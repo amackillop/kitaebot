@@ -11,8 +11,17 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, fenix, crane, flake-utils, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      fenix,
+      crane,
+      flake-utils,
+      ...
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
@@ -38,16 +47,22 @@
       in
       {
         checks = {
-          clippy = craneLib.cargoClippy (commonArgs // {
-            inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-          });
+          clippy = craneLib.cargoClippy (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+            }
+          );
 
           fmt = craneLib.cargoFmt { inherit src; };
 
-          test = craneLib.cargoTest (commonArgs // {
-            inherit cargoArtifacts;
-          });
+          test = craneLib.cargoTest (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+            }
+          );
         };
 
         devShells.default = craneLib.devShell {
@@ -56,6 +71,10 @@
           packages = with pkgs; [
             just
             rust-analyzer
+            # Nix tooling
+            nixfmt-rfc-style
+            statix
+            deadnix
           ];
 
           shellHook = ''
