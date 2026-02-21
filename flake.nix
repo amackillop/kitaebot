@@ -1,0 +1,63 @@
+{
+  description = "Kitaebot the Autonomous Agent";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    crane.url = "github:ipetkov/crane";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
+
+  outputs = { self, nixpkgs, fenix, crane, flake-utils, ... }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+
+        toolchain = fenix.packages.${system}.stable.withComponents [
+          "cargo"
+          "clippy"
+          "rust-src"
+          "rustc"
+          "rustfmt"
+        ];
+
+        craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+
+        src = craneLib.cleanCargoSource ./.;
+
+        commonArgs = {
+          inherit src;
+          strictDeps = true;
+        };
+
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+      in
+      {
+        checks = {
+          clippy = craneLib.cargoClippy (commonArgs // {
+            inherit cargoArtifacts;
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          });
+
+          fmt = craneLib.cargoFmt { inherit src; };
+
+          test = craneLib.cargoTest (commonArgs // {
+            inherit cargoArtifacts;
+          });
+        };
+
+        devShells.default = craneLib.devShell {
+          checks = self.checks.${system};
+
+          packages = with pkgs; [
+            just
+            rust-analyzer
+          ];
+        };
+      }
+    );
+}

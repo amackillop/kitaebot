@@ -1,5 +1,8 @@
 .*
 
+commit-message.txt
 /target
+/inspiration
 
 !.git*
+!.envrc
