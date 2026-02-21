@@ -1,0 +1,13 @@
+[package]
+name = "kitaebot"
+version = "0.0.1"
+edition = "2024"
+authors = ["amackillop"]
+description = "An autonomous agent"
+license = "MIT"
+repository = "https://github.com/amackillop/kitaebot"
+readme = "README.md"
+keywords = ["agent", "autonomous", "ai", "bot", "llm"]
+categories = ["command-line-utilities"]
+
+[dependencies]
