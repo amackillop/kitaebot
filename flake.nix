@@ -57,6 +57,17 @@
             just
             rust-analyzer
           ];
+
+          shellHook = ''
+            echo "================================================================================"
+            echo "Kitaebot Development Environment"
+
+            echo "Configuring Project..."
+            git config core.hooksPath .githooks
+
+            echo "Development Environment Ready."
+            echo "================================================================================"
+          '';
         };
       }
     );
