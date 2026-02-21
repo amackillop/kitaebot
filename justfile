@@ -8,10 +8,10 @@ check:
 
 # Check Nix code formatting and lint
 check-nix:
-    nixfmt --check flake.nix nix/*.nix
+    nixfmt --check flake.nix vm/*.nix
     statix check flake.nix
-    statix check nix/
-    deadnix flake.nix nix/
+    statix check vm/
+    deadnix flake.nix vm/
 
 # Build the project
 build:
@@ -32,7 +32,7 @@ fmt:
 
 # Format Nix code
 fmt-nix:
-    nixfmt flake.nix nix/*.nix
+    nixfmt flake.nix vm/*.nix
 
 # Auto-fix lint issues
 fix:
@@ -41,3 +41,12 @@ fix:
 # Run the binary
 run:
     cargo run
+
+# Build the VM
+vm-build:
+    nix build .#vm
+
+# Run the VM (builds first if needed)
+vm-run:
+    @just vm-build
+    ./result/bin/run-kitaebot-vm
