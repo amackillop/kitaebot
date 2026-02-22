@@ -3,6 +3,11 @@
 //! The Provider trait abstracts over different LLM APIs (`OpenRouter`, `OpenAI`, etc.).
 //! All providers must implement the same chat interface.
 
+mod openrouter;
+
+#[allow(unused_imports)] // Will be used when wired up in main.rs
+pub use openrouter::{OpenRouterConfig, OpenRouterProvider};
+
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolDefinition};
 
