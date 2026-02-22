@@ -3,8 +3,6 @@
 //! The Provider trait abstracts over different LLM APIs (`OpenRouter`, `OpenAI`, etc.).
 //! All providers must implement the same chat interface.
 
-#![allow(dead_code)] // Will be used in later commits
-
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolDefinition};
 

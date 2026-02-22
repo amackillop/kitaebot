@@ -4,8 +4,6 @@
 //! Each turn sends context to the LLM and either returns a text response
 //! or executes tool calls until the LLM completes.
 
-#![allow(dead_code)] // Will be used in later commits
-
 use crate::error::Error;
 use crate::provider::Provider;
 use crate::tools::ToolRegistry;

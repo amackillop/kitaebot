@@ -3,8 +3,6 @@
 //! Tools are functions the agent can call (exec, `read_file`, `web_search`, etc.).
 //! The `ToolRegistry` manages available tools and routes execution requests.
 
-#![allow(dead_code)] // Will be used in later commits
-
 use crate::error::ToolError;
 use crate::types::{ToolCall, ToolDefinition};
 use async_trait::async_trait;
