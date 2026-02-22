@@ -8,10 +8,11 @@ check:
 
 # Check Nix code formatting and lint
 check-nix:
-    nixfmt --check flake.nix vm/*.nix
+    nixfmt --check flake.nix vm/*.nix deploy/*.nix
     statix check flake.nix
     statix check vm/
-    deadnix flake.nix vm/
+    statix check deploy/
+    deadnix flake.nix vm/ deploy/
 
 # Build the project
 build:
@@ -32,7 +33,7 @@ fmt:
 
 # Format Nix code
 fmt-nix:
-    nixfmt flake.nix vm/*.nix
+    nixfmt flake.nix vm/*.nix deploy/*.nix
 
 # Auto-fix lint issues
 fix:

@@ -91,12 +91,7 @@
       }
     )
     // {
-      # VM configuration (x86_64-linux only)
-      nixosConfigurations.kitaebot = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [ ./vm/configuration.nix ];
-      };
-
-      packages.x86_64-linux.vm = self.nixosConfigurations.kitaebot.config.system.build.vm;
+      # Reusable NixOS module for kitaebot VM
+      nixosModules.vm = ./vm/configuration.nix;
     };
 }
