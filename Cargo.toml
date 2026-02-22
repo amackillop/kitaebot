@@ -26,3 +26,8 @@ must_use_candidate = "allow"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+async-trait = "0.1"
+tokio = { version = "1", features = ["macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
