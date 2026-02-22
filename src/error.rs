@@ -27,7 +27,7 @@ pub enum Error {
 }
 
 /// LLM provider errors.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ProviderError {
     /// Network error (connection failed, timeout, etc.).
     #[error("Network error: {0}")]

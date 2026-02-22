@@ -81,7 +81,7 @@ pub struct ToolFunction {
 /// The agent loop handles these differently:
 /// - `Text`: Return to user and end turn
 /// - `ToolCalls`: Execute tools and continue loop
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Response {
     /// Final text response to return to the user
     Text(String),

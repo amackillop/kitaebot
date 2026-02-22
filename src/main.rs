@@ -1,3 +1,4 @@
+mod agent;
 mod error;
 mod provider;
 mod tools;
