@@ -127,6 +127,7 @@ mod tests {
     fn tool_call(id: &str) -> ToolCall {
         ToolCall {
             id: id.to_string(),
+            call_type: "function".to_string(),
             function: ToolFunction {
                 name: "stub".to_string(),
                 arguments: "{}".to_string(),

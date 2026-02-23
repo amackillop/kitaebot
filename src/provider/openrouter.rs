@@ -77,6 +77,7 @@ impl OpenRouterProvider {
                     .into_iter()
                     .map(|tc| ToolCall {
                         id: tc.id,
+                        call_type: "function".to_string(),
                         function: ToolFunction {
                             name: tc.function.name,
                             arguments: tc.function.arguments,

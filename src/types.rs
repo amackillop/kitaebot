@@ -62,6 +62,10 @@ pub struct ToolCall {
     /// Unique identifier for this tool call
     pub id: String,
 
+    /// Type of tool call (always "function")
+    #[serde(rename = "type")]
+    pub call_type: String,
+
     /// The function to be called
     pub function: ToolFunction,
 }

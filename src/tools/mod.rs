@@ -134,6 +134,7 @@ mod tests {
 
         let call = ToolCall {
             id: "test-123".to_string(),
+            call_type: "function".to_string(),
             function: crate::types::ToolFunction {
                 name: "stub".to_string(),
                 arguments: "{}".to_string(),
@@ -151,6 +152,7 @@ mod tests {
 
         let call = ToolCall {
             id: "test-123".to_string(),
+            call_type: "function".to_string(),
             function: crate::types::ToolFunction {
                 name: "nonexistent".to_string(),
                 arguments: "{}".to_string(),
@@ -169,6 +171,7 @@ mod tests {
 
         let call = ToolCall {
             id: "test-123".to_string(),
+            call_type: "function".to_string(),
             function: crate::types::ToolFunction {
                 name: "stub".to_string(),
                 arguments: "invalid json".to_string(),
