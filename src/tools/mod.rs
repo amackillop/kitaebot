@@ -112,6 +112,8 @@ impl Default for ToolRegistry {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::ToolFunction;
+
     use super::*;
 
     #[test]
@@ -135,14 +137,13 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(StubTool));
 
-        let call = ToolCall {
-            id: "test-123".to_string(),
-            call_type: "function".to_string(),
-            function: crate::types::ToolFunction {
+        let call = ToolCall::new(
+            "test-123".to_string(),
+            ToolFunction {
                 name: "stub".to_string(),
                 arguments: "{}".to_string(),
             },
-        };
+        );
 
         let result = registry.execute(&call).await;
         assert!(result.is_ok());
@@ -153,14 +154,13 @@ mod tests {
     async fn test_tool_not_found() {
         let registry = ToolRegistry::new();
 
-        let call = ToolCall {
-            id: "test-123".to_string(),
-            call_type: "function".to_string(),
-            function: crate::types::ToolFunction {
+        let call = ToolCall::new(
+            "test-123".to_string(),
+            ToolFunction {
                 name: "nonexistent".to_string(),
                 arguments: "{}".to_string(),
             },
-        };
+        );
 
         let result = registry.execute(&call).await;
         assert!(result.is_err());
@@ -172,14 +172,13 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(StubTool));
 
-        let call = ToolCall {
-            id: "test-123".to_string(),
-            call_type: "function".to_string(),
-            function: crate::types::ToolFunction {
+        let call = ToolCall::new(
+            "test-123".to_string(),
+            ToolFunction {
                 name: "stub".to_string(),
                 arguments: "invalid json".to_string(),
             },
-        };
+        );
 
         let result = registry.execute(&call).await;
         assert!(result.is_err());

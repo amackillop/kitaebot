@@ -75,13 +75,14 @@ impl OpenRouterProvider {
             Some(calls) if !calls.is_empty() => {
                 let tool_calls = calls
                     .into_iter()
-                    .map(|tc| ToolCall {
-                        id: tc.id,
-                        call_type: "function".to_string(),
-                        function: ToolFunction {
-                            name: tc.function.name,
-                            arguments: tc.function.arguments,
-                        },
+                    .map(|tc| {
+                        ToolCall::new(
+                            tc.id,
+                            ToolFunction {
+                                name: tc.function.name,
+                                arguments: tc.function.arguments,
+                            },
+                        )
                     })
                     .collect();
                 Ok(Response::ToolCalls(tool_calls))

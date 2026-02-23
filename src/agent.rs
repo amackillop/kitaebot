@@ -125,14 +125,13 @@ mod tests {
     }
 
     fn tool_call(id: &str) -> ToolCall {
-        ToolCall {
-            id: id.to_string(),
-            call_type: "function".to_string(),
-            function: ToolFunction {
+        ToolCall::new(
+            id.to_string(),
+            ToolFunction {
                 name: "stub".to_string(),
                 arguments: "{}".to_string(),
             },
-        }
+        )
     }
 
     fn tool_calls(ids: &[&str]) -> Response {

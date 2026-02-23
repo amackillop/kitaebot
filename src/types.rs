@@ -62,12 +62,22 @@ pub struct ToolCall {
     /// Unique identifier for this tool call
     pub id: String,
 
-    /// Type of tool call (always "function")
-    #[serde(rename = "type")]
-    pub call_type: String,
-
     /// The function to be called
     pub function: ToolFunction,
+
+    /// Type of tool call (always "function")
+    #[serde(rename = "type")]
+    call_type: String,
+}
+
+impl ToolCall {
+    pub fn new(id: String, function: ToolFunction) -> Self {
+        Self {
+            id,
+            function,
+            call_type: String::from("function"),
+        }
+    }
 }
 
 /// Function details within a tool call.
