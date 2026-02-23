@@ -5,17 +5,29 @@ mod tools;
 mod types;
 
 use agent::run_turn;
+#[cfg(not(feature = "mock-network"))]
+use provider::OpenRouterProvider;
+#[cfg(feature = "mock-network")]
 use provider::StubProvider;
 use std::io::{self, Write};
 use tools::{StubTool, ToolRegistry};
 
 #[tokio::main]
 async fn main() {
+    #[cfg(feature = "mock-network")]
     let provider = StubProvider;
+
+    #[cfg(not(feature = "mock-network"))]
+    let provider = OpenRouterProvider::from_env().unwrap_or_else(|e| {
+        eprintln!("Failed to initialize provider: {e}");
+        eprintln!("Set OPENROUTER_API_KEY environment variable");
+        std::process::exit(1);
+    });
+
     let mut tools = ToolRegistry::new();
     tools.register(Box::new(StubTool));
 
-    println!("Kitaebot REPL (stub mode)");
+    println!("Kitaebot REPL");
     println!("Type 'exit' to quit\n");
 
     loop {

@@ -2,8 +2,6 @@
 //!
 //! Communicates with `OpenRouter`'s OpenAI-compatible API to get LLM responses.
 
-#![allow(dead_code)] // Will be used when wired up in main.rs
-
 use std::env;
 
 use reqwest::Client;

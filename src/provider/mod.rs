@@ -5,8 +5,7 @@
 
 mod openrouter;
 
-#[allow(unused_imports)] // Will be used when wired up in main.rs
-pub use openrouter::{OpenRouterConfig, OpenRouterProvider};
+pub use openrouter::OpenRouterProvider;
 
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolDefinition};
@@ -35,8 +34,10 @@ pub trait Provider: Send + Sync {
 ///
 /// Returns a fixed response without making any API calls.
 /// Used for testing the agent loop before implementing the real `OpenRouter` client.
+#[cfg(feature = "mock-network")]
 pub struct StubProvider;
 
+#[cfg(feature = "mock-network")]
 impl Provider for StubProvider {
     async fn chat(
         &self,

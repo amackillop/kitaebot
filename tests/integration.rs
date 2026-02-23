@@ -13,7 +13,7 @@ fn welcome_message() {
         .write_stdin("exit\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Kitaebot REPL (stub mode)"))
+        .stdout(predicate::str::contains("Kitaebot REPL"))
         .stdout(predicate::str::contains("Type 'exit' to quit"));
 }
 

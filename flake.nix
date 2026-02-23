@@ -61,6 +61,7 @@
             commonArgs
             // {
               inherit cargoArtifacts;
+              cargoTestExtraArgs = "--features mock-network";
             }
           );
         };
