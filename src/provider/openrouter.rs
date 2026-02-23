@@ -14,7 +14,7 @@ use super::Provider;
 
 /// Configuration for the `OpenRouter` provider.
 pub struct OpenRouterConfig {
-    /// Model identifier (e.g., "anthropic/claude-sonnet-4").
+    /// Model identifier (e.g., "minimax/minimax-m2.5").
     pub model: String,
     /// Maximum tokens in response.
     pub max_tokens: u32,
@@ -25,7 +25,8 @@ pub struct OpenRouterConfig {
 impl Default for OpenRouterConfig {
     fn default() -> Self {
         Self {
-            model: "anthropic/claude-sonnet-4".to_string(),
+            // Default to a free model
+            model: "arcee-ai/trinity-large-preview:free".to_string(),
             max_tokens: 4096,
             temperature: 0.7,
         }
