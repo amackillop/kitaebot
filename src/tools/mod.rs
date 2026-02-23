@@ -2,6 +2,11 @@
 //!
 //! Tools are functions the agent can call (exec, `read_file`, `web_search`, etc.).
 //! The `ToolRegistry` manages available tools and routes execution requests.
+#[cfg(test)]
+mod stub;
+
+#[cfg(test)]
+pub use stub::StubTool;
 
 use crate::error::ToolError;
 use crate::types::{ToolCall, ToolDefinition};
@@ -99,33 +104,6 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Stub tool for testing.
-///
-/// Returns a fixed response without doing any real work.
-pub struct StubTool;
-
-#[async_trait]
-impl Tool for StubTool {
-    fn name(&self) -> &'static str {
-        "stub"
-    }
-
-    fn description(&self) -> &'static str {
-        "A stub tool that returns a fixed response"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-        })
-    }
-
-    async fn execute(&self, _args: serde_json::Value) -> Result<String, ToolError> {
-        Ok("Stub tool executed successfully".to_string())
     }
 }
 
