@@ -2,9 +2,12 @@
 //!
 //! Tools are functions the agent can call (exec, `read_file`, `web_search`, etc.).
 //! The `ToolRegistry` manages available tools and routes execution requests.
+
+mod exec;
 #[cfg(test)]
 mod stub;
 
+pub use exec::ExecTool;
 #[cfg(test)]
 pub use stub::StubTool;
 
