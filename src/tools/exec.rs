@@ -23,13 +23,13 @@ use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use async_trait::async_trait;
 use regex::RegexSet;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 use crate::error::ToolError;
-use crate::tools::Tool;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const MAX_OUTPUT_BYTES: usize = 10 * 1024;
@@ -47,55 +47,43 @@ static DENY_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
     .expect("invalid deny patterns")
 });
 
+/// Arguments for the exec tool.
+#[derive(Deserialize, JsonSchema)]
+struct Args {
+    /// The shell command to execute.
+    command: String,
+}
+
 /// Tool that executes shell commands in the workspace.
-pub struct ExecTool {
+pub struct Exec {
     working_dir: PathBuf,
     timeout: Duration,
 }
 
-impl ExecTool {
+impl Exec {
+    pub const NAME: &str = "exec";
+    pub const DESCRIPTION: &str = "Execute a shell command in the workspace";
+
+    pub fn parameters() -> serde_json::Value {
+        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+    }
+
     pub fn new(working_dir: impl Into<PathBuf>) -> Self {
         Self {
             working_dir: working_dir.into(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
     }
-}
 
-#[async_trait]
-impl Tool for ExecTool {
-    fn name(&self) -> &'static str {
-        "exec"
-    }
+    pub async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError> {
+        let args: Args =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-    fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command to execute"
-                }
-            },
-            "required": ["command"]
-        })
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError> {
-        let command = args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidArguments("missing 'command' argument".into()))?;
-
-        if has_path_traversal(command) {
+        if has_path_traversal(&args.command) {
             return Err(ToolError::Blocked("path traversal detected".into()));
         }
 
-        if is_blocked(command) {
+        if is_blocked(&args.command) {
             return Err(ToolError::Blocked("command matches deny pattern".into()));
         }
 
@@ -103,7 +91,7 @@ impl Tool for ExecTool {
             self.timeout,
             Command::new("sh")
                 .arg("-c")
-                .arg(command)
+                .arg(&args.command)
                 .current_dir(&self.working_dir)
                 .output(),
         )
@@ -114,7 +102,7 @@ impl Tool for ExecTool {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        let mut result = format!("$ {command}\n");
+        let mut result = format!("$ {}\n", args.command);
 
         if !stdout.is_empty() {
             result.push_str(&truncate_output(&stdout, MAX_OUTPUT_BYTES));
@@ -167,6 +155,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_parameters_schema() {
+        let schema = Exec::parameters();
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["command"]["type"], "string");
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("command"))
+        );
+    }
+
+    #[test]
     fn test_deny_patterns() {
         assert!(is_blocked("rm -rf /"));
         assert!(is_blocked("rm -r foo"));
@@ -204,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_simple_command() {
-        let tool = ExecTool::new(".");
+        let tool = Exec::new(".");
         let args = serde_json::json!({"command": "echo hello"});
         let result = tool.execute(args).await.unwrap();
         assert!(result.contains("hello"));
@@ -213,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_missing_command() {
-        let tool = ExecTool::new(".");
+        let tool = Exec::new(".");
         let args = serde_json::json!({});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
@@ -221,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_blocked_command() {
-        let tool = ExecTool::new(".");
+        let tool = Exec::new(".");
         let args = serde_json::json!({"command": "rm -rf /"});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::Blocked(_))));
@@ -229,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_path_traversal_blocked() {
-        let tool = ExecTool::new(".");
+        let tool = Exec::new(".");
         let args = serde_json::json!({"command": "cat ../secret"});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::Blocked(_))));

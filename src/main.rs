@@ -10,7 +10,7 @@ use provider::OpenRouterProvider;
 #[cfg(feature = "mock-network")]
 use provider::StubProvider;
 use std::io::{self, Write};
-use tools::{ExecTool, ToolRegistry};
+use tools::{Exec, Tool, Tools};
 
 #[tokio::main]
 async fn main() {
@@ -24,8 +24,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let mut tools = ToolRegistry::new();
-    tools.register(Box::new(ExecTool::new(".")));
+    let tools = Tools::new(vec![Tool::Exec(Exec::new("."))]);
 
     println!("Kitaebot REPL");
     println!("Type 'exit' to quit\n");

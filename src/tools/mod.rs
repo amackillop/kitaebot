@@ -1,100 +1,88 @@
 //! Tool execution system.
 //!
 //! Tools are functions the agent can call (exec, `read_file`, `web_search`, etc.).
-//! The `ToolRegistry` manages available tools and routes execution requests.
 
 mod exec;
 #[cfg(test)]
 mod stub;
 
-pub use exec::ExecTool;
+pub use exec::Exec;
 #[cfg(test)]
-pub use stub::StubTool;
+pub use stub::Stub;
 
 use crate::error::ToolError;
 use crate::types::{ToolCall, ToolDefinition};
-use async_trait::async_trait;
-use std::collections::HashMap;
 
-/// Tool that can be executed by the agent.
-///
-/// Each tool defines its name, description, parameters schema, and execution logic.
-///
-/// # Design Note
-/// We use methods instead of associated constants for metadata (name, description)
-/// because trait objects (`Box<dyn Tool>`) cannot access associated constants.
-/// This design enables dynamic tool registration at the cost of small method call
-/// overhead (optimized away by the compiler).
-#[async_trait]
-pub trait Tool: Send + Sync {
-    /// Tool name (must be unique in registry).
-    fn name(&self) -> &'static str;
-
-    /// Human-readable description of what the tool does.
-    fn description(&self) -> &'static str;
-
-    /// JSON Schema describing the tool's parameters.
-    fn parameters(&self) -> serde_json::Value;
-
-    /// Execute the tool with given arguments.
-    ///
-    /// # Arguments
-    /// * `args` - JSON object containing the tool's arguments
-    ///
-    /// # Returns
-    /// String result to send back to the LLM
-    async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError>;
+/// Available tools for the agent.
+pub enum Tool {
+    Exec(Exec),
+    #[cfg(test)]
+    Stub(Stub),
 }
 
-/// Registry of available tools.
-///
-/// Maintains a collection of tools and provides lookup and execution services.
-pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
-}
-
-impl ToolRegistry {
-    /// Create an empty tool registry.
-    pub fn new() -> Self {
-        Self {
-            tools: HashMap::new(),
+impl Tool {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Exec(_) => Exec::NAME,
+            #[cfg(test)]
+            Self::Stub(_) => Stub::NAME,
         }
     }
 
-    /// Register a tool.
-    ///
-    /// If a tool with the same name already exists, it will be replaced.
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+    fn description(&self) -> &'static str {
+        match self {
+            Self::Exec(_) => Exec::DESCRIPTION,
+            #[cfg(test)]
+            Self::Stub(_) => Stub::DESCRIPTION,
+        }
     }
 
-    /// Get tool definitions for the LLM.
-    ///
-    /// Returns a list of all registered tools in the format expected by the LLM API.
+    fn parameters(&self) -> serde_json::Value {
+        match self {
+            Self::Exec(_) => Exec::parameters(),
+            #[cfg(test)]
+            Self::Stub(_) => Stub::parameters(),
+        }
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            self.name().to_string(),
+            self.description().to_string(),
+            self.parameters(),
+        )
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError> {
+        match self {
+            Self::Exec(e) => e.execute(args).await,
+            #[cfg(test)]
+            Self::Stub(s) => s.execute(args).await,
+        }
+    }
+}
+
+/// Collection of available tools.
+///
+/// Uses `Vec` with linear scan for lookup. For small tool counts (<50),
+/// this outperforms `HashMap` due to cache locality and no hashing overhead.
+/// Tool execution involves HTTP calls to an LLM (100ms+), so lookup time is noise.
+pub struct Tools(Vec<Tool>);
+
+impl Tools {
+    pub fn new(tools: Vec<Tool>) -> Self {
+        Self(tools)
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .values()
-            .map(|t| {
-                ToolDefinition::new(
-                    t.name().to_string(),
-                    t.description().to_string(),
-                    t.parameters(),
-                )
-            })
-            .collect()
+        self.0.iter().map(Tool::definition).collect()
     }
 
-    /// Execute a tool call from the LLM.
-    ///
-    /// # Arguments
-    /// * `call` - The tool call request from the LLM
-    ///
-    /// # Returns
-    /// String result to send back to the LLM
     pub async fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
         let tool = self
-            .tools
-            .get(&call.function.name)
+            .0
+            .iter()
+            .find(|t| t.name() == call.function.name)
             .ok_or_else(|| ToolError::NotFound(call.function.name.clone()))?;
 
         let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
@@ -104,39 +92,28 @@ impl ToolRegistry {
     }
 }
 
-impl Default for ToolRegistry {
+impl Default for Tools {
     fn default() -> Self {
-        Self::new()
+        Self::new(vec![])
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::types::ToolFunction;
 
-    use super::*;
-
     #[test]
-    fn test_registry_creation() {
-        let registry = ToolRegistry::new();
-        assert_eq!(registry.definitions().len(), 0);
-    }
-
-    #[test]
-    fn test_tool_registration() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(StubTool));
-
-        let definitions = registry.definitions();
-        assert_eq!(definitions.len(), 1);
-        assert_eq!(definitions[0].function.name, "stub");
+    fn test_definitions() {
+        let tools = Tools::new(vec![Tool::Stub(Stub)]);
+        let defs = tools.definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].function.name, "stub");
     }
 
     #[tokio::test]
-    async fn test_tool_execution() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(StubTool));
-
+    async fn test_execute() {
+        let tools = Tools::new(vec![Tool::Stub(Stub)]);
         let call = ToolCall::new(
             "test-123".to_string(),
             ToolFunction {
@@ -144,16 +121,13 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         );
-
-        let result = registry.execute(&call).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "Stub tool executed successfully");
+        let result = tools.execute(&call).await.unwrap();
+        assert_eq!(result, "Stub tool executed successfully");
     }
 
     #[tokio::test]
-    async fn test_tool_not_found() {
-        let registry = ToolRegistry::new();
-
+    async fn test_not_found() {
+        let tools = Tools::new(vec![]);
         let call = ToolCall::new(
             "test-123".to_string(),
             ToolFunction {
@@ -161,17 +135,13 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         );
-
-        let result = registry.execute(&call).await;
-        assert!(result.is_err());
+        let result = tools.execute(&call).await;
         assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
     }
 
     #[tokio::test]
     async fn test_invalid_arguments() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(StubTool));
-
+        let tools = Tools::new(vec![Tool::Stub(Stub)]);
         let call = ToolCall::new(
             "test-123".to_string(),
             ToolFunction {
@@ -179,9 +149,7 @@ mod tests {
                 arguments: "invalid json".to_string(),
             },
         );
-
-        let result = registry.execute(&call).await;
-        assert!(result.is_err());
+        let result = tools.execute(&call).await;
         assert!(matches!(
             result.unwrap_err(),
             ToolError::InvalidArguments(_)

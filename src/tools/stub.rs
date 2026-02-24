@@ -1,30 +1,27 @@
 //! Stub tool for testing.
 
-use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::tools::Tool;
 
-pub struct StubTool;
+/// Arguments for the stub tool.
+#[derive(Deserialize, JsonSchema)]
+struct Args {}
 
-#[async_trait]
-impl Tool for StubTool {
-    fn name(&self) -> &'static str {
-        "stub"
+/// A no-op tool that returns a fixed response.
+pub struct Stub;
+
+impl Stub {
+    pub const NAME: &str = "stub";
+    pub const DESCRIPTION: &str = "A stub tool for testing";
+
+    pub fn parameters() -> serde_json::Value {
+        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
     }
 
-    fn description(&self) -> &'static str {
-        "A stub tool that returns a fixed response"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-        })
-    }
-
-    async fn execute(&self, _args: serde_json::Value) -> Result<String, ToolError> {
+    #[allow(clippy::unused_async)] // Async for interface consistency
+    pub async fn execute(&self, _args: serde_json::Value) -> Result<String, ToolError> {
         Ok("Stub tool executed successfully".to_string())
     }
 }

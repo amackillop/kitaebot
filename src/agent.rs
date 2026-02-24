@@ -6,7 +6,7 @@
 
 use crate::error::Error;
 use crate::provider::Provider;
-use crate::tools::ToolRegistry;
+use crate::tools::Tools;
 use crate::types::{Message, Response};
 use futures::future::join_all;
 
@@ -28,7 +28,7 @@ const MAX_ITERATIONS: usize = 20;
 pub async fn run_turn<P: Provider>(
     user_message: &str,
     provider: &P,
-    tools: &ToolRegistry,
+    tools: &Tools,
 ) -> Result<String, Error> {
     let mut messages = vec![
         Message::System {
@@ -89,7 +89,7 @@ fn build_system_prompt() -> String {
 mod tests {
     use super::*;
     use crate::error::ProviderError;
-    use crate::tools::StubTool;
+    use crate::tools::{Stub, Tool};
     use crate::types::{ToolCall, ToolDefinition, ToolFunction};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -138,17 +138,15 @@ mod tests {
         Response::ToolCalls(ids.iter().map(|&id| tool_call(id)).collect())
     }
 
-    fn tools_with_stub() -> ToolRegistry {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(StubTool));
-        registry
+    fn tools_with_stub() -> Tools {
+        Tools::new(vec![Tool::Stub(Stub)])
     }
 
     #[tokio::test]
     async fn test_text_response() {
         let provider = MockProvider::new(vec![Ok(text("Hello from LLM"))]);
 
-        let result = run_turn("Hello", &provider, &ToolRegistry::new()).await;
+        let result = run_turn("Hello", &provider, &Tools::new(vec![])).await;
         assert_eq!(result.unwrap(), "Hello from LLM");
     }
 
@@ -176,7 +174,7 @@ mod tests {
         let provider =
             MockProvider::new(vec![Err(ProviderError::Network("Mock error".to_string()))]);
 
-        let result = run_turn("Error case", &provider, &ToolRegistry::new()).await;
+        let result = run_turn("Error case", &provider, &Tools::new(vec![])).await;
         assert!(matches!(result.unwrap_err(), Error::Provider(_)));
     }
 
