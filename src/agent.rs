@@ -56,9 +56,9 @@ pub async fn run_turn<P: Provider>(
                 });
                 return Ok(content);
             }
-            Response::ToolCalls(calls) => {
+            Response::ToolCalls { content, calls } => {
                 session.add_message(Message::Assistant {
-                    content: String::new(),
+                    content,
                     tool_calls: Some(calls.clone()),
                 });
 
@@ -132,7 +132,10 @@ mod tests {
     }
 
     fn tool_calls(ids: &[&str]) -> Response {
-        Response::ToolCalls(ids.iter().map(|&id| tool_call(id)).collect())
+        Response::ToolCalls {
+            content: String::new(),
+            calls: ids.iter().map(|&id| tool_call(id)).collect(),
+        }
     }
 
     fn tools_with_stub() -> Tools {

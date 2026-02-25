@@ -100,8 +100,11 @@ pub enum Response {
     /// Final text response to return to the user
     Text(String),
 
-    /// One or more tool calls to execute
-    ToolCalls(Vec<ToolCall>),
+    /// One or more tool calls to execute, with optional accompanying text
+    ToolCalls {
+        content: String,
+        calls: Vec<ToolCall>,
+    },
 }
 
 /// Tool definition sent to the LLM.

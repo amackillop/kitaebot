@@ -71,9 +71,11 @@ impl OpenRouterProvider {
                 ProviderError::InvalidResponse("no choices in response".to_string())
             })?;
 
+        let content = choice.message.content.unwrap_or_default();
+
         match choice.message.tool_calls {
             Some(calls) if !calls.is_empty() => {
-                let tool_calls = calls
+                let calls = calls
                     .into_iter()
                     .map(|tc| {
                         ToolCall::new(
@@ -85,12 +87,9 @@ impl OpenRouterProvider {
                         )
                     })
                     .collect();
-                Ok(Response::ToolCalls(tool_calls))
+                Ok(Response::ToolCalls { content, calls })
             }
-            _ => {
-                let content = choice.message.content.unwrap_or_default();
-                Ok(Response::Text(content))
-            }
+            _ => Ok(Response::Text(content)),
         }
     }
 }
