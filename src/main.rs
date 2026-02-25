@@ -10,6 +10,7 @@ mod workspace;
 
 use agent::run_turn;
 use heartbeat::Outcome;
+use lock::Lock;
 #[cfg(not(feature = "mock-network"))]
 use provider::OpenRouterProvider;
 use provider::Provider;
@@ -65,6 +66,11 @@ async fn run_heartbeat<P: Provider>(workspace: &Workspace, provider: &P, tools: 
 }
 
 async fn run_repl<P: Provider>(workspace: &Workspace, provider: &P, tools: &Tools) {
+    let Ok(_lock) = Lock::acquire(&workspace.repl_lock_path()) else {
+        eprintln!("Another session is already running");
+        std::process::exit(1);
+    };
+
     let mut session = Session::load(&workspace.session_path()).unwrap_or_else(|e| {
         eprintln!("Failed to load session: {e}");
         std::process::exit(1);

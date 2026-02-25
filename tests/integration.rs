@@ -188,6 +188,28 @@ fn heartbeat_with_tasks_executes() {
 }
 
 #[test]
+fn heartbeat_skips_when_repl_locked() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("HEARTBEAT.md"),
+        "# Heartbeat\n\n- [ ] Test task\n",
+    )
+    .unwrap();
+
+    // Simulate a REPL holding the lock.
+    fs::write(dir.path().join("repl.lock"), std::process::id().to_string()).unwrap();
+
+    kitaebot_with_workspace(&dir)
+        .arg("heartbeat")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("user session active"));
+
+    // History should not be written.
+    assert!(!dir.path().join("memory/HISTORY.md").exists());
+}
+
+#[test]
 fn unknown_subcommand_fails() {
     let dir = tempfile::tempdir().unwrap();
     kitaebot_with_workspace(&dir)
