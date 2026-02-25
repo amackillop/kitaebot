@@ -2,7 +2,7 @@
 //!
 //! The workspace is the root directory where kitaebot stores its configuration,
 //! session data, and project files. Resolved from `KITAEBOT_WORKSPACE` env var,
-//! falling back to `/var/lib/kitaebot`.
+//! falling back to `~/.local/share/kitaebot` (XDG data home).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::error::WorkspaceError;
 
 const ENV_VAR: &str = "KITAEBOT_WORKSPACE";
-const DEFAULT_PATH: &str = "/var/lib/kitaebot";
+const APP_NAME: &str = "kitaebot";
 
 const DEFAULT_SOUL: &str = "\
 # Soul
@@ -64,10 +64,14 @@ You have access to:
 pub struct Workspace(PathBuf);
 
 impl Workspace {
-    /// Initialize the workspace from `KITAEBOT_WORKSPACE` env var or default path.
+    /// Initialize the workspace from `KITAEBOT_WORKSPACE` env var or XDG default.
+    ///
+    /// Fallback: `$XDG_DATA_HOME/kitaebot`, then `~/.local/share/kitaebot`.
     pub fn init() -> Result<Self, WorkspaceError> {
-        let path =
-            std::env::var(ENV_VAR).map_or_else(|_| PathBuf::from(DEFAULT_PATH), PathBuf::from);
+        let path = std::env::var(ENV_VAR)
+            .map(PathBuf::from)
+            .or_else(|_| default_data_dir())
+            .map_err(|e| WorkspaceError::Init(PathBuf::from(APP_NAME), e))?;
         Self::init_at(path)
     }
 
@@ -138,6 +142,20 @@ impl Workspace {
             Err(e) => Err(WorkspaceError::Init(path, e)),
         }
     }
+}
+
+/// Resolve the default data directory following XDG Base Directory spec.
+fn default_data_dir() -> Result<PathBuf, std::io::Error> {
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "neither XDG_DATA_HOME nor HOME is set",
+            )
+        })?;
+    Ok(base.join(APP_NAME))
 }
 
 #[cfg(test)]
