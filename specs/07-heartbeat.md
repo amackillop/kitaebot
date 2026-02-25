@@ -164,3 +164,5 @@ All heartbeat activity is logged to `memory/HISTORY.md`:
 - **Conditional tasks** — Only run if condition met
 - **External triggers** — Webhooks to trigger heartbeat
 - **Resource limits** — Cap API usage per heartbeat
+- **Debug logging of skips** — Structured logging for skip events (currently silent)
+- **History truncation** — Cap or summarize long agent responses before appending to HISTORY.md

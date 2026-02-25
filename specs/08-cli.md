@@ -87,3 +87,4 @@ Empty/whitespace-only input is silently skipped.
 - **Progress indicators** — Spinner while waiting for response
 - **Streaming output** — Print tokens as they arrive
 - **Multiline input** — For pasting code blocks
+- **REPL lock** — Single-instance enforcement via PID lock file to prevent concurrent REPL sessions and coordinate with heartbeat
