@@ -105,6 +105,26 @@ impl Workspace {
         self.0.join("session.json")
     }
 
+    /// Path to the heartbeat task file.
+    pub fn heartbeat_path(&self) -> PathBuf {
+        self.0.join("HEARTBEAT.md")
+    }
+
+    /// Path to the heartbeat history log.
+    pub fn history_path(&self) -> PathBuf {
+        self.0.join("memory/HISTORY.md")
+    }
+
+    /// Path to the heartbeat lock file.
+    pub fn heartbeat_lock_path(&self) -> PathBuf {
+        self.0.join("heartbeat.lock")
+    }
+
+    /// Path to the REPL lock file.
+    pub fn repl_lock_path(&self) -> PathBuf {
+        self.0.join("repl.lock")
+    }
+
     /// Build the system prompt from workspace files.
     ///
     /// Reads `SOUL.md`, `AGENTS.md`, and optionally `USER.md`, concatenating
@@ -210,5 +230,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
         assert_eq!(ws.session_path(), dir.path().join("session.json"));
+    }
+
+    #[test]
+    fn heartbeat_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        assert_eq!(ws.heartbeat_path(), dir.path().join("HEARTBEAT.md"));
+    }
+
+    #[test]
+    fn history_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        assert_eq!(ws.history_path(), dir.path().join("memory/HISTORY.md"));
+    }
+
+    #[test]
+    fn heartbeat_lock_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        assert_eq!(ws.heartbeat_lock_path(), dir.path().join("heartbeat.lock"));
+    }
+
+    #[test]
+    fn repl_lock_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        assert_eq!(ws.repl_lock_path(), dir.path().join("repl.lock"));
     }
 }
