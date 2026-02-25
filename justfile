@@ -20,7 +20,7 @@ build:
 
 # Run tests
 test:
-    cargo test
+    cargo test --features mock-network
 
 # Lint with clippy
 lint:
