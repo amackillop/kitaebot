@@ -5,6 +5,8 @@
 
 #![allow(dead_code)] // Types defined here will be used in later commits
 
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// Top-level agent error.
@@ -69,3 +71,12 @@ pub enum ToolError {
     #[error("Tool blocked: {0}")]
     Blocked(String),
 }
+
+/// Workspace initialization errors.
+#[derive(Debug, Error)]
+pub enum WorkspaceError {
+    /// Failed to create or access workspace directory.
+    #[error("Failed to initialize workspace at {0}: {1}")]
+    Init(PathBuf, #[source] std::io::Error),
+}
+
