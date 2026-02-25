@@ -45,12 +45,13 @@ I am kitaebot, a personal AI assistant.
 
 ## How It's Used
 
-The agent loop builds the system prompt by concatenating:
+The system prompt is built once at startup and cached for the session. It is rebuilt when the user runs `/new` to start a fresh session. This means edits to SOUL.md take effect on the next session, not mid-conversation — the agent does not modify its own prompt files.
+
+The prompt is assembled by concatenating:
 
 1. `SOUL.md` — Personality and values
 2. `AGENTS.md` — Operational instructions
 3. `USER.md` — User profile (optional)
-4. Context header — Working directory, available tools
 
 ```rust
 fn build_system_prompt(workspace: &Path) -> String {
@@ -148,5 +149,4 @@ Information *about* the user:
 
 - **Soul versioning** — Track changes over time
 - **Soul inheritance** — Base soul + user overrides
-- **Dynamic soul** — Adjust based on context or mood
 - **Soul marketplace** — Share personalities (probably overkill)

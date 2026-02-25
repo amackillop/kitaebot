@@ -40,6 +40,8 @@ async fn main() {
         std::process::exit(1);
     });
 
+    let mut system_prompt = workspace.system_prompt();
+
     let n = session.messages().len();
     if n == 0 {
         println!("New session\n");
@@ -69,11 +71,10 @@ async fn main() {
             if let Err(e) = session.save(&workspace.session_path()) {
                 eprintln!("Failed to save session: {e}");
             }
+            system_prompt = workspace.system_prompt();
             println!("Session cleared.\n");
             continue;
         }
-
-        let system_prompt = workspace.system_prompt();
 
         match run_turn(&mut session, &system_prompt, input, &provider, &tools).await {
             Ok(response) => {
