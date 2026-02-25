@@ -11,140 +11,84 @@ The workspace is the agent's home directory. It contains configuration, state, a
 3. **Portability** — Workspace can be backed up, moved, or reset
 4. **Simplicity** — No complex permission system needed
 
+## Location
+
+Resolved via fallback chain:
+
+1. `KITAEBOT_WORKSPACE` environment variable
+2. `$XDG_DATA_HOME/kitaebot`
+3. `~/.local/share/kitaebot`
+
 ## Directory Structure
 
 ```
-/var/lib/kitaebot/
-├── config.toml          # Agent configuration
-├── session.json         # Conversation history
+~/.local/share/kitaebot/     (or KITAEBOT_WORKSPACE)
+├── session.json             # Conversation history
 │
-├── SOUL.md              # Agent personality (system prompt)
-├── USER.md              # User profile
-├── AGENTS.md            # Agent instructions
-├── TOOLS.md             # Tool documentation (generated)
-├── HEARTBEAT.md         # Periodic tasks
+├── SOUL.md                  # Agent personality (system prompt)
+├── AGENTS.md                # Agent instructions
+├── USER.md                  # User profile (optional, user-created)
 │
-├── memory/
-│   ├── MEMORY.md        # Long-term facts
-│   └── HISTORY.md       # Event log
+├── memory/                  # (Future) Long-term memory
 │
-└── projects/            # User's working area
+└── projects/                # User's working area
     └── ...
 ```
 
 ## File Purposes
 
-### Core Files
-
-| File | Purpose | Who Edits |
-|------|---------|-----------|
-| `config.toml` | Runtime configuration | User |
-| `session.json` | Conversation state | Agent (automatic) |
-
 ### Prompt Files
 
-These are loaded into the system prompt:
+Loaded into the system prompt (concatenated in order):
 
 | File | Purpose | Who Edits |
 |------|---------|-----------|
 | `SOUL.md` | Personality, values, style | User |
-| `USER.md` | User profile, preferences | User |
 | `AGENTS.md` | Instructions for the agent | User |
-| `TOOLS.md` | Tool documentation | Generated |
+| `USER.md` | User profile, preferences | User (optional) |
 
-### Memory Files
+### State Files
 
 | File | Purpose | Who Edits |
 |------|---------|-----------|
-| `memory/MEMORY.md` | Consolidated long-term facts | Agent |
-| `memory/HISTORY.md` | Append-only event log | Agent |
-| `HEARTBEAT.md` | Periodic tasks | Agent |
+| `session.json` | Conversation state | Agent (automatic) |
 
-### User Files
+## Initialization
 
-The `projects/` directory is for user work. The agent can create, read, and modify files here.
+On startup, `Workspace::init()` creates the directory tree and writes default templates for `SOUL.md` and `AGENTS.md` using `create_new` (O_EXCL) — existing files are never overwritten.
 
-## Bundled Templates
-
-The VM includes template versions of workspace files. On first boot:
-
-1. Check if workspace exists
-2. If not, copy templates to `/var/lib/kitaebot/`
-3. Set appropriate permissions
-
-Templates come from `workspace/` in the source repo (same as nanobot).
+Directories created: workspace root, `memory/`, `projects/`.
 
 ## Isolation Enforcement
 
-### Path Validation
+### Path Traversal
 
-All file operations validate paths:
-
-```rust
-fn validate_path(workspace: &Path, requested: &Path) -> Result<PathBuf> {
-    let canonical = requested.canonicalize()?;
-
-    if !canonical.starts_with(workspace) {
-        return Err(Error::PathTraversal);
-    }
-
-    Ok(canonical)
-}
-```
+The `exec` tool rejects commands containing `../` to prevent escaping the workspace.
 
 ### Shell Restrictions
 
-The `exec` tool always runs with:
-- `cwd` = workspace
-- No access to parent directories
-- PATH restricted to safe commands
+The `exec` tool always runs with `cwd` = workspace root.
 
-### Nix Sandbox
+### VM Sandbox
 
-The VM provides additional isolation:
+The VM provides the real security boundary:
 - Separate filesystem namespace
 - Limited network access
 - Resource constraints
-
-## Permissions
-
-```
-/var/lib/kitaebot/           drwxr-xr-x  kitaebot:kitaebot
-├── config.toml              -rw-------  (contains API key)
-├── session.json             -rw-r--r--
-├── SOUL.md                  -rw-r--r--
-├── memory/                  drwxr-xr-x
-│   └── ...                  -rw-r--r--
-└── projects/                drwxr-xr-x
-    └── ...                  -rw-r--r--
-```
 
 ## Backup & Recovery
 
 Workspace is self-contained. To backup:
 
 ```bash
-tar -czf kitaebot-backup.tar.gz /var/lib/kitaebot/
-```
-
-To restore:
-
-```bash
-tar -xzf kitaebot-backup.tar.gz -C /
-```
-
-## Reset
-
-To start fresh:
-
-```bash
-rm -rf /var/lib/kitaebot/*
-systemctl restart kitaebot
-# Templates will be re-copied
+tar -czf kitaebot-backup.tar.gz ~/.local/share/kitaebot/
 ```
 
 ## Future Considerations
 
+- **config.toml** — Runtime configuration file for model, tokens, temperature
+- **TOOLS.md** — Generated tool documentation included in system prompt
+- **HEARTBEAT.md** — Periodic task definitions
 - **Git integration** — Auto-commit workspace changes
 - **Encryption at rest** — For sensitive data
 - **Quota management** — Prevent disk exhaustion

@@ -18,114 +18,69 @@ With persistence:
 
 ## Data Structure
 
-```rust
-pub struct Session {
-    pub messages: Vec<SessionMessage>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
+The session stores `Message` values directly (the same enum used by the agent loop and provider). This avoids a separate `SessionMessage` type and keeps the serialization format aligned with the OpenAI wire format.
 
-pub struct SessionMessage {
-    pub role: Role,
-    pub content: String,
-    pub timestamp: DateTime<Utc>,
-    pub tool_calls: Option<Vec<ToolCallRecord>>,
-    pub tool_results: Option<Vec<ToolResultRecord>>,
-}
-
-pub enum Role {
-    User,
-    Assistant,
-}
-```
+Timestamps use a custom `Timestamp(u64)` type — seconds since Unix epoch — to avoid pulling in `chrono` for two fields. Messages do not carry individual timestamps.
 
 ## Storage Format
 
-Session is stored as `session.json` in the workspace:
+Session is stored as `session.json` in the workspace. Example:
 
 ```json
 {
     "messages": [
         {
             "role": "user",
-            "content": "What files are in my workspace?",
-            "timestamp": "2024-02-21T12:00:00Z"
+            "content": "What files are in my workspace?"
         },
         {
             "role": "assistant",
-            "content": "Let me check...",
-            "timestamp": "2024-02-21T12:00:01Z",
+            "content": "",
             "tool_calls": [
-                {"id": "call_123", "name": "exec", "arguments": {"command": "ls"}}
+                {"id": "call_123", "type": "function", "function": {"name": "exec", "arguments": "{\"command\": \"ls\"}"}}
             ]
         },
         {
+            "role": "tool",
+            "tool_call_id": "call_123",
+            "content": "$ ls\nSOUL.md\nsession.json\nprojects/\n\nExit code: 0"
+        },
+        {
             "role": "assistant",
-            "content": "Your workspace contains: SOUL.md, session.json, projects/",
-            "timestamp": "2024-02-21T12:00:02Z"
+            "content": "Your workspace contains: SOUL.md, session.json, projects/"
         }
     ],
-    "created_at": "2024-02-21T12:00:00Z",
-    "updated_at": "2024-02-21T12:00:02Z"
+    "created_at": 1708516800,
+    "updated_at": 1708516802
 }
 ```
 
 ## Operations
 
-```rust
-impl Session {
-    /// Load session from disk, or create new if not exists
-    pub fn load(workspace: &Path) -> Result<Self>;
+- **`Session::new()`** — Create empty session with current timestamp
+- **`Session::load(path)`** — Load from disk; create new if file doesn't exist; return parse error if corrupt
+- **`Session::save(path)`** — Atomic write (tmp + rename) to prevent corruption
+- **`Session::add_message(msg)`** — Append message, update `updated_at`
+- **`Session::messages()`** — Return full message slice (no windowing)
+- **`Session::clear()`** — Wipe messages, preserve `created_at`
 
-    /// Save session to disk
-    pub fn save(&self, workspace: &Path) -> Result<()>;
+## File Safety
 
-    /// Add a message to the session
-    pub fn add_message(&mut self, message: SessionMessage);
+Writes use atomic rename to prevent corruption: write to `session.json.tmp`, then rename to `session.json`.
 
-    /// Get messages for context building
-    pub fn get_history(&self, limit: usize) -> &[SessionMessage];
+## Session Commands
 
-    /// Clear session (user command: /new)
-    pub fn clear(&mut self);
-}
-```
+| Command | Action |
+|---------|--------|
+| `/new` | Clear session, start fresh |
 
 ## MVP Simplifications
-
-For MVP, we keep it simple:
 
 1. **No consolidation** — Messages accumulate unbounded
 2. **No windowing** — All messages sent to LLM (until context limit)
 3. **No backup** — Single file, atomic write
 4. **No encryption** — Plain JSON (workspace is private anyway)
-
-## File Safety
-
-Writes use atomic rename to prevent corruption:
-
-```rust
-fn save(&self, workspace: &Path) -> Result<()> {
-    let path = workspace.join("session.json");
-    let temp = workspace.join("session.json.tmp");
-
-    let content = serde_json::to_string_pretty(self)?;
-    fs::write(&temp, content)?;
-    fs::rename(&temp, &path)?;
-
-    Ok(())
-}
-```
-
-## Session Commands
-
-User can control the session via CLI commands:
-
-| Command | Action |
-|---------|--------|
-| `/new` | Clear session, start fresh |
-| `/history` | Show recent messages |
-| `/export` | Dump session to stdout |
+5. **No per-message timestamps** — Only session-level `created_at`/`updated_at`
 
 ## Future Considerations
 
@@ -139,8 +94,6 @@ When sessions grow large, we'll need to consolidate:
 4. Append summary to `HISTORY.md`
 5. Remove old messages from session
 
-This keeps context manageable while preserving important information.
-
 ### Token Counting
 
 Currently no token awareness. Eventually:
@@ -148,7 +101,6 @@ Currently no token awareness. Eventually:
 1. Estimate tokens per message
 2. Track cumulative context size
 3. Trigger consolidation before hitting limit
-4. Truncate from oldest if emergency
 
 ### Multiple Sessions
 

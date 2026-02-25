@@ -19,20 +19,20 @@ Existing solutions (nanobot, OpenClaw) are feature-rich but complex. Kitaebot pr
 ┌────────────────────────────────────────────────────────┐
 │                     NixOS VM                           │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │                  kitaebot daemon                  │  │
+│  │                  kitaebot daemon                 │  │
 │  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  │  │
 │  │  │   Agent    │  │  Provider  │  │   Tools    │  │  │
 │  │  │   Loop     │──│ (OpenRouter│──│  (exec)    │  │  │
 │  │  └────────────┘  └────────────┘  └────────────┘  │  │
-│  │         │                                         │  │
+│  │         │                                        │  │
 │  │  ┌──────▼─────┐  ┌────────────┐                  │  │
-│  │  │  SOUL.md   │  │ session.json│                  │  │
+│  │  │  SOUL.md   │  │session.json│                  │  │
 │  │  │  (prompt)  │  │ (history)  │                  │  │
 │  │  └────────────┘  └────────────┘                  │  │
 │  └──────────────────────────────────────────────────┘  │
 │                                                        │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │              /var/lib/kitaebot                    │  │
+│  │              ~/.local/share/kitaebot             │  │
 │  │  (workspace: files, projects, agent state)       │  │
 │  └──────────────────────────────────────────────────┘  │
 │                                                        │

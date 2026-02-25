@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The soul defines the agent's personality, values, and communication style. It's loaded into the system prompt at the start of every conversation, giving the agent a consistent identity.
+The soul defines the agent's personality, values, and communication style. It's loaded into the system prompt at the start of every session, giving the agent a consistent identity.
 
 ## Why "Soul"?
 
@@ -14,7 +14,7 @@ The term comes from nanobot. It's more evocative than "system prompt" or "person
 
 ## File Location
 
-`/var/lib/kitaebot/SOUL.md`
+`<workspace>/SOUL.md` (e.g., `~/.local/share/kitaebot/SOUL.md`)
 
 ## Default Content
 
@@ -45,32 +45,9 @@ I am kitaebot, a personal AI assistant.
 
 ## How It's Used
 
-The system prompt is built once at startup and cached for the session. It is rebuilt when the user runs `/new` to start a fresh session. This means edits to SOUL.md take effect on the next session, not mid-conversation — the agent does not modify its own prompt files.
+The system prompt is built once at startup by concatenating `SOUL.md`, `AGENTS.md`, and `USER.md` (if present). It is cached for the session lifetime and rebuilt when the user runs `/new`. Missing files are silently skipped.
 
-The prompt is assembled by concatenating:
-
-1. `SOUL.md` — Personality and values
-2. `AGENTS.md` — Operational instructions
-3. `USER.md` — User profile (optional)
-
-```rust
-fn build_system_prompt(workspace: &Path) -> String {
-    let soul = fs::read_to_string(workspace.join("SOUL.md"))
-        .unwrap_or_default();
-    let agents = fs::read_to_string(workspace.join("AGENTS.md"))
-        .unwrap_or_default();
-    let user = fs::read_to_string(workspace.join("USER.md"))
-        .unwrap_or_default();
-
-    format!(
-        "{soul}\n\n{agents}\n\n{user}\n\n## Context\n\nWorking directory: {workspace}\n",
-        soul = soul,
-        agents = agents,
-        user = user,
-        workspace = workspace.display()
-    )
-}
-```
+The system prompt is prepended to every provider call but never stored in the session.
 
 ## Customization
 
@@ -104,49 +81,21 @@ I am a warm and supportive assistant.
 
 ### AGENTS.md
 
-Instructions for *how* the agent operates:
-
-```markdown
-# Agent Instructions
-
-## Tools
-
-You have access to:
-- `exec` — Run shell commands
-
-## Memory
-
-- Session is persisted in session.json
-- Long-term facts go in memory/MEMORY.md
-
-## Guidelines
-
-- Always explain before taking action
-- Ask for clarification if unsure
-```
+Instructions for *how* the agent operates (tools available, guidelines, memory).
 
 ### USER.md
 
-Information *about* the user:
-
-```markdown
-# User Profile
-
-- Name: Alex
-- Timezone: UTC-8
-- Role: Software developer
-- Prefers: Technical explanations, no hand-holding
-```
+Information *about* the user (name, timezone, preferences). Optional — not created by default.
 
 ## Design Principles
 
 1. **Separation of concerns** — Personality (SOUL) vs. instructions (AGENTS) vs. user info (USER)
 2. **User control** — All files are editable markdown
-3. **Fail gracefully** — Missing files use defaults, don't crash
+3. **Fail gracefully** — Missing files are skipped, don't crash
 4. **Minimal prompt** — Keep it short to save tokens
 
 ## Future Considerations
 
+- **Context appendix** — Append working directory and tool summary to prompt
 - **Soul versioning** — Track changes over time
 - **Soul inheritance** — Base soul + user overrides
-- **Soul marketplace** — Share personalities (probably overkill)

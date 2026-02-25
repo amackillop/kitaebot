@@ -14,31 +14,13 @@ The loop pattern is the standard approach for agentic systems because:
 
 ## Behavior
 
-```
-fn run_turn(user_message: &str) -> Result<String> {
-    let mut messages = build_context(user_message);
+1. Push user message onto the session
+2. Prepend system prompt to session messages (system prompt is not stored in the session)
+3. Send to provider
+4. If `Response::Text` — store assistant message, return text
+5. If `Response::ToolCalls` — store assistant message, execute all tool calls in parallel, store results, loop
 
-    for iteration in 0..MAX_ITERATIONS {
-        let response = provider.chat(&messages, &tools)?;
-
-        match response {
-            Response::Text(content) => {
-                return Ok(content);
-            }
-            Response::ToolCalls(calls) => {
-                messages.push(assistant_message_with_tool_calls(&calls));
-
-                for call in calls {
-                    let result = tools.execute(&call)?;
-                    messages.push(tool_result_message(call.id, result));
-                }
-            }
-        }
-    }
-
-    Err(Error::MaxIterationsReached)
-}
-```
+The system prompt is prepended per provider call but not persisted in the session. Edits to SOUL.md take effect on the next `/new` session since the prompt is cached at startup.
 
 ## Context Building
 
@@ -46,7 +28,7 @@ Each turn starts by assembling the message array:
 
 ```
 [
-    { role: "system", content: <SOUL.md + AGENTS.md + context> },
+    { role: "system", content: <SOUL.md + AGENTS.md + USER.md> },
     { role: "user", content: <message 1> },
     { role: "assistant", content: <response 1> },
     ...
@@ -54,11 +36,10 @@ Each turn starts by assembling the message array:
 ]
 ```
 
-The system prompt includes:
+The system prompt is built by concatenating:
 - Contents of `SOUL.md` (personality)
 - Contents of `AGENTS.md` (instructions)
-- Current working directory
-- Available tools summary
+- Contents of `USER.md` (user profile, optional)
 
 ## Constraints
 
@@ -74,7 +55,7 @@ The system prompt includes:
 |-------|----------|
 | Provider API error | Return error to user, don't retry |
 | Tool execution error | Return error text to LLM, let it decide |
-| Max iterations reached | Return partial result + warning |
+| Max iterations reached | Return `Error::MaxIterationsReached` to caller |
 | Parse error | Return error to user |
 
 ## State
@@ -84,5 +65,4 @@ The agent loop itself is stateless. All persistence is handled by the session mo
 ## Future Considerations
 
 - **Streaming**: Currently batch-only. Streaming would update the CLI in real-time.
-- **Parallel tool calls**: OpenAI API supports multiple tool calls; we execute sequentially for simplicity.
 - **Token counting**: Currently no token awareness. May need to truncate history when approaching limits.

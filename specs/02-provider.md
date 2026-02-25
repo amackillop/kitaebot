@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The provider module handles communication with the LLM API. It abstracts the HTTP details and provides a clean interface for the agent loop.
+The provider module handles communication with the LLM API. It abstracts the HTTP details behind a trait so the agent loop doesn't care which backend is used.
 
 ## Why OpenRouter?
 
@@ -15,34 +15,9 @@ OpenRouter is a gateway to multiple LLM providers (Anthropic, OpenAI, etc.) with
 
 ## Interface
 
-```rust
-pub struct Provider {
-    client: reqwest::Client,
-    api_key: String,
-    model: String,
-    max_tokens: u32,
-    temperature: f32,
-}
+The `Provider` trait defines a single `chat` method. `OpenRouterProvider` is the current production implementation; `StubProvider` (feature-gated behind `mock-network`) is used for testing.
 
-impl Provider {
-    pub async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-    ) -> Result<Response, ProviderError>;
-}
-
-pub enum Response {
-    Text(String),
-    ToolCalls(Vec<ToolCall>),
-}
-
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: serde_json::Value,
-}
-```
+Tool call arguments are passed as a JSON **string** (not a parsed `Value`), matching the OpenAI wire format. The `Tools` module deserializes them.
 
 ## Request Format
 
@@ -68,41 +43,15 @@ pub struct ToolCall {
 }
 ```
 
+The `tools` field is omitted when no tools are registered.
+
 ## Response Parsing
 
 The API returns either:
 
-**Text response:**
-```json
-{
-    "choices": [{
-        "message": {
-            "role": "assistant",
-            "content": "Here's what I found..."
-        }
-    }]
-}
-```
+**Text response:** `choices[0].message.content` is present, no `tool_calls`.
 
-**Tool call response:**
-```json
-{
-    "choices": [{
-        "message": {
-            "role": "assistant",
-            "content": null,
-            "tool_calls": [{
-                "id": "call_abc123",
-                "type": "function",
-                "function": {
-                    "name": "exec",
-                    "arguments": "{\"command\": \"ls -la\"}"
-                }
-            }]
-        }
-    }]
-}
-```
+**Tool call response:** `choices[0].message.tool_calls` contains one or more calls, each with `id`, `function.name`, and `function.arguments` (JSON string).
 
 ## Error Handling
 
@@ -110,19 +59,17 @@ The API returns either:
 |-------------|---------|--------|
 | 200 | Success | Parse response |
 | 400 | Bad request | Return error (likely our bug) |
-| 401 | Unauthorized | Return error (bad API key) |
-| 429 | Rate limited | Return error (could retry, but keep simple) |
-| 500+ | Server error | Return error |
+| 401 | Unauthorized | Return `ProviderError::Authentication` |
+| 429 | Rate limited | Return `ProviderError::RateLimited` |
+| Other | Server/unknown error | Return `ProviderError::Network` with status and body |
 
 ## Configuration
 
-```toml
-[provider]
-api_key = "sk-or-..."  # Or OPENROUTER_API_KEY env var
-model = "anthropic/claude-sonnet-4"
-max_tokens = 4096
-temperature = 0.7
-```
+The provider is configured via:
+- `OPENROUTER_API_KEY` environment variable (required)
+- `OpenRouterConfig` struct with defaults: model `arcee-ai/trinity-large-preview:free`, max_tokens 4096, temperature 0.7
+
+No config file parsing yet — configuration is compile-time defaults + env var.
 
 ## Why Not Streaming (MVP)?
 
@@ -135,6 +82,7 @@ Batch is simpler. Add streaming when UX demands it.
 
 ## Future Considerations
 
+- **Config file**: Load model/tokens/temperature from `config.toml`.
 - **Retry logic**: Currently no retries. Could add exponential backoff for transient errors.
 - **Multiple providers**: Could add direct Anthropic/OpenAI clients, but OpenRouter makes this unnecessary.
 - **Caching**: Could cache identical requests, but LLM responses are rarely identical.
