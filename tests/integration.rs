@@ -11,14 +11,31 @@ fn kitaebot_with_workspace(dir: &TempDir) -> Command {
 }
 
 #[test]
-fn welcome_message() {
+fn new_session_status() {
     let dir = tempfile::tempdir().unwrap();
     kitaebot_with_workspace(&dir)
         .write_stdin("exit\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Kitaebot REPL"))
-        .stdout(predicate::str::contains("Type 'exit' to quit"));
+        .stdout(predicate::str::contains("New session"));
+}
+
+#[test]
+fn resumed_session_status() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // First run: create a session with one turn
+    kitaebot_with_workspace(&dir)
+        .write_stdin("hello\nexit\n")
+        .assert()
+        .success();
+
+    // Second run: should show resumed
+    kitaebot_with_workspace(&dir)
+        .write_stdin("exit\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resumed session"));
 }
 
 #[test]

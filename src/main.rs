@@ -40,8 +40,12 @@ async fn main() {
         std::process::exit(1);
     });
 
-    println!("Kitaebot REPL");
-    println!("Type 'exit' to quit\n");
+    let n = session.messages().len();
+    if n == 0 {
+        println!("New session\n");
+    } else {
+        println!("Resumed session ({n} messages)\n");
+    }
 
     loop {
         print!("> ");
