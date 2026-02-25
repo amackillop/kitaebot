@@ -9,8 +9,10 @@ mod types;
 mod workspace;
 
 use agent::run_turn;
+use heartbeat::Outcome;
 #[cfg(not(feature = "mock-network"))]
 use provider::OpenRouterProvider;
+use provider::Provider;
 #[cfg(feature = "mock-network")]
 use provider::StubProvider;
 use session::Session;
@@ -37,6 +39,32 @@ async fn main() {
 
     let tools = Tools::new(vec![Tool::Exec(Exec::new(workspace.path()))]);
 
+    match std::env::args().nth(1).as_deref() {
+        Some("heartbeat") => run_heartbeat(&workspace, &provider, &tools).await,
+        Some(cmd) => {
+            eprintln!("Unknown command: {cmd}");
+            std::process::exit(1);
+        }
+        None => run_repl(&workspace, &provider, &tools).await,
+    }
+}
+
+async fn run_heartbeat<P: Provider>(workspace: &Workspace, provider: &P, tools: &Tools) {
+    match heartbeat::run(workspace, provider, tools).await {
+        Ok(Outcome::Executed(response)) => {
+            eprintln!("Heartbeat complete: {response}");
+        }
+        Ok(Outcome::Skipped(reason)) => {
+            eprintln!("Heartbeat skipped: {reason}");
+        }
+        Err(e) => {
+            eprintln!("Heartbeat failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run_repl<P: Provider>(workspace: &Workspace, provider: &P, tools: &Tools) {
     let mut session = Session::load(&workspace.session_path()).unwrap_or_else(|e| {
         eprintln!("Failed to load session: {e}");
         std::process::exit(1);
@@ -78,7 +106,7 @@ async fn main() {
             continue;
         }
 
-        match run_turn(&mut session, &system_prompt, input, &provider, &tools).await {
+        match run_turn(&mut session, &system_prompt, input, provider, tools).await {
             Ok(response) => {
                 println!("{response}\n");
                 if let Err(e) = session.save(&workspace.session_path()) {
