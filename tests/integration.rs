@@ -2,14 +2,18 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use tempfile::TempDir;
 
-fn kitaebot() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("kitaebot"))
+fn kitaebot_with_workspace(dir: &TempDir) -> Command {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("kitaebot"));
+    cmd.env("KITAEBOT_WORKSPACE", dir.path());
+    cmd
 }
 
 #[test]
 fn welcome_message() {
-    kitaebot()
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
         .write_stdin("exit\n")
         .assert()
         .success()
@@ -19,17 +23,26 @@ fn welcome_message() {
 
 #[test]
 fn exit_command() {
-    kitaebot().write_stdin("exit\n").assert().success();
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
+        .write_stdin("exit\n")
+        .assert()
+        .success();
 }
 
 #[test]
 fn eof_exits_cleanly() {
-    kitaebot().write_stdin("").assert().success();
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
+        .write_stdin("")
+        .assert()
+        .success();
 }
 
 #[test]
 fn stub_response() {
-    kitaebot()
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
         .write_stdin("hello\nexit\n")
         .assert()
         .success()
@@ -38,7 +51,8 @@ fn stub_response() {
 
 #[test]
 fn multiple_inputs() {
-    kitaebot()
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
         .write_stdin("first\nsecond\nthird\nexit\n")
         .assert()
         .success()
@@ -51,7 +65,8 @@ fn multiple_inputs() {
 
 #[test]
 fn empty_input_skipped() {
-    kitaebot()
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
         .write_stdin("\n\nhello\nexit\n")
         .assert()
         .success()
@@ -64,9 +79,45 @@ fn empty_input_skipped() {
 
 #[test]
 fn prompts_displayed() {
-    kitaebot()
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
         .write_stdin("test\nexit\n")
         .assert()
         .success()
         .stdout(predicate::str::contains(">"));
+}
+
+#[test]
+fn workspace_initialized_on_start() {
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
+        .write_stdin("exit\n")
+        .assert()
+        .success();
+
+    assert!(dir.path().join("SOUL.md").exists());
+    assert!(dir.path().join("AGENTS.md").exists());
+    assert!(dir.path().join("memory").is_dir());
+    assert!(dir.path().join("projects").is_dir());
+}
+
+#[test]
+fn session_persisted_after_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
+        .write_stdin("hello\nexit\n")
+        .assert()
+        .success();
+
+    assert!(dir.path().join("session.json").exists());
+}
+
+#[test]
+fn new_command_clears_session() {
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
+        .write_stdin("hello\n/new\nexit\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Session cleared."));
 }

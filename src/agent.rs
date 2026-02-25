@@ -6,6 +6,7 @@
 
 use crate::error::Error;
 use crate::provider::Provider;
+use crate::session::Session;
 use crate::tools::Tools;
 use crate::types::{Message, Response};
 use futures::future::join_all;
@@ -15,33 +16,33 @@ const MAX_ITERATIONS: usize = 20;
 
 /// Run a single turn of the agent loop.
 ///
-/// # Arguments
-/// * `user_message` - The user's input message
-/// * `provider` - LLM provider for generating responses
-/// * `tools` - Registry of available tools
-///
-/// # Returns
-/// The final text response from the LLM
+/// Pushes the user message onto the session, sends the history (with system
+/// prompt prepended) to the provider, and appends assistant/tool messages.
+/// The system prompt is prepended per provider call but not stored in the
+/// session, so edits to SOUL.md take effect without a restart.
 ///
 /// # Errors
 /// Returns error if max iterations reached or provider fails
 pub async fn run_turn<P: Provider>(
+    session: &mut Session,
+    system_prompt: &str,
     user_message: &str,
     provider: &P,
     tools: &Tools,
 ) -> Result<String, Error> {
-    let mut messages = vec![
-        Message::System {
-            content: build_system_prompt(),
-        },
-        Message::User {
-            content: user_message.to_string(),
-        },
-    ];
+    session.add_message(Message::User {
+        content: user_message.to_string(),
+    });
 
     let tool_definitions = tools.definitions();
 
     for _iteration in 0..MAX_ITERATIONS {
+        // Prepend system prompt for each provider call (not stored in session)
+        let mut messages = vec![Message::System {
+            content: system_prompt.to_string(),
+        }];
+        messages.extend(session.messages().iter().cloned());
+
         let response = provider
             .chat(&messages, &tool_definitions)
             .await
@@ -49,10 +50,14 @@ pub async fn run_turn<P: Provider>(
 
         match response {
             Response::Text(content) => {
+                session.add_message(Message::Assistant {
+                    content: content.clone(),
+                    tool_calls: None,
+                });
                 return Ok(content);
             }
             Response::ToolCalls(calls) => {
-                messages.push(Message::Assistant {
+                session.add_message(Message::Assistant {
                     content: String::new(),
                     tool_calls: Some(calls.clone()),
                 });
@@ -65,7 +70,7 @@ pub async fn run_turn<P: Provider>(
                 for (call, result) in calls.iter().zip(results) {
                     let content = result.unwrap_or_else(|e| format!("Error: {e}"));
 
-                    messages.push(Message::Tool {
+                    session.add_message(Message::Tool {
                         call_id: call.id.clone(),
                         content,
                     });
@@ -75,14 +80,6 @@ pub async fn run_turn<P: Provider>(
     }
 
     Err(Error::MaxIterationsReached)
-}
-
-/// Build the system prompt.
-///
-/// Includes personality (SOUL.md), instructions (AGENTS.md), and context.
-/// Currently returns a stub - will load from files later.
-fn build_system_prompt() -> String {
-    "You are Kitaebot, an autonomous agent running in a NixOS VM.".to_string()
 }
 
 #[cfg(test)]
@@ -142,12 +139,24 @@ mod tests {
         Tools::new(vec![Tool::Stub(Stub)])
     }
 
+    const SYSTEM: &str = "You are a test assistant.";
+
     #[tokio::test]
     async fn test_text_response() {
         let provider = MockProvider::new(vec![Ok(text("Hello from LLM"))]);
+        let mut session = Session::new();
 
-        let result = run_turn("Hello", &provider, &Tools::new(vec![])).await;
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Hello",
+            &provider,
+            &Tools::new(vec![]),
+        )
+        .await;
         assert_eq!(result.unwrap(), "Hello from LLM");
+        // User + Assistant messages stored
+        assert_eq!(session.messages().len(), 2);
     }
 
     #[tokio::test]
@@ -156,16 +165,32 @@ mod tests {
             Ok(tool_calls(&["call-1"])),
             Ok(text("Tool result processed")),
         ]);
+        let mut session = Session::new();
 
-        let result = run_turn("Use a tool", &provider, &tools_with_stub()).await;
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Use a tool",
+            &provider,
+            &tools_with_stub(),
+        )
+        .await;
         assert_eq!(result.unwrap(), "Tool result processed");
     }
 
     #[tokio::test]
     async fn test_max_iterations() {
         let provider = MockProvider::new(vec![Ok(tool_calls(&["call-infinite"])); MAX_ITERATIONS]);
+        let mut session = Session::new();
 
-        let result = run_turn("Infinite loop", &provider, &tools_with_stub()).await;
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Infinite loop",
+            &provider,
+            &tools_with_stub(),
+        )
+        .await;
         assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
     }
 
@@ -173,8 +198,16 @@ mod tests {
     async fn test_provider_error() {
         let provider =
             MockProvider::new(vec![Err(ProviderError::Network("Mock error".to_string()))]);
+        let mut session = Session::new();
 
-        let result = run_turn("Error case", &provider, &Tools::new(vec![])).await;
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Error case",
+            &provider,
+            &Tools::new(vec![]),
+        )
+        .await;
         assert!(matches!(result.unwrap_err(), Error::Provider(_)));
     }
 
@@ -184,8 +217,16 @@ mod tests {
             Ok(tool_calls(&["call-1", "call-2"])),
             Ok(text("Multiple tools executed")),
         ]);
+        let mut session = Session::new();
 
-        let result = run_turn("Parallel tools", &provider, &tools_with_stub()).await;
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Parallel tools",
+            &provider,
+            &tools_with_stub(),
+        )
+        .await;
         assert_eq!(result.unwrap(), "Multiple tools executed");
     }
 }
