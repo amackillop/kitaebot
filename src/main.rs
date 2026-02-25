@@ -1,5 +1,6 @@
 mod agent;
 mod error;
+mod lock;
 mod provider;
 mod session;
 mod tools;
