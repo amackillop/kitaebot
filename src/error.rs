@@ -80,3 +80,18 @@ pub enum WorkspaceError {
     Init(PathBuf, #[source] std::io::Error),
 }
 
+/// Session persistence errors.
+#[derive(Debug, Error)]
+pub enum SessionError {
+    /// I/O error reading or writing session file.
+    #[error("Session I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Failed to parse session JSON.
+    #[error("Failed to parse session: {0}")]
+    Parse(#[source] serde_json::Error),
+
+    /// Failed to serialize session to JSON.
+    #[error("Failed to serialize session: {0}")]
+    Serialize(#[source] serde_json::Error),
+}

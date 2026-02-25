@@ -41,3 +41,4 @@ regex = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 assert_cmd = "2.0"
 predicates = "3.1"
+tempfile = "3"
