@@ -17,18 +17,21 @@ Unlike cron (which schedules specific commands), heartbeat is agent-driven:
 
 ```
 ┌─────────────────────────────────────────────┐
-│              systemd timer                   │
-│         (every 30 minutes)                   │
+│              systemd timer                  │
+│         (every 30 minutes)                  │
 └─────────────────────┬───────────────────────┘
                       │
                       ▼
 ┌─────────────────────────────────────────────┐
-│           kitaebot heartbeat                 │
-│                                              │
-│  1. Read HEARTBEAT.md                        │
-│  2. If tasks exist, send to agent            │
-│  3. Agent processes and responds             │
-│  4. Log result to HISTORY.md                 │
+│           kitaebot heartbeat                │
+│                                             │
+│  1. Check repl.lock — skip if held          │
+│  2. Acquire heartbeat.lock — skip if held   │
+│  3. Read HEARTBEAT.md — skip if missing     │
+│  4. Parse active tasks — skip if none       │
+│  5. Build prompt from active task lines     │
+│  6. Run one agent turn (ephemeral session)  │
+│  7. Append result to memory/HISTORY.md      │
 └─────────────────────────────────────────────┘
 ```
 
@@ -52,35 +55,17 @@ Tasks below are checked every 30 minutes.
 
 ## Execution Flow
 
+See `src/heartbeat.rs` for the implementation. The core function:
+
 ```rust
-async fn run_heartbeat(workspace: &Path) -> Result<()> {
-    let heartbeat = fs::read_to_string(workspace.join("HEARTBEAT.md"))?;
-
-    // Check if there are any tasks
-    if !has_active_tasks(&heartbeat) {
-        log::debug!("No heartbeat tasks, skipping");
-        return Ok(());
-    }
-
-    // Build prompt for agent
-    let prompt = format!(
-        "This is a heartbeat check. Review the following tasks and handle any that need attention:\n\n{}",
-        heartbeat
-    );
-
-    // Run agent with heartbeat context
-    let response = agent.process_message(&prompt, "heartbeat").await?;
-
-    // Log to history
-    append_to_history(workspace, &format!(
-        "[{}] Heartbeat: {}\n",
-        Utc::now().format("%Y-%m-%d %H:%M"),
-        summarize(&response)
-    ))?;
-
-    Ok(())
-}
+pub async fn run<P: Provider>(
+    workspace: &Workspace, provider: &P, tools: &Tools,
+) -> Result<Outcome, Error>
 ```
+
+Returns `Outcome::Executed(response)` on success or `Outcome::Skipped(reason)` when there is nothing to do. Uses an ephemeral `Session::new()` — heartbeat turns are not persisted.
+
+The prompt is built from active task lines only (`- [ ]` checkboxes), not the full file content. The full agent response is appended to `memory/HISTORY.md` with a UTC timestamp formatted via Hinnant's `civil_from_days` (no `chrono` dependency).
 
 ## Systemd Integration
 
@@ -138,21 +123,30 @@ For MVP:
 
 ## Skipping Heartbeat
 
-Heartbeat is skipped when:
+Heartbeat is skipped (not an error) when:
 
-1. `HEARTBEAT.md` doesn't exist
-2. No active tasks (all completed or only headers)
-3. Agent is currently in a user session
-4. Previous heartbeat still running
+1. A user session holds `repl.lock`
+2. Another heartbeat holds `heartbeat.lock`
+3. `HEARTBEAT.md` doesn't exist
+4. No active tasks (no unchecked `- [ ]` lines)
+
+Checks run in this order. Skip reason is printed to stderr.
+
+## Locking
+
+Mutual exclusion uses PID-based lock files (see `src/lock.rs`):
+
+- **`repl.lock`** — Held by user sessions. Heartbeat checks but does not acquire.
+- **`heartbeat.lock`** — Acquired for the duration of the heartbeat turn. RAII guard removes on drop.
+
+Stale locks (dead PID) are automatically recovered. `create_new` provides atomic acquisition. This is defense-in-depth — systemd's `Type=oneshot` prevents overlapping runs.
 
 ## Logging
 
-All heartbeat activity is logged to `memory/HISTORY.md`:
+Executed heartbeats are logged to `memory/HISTORY.md`. Skip events are printed to stderr but not persisted.
 
 ```markdown
 [2024-02-21 14:30] Heartbeat: Checked project builds - all passing. No new inbox files.
-
-[2024-02-21 15:00] Heartbeat: Skipped - no active tasks.
 
 [2024-02-21 15:30] Heartbeat: Found 3 new files in inbox, summarized and filed.
 ```
