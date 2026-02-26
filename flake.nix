@@ -51,7 +51,15 @@
             commonArgs
             // {
               inherit cargoArtifacts;
-              cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+              cargoClippyExtraArgs = "-- --deny warnings";
+            }
+          );
+
+          clippy-tests = craneLib.cargoClippy (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--tests --features mock-network -- --deny warnings";
             }
           );
 

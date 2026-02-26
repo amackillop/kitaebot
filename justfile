@@ -22,9 +22,10 @@ build:
 test:
     cargo test --features mock-network
 
-# Lint with clippy
+# Lint with clippy (both real and test builds)
 lint:
     cargo clippy -- --deny warnings
+    cargo clippy --tests --features mock-network -- --deny warnings
 
 # Format code
 fmt:
