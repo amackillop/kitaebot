@@ -96,6 +96,22 @@ pub enum HeartbeatError {
     WriteHistory(#[source] std::io::Error),
 }
 
+/// Configuration errors.
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    /// I/O error reading config file.
+    #[error("Config I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Failed to parse TOML.
+    #[error("Config parse error: {0}")]
+    Parse(String),
+
+    /// Parsed successfully but values are invalid.
+    #[error("Invalid config: {0}")]
+    Invalid(String),
+}
+
 /// Session persistence errors.
 #[derive(Debug, Error)]
 pub enum SessionError {
