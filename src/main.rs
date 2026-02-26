@@ -15,7 +15,6 @@ use provider::OpenRouterProvider;
 use provider::Provider;
 #[cfg(feature = "mock-network")]
 use provider::StubProvider;
-use std::io::{self, Write};
 use tools::{Exec, Tool, Tools};
 use workspace::Workspace;
 
@@ -39,12 +38,20 @@ async fn main() {
     let tools = Tools::new(vec![Tool::Exec(Exec::new(workspace.path()))]);
 
     match std::env::args().nth(1).as_deref() {
+        Some("chat") => repl::run(&workspace, &provider, &tools).await,
         Some("heartbeat") => run_heartbeat(&workspace, &provider, &tools).await,
         Some(cmd) => {
             eprintln!("Unknown command: {cmd}");
             std::process::exit(1);
         }
-        None => run_repl(&workspace, &provider, &tools).await,
+        None => {
+            eprintln!("Usage: kitaebot <command>");
+            eprintln!();
+            eprintln!("Commands:");
+            eprintln!("  chat       Interactive conversation");
+            eprintln!("  heartbeat  Run periodic tasks");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -59,65 +66,6 @@ async fn run_heartbeat<P: Provider>(workspace: &Workspace, provider: &P, tools: 
         Err(e) => {
             eprintln!("Heartbeat failed: {e}");
             std::process::exit(1);
-        }
-    }
-}
-
-async fn run_repl<P: Provider>(workspace: &Workspace, provider: &P, tools: &Tools) {
-    let Ok(_lock) = Lock::acquire(&workspace.repl_lock_path()) else {
-        eprintln!("Another session is already running");
-        std::process::exit(1);
-    };
-
-    let mut session = Session::load(&workspace.session_path()).unwrap_or_else(|e| {
-        eprintln!("Failed to load session: {e}");
-        std::process::exit(1);
-    });
-
-    let mut system_prompt = workspace.system_prompt();
-
-    let n = session.messages().len();
-    if n == 0 {
-        println!("New session\n");
-    } else {
-        println!("Resumed session ({n} messages)\n");
-    }
-
-    loop {
-        print!("> ");
-        io::stdout().flush().unwrap();
-
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(0) | Err(_) => break, // EOF or read error
-            Ok(_) => {}
-        }
-
-        let input = input.trim();
-        if input.is_empty() {
-            continue;
-        }
-        if input == "exit" {
-            break;
-        }
-        if input == "/new" {
-            session.clear();
-            if let Err(e) = session.save(&workspace.session_path()) {
-                eprintln!("Failed to save session: {e}");
-            }
-            system_prompt = workspace.system_prompt();
-            println!("Session cleared.\n");
-            continue;
-        }
-
-        match run_turn(&mut session, &system_prompt, input, provider, tools).await {
-            Ok(response) => {
-                println!("{response}\n");
-                if let Err(e) = session.save(&workspace.session_path()) {
-                    eprintln!("Failed to save session: {e}");
-                }
-            }
-            Err(e) => eprintln!("Error: {e}\n"),
         }
     }
 }

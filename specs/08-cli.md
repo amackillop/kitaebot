@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The CLI is the primary way users interact with the agent. It provides an interactive REPL for conversations.
+The `kitaebot` CLI is the user-facing entry point. Subcommands dispatch to distinct modes of operation. The daemon will be a separate binary (`kitaebotd`).
 
 ## Why CLI?
 
@@ -11,10 +11,22 @@ The CLI is the primary way users interact with the agent. It provides an interac
 3. **Scriptable** — Can pipe input/output
 4. **Low overhead** — No UI framework needed
 
-## Interactive Mode
+## Subcommands
 
 ```
-$ kitaebot
+$ kitaebot <command>
+
+Commands:
+  chat       Interactive conversation
+  heartbeat  Run periodic tasks
+```
+
+Bare invocation prints usage and exits with code 1.
+
+## Chat Mode
+
+```
+$ kitaebot chat
 New session
 
 > What files are in my workspace?
@@ -34,39 +46,45 @@ Your workspace contains:
 On resume:
 
 ```
-$ kitaebot
+$ kitaebot chat
 Resumed session (5 messages)
 
 >
 ```
 
-## Commands
+### REPL Commands
 
 | Input | Action |
 |-------|--------|
 | `/new`  | Clear session, rebuild system prompt, start fresh |
-| `/quit` | Exit the REPL |
+| `exit` | Exit the REPL |
 | EOF (Ctrl-D) | Exit the REPL |
 
 Empty/whitespace-only input is silently skipped.
 
-## Startup
+### Chat Startup
+
+1. Acquire REPL lock (exit 1 if another session active)
+2. Load session from disk (exit 1 on failure)
+3. Cache system prompt
+4. Print session status ("New session" or "Resumed session (N messages)")
+5. Enter REPL loop
+
+### Turn Cycle
+
+1. Read line from stdin
+2. Skip if empty, break if `exit` or EOF
+3. Handle `/new` (clear session, save, rebuild prompt)
+4. Otherwise: `run_turn()` → print response → save session
+5. On error: print to stderr, continue
+
+## Global Startup
+
+Runs before subcommand dispatch:
 
 1. Initialize provider from `OPENROUTER_API_KEY` env var (exit 1 on failure)
 2. Initialize workspace (exit 1 on failure)
 3. Load tools (exec with workspace as cwd)
-4. Load session from disk (exit 1 on failure)
-5. Cache system prompt
-6. Print session status ("New session" or "Resumed session (N messages)")
-7. Enter REPL loop
-
-## Turn Cycle
-
-1. Read line from stdin
-2. Skip if empty, break if `/quit` or EOF
-3. Handle `/new` (clear session, save, rebuild prompt)
-4. Otherwise: `run_turn()` → print response → save session
-5. On error: print to stderr, continue
 
 ## Error Behavior
 
@@ -78,13 +96,12 @@ Empty/whitespace-only input is silently skipped.
 
 ## Future Considerations
 
-- **clap integration** — Subcommands (`heartbeat`, `config`, `version`), CLI args (`--model`, `--config`, `-v`)
+- **clap integration** — CLI args (`--model`, `--config`, `-v`)
 - **Slash commands** — `/help`, `/history`, `/config`, `/soul`
-- **Non-interactive mode** — `kitaebot "message"` or `echo "message" | kitaebot`
+- **Non-interactive mode** — `kitaebot chat "message"` or `echo "message" | kitaebot chat`
 - **Exit codes** — Distinguish config errors (2) from provider errors (3)
 - **Readline support** — History, completion, editing
 - **Colors** — Syntax highlighting for code blocks
 - **Progress indicators** — Spinner while waiting for response
 - **Streaming output** — Print tokens as they arrive
 - **Multiline input** — For pasting code blocks
-- **REPL lock** — Single-instance enforcement via PID lock file to prevent concurrent REPL sessions and coordinate with heartbeat

@@ -12,10 +12,40 @@ fn kitaebot_with_workspace(dir: &TempDir) -> Command {
     cmd
 }
 
+fn kitaebot_chat(dir: &TempDir) -> Command {
+    let mut cmd = kitaebot_with_workspace(dir);
+    cmd.arg("chat");
+    cmd
+}
+
+// --- CLI dispatch tests ---
+
+#[test]
+fn bare_invocation_prints_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Usage: kitaebot <command>"))
+        .stderr(predicate::str::contains("chat"));
+}
+
+#[test]
+fn unknown_subcommand_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    kitaebot_with_workspace(&dir)
+        .arg("bogus")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unknown command: bogus"));
+}
+
+// --- Chat REPL tests ---
+
 #[test]
 fn new_session_status() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
+    kitaebot_chat(&dir)
         .write_stdin("exit\n")
         .assert()
         .success()
@@ -27,13 +57,13 @@ fn resumed_session_status() {
     let dir = tempfile::tempdir().unwrap();
 
     // First run: create a session with one turn
-    kitaebot_with_workspace(&dir)
+    kitaebot_chat(&dir)
         .write_stdin("hello\nexit\n")
         .assert()
         .success();
 
     // Second run: should show resumed
-    kitaebot_with_workspace(&dir)
+    kitaebot_chat(&dir)
         .write_stdin("exit\n")
         .assert()
         .success()
@@ -43,25 +73,19 @@ fn resumed_session_status() {
 #[test]
 fn exit_command() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
-        .write_stdin("exit\n")
-        .assert()
-        .success();
+    kitaebot_chat(&dir).write_stdin("exit\n").assert().success();
 }
 
 #[test]
 fn eof_exits_cleanly() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
-        .write_stdin("")
-        .assert()
-        .success();
+    kitaebot_chat(&dir).write_stdin("").assert().success();
 }
 
 #[test]
 fn stub_response() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
+    kitaebot_chat(&dir)
         .write_stdin("hello\nexit\n")
         .assert()
         .success()
@@ -71,7 +95,7 @@ fn stub_response() {
 #[test]
 fn multiple_inputs() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
+    kitaebot_chat(&dir)
         .write_stdin("first\nsecond\nthird\nexit\n")
         .assert()
         .success()
@@ -85,7 +109,7 @@ fn multiple_inputs() {
 #[test]
 fn empty_input_skipped() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
+    kitaebot_chat(&dir)
         .write_stdin("\n\nhello\nexit\n")
         .assert()
         .success()
@@ -99,7 +123,7 @@ fn empty_input_skipped() {
 #[test]
 fn prompts_displayed() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
+    kitaebot_chat(&dir)
         .write_stdin("test\nexit\n")
         .assert()
         .success()
@@ -109,10 +133,7 @@ fn prompts_displayed() {
 #[test]
 fn workspace_initialized_on_start() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
-        .write_stdin("exit\n")
-        .assert()
-        .success();
+    kitaebot_chat(&dir).write_stdin("exit\n").assert().success();
 
     assert!(dir.path().join("SOUL.md").exists());
     assert!(dir.path().join("AGENTS.md").exists());
@@ -123,7 +144,7 @@ fn workspace_initialized_on_start() {
 #[test]
 fn session_persisted_after_turn() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
+    kitaebot_chat(&dir)
         .write_stdin("hello\nexit\n")
         .assert()
         .success();
@@ -134,7 +155,7 @@ fn session_persisted_after_turn() {
 #[test]
 fn new_command_clears_session() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
+    kitaebot_chat(&dir)
         .write_stdin("hello\n/new\nexit\n")
         .assert()
         .success()
@@ -207,14 +228,4 @@ fn heartbeat_skips_when_repl_locked() {
 
     // History should not be written.
     assert!(!dir.path().join("memory/HISTORY.md").exists());
-}
-
-#[test]
-fn unknown_subcommand_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
-        .arg("bogus")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("Unknown command: bogus"));
 }

@@ -58,7 +58,7 @@ Existing solutions (nanobot, OpenClaw) are feature-rich but complex. Kitaebot pr
 
 ## Data Flow
 
-1. User SSHs into VM, runs `kitaebot`
+1. User SSHs into VM, runs `kitaebot chat`
 2. CLI reads user input
 3. Agent loop builds context (soul + session history + user message)
 4. Provider sends request to OpenRouter
