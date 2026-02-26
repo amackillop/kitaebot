@@ -66,6 +66,14 @@
           );
         };
 
+        packages.default = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            doCheck = false; # Tests run in checks.test with mock-network
+          }
+        );
+
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};
 
