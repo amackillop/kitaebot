@@ -3,20 +3,18 @@ mod error;
 mod heartbeat;
 mod lock;
 mod provider;
+mod repl;
 mod session;
 mod tools;
 mod types;
 mod workspace;
 
-use agent::run_turn;
 use heartbeat::Outcome;
-use lock::Lock;
 #[cfg(not(feature = "mock-network"))]
 use provider::OpenRouterProvider;
 use provider::Provider;
 #[cfg(feature = "mock-network")]
 use provider::StubProvider;
-use session::Session;
 use std::io::{self, Write};
 use tools::{Exec, Tool, Tools};
 use workspace::Workspace;
