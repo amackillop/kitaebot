@@ -27,6 +27,7 @@
         modules = [
           kitaebot.nixosModules.vm
           ./configuration.nix
+          { kitaebot.package = kitaebot.packages.x86_64-linux.default; }
         ];
       };
 

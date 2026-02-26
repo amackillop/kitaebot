@@ -4,8 +4,9 @@ commit-message.txt
 kitaebot.qcow2
 result
 
-/plans
-/target
-/inspiration
+plans/
+target/
+inspiration/
+secrets/*
 
 !.git*
