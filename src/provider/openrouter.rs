@@ -2,36 +2,14 @@
 //!
 //! Communicates with `OpenRouter`'s OpenAI-compatible API to get LLM responses.
 
-use std::env;
-
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::config::ProviderConfig;
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
 use super::Provider;
-
-/// Configuration for the `OpenRouter` provider.
-pub struct OpenRouterConfig {
-    /// Model identifier (e.g., "minimax/minimax-m2.5").
-    pub model: String,
-    /// Maximum tokens in response.
-    pub max_tokens: u32,
-    /// Sampling temperature.
-    pub temperature: f32,
-}
-
-impl Default for OpenRouterConfig {
-    fn default() -> Self {
-        Self {
-            // Default to a free model
-            model: "arcee-ai/trinity-large-preview:free".to_string(),
-            max_tokens: 4096,
-            temperature: 0.7,
-        }
-    }
-}
 
 /// `OpenRouter` LLM provider.
 ///
@@ -39,29 +17,23 @@ impl Default for OpenRouterConfig {
 pub struct OpenRouterProvider {
     client: Client,
     api_key: String,
-    config: OpenRouterConfig,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
 }
 
 impl OpenRouterProvider {
     const ENDPOINT: &'static str = "https://openrouter.ai/api/v1/chat/completions";
 
     /// Create a new provider with the given API key and configuration.
-    pub fn new(api_key: String, config: OpenRouterConfig) -> Self {
+    pub fn new(api_key: String, config: &ProviderConfig) -> Self {
         Self {
             client: Client::new(),
             api_key,
-            config,
+            model: config.model.clone(),
+            max_tokens: config.max_tokens,
+            temperature: config.temperature,
         }
-    }
-
-    /// Create a provider using the `OPENROUTER_API_KEY` environment variable.
-    ///
-    /// # Errors
-    ///
-    /// Returns `ProviderError::Authentication` if the environment variable is not set.
-    pub fn from_env() -> Result<Self, ProviderError> {
-        let api_key = env::var("OPENROUTER_API_KEY").map_err(|_| ProviderError::Authentication)?;
-        Ok(Self::new(api_key, OpenRouterConfig::default()))
     }
 
     /// Parse the API response into our domain type.
@@ -101,11 +73,11 @@ impl Provider for OpenRouterProvider {
         tools: &[ToolDefinition],
     ) -> Result<Response, ProviderError> {
         let request = ChatRequest {
-            model: &self.config.model,
+            model: &self.model,
             messages,
             tools: if tools.is_empty() { None } else { Some(tools) },
-            max_tokens: self.config.max_tokens,
-            temperature: self.config.temperature,
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
         };
 
         let response = self

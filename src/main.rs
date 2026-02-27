@@ -10,6 +10,7 @@ mod tools;
 mod types;
 mod workspace;
 
+use config::Config;
 use heartbeat::Outcome;
 #[cfg(not(feature = "mock-network"))]
 use provider::OpenRouterProvider;
@@ -21,20 +22,29 @@ use workspace::Workspace;
 
 #[tokio::main]
 async fn main() {
-    #[cfg(feature = "mock-network")]
-    let provider = StubProvider;
-
-    #[cfg(not(feature = "mock-network"))]
-    let provider = OpenRouterProvider::from_env().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize provider: {e}");
-        eprintln!("Set OPENROUTER_API_KEY environment variable");
-        std::process::exit(1);
-    });
-
     let workspace = Workspace::init().unwrap_or_else(|e| {
         eprintln!("Failed to initialize workspace: {e}");
         std::process::exit(1);
     });
+
+    // Remaining fields wired in subsequent commits.
+    #[allow(unused_variables)]
+    let config = Config::load(workspace.path()).unwrap_or_else(|e| {
+        eprintln!("Failed to load config: {e}");
+        std::process::exit(1);
+    });
+
+    #[cfg(feature = "mock-network")]
+    let provider = StubProvider;
+
+    #[cfg(not(feature = "mock-network"))]
+    let provider = {
+        let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
+            eprintln!("Set OPENROUTER_API_KEY environment variable");
+            std::process::exit(1);
+        });
+        OpenRouterProvider::new(api_key, &config.provider)
+    };
 
     let tools = Tools::new(vec![Tool::Exec(Exec::new(workspace.path()))]);
 

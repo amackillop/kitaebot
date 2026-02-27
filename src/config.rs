@@ -4,8 +4,6 @@
 //! defaults; malformed file is a hard error. Unknown fields are rejected
 //! to catch typos early.
 
-#![allow(dead_code)] // Wired in subsequent commits
-
 use std::path::Path;
 
 use serde::Deserialize;
