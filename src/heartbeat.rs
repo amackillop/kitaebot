@@ -63,6 +63,7 @@ pub async fn run<P: Provider>(
     workspace: &Workspace,
     provider: &P,
     tools: &Tools,
+    max_iterations: usize,
 ) -> Result<Outcome, Error> {
     if Lock::is_held(&workspace.repl_lock_path()) {
         return Ok(Outcome::Skipped(SkipReason::SessionActive));
@@ -89,7 +90,15 @@ pub async fn run<P: Provider>(
     let system_prompt = workspace.system_prompt();
     let mut session = Session::new();
 
-    let response = run_turn(&mut session, &system_prompt, &prompt, provider, tools).await?;
+    let response = run_turn(
+        &mut session,
+        &system_prompt,
+        &prompt,
+        provider,
+        tools,
+        max_iterations,
+    )
+    .await?;
 
     append_history(&workspace.history_path(), &response).map_err(HeartbeatError::WriteHistory)?;
 

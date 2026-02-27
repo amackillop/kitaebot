@@ -27,8 +27,6 @@ async fn main() {
         std::process::exit(1);
     });
 
-    // Remaining fields wired in subsequent commits.
-    #[allow(unused_variables)]
     let config = Config::load(workspace.path()).unwrap_or_else(|e| {
         eprintln!("Failed to load config: {e}");
         std::process::exit(1);
@@ -49,8 +47,12 @@ async fn main() {
     let tools = Tools::new(vec![Tool::Exec(Exec::new(workspace.path()))]);
 
     match std::env::args().nth(1).as_deref() {
-        Some("chat") => repl::run(&workspace, &provider, &tools).await,
-        Some("heartbeat") => run_heartbeat(&workspace, &provider, &tools).await,
+        Some("chat") => {
+            repl::run(&workspace, &provider, &tools, config.agent.max_iterations).await;
+        }
+        Some("heartbeat") => {
+            run_heartbeat(&workspace, &provider, &tools, config.agent.max_iterations).await;
+        }
         Some(cmd) => {
             eprintln!("Unknown command: {cmd}");
             std::process::exit(1);
@@ -66,8 +68,13 @@ async fn main() {
     }
 }
 
-async fn run_heartbeat<P: Provider>(workspace: &Workspace, provider: &P, tools: &Tools) {
-    match heartbeat::run(workspace, provider, tools).await {
+async fn run_heartbeat<P: Provider>(
+    workspace: &Workspace,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+) {
+    match heartbeat::run(workspace, provider, tools, max_iterations).await {
         Ok(Outcome::Executed(response)) => {
             eprintln!("Heartbeat complete: {response}");
         }

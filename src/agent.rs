@@ -11,9 +11,6 @@ use crate::tools::Tools;
 use crate::types::{Message, Response};
 use futures::future::join_all;
 
-/// Maximum iterations per turn to prevent infinite loops.
-const MAX_ITERATIONS: usize = 20;
-
 /// Run a single turn of the agent loop.
 ///
 /// Pushes the user message onto the session, sends the history (with system
@@ -29,6 +26,7 @@ pub async fn run_turn<P: Provider>(
     user_message: &str,
     provider: &P,
     tools: &Tools,
+    max_iterations: usize,
 ) -> Result<String, Error> {
     session.add_message(Message::User {
         content: user_message.to_string(),
@@ -36,7 +34,7 @@ pub async fn run_turn<P: Provider>(
 
     let tool_definitions = tools.definitions();
 
-    for _iteration in 0..MAX_ITERATIONS {
+    for _iteration in 0..max_iterations {
         // Prepend system prompt for each provider call (not stored in session)
         let mut messages = vec![Message::System {
             content: system_prompt.to_string(),
@@ -143,6 +141,7 @@ mod tests {
     }
 
     const SYSTEM: &str = "You are a test assistant.";
+    const MAX_ITER: usize = 20;
 
     #[tokio::test]
     async fn test_text_response() {
@@ -155,6 +154,7 @@ mod tests {
             "Hello",
             &provider,
             &Tools::new(vec![]),
+            MAX_ITER,
         )
         .await;
         assert_eq!(result.unwrap(), "Hello from LLM");
@@ -176,6 +176,7 @@ mod tests {
             "Use a tool",
             &provider,
             &tools_with_stub(),
+            MAX_ITER,
         )
         .await;
         assert_eq!(result.unwrap(), "Tool result processed");
@@ -183,7 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_iterations() {
-        let provider = MockProvider::new(vec![Ok(tool_calls(&["call-infinite"])); MAX_ITERATIONS]);
+        let provider = MockProvider::new(vec![Ok(tool_calls(&["call-infinite"])); MAX_ITER]);
         let mut session = Session::new();
 
         let result = run_turn(
@@ -192,6 +193,7 @@ mod tests {
             "Infinite loop",
             &provider,
             &tools_with_stub(),
+            MAX_ITER,
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
@@ -209,6 +211,7 @@ mod tests {
             "Error case",
             &provider,
             &Tools::new(vec![]),
+            MAX_ITER,
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::Provider(_)));
@@ -228,6 +231,7 @@ mod tests {
             "Parallel tools",
             &provider,
             &tools_with_stub(),
+            MAX_ITER,
         )
         .await;
         assert_eq!(result.unwrap(), "Multiple tools executed");

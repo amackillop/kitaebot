@@ -15,7 +15,12 @@ use std::io::{self, Write};
 ///
 /// Acquires the REPL lock, loads the session, and enters a read-eval-print
 /// loop until the user sends EOF or types `exit`.
-pub async fn run<P: Provider>(workspace: &Workspace, provider: &P, tools: &Tools) {
+pub async fn run<P: Provider>(
+    workspace: &Workspace,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+) {
     let Ok(_lock) = Lock::acquire(&workspace.repl_lock_path()) else {
         eprintln!("Another session is already running");
         std::process::exit(1);
@@ -62,7 +67,16 @@ pub async fn run<P: Provider>(workspace: &Workspace, provider: &P, tools: &Tools
             continue;
         }
 
-        match run_turn(&mut session, &system_prompt, input, provider, tools).await {
+        match run_turn(
+            &mut session,
+            &system_prompt,
+            input,
+            provider,
+            tools,
+            max_iterations,
+        )
+        .await
+        {
             Ok(response) => {
                 println!("{response}\n");
                 if let Err(e) = session.save(&workspace.session_path()) {
