@@ -84,36 +84,9 @@ pub async fn run_turn<P: Provider>(
 mod tests {
     use super::*;
     use crate::error::ProviderError;
+    use crate::provider::MockProvider;
     use crate::tools::{Stub, Tool};
-    use crate::types::{ToolCall, ToolDefinition, ToolFunction};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Mock provider that returns pre-configured responses.
-    struct MockProvider {
-        responses: Vec<Result<Response, ProviderError>>,
-        call_count: Arc<AtomicUsize>,
-    }
-
-    impl MockProvider {
-        fn new(responses: Vec<Result<Response, ProviderError>>) -> Self {
-            Self {
-                responses,
-                call_count: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-    }
-
-    impl Provider for MockProvider {
-        async fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolDefinition],
-        ) -> Result<Response, ProviderError> {
-            let index = self.call_count.fetch_add(1, Ordering::SeqCst);
-            self.responses[index].clone()
-        }
-    }
+    use crate::types::{ToolCall, ToolFunction};
 
     fn text(s: &str) -> Response {
         Response::Text(s.to_string())

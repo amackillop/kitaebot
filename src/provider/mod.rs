@@ -3,9 +3,13 @@
 //! The Provider trait abstracts over different LLM APIs (`OpenRouter`, `OpenAI`, etc.).
 //! All providers must implement the same chat interface.
 
+#[cfg(test)]
+mod mock;
 #[cfg(not(feature = "mock-network"))]
 mod openrouter;
 
+#[cfg(test)]
+pub use mock::MockProvider;
 #[cfg(not(feature = "mock-network"))]
 pub use openrouter::OpenRouterProvider;
 
