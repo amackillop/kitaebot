@@ -44,7 +44,10 @@ async fn main() {
         OpenRouterProvider::new(api_key, &config.provider)
     };
 
-    let tools = Tools::new(vec![Tool::Exec(Exec::new(workspace.path()))]);
+    let tools = Tools::new(vec![Tool::Exec(Exec::new(
+        workspace.path(),
+        &config.tools.exec,
+    ))]);
 
     match std::env::args().nth(1).as_deref() {
         Some("chat") => {

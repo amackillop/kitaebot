@@ -29,10 +29,8 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
+use crate::config::ExecConfig;
 use crate::error::ToolError;
-
-const DEFAULT_TIMEOUT_SECS: u64 = 60;
-const MAX_OUTPUT_BYTES: usize = 10 * 1024;
 
 /// Patterns that indicate dangerous commands.
 static DENY_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
@@ -58,6 +56,7 @@ struct Args {
 pub struct Exec {
     working_dir: PathBuf,
     timeout: Duration,
+    max_output_bytes: usize,
 }
 
 impl Exec {
@@ -68,10 +67,11 @@ impl Exec {
         serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
     }
 
-    pub fn new(working_dir: impl Into<PathBuf>) -> Self {
+    pub fn new(working_dir: impl Into<PathBuf>, config: &ExecConfig) -> Self {
         Self {
             working_dir: working_dir.into(),
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            timeout: Duration::from_secs(config.timeout_secs),
+            max_output_bytes: config.max_output_bytes,
         }
     }
 
@@ -105,7 +105,7 @@ impl Exec {
         let mut result = format!("$ {}\n", args.command);
 
         if !stdout.is_empty() {
-            result.push_str(&truncate_output(&stdout, MAX_OUTPUT_BYTES));
+            result.push_str(&truncate_output(&stdout, self.max_output_bytes));
         }
 
         if !stderr.is_empty() {
@@ -113,7 +113,7 @@ impl Exec {
                 result.push('\n');
             }
             result.push_str("STDERR:\n");
-            result.push_str(&truncate_output(&stderr, MAX_OUTPUT_BYTES));
+            result.push_str(&truncate_output(&stderr, self.max_output_bytes));
         }
 
         let _ = write!(
@@ -206,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_simple_command() {
-        let tool = Exec::new(".");
+        let tool = Exec::new(".", &ExecConfig::default());
         let args = serde_json::json!({"command": "echo hello"});
         let result = tool.execute(args).await.unwrap();
         assert!(result.contains("hello"));
@@ -215,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_missing_command() {
-        let tool = Exec::new(".");
+        let tool = Exec::new(".", &ExecConfig::default());
         let args = serde_json::json!({});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
@@ -223,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_blocked_command() {
-        let tool = Exec::new(".");
+        let tool = Exec::new(".", &ExecConfig::default());
         let args = serde_json::json!({"command": "rm -rf /"});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::Blocked(_))));
@@ -231,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_path_traversal_blocked() {
-        let tool = Exec::new(".");
+        let tool = Exec::new(".", &ExecConfig::default());
         let args = serde_json::json!({"command": "cat ../secret"});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::Blocked(_))));
