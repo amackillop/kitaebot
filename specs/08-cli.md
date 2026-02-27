@@ -82,14 +82,16 @@ Empty/whitespace-only input is silently skipped.
 
 Runs before subcommand dispatch:
 
-1. Initialize provider from `OPENROUTER_API_KEY` env var (exit 1 on failure)
-2. Initialize workspace (exit 1 on failure)
-3. Load tools (exec with workspace as cwd)
+1. Initialize workspace (exit 1 on failure)
+2. Load `config.toml` from workspace (exit 1 on malformed file; missing file → defaults)
+3. Initialize provider from `OPENROUTER_API_KEY` env var + config (exit 1 on failure)
+4. Load tools (exec with workspace as cwd + exec config)
 
 ## Error Behavior
 
-- Provider init failure: print message, suggest setting env var, exit 1
 - Workspace init failure: print message, exit 1
+- Config load failure (malformed TOML, invalid values): print message, exit 1
+- Provider init failure: print message, suggest setting env var, exit 1
 - Session load failure: print message, exit 1
 - Turn error: print to stderr, continue REPL
 - Session save failure: print to stderr, continue REPL

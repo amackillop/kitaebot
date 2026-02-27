@@ -43,11 +43,13 @@ The system prompt is built by concatenating:
 
 ## Constraints
 
-| Constraint | Value | Rationale |
-|------------|-------|-----------|
-| Max iterations | 20 | Prevent infinite loops, runaway costs |
-| Timeout per tool | 60s | Don't hang on slow commands |
-| Max tokens | 4096 | Balance cost vs capability |
+All values are configurable via `config.toml` (see `src/config.rs`). Defaults shown below.
+
+| Constraint | Default | Config key | Rationale |
+|------------|---------|------------|-----------|
+| Max iterations | 20 | `agent.max_iterations` | Prevent infinite loops, runaway costs |
+| Timeout per tool | 60s | `tools.exec.timeout_secs` | Don't hang on slow commands |
+| Max tokens | 4096 | `provider.max_tokens` | Balance cost vs capability |
 
 ## Error Handling
 

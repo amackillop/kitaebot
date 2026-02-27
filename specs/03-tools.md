@@ -52,12 +52,14 @@ Commands are checked against deny patterns before execution:
 
 ### Restrictions
 
-| Restriction | Value |
-|-------------|-------|
-| Working directory | Always workspace root |
-| Timeout | 60 seconds |
-| Output size | Truncated at 10KB (UTF-8 aware) |
-| Path traversal | Rejects `../` in command |
+Timeout and output size are configurable via `config.toml` (see `src/config.rs`). Defaults shown below.
+
+| Restriction | Default | Config key |
+|-------------|---------|------------|
+| Working directory | Workspace root | — |
+| Timeout | 60 seconds | `tools.exec.timeout_secs` |
+| Output size | 10KB (UTF-8 aware) | `tools.exec.max_output_bytes` |
+| Path traversal | Rejects `../` | — |
 
 ### Output Format
 

@@ -65,11 +65,12 @@ The API returns either:
 
 ## Configuration
 
-The provider is configured via:
-- `OPENROUTER_API_KEY` environment variable (required)
-- `OpenRouterConfig` struct with defaults: model `arcee-ai/trinity-large-preview:free`, max_tokens 4096, temperature 0.7
+- **API key**: `OPENROUTER_API_KEY` environment variable (required, read in `main.rs`)
+- **Model/tokens/temperature**: Read from `config.toml` via `ProviderConfig` (see `src/config.rs`)
 
-No config file parsing yet — configuration is compile-time defaults + env var.
+The provider itself has no env var or config file awareness — `main.rs` reads both and passes values into `OpenRouterProvider::new(api_key, &config.provider)`.
+
+Defaults (when no `config.toml` exists): model `arcee-ai/trinity-large-preview:free`, max_tokens 4096, temperature 0.7.
 
 ## Why Not Streaming (MVP)?
 
@@ -82,7 +83,6 @@ Batch is simpler. Add streaming when UX demands it.
 
 ## Future Considerations
 
-- **Config file**: Load model/tokens/temperature from `config.toml`.
 - **Retry logic**: Currently no retries. Could add exponential backoff for transient errors.
 - **Multiple providers**: Could add direct Anthropic/OpenAI clients, but OpenRouter makes this unnecessary.
 - **Caching**: Could cache identical requests, but LLM responses are rarely identical.
