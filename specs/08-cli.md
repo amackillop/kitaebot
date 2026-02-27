@@ -40,7 +40,7 @@ Your workspace contains:
 - session.json (conversation history)
 - projects/ (your working area)
 
-> /quit
+> /exit
 ```
 
 On resume:
@@ -54,10 +54,13 @@ Resumed session (5 messages)
 
 ### REPL Commands
 
+All commands are prefixed with `/`. Unrecognized `/` commands print an
+error instead of being sent to the agent.
+
 | Input | Action |
 |-------|--------|
 | `/new`  | Clear session, rebuild system prompt, start fresh |
-| `exit` | Exit the REPL |
+| `/exit` | Exit the REPL |
 | EOF (Ctrl-D) | Exit the REPL |
 
 Empty/whitespace-only input is silently skipped.
@@ -73,10 +76,12 @@ Empty/whitespace-only input is silently skipped.
 ### Turn Cycle
 
 1. Read line from stdin
-2. Skip if empty, break if `exit` or EOF
-3. Handle `/new` (clear session, save, rebuild prompt)
-4. Otherwise: `run_turn()` → print response → save session
-5. On error: print to stderr, continue
+2. Parse into `Command` (empty, `/exit`, `/new`, unknown `/cmd`, message)
+3. Skip empty, break on `/exit` or EOF
+4. Handle `/new` (clear session, save, rebuild prompt)
+5. Reject unknown `/` commands with error to stderr
+6. Otherwise: `run_turn()` → print response → save session
+7. On error: print to stderr, continue
 
 ## Global Startup
 
@@ -99,7 +104,7 @@ Runs before subcommand dispatch:
 ## Future Considerations
 
 - **clap integration** — CLI args (`--model`, `--config`, `-v`)
-- **Slash commands** — `/help`, `/history`, `/config`, `/soul`
+- **More slash commands** — `/help`, `/history`, `/config`, `/soul`
 - **Non-interactive mode** — `kitaebot chat "message"` or `echo "message" | kitaebot chat`
 - **Exit codes** — Distinguish config errors (2) from provider errors (3)
 - **Readline support** — History, completion, editing

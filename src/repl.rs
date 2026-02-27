@@ -20,12 +20,14 @@ use std::io::{self, Write};
 pub enum Command<'a> {
     /// Blank line — do nothing.
     Empty,
-    /// End the session.
+    /// `/exit` — end the session.
     Exit,
-    /// Clear session and start fresh.
+    /// `/new` — clear session and start fresh.
     NewSession,
     /// Send a message to the agent.
     Message(&'a str),
+    /// Unrecognized `/` command.
+    Unknown(&'a str),
 }
 
 impl<'a> Command<'a> {
@@ -34,10 +36,12 @@ impl<'a> Command<'a> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             Self::Empty
-        } else if trimmed == "exit" {
+        } else if trimmed == "/exit" {
             Self::Exit
         } else if trimmed == "/new" {
             Self::NewSession
+        } else if trimmed.starts_with('/') {
+            Self::Unknown(trimmed)
         } else {
             Self::Message(trimmed)
         }
@@ -56,7 +60,7 @@ pub fn greeting(message_count: usize) -> String {
 /// Run the interactive REPL loop.
 ///
 /// Acquires the REPL lock, loads the session, and enters a read-eval-print
-/// loop until the user sends EOF or types `exit`.
+/// loop until the user sends EOF or types `/exit`.
 pub async fn run<P: Provider>(
     workspace: &Workspace,
     provider: &P,
@@ -98,6 +102,9 @@ pub async fn run<P: Provider>(
                 system_prompt = workspace.system_prompt();
                 println!("Session cleared.\n");
             }
+            Command::Unknown(cmd) => {
+                eprintln!("Unknown command: {cmd}\n");
+            }
             Command::Message(msg) => {
                 match agent::run_turn(
                     &mut session,
@@ -136,9 +143,9 @@ mod tests {
 
     #[test]
     fn parse_exit() {
-        assert_eq!(Command::parse("exit"), Command::Exit);
-        assert_eq!(Command::parse("exit\n"), Command::Exit);
-        assert_eq!(Command::parse("  exit  "), Command::Exit);
+        assert_eq!(Command::parse("/exit"), Command::Exit);
+        assert_eq!(Command::parse("/exit\n"), Command::Exit);
+        assert_eq!(Command::parse("  /exit  "), Command::Exit);
     }
 
     #[test]
@@ -158,17 +165,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_exit_like_strings_are_messages() {
+    fn parse_exit_is_a_message() {
+        assert_eq!(Command::parse("exit"), Command::Message("exit"));
         assert_eq!(Command::parse("exit now"), Command::Message("exit now"));
-        assert_eq!(Command::parse("EXIT"), Command::Message("EXIT"));
     }
 
     #[test]
-    fn parse_slash_commands_are_messages() {
-        assert_eq!(Command::parse("/help"), Command::Message("/help"));
+    fn parse_unknown_slash_commands() {
+        assert_eq!(Command::parse("/help"), Command::Unknown("/help"));
+        assert_eq!(Command::parse("/nwe"), Command::Unknown("/nwe"));
+        assert_eq!(Command::parse("  /foo  \n"), Command::Unknown("/foo"));
+    }
+
+    #[test]
+    fn parse_slash_with_args_is_unknown() {
         assert_eq!(
             Command::parse("/new session"),
-            Command::Message("/new session")
+            Command::Unknown("/new session")
         );
     }
 
