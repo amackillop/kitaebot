@@ -1,7 +1,5 @@
 //! Integration tests for the kitaebot binary.
 
-use std::fs;
-
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -160,72 +158,4 @@ fn new_command_clears_session() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Session cleared."));
-}
-
-// --- Heartbeat integration tests ---
-
-#[test]
-fn heartbeat_no_file_skips() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_with_workspace(&dir)
-        .arg("heartbeat")
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("no HEARTBEAT.md"));
-}
-
-#[test]
-fn heartbeat_no_tasks_skips() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(
-        dir.path().join("HEARTBEAT.md"),
-        "# Heartbeat\n\n- [x] Already done\n",
-    )
-    .unwrap();
-
-    kitaebot_with_workspace(&dir)
-        .arg("heartbeat")
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("no active tasks"));
-}
-
-#[test]
-fn heartbeat_with_tasks_executes() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(
-        dir.path().join("HEARTBEAT.md"),
-        "# Heartbeat\n\n- [ ] Test task\n",
-    )
-    .unwrap();
-
-    kitaebot_with_workspace(&dir)
-        .arg("heartbeat")
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Heartbeat complete"));
-
-    assert!(dir.path().join("memory/HISTORY.md").exists());
-}
-
-#[test]
-fn heartbeat_skips_when_repl_locked() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(
-        dir.path().join("HEARTBEAT.md"),
-        "# Heartbeat\n\n- [ ] Test task\n",
-    )
-    .unwrap();
-
-    // Simulate a REPL holding the lock.
-    fs::write(dir.path().join("repl.lock"), std::process::id().to_string()).unwrap();
-
-    kitaebot_with_workspace(&dir)
-        .arg("heartbeat")
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("user session active"));
-
-    // History should not be written.
-    assert!(!dir.path().join("memory/HISTORY.md").exists());
 }

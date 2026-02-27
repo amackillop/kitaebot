@@ -37,20 +37,22 @@ Unlike cron (which schedules specific commands), heartbeat is agent-driven:
 
 ## HEARTBEAT.md Format
 
+Tasks are recurring — they run every heartbeat cycle, not once. Checkboxes
+act as an enable/disable toggle: `- [ ]` is enabled, `- [x]` is disabled.
+The user (or agent) toggles checkboxes to activate or deactivate tasks
+without deleting them. This avoids re-adding tasks with slightly different
+wording.
+
 ```markdown
 # Heartbeat Tasks
 
 Tasks below are checked every 30 minutes.
 
-## Active Tasks
+## Tasks
 
 - [ ] Check if any project builds are failing
 - [ ] Summarize any new files in projects/inbox
-- [ ] Review memory and clean up stale entries
-
-## Completed
-
-<!-- Agent moves completed tasks here -->
+- [x] Review memory and clean up stale entries
 ```
 
 ## Execution Flow
@@ -104,13 +106,20 @@ The agent can modify `HEARTBEAT.md` using the `exec` tool:
 echo "- [ ] New periodic task" >> HEARTBEAT.md
 ```
 
-**Remove a task:**
+**Disable a task:**
+```bash
+sed -i 's/- \[ \] specific task/- [x] specific task/' HEARTBEAT.md
+```
+
+**Enable a task:**
+```bash
+sed -i 's/- \[x\] specific task/- [ ] specific task/' HEARTBEAT.md
+```
+
+**Remove a task permanently:**
 ```bash
 sed -i '/specific task/d' HEARTBEAT.md
 ```
-
-**Mark complete:**
-The agent moves tasks to the Completed section.
 
 ## MVP Simplifications
 

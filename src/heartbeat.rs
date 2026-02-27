@@ -9,7 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::time::SystemTime;
 
-use crate::agent::run_turn;
+use crate::agent;
 use crate::error::{Error, HeartbeatError};
 use crate::lock::Lock;
 use crate::provider::Provider;
@@ -90,7 +90,7 @@ pub async fn run<P: Provider>(
     let system_prompt = workspace.system_prompt();
     let mut session = Session::new();
 
-    let response = run_turn(
+    let response = agent::run_turn(
         &mut session,
         &system_prompt,
         &prompt,
@@ -174,6 +174,9 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::MockProvider;
+    use crate::tools::Tools;
+    use crate::types::Response;
 
     #[test]
     fn parse_finds_unchecked_tasks() {
@@ -249,5 +252,85 @@ mod tests {
         assert!(content.contains("Heartbeat:"));
         // Two entries, each ending with double newline
         assert_eq!(content.matches("Heartbeat:").count(), 2);
+    }
+
+    // -- integration tests for heartbeat::run --
+
+    fn workspace() -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        (dir, ws)
+    }
+
+    #[tokio::test]
+    async fn run_skips_when_no_heartbeat_file() {
+        let (_dir, ws) = workspace();
+        let provider = MockProvider::new(vec![]);
+        let outcome = run(&ws, &provider, &Tools::default(), 1).await.unwrap();
+        assert!(matches!(
+            outcome,
+            Outcome::Skipped(SkipReason::NoHeartbeatFile)
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_skips_when_no_active_tasks() {
+        let (_dir, ws) = workspace();
+        fs::write(ws.heartbeat_path(), "- [x] Done\n- [x] Also done\n").unwrap();
+
+        let provider = MockProvider::new(vec![]);
+        let outcome = run(&ws, &provider, &Tools::default(), 1).await.unwrap();
+        assert!(matches!(
+            outcome,
+            Outcome::Skipped(SkipReason::NoActiveTasks)
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_skips_when_repl_lock_held() {
+        let (_dir, ws) = workspace();
+        fs::write(ws.heartbeat_path(), "- [ ] Pending task\n").unwrap();
+        // Write current PID so Lock::is_held returns true.
+        fs::write(ws.repl_lock_path(), std::process::id().to_string()).unwrap();
+
+        let provider = MockProvider::new(vec![]);
+        let outcome = run(&ws, &provider, &Tools::default(), 1).await.unwrap();
+        assert!(matches!(
+            outcome,
+            Outcome::Skipped(SkipReason::SessionActive)
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_skips_when_heartbeat_lock_held() {
+        let (_dir, ws) = workspace();
+        fs::write(ws.heartbeat_path(), "- [ ] Pending task\n").unwrap();
+        // Hold the heartbeat lock for the duration of this test.
+        let _lock = Lock::acquire(&ws.heartbeat_lock_path()).unwrap();
+
+        let provider = MockProvider::new(vec![]);
+        let outcome = run(&ws, &provider, &Tools::default(), 1).await.unwrap();
+        assert!(matches!(
+            outcome,
+            Outcome::Skipped(SkipReason::HeartbeatLocked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_executes_and_writes_history() {
+        let (_dir, ws) = workspace();
+        fs::write(ws.heartbeat_path(), "- [ ] Check builds\n").unwrap();
+
+        let provider = MockProvider::new(vec![Ok(Response::Text("All builds green".into()))]);
+        let outcome = run(&ws, &provider, &Tools::default(), 1).await.unwrap();
+
+        match outcome {
+            Outcome::Executed(ref text) => assert_eq!(text, "All builds green"),
+            other @ Outcome::Skipped(_) => panic!("expected Executed, got {other:?}"),
+        }
+
+        let history = fs::read_to_string(ws.history_path()).unwrap();
+        assert!(history.contains("All builds green"));
+        assert!(history.contains("Heartbeat:"));
     }
 }
