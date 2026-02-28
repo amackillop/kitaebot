@@ -23,13 +23,26 @@ Resolved via fallback chain:
 
 ```
 ~/.local/share/kitaebot/     (or KITAEBOT_WORKSPACE)
-├── session.json             # Conversation history
+├── config.toml              # Runtime configuration
 │
 ├── SOUL.md                  # Agent personality (system prompt)
 ├── AGENTS.md                # Agent instructions
 ├── USER.md                  # User profile (optional, user-created)
+├── HEARTBEAT.md             # Periodic task definitions
 │
-├── memory/                  # (Future) Long-term memory
+├── sessions/                # Per-channel conversation history
+│   ├── telegram.json
+│   ├── heartbeat.json
+│   └── repl.json
+│
+├── locks/                   # Per-channel PID lock files
+│   ├── telegram.lock
+│   ├── heartbeat.lock
+│   └── repl.lock
+│
+├── memory/                  # Shared long-term memory
+│   ├── HISTORY.md           # Heartbeat execution log
+│   └── daily-*.md           # Auto-created daily logs
 │
 └── projects/                # User's working area
     └── ...
@@ -51,13 +64,48 @@ Loaded into the system prompt (concatenated in order):
 
 | File | Purpose | Who Edits |
 |------|---------|-----------|
-| `session.json` | Conversation state | Agent (automatic) |
+| `sessions/*.json` | Per-channel conversation state | Agent (automatic) |
+| `locks/*.lock` | Mutual exclusion per channel | Agent (automatic) |
+| `memory/HISTORY.md` | Heartbeat execution log | Agent (automatic) |
+| `memory/daily-*.md` | Daily logs (timestamped entries) | Agent (automatic) |
+| `HEARTBEAT.md` | Periodic task definitions | User or agent |
+| `config.toml` | Runtime configuration | User |
+
+### Shared Memory
+
+The `memory/` directory is shared across all channels. Any channel can read or write files here. This is the mechanism for cross-channel knowledge transfer:
+
+- Heartbeat writes execution logs to `memory/HISTORY.md`
+- Telegram conversations can write learnings to `memory/`
+- REPL sessions can read memory to debug agent behavior
+
+### Memory Search
+
+The agent searches memory files using `rg` via the exec tool. No custom search infrastructure needed.
+
+- `rg -l "query" memory/` — file discovery
+- `rg -C2 "query" memory/` — matching lines with context
+
+This is sufficient while memory is small (dozens of files). When memory grows to hundreds of files or queries need semantic understanding, graduate to FTS (SQLite FTS5) then hybrid search (FTS + embeddings via RRF).
+
+The agent's system prompt should mention that `memory/` is searchable and encourage using `rg` to find prior context before asking the user.
+
+### Daily Logs
+
+Auto-created daily log files provide temporal awareness across channels.
+
+- **File:** `memory/daily-YYYY-MM-DD.md` — created on first write each day
+- Any channel can append to today's log via the exec tool
+- Daily logs are append-only markdown with timestamped entries
+- Lives in `memory/` alongside `HISTORY.md` — no new directory needed
+
+The agent's system prompt includes the last 2 days of daily logs (today + yesterday). This gives the agent a sense of "what happened recently" without loading full session history from all channels.
 
 ## Initialization
 
 On startup, `Workspace::init()` creates the directory tree and writes default templates for `SOUL.md` and `AGENTS.md` using `create_new` (O_EXCL) — existing files are never overwritten.
 
-Directories created: workspace root, `memory/`, `projects/`.
+Directories created: workspace root, `sessions/`, `locks/`, `memory/`, `projects/`.
 
 ## Isolation Enforcement
 
@@ -86,9 +134,6 @@ tar -czf kitaebot-backup.tar.gz ~/.local/share/kitaebot/
 
 ## Future Considerations
 
-- **config.toml** — Runtime configuration file for model, tokens, temperature
-- **TOOLS.md** — Generated tool documentation included in system prompt
-- **HEARTBEAT.md** — Periodic task definitions
 - **Git integration** — Auto-commit workspace changes
 - **Encryption at rest** — For sensitive data
 - **Quota management** — Prevent disk exhaustion

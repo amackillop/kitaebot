@@ -91,3 +91,7 @@ Not in MVP, but the registry makes these easy to add:
 | `edit_file` | Line-based editing |
 | `web_fetch` | Fetch URL content |
 | `web_search` | Search via SearXNG |
+
+### Tool Trait
+
+When the tool count grows beyond `exec`, extract a `Tool` trait with `name()`, `description()`, `parameters() -> Value` (JSON Schema), and `execute(args) -> Result<String, ToolError>`. The current enum-with-match dispatch is correct for 1–3 tools. A trait becomes worthwhile when tools have different config, lifecycle, or authorship. Keep static dispatch (enum) until dynamic loading is actually needed.

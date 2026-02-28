@@ -2,7 +2,7 @@
 
 ## What Is Kitaebot?
 
-A personal AI agent that runs in a NixOS VM. You SSH in, chat with it, and ask it to do things. It has a persistent personality ("soul"), remembers conversations, and can execute shell commands in its isolated workspace.
+A personal AI agent that runs in a NixOS VM. You communicate with it primarily via Telegram (or other messaging channels). It has a persistent personality ("soul"), maintains per-channel conversation history, shares long-term memory across all channels, and can execute shell commands in its isolated workspace.
 
 ## Why Build This?
 
@@ -16,31 +16,50 @@ Existing solutions (nanobot, OpenClaw) are feature-rich but complex. Kitaebot pr
 ## System Architecture
 
 ```
-┌────────────────────────────────────────────────────────┐
-│                     NixOS VM                           │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │                  kitaebot daemon                 │  │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  │  │
-│  │  │   Agent    │  │  Provider  │  │   Tools    │  │  │
-│  │  │   Loop     │──│ (OpenRouter│──│  (exec)    │  │  │
-│  │  └────────────┘  └────────────┘  └────────────┘  │  │
-│  │         │                                        │  │
-│  │  ┌──────▼─────┐  ┌────────────┐                  │  │
-│  │  │  SOUL.md   │  │session.json│                  │  │
-│  │  │  (prompt)  │  │ (history)  │                  │  │
-│  │  └────────────┘  └────────────┘                  │  │
-│  └──────────────────────────────────────────────────┘  │
-│                                                        │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │              ~/.local/share/kitaebot             │  │
-│  │  (workspace: files, projects, agent state)       │  │
-│  └──────────────────────────────────────────────────┘  │
-│                                                        │
-│  ┌──────────────┐                                      │
-│  │    sshd      │◄─────── user connects via SSH        │
-│  └──────────────┘                                      │
-└────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                        NixOS VM                          │
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │             kitaebot run  (daemon)                 │  │
+│  │                                                    │  │
+│  │  ┌──────────┐  ┌───────────┐                       │  │
+│  │  │ Telegram │  │ Heartbeat │  ← channels           │  │
+│  │  │  poller  │  │   timer   │                       │  │
+│  │  └─────┬────┘  └─────┬─────┘                       │  │
+│  │        │             │                             │  │
+│  │        ▼             ▼                             │  │
+│  │  ┌──────────┐  ┌────────────┐  ┌──────────┐        │  │
+│  │  │  Agent   │  │ Provider   │  │  Tools   │        │  │
+│  │  │  Loop    │──│(OpenRouter)│──│  (exec)  │        │  │
+│  │  └──────────┘  └────────────┘  └──────────┘        │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │            ~/.local/share/kitaebot                 │  │
+│  │                                                    │  │
+│  │  sessions/          memory/         SOUL.md        │  │
+│  │  ├── telegram.json  └── HISTORY.md  AGENTS.md      │  │
+│  │  ├── heartbeat.json                 HEARTBEAT.md   │  │
+│  │  └── repl.json                      config.toml    │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  ┌──────────────┐                                        │
+│  │    sshd      │◄── user connects via SSH               │
+│  │              │    runs `kitaebot chat` (debug REPL)   │
+│  └──────────────┘                                        │
+└──────────────────────────────────────────────────────────┘
 ```
+
+## Binary Design
+
+Single binary, two modes:
+
+| Command | Role | Lifecycle |
+|---------|------|-----------|
+| `kitaebot run` | Daemon: Telegram poller + heartbeat timer | Long-lived (systemd service) |
+| `kitaebot chat` | Local REPL for debugging and backup | Interactive, on-demand |
+
+Both are independent processes sharing the workspace. No IPC — coordination via per-channel file locks.
 
 ## Components
 
@@ -49,22 +68,40 @@ Existing solutions (nanobot, OpenClaw) are feature-rich but complex. Kitaebot pr
 | [01](01-agent-loop.md) | Agent Loop | Core conversation/tool execution cycle |
 | [02](02-provider.md) | LLM Provider | OpenRouter API client |
 | [03](03-tools.md) | Tool System | Extensible tool registry + exec tool |
-| [04](04-session.md) | Session | Conversation persistence |
+| [04](04-session.md) | Session | Per-channel conversation persistence |
 | [05](05-workspace.md) | Workspace | File structure and isolation |
 | [06](06-soul.md) | Soul | Agent personality and system prompt |
-| [07](07-heartbeat.md) | Heartbeat | Periodic task execution |
-| [08](08-cli.md) | CLI | User interface |
+| [07](07-heartbeat.md) | Heartbeat | Periodic awareness checks |
+| [08](08-cli.md) | CLI | Subcommands and REPL interface |
 | [09](09-vm.md) | NixOS VM | Deployment and system configuration |
+| [10](10-channels.md) | Channels | External messaging interfaces (Telegram) |
+| [11](11-safety.md) | Safety | Leak detection and output wrapping |
+| [12](12-context.md) | Context | Token budget and conversation windowing |
 
 ## Data Flow
 
-1. User SSHs into VM, runs `kitaebot chat`
-2. CLI reads user input
-3. Agent loop builds context (soul + session history + user message)
+### Telegram (primary)
+
+1. Daemon polls Telegram for new messages
+2. Incoming message translated to `Message::User`
+3. Agent loop builds context (soul + channel session + user message)
 4. Provider sends request to OpenRouter
 5. If response contains tool calls, execute them and loop
-6. Final text response displayed to user
-7. Session updated and persisted
+6. Final text response sent back to Telegram
+7. Channel session updated and persisted
+
+### REPL (debug)
+
+1. User SSHs into VM, runs `kitaebot chat`
+2. Same agent loop, different session (`sessions/repl.json`)
+3. Response printed to stdout
+
+### Heartbeat
+
+1. Internal timer fires (every 30 minutes)
+2. Agent reviews HEARTBEAT.md in context of prior heartbeat session
+3. Acts if needed, responds HEARTBEAT_OK if not
+4. Result appended to `memory/HISTORY.md`
 
 ## Design Principles
 
@@ -72,3 +109,4 @@ Existing solutions (nanobot, OpenClaw) are feature-rich but complex. Kitaebot pr
 - **Explicit over magic** — Configuration is visible and editable
 - **Fail loudly** — Errors should be clear, not swallowed
 - **Minimal dependencies** — Only add what's necessary
+- **Channel as pattern, not trait** — Each channel follows the same shape; extract abstraction when the second channel makes the common interface concrete

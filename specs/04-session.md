@@ -4,17 +4,37 @@
 
 The session module persists conversation history across agent restarts. It maintains the context that makes the agent feel continuous rather than amnesiac.
 
-## Why Persistence Matters
+## Per-Channel Sessions
 
-Without persistence:
-- Agent forgets everything on restart
-- User must re-explain context every time
-- No sense of ongoing relationship
+Each channel has its own session file under `sessions/`:
 
-With persistence:
-- Conversations continue naturally
-- Agent builds understanding over time
-- User can reference past interactions
+```
+sessions/
+├── telegram.json      # Primary communication channel
+├── heartbeat.json     # Periodic awareness checks
+└── repl.json          # Local debug/testing
+```
+
+Sessions are isolated — a Telegram conversation and a REPL session carry independent history. The agent sees different conversational context depending on which channel it's serving.
+
+### Why Separate Sessions?
+
+1. **Different interaction contexts** — A Telegram conversation with the user is a different context than a heartbeat awareness check
+2. **No cross-contamination** — Debug REPL messages don't appear in Telegram context
+3. **Independent lifecycles** — Clearing the REPL session doesn't wipe Telegram history
+4. **Concurrent access** — Different channels can run turns simultaneously without session conflicts
+
+### Shared Long-Term Memory
+
+While sessions are isolated, all channels share the workspace:
+
+| Layer | Scope | Example |
+|-------|-------|---------|
+| `sessions/<channel>.json` | Per-channel | Conversational history |
+| `memory/` | Shared | HISTORY.md, learnings, notes |
+| Workspace files | Shared | SOUL.md, HEARTBEAT.md, projects/ |
+
+A learning from a Telegram conversation (written to `memory/`) is visible during the next heartbeat or REPL session. The agent's knowledge persists across channels even though conversations don't.
 
 ## Data Structure
 
@@ -24,7 +44,7 @@ Timestamps use a custom `Timestamp(u64)` type — seconds since Unix epoch — t
 
 ## Storage Format
 
-Session is stored as `session.json` in the workspace. Example:
+Session files live in `sessions/` under the workspace root. Example (`sessions/telegram.json`):
 
 ```json
 {
@@ -64,21 +84,23 @@ Session is stored as `session.json` in the workspace. Example:
 - **`Session::messages()`** — Return full message slice (no windowing)
 - **`Session::clear()`** — Wipe messages, preserve `created_at`
 
+The session module is channel-agnostic. It doesn't know which channel it serves — the caller provides the path (`sessions/telegram.json`, `sessions/repl.json`, etc).
+
 ## File Safety
 
-Writes use atomic rename to prevent corruption: write to `session.json.tmp`, then rename to `session.json`.
+Writes use atomic rename to prevent corruption: write to `sessions/<channel>.json.tmp`, then rename to `sessions/<channel>.json`.
 
 ## Session Commands
 
-| Command | Action |
-|---------|--------|
-| `/new` | Clear session, start fresh |
+| Command | Action | Scope |
+|---------|--------|-------|
+| `/new` | Clear session, start fresh | REPL only |
 
 ## MVP Simplifications
 
 1. **No consolidation** — Messages accumulate unbounded
 2. **No windowing** — All messages sent to LLM (until context limit)
-3. **No backup** — Single file, atomic write
+3. **No backup** — Single file per channel, atomic write
 4. **No encryption** — Plain JSON (workspace is private anyway)
 5. **No per-message timestamps** — Only session-level `created_at`/`updated_at`
 
@@ -86,13 +108,12 @@ Writes use atomic rename to prevent corruption: write to `session.json.tmp`, the
 
 ### Memory Consolidation
 
-When sessions grow large, we'll need to consolidate:
+When sessions grow large (particularly heartbeat), we'll need to consolidate:
 
 1. Take oldest N messages
 2. Ask LLM to summarize key facts
-3. Write to `MEMORY.md`
-4. Append summary to `HISTORY.md`
-5. Remove old messages from session
+3. Write summary to `memory/`
+4. Remove old messages from session
 
 ### Token Counting
 
@@ -102,10 +123,6 @@ Currently no token awareness. Eventually:
 2. Track cumulative context size
 3. Trigger consolidation before hitting limit
 
-### Multiple Sessions
+### Session Metadata
 
-Current design is single-session. Could extend to:
-
-- Named sessions (`kitaebot --session project-x`)
-- Auto-switching based on context
-- Session templates
+May want to store channel-specific metadata alongside the message history (e.g., Telegram chat_id, last update_id offset). Keep the session format extensible — additional top-level fields are ignored by older code.
