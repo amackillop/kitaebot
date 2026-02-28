@@ -72,7 +72,7 @@ pub async fn run<P: Provider>(
         std::process::exit(1);
     };
 
-    let mut session = Session::load(&workspace.session_path()).unwrap_or_else(|e| {
+    let mut session = Session::load(&workspace.repl_session_path()).unwrap_or_else(|e| {
         eprintln!("Failed to load session: {e}");
         std::process::exit(1);
     });
@@ -96,7 +96,7 @@ pub async fn run<P: Provider>(
             Command::Exit => break,
             Command::NewSession => {
                 session.clear();
-                if let Err(e) = session.save(&workspace.session_path()) {
+                if let Err(e) = session.save(&workspace.repl_session_path()) {
                     eprintln!("Failed to save session: {e}");
                 }
                 system_prompt = workspace.system_prompt();
@@ -118,7 +118,7 @@ pub async fn run<P: Provider>(
                 {
                     Ok(response) => {
                         println!("{response}\n");
-                        if let Err(e) = session.save(&workspace.session_path()) {
+                        if let Err(e) = session.save(&workspace.repl_session_path()) {
                             eprintln!("Failed to save session: {e}");
                         }
                     }

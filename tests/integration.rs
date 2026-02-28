@@ -141,6 +141,8 @@ fn workspace_initialized_on_start() {
 
     assert!(dir.path().join("SOUL.md").exists());
     assert!(dir.path().join("AGENTS.md").exists());
+    assert!(dir.path().join("sessions").is_dir());
+    assert!(dir.path().join("locks").is_dir());
     assert!(dir.path().join("memory").is_dir());
     assert!(dir.path().join("projects").is_dir());
 }
@@ -153,7 +155,7 @@ fn session_persisted_after_turn() {
         .assert()
         .success();
 
-    assert!(dir.path().join("session.json").exists());
+    assert!(dir.path().join("sessions/repl.json").exists());
 }
 
 #[test]

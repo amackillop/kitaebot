@@ -85,6 +85,8 @@ impl Workspace {
         };
 
         mk(&path)?;
+        mk(&path.join("sessions"))?;
+        mk(&path.join("locks"))?;
         mk(&path.join("memory"))?;
         mk(&path.join("projects"))?;
 
@@ -100,9 +102,9 @@ impl Workspace {
         &self.0
     }
 
-    /// Path to the session JSON file.
-    pub fn session_path(&self) -> PathBuf {
-        self.0.join("session.json")
+    /// Path to the REPL session file.
+    pub fn repl_session_path(&self) -> PathBuf {
+        self.0.join("sessions/repl.json")
     }
 
     /// Path to the heartbeat task file.
@@ -117,12 +119,12 @@ impl Workspace {
 
     /// Path to the heartbeat lock file.
     pub fn heartbeat_lock_path(&self) -> PathBuf {
-        self.0.join("heartbeat.lock")
+        self.0.join("locks/heartbeat.lock")
     }
 
     /// Path to the REPL lock file.
     pub fn repl_lock_path(&self) -> PathBuf {
-        self.0.join("repl.lock")
+        self.0.join("locks/repl.lock")
     }
 
     /// Build the system prompt from workspace files.
@@ -189,6 +191,8 @@ mod tests {
 
         assert!(ws.path().join("SOUL.md").exists());
         assert!(ws.path().join("AGENTS.md").exists());
+        assert!(ws.path().join("sessions").is_dir());
+        assert!(ws.path().join("locks").is_dir());
         assert!(ws.path().join("memory").is_dir());
         assert!(ws.path().join("projects").is_dir());
         assert!(!ws.path().join("USER.md").exists());
@@ -226,10 +230,13 @@ mod tests {
     }
 
     #[test]
-    fn session_path() {
+    fn repl_session_path() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        assert_eq!(ws.session_path(), dir.path().join("session.json"));
+        assert_eq!(
+            ws.repl_session_path(),
+            dir.path().join("sessions/repl.json")
+        );
     }
 
     #[test]
@@ -250,13 +257,16 @@ mod tests {
     fn heartbeat_lock_path() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        assert_eq!(ws.heartbeat_lock_path(), dir.path().join("heartbeat.lock"));
+        assert_eq!(
+            ws.heartbeat_lock_path(),
+            dir.path().join("locks/heartbeat.lock")
+        );
     }
 
     #[test]
     fn repl_lock_path() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        assert_eq!(ws.repl_lock_path(), dir.path().join("repl.lock"));
+        assert_eq!(ws.repl_lock_path(), dir.path().join("locks/repl.lock"));
     }
 }

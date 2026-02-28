@@ -86,12 +86,10 @@ Telegram servers
 ┌──────────────┐
 │   Telegram   │  1. Receive update
 │   poller     │  2. Extract message text + chat_id
-│              │  3. Acquire channel lock
-│              │  4. Load session (sessions/telegram.json)
-│              │  5. Call run_turn(message)
-│              │  6. Send response via sendMessage API
-│              │  7. Save session
-│              │  8. Release channel lock
+│              │  3. Load session (sessions/telegram.json)
+│              │  4. Call run_turn(message)
+│              │  5. Send response via sendMessage API
+│              │  6. Save session
 └──────────────┘
 ```
 
@@ -129,12 +127,11 @@ TELEGRAM_CHAT_ID=123456789
 Each channel follows the same shape:
 
 1. Wait for input (poll Telegram, read stdin, timer tick)
-2. Acquire per-channel lock
+2. Acquire lock (if needed — only when multiple OS processes can collide)
 3. Load per-channel session
 4. Call `run_turn()` with the input as `Message::User`
 5. Deliver the response (send Telegram message, print to stdout, write to HISTORY.md)
 6. Save session
-7. Release lock
 
 There is no `Channel` trait. Each channel module implements this pattern directly. The specifics vary enough (chat IDs, message threading, media types, delivery confirmation) that a shared trait would be either too thin to enforce anything useful or too leaky to accommodate real differences.
 
@@ -142,17 +139,16 @@ Extract the trait when the second channel arrives and the common shape is concre
 
 ## Per-Channel Locking
 
-Each channel has its own lock file:
+Lock files prevent concurrent access where multiple OS processes could collide:
 
 | Lock | Holder |
 |------|--------|
-| `locks/repl.lock` | REPL process |
-| `locks/telegram.lock` | Daemon (per-message) |
-| `locks/heartbeat.lock` | Daemon (per-heartbeat) |
+| `locks/repl.lock` | REPL process (`kitaebot chat`) |
+| `locks/heartbeat.lock` | Heartbeat invocation (`kitaebot heartbeat` / systemd timer) |
 
-Locks prevent concurrent turns on the **same** channel. Different channels can run turns concurrently — the provider is stateless (full context sent each call) and sessions are isolated.
+Telegram needs no lock — the poller is a single sequential loop inside the daemon process. The loop itself serializes message processing. Messages arriving during a turn are queued by Telegram's `getUpdates` offset mechanism and picked up on the next poll.
 
-The Telegram lock is acquired per-message and released after the response is sent. This prevents a second Telegram message from starting a turn while the first is still running. Messages arriving during a turn are queued by Telegram's `getUpdates` offset mechanism — they'll be picked up on the next poll.
+Different channels can run turns concurrently — the provider is stateless (full context sent each call) and sessions are isolated.
 
 ## Session Isolation vs Shared Memory
 

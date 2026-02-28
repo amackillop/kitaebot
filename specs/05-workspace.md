@@ -35,8 +35,7 @@ Resolved via fallback chain:
 │   ├── heartbeat.json
 │   └── repl.json
 │
-├── locks/                   # Per-channel PID lock files
-│   ├── telegram.lock
+├── locks/                   # PID lock files
 │   ├── heartbeat.lock
 │   └── repl.lock
 │
