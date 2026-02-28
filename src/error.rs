@@ -91,6 +91,10 @@ pub enum HeartbeatError {
     #[error("Failed to read tasks: {0}")]
     ReadTasks(#[source] std::io::Error),
 
+    /// Failed to load or save the heartbeat session.
+    #[error("Session error: {0}")]
+    Session(String),
+
     /// Failed to append to HISTORY.md.
     #[error("Failed to write history: {0}")]
     WriteHistory(#[source] std::io::Error),

@@ -76,21 +76,6 @@ impl Lock {
             path: path.to_path_buf(),
         })
     }
-
-    /// Check whether a lock at `path` is currently held by a live process.
-    ///
-    /// Advisory only — inherently racy (the lock can be released between
-    /// this check and the caller acting on the result). Suitable for
-    /// skip-if-busy logic, not for safety-critical decisions.
-    pub fn is_held(path: &Path) -> bool {
-        let Ok(contents) = fs::read_to_string(path) else {
-            return false;
-        };
-        let Ok(pid) = contents.trim().parse::<u32>() else {
-            return false;
-        };
-        process_alive(pid)
-    }
 }
 
 impl Drop for Lock {
@@ -148,16 +133,5 @@ mod tests {
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents, std::process::id().to_string());
         drop(lock);
-    }
-
-    #[test]
-    fn is_held_when_locked() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.lock");
-
-        assert!(!Lock::is_held(&path));
-
-        let _lock = Lock::acquire(&path).unwrap();
-        assert!(Lock::is_held(&path));
     }
 }

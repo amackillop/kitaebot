@@ -2,7 +2,7 @@
 //!
 //! Reads `HEARTBEAT.md` for active tasks, sends them to the agent for
 //! processing, and logs the result to `memory/HISTORY.md`. Skips
-//! gracefully when there is nothing to do or another session is active.
+//! gracefully when there is nothing to do or another heartbeat is running.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -24,8 +24,6 @@ pub enum SkipReason {
     NoHeartbeatFile,
     /// File exists but contains no unchecked tasks.
     NoActiveTasks,
-    /// A user session (REPL or messaging channel) holds the lock.
-    SessionActive,
     /// Another heartbeat process is already running.
     HeartbeatLocked,
 }
@@ -35,7 +33,6 @@ impl fmt::Display for SkipReason {
         match self {
             Self::NoHeartbeatFile => write!(f, "no HEARTBEAT.md"),
             Self::NoActiveTasks => write!(f, "no active tasks"),
-            Self::SessionActive => write!(f, "user session active"),
             Self::HeartbeatLocked => write!(f, "heartbeat already running"),
         }
     }
@@ -53,22 +50,18 @@ pub enum Outcome {
 /// Run a single heartbeat cycle.
 ///
 /// # Flow
-/// 1. Check REPL lock — skip if a user session is active
-/// 2. Acquire heartbeat lock — skip if another heartbeat is running
-/// 3. Read `HEARTBEAT.md` — skip if missing
-/// 4. Parse active tasks — skip if none
+/// 1. Acquire heartbeat lock — skip if another heartbeat is running
+/// 2. Read `HEARTBEAT.md` — skip if missing
+/// 3. Parse active tasks — skip if none
+/// 4. Load persistent session
 /// 5. Build prompt and run one agent turn
-/// 6. Append result to `memory/HISTORY.md`
+/// 6. Save session and append result to `memory/HISTORY.md`
 pub async fn run<P: Provider>(
     workspace: &Workspace,
     provider: &P,
     tools: &Tools,
     max_iterations: usize,
 ) -> Result<Outcome, Error> {
-    if Lock::is_held(&workspace.repl_lock_path()) {
-        return Ok(Outcome::Skipped(SkipReason::SessionActive));
-    }
-
     let Ok(_lock) = Lock::acquire(&workspace.heartbeat_lock_path()) else {
         return Ok(Outcome::Skipped(SkipReason::HeartbeatLocked));
     };
@@ -88,7 +81,9 @@ pub async fn run<P: Provider>(
 
     let prompt = build_prompt(&tasks);
     let system_prompt = workspace.system_prompt();
-    let mut session = Session::new();
+    let session_path = workspace.heartbeat_session_path();
+    let mut session =
+        Session::load(&session_path).map_err(|e| HeartbeatError::Session(e.to_string()))?;
 
     let response = agent::run_turn(
         &mut session,
@@ -100,6 +95,9 @@ pub async fn run<P: Provider>(
     )
     .await?;
 
+    session
+        .save(&session_path)
+        .map_err(|e| HeartbeatError::Session(e.to_string()))?;
     append_history(&workspace.history_path(), &response).map_err(HeartbeatError::WriteHistory)?;
 
     Ok(Outcome::Executed(response))
@@ -287,21 +285,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_skips_when_repl_lock_held() {
-        let (_dir, ws) = workspace();
-        fs::write(ws.heartbeat_path(), "- [ ] Pending task\n").unwrap();
-        // Write current PID so Lock::is_held returns true.
-        fs::write(ws.repl_lock_path(), std::process::id().to_string()).unwrap();
-
-        let provider = MockProvider::new(vec![]);
-        let outcome = run(&ws, &provider, &Tools::default(), 1).await.unwrap();
-        assert!(matches!(
-            outcome,
-            Outcome::Skipped(SkipReason::SessionActive)
-        ));
-    }
-
-    #[tokio::test]
     async fn run_skips_when_heartbeat_lock_held() {
         let (_dir, ws) = workspace();
         fs::write(ws.heartbeat_path(), "- [ ] Pending task\n").unwrap();
@@ -332,5 +315,10 @@ mod tests {
         let history = fs::read_to_string(ws.history_path()).unwrap();
         assert!(history.contains("All builds green"));
         assert!(history.contains("Heartbeat:"));
+
+        // Session persisted to disk.
+        assert!(ws.heartbeat_session_path().exists());
+        let session = Session::load(&ws.heartbeat_session_path()).unwrap();
+        assert!(!session.messages().is_empty());
     }
 }
