@@ -7,11 +7,15 @@ Kitaebot: autonomous agent in Rust. Priorities: security-first sandboxing, NixOS
 ## Commands
 You can use `nix develop -c "command"` to run things in the dev shell if you are not running from within it.
 See the justfile for development commands or list with `just`.
+Stick to using `just check` for general code validation and the other just recipes
+for specific things like running the formatter or just the tests.
+If there is a common thing you want to do that isn't already a just recipe, add it.
 
 ## Workflow
 Structure your plans by atomic and verifiable commits.
 When building, go one commit at a time and run `just check` before asking the human for a review.
 Stage the changes. Including any tweaks made to pass the code checks.
+Make sure to keep STATUS.md up to date with each commit.
 The human will review and actually run `git commit` and then tell you to move onto the next one.
 
 ## Commit Messages
@@ -22,6 +26,7 @@ Explain the business value and architectural reasoning.
 
 ## Architecture
 Early scaffold stage. Reference code in `inspiration/nanobot/` (Python-based agent with channels, tools, skills).
+See `STATUS.md` for implementation progress against specs, known bugs, and the build queue.
 
 ## Style
 - Rust 2024 edition
