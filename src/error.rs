@@ -30,6 +30,10 @@ pub enum Error {
     /// Heartbeat execution error.
     #[error("Heartbeat error: {0}")]
     Heartbeat(#[from] HeartbeatError),
+
+    /// Safety layer blocked the output.
+    #[error("Safety error: {0}")]
+    Safety(#[from] SafetyError),
 }
 
 /// LLM provider errors.
@@ -114,6 +118,14 @@ pub enum ConfigError {
     /// Parsed successfully but values are invalid.
     #[error("Invalid config: {0}")]
     Invalid(String),
+}
+
+/// Safety layer errors.
+#[derive(Debug, Error)]
+pub enum SafetyError {
+    /// Tool output contained a pattern matching a known secret format.
+    #[error("Potential secret detected (pattern: {pattern_name})")]
+    LeakDetected { pattern_name: String },
 }
 
 /// Session persistence errors.

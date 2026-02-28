@@ -5,6 +5,7 @@ mod heartbeat;
 mod lock;
 mod provider;
 mod repl;
+mod safety;
 mod session;
 mod tools;
 mod types;

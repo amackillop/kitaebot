@@ -4,11 +4,11 @@
 
 mod exec;
 #[cfg(test)]
-mod stub;
+mod mock;
 
 pub use exec::Exec;
 #[cfg(test)]
-pub use stub::Stub;
+pub use mock::MockTool;
 
 use crate::error::ToolError;
 use crate::types::{ToolCall, ToolDefinition};
@@ -17,23 +17,23 @@ use crate::types::{ToolCall, ToolDefinition};
 pub enum Tool {
     Exec(Exec),
     #[cfg(test)]
-    Stub(Stub),
+    Mock(MockTool),
 }
 
 impl Tool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         match self {
             Self::Exec(_) => Exec::NAME,
             #[cfg(test)]
-            Self::Stub(_) => Stub::NAME,
+            Self::Mock(_) => MockTool::NAME,
         }
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         match self {
             Self::Exec(_) => Exec::DESCRIPTION,
             #[cfg(test)]
-            Self::Stub(_) => Stub::DESCRIPTION,
+            Self::Mock(_) => MockTool::DESCRIPTION,
         }
     }
 
@@ -41,7 +41,7 @@ impl Tool {
         match self {
             Self::Exec(_) => Exec::parameters(),
             #[cfg(test)]
-            Self::Stub(_) => Stub::parameters(),
+            Self::Mock(_) => MockTool::parameters(),
         }
     }
 
@@ -57,7 +57,7 @@ impl Tool {
         match self {
             Self::Exec(e) => e.execute(args).await,
             #[cfg(test)]
-            Self::Stub(s) => s.execute(args).await,
+            Self::Mock(m) => m.execute(args).await,
         }
     }
 }
@@ -103,26 +103,29 @@ mod tests {
     use super::*;
     use crate::types::ToolFunction;
 
+    fn mock_call(id: &str) -> ToolCall {
+        ToolCall::new(
+            id.to_string(),
+            ToolFunction {
+                name: MockTool::NAME.to_string(),
+                arguments: "{}".to_string(),
+            },
+        )
+    }
+
     #[test]
     fn test_definitions() {
-        let tools = Tools::new(vec![Tool::Stub(Stub)]);
+        let tools = Tools::new(vec![Tool::Mock(MockTool::new("ok"))]);
         let defs = tools.definitions();
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].function.name, "stub");
+        assert_eq!(defs[0].function.name, "mock");
     }
 
     #[tokio::test]
     async fn test_execute() {
-        let tools = Tools::new(vec![Tool::Stub(Stub)]);
-        let call = ToolCall::new(
-            "test-123".to_string(),
-            ToolFunction {
-                name: "stub".to_string(),
-                arguments: "{}".to_string(),
-            },
-        );
-        let result = tools.execute(&call).await.unwrap();
-        assert_eq!(result, "Stub tool executed successfully");
+        let tools = Tools::new(vec![Tool::Mock(MockTool::new("executed"))]);
+        let result = tools.execute(&mock_call("test-123")).await.unwrap();
+        assert_eq!(result, "executed");
     }
 
     #[tokio::test]
@@ -141,11 +144,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_arguments() {
-        let tools = Tools::new(vec![Tool::Stub(Stub)]);
+        let tools = Tools::new(vec![Tool::Mock(MockTool::new("ok"))]);
         let call = ToolCall::new(
             "test-123".to_string(),
             ToolFunction {
-                name: "stub".to_string(),
+                name: MockTool::NAME.to_string(),
                 arguments: "invalid json".to_string(),
             },
         );

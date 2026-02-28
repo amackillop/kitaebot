@@ -6,6 +6,7 @@
 
 use crate::error::Error;
 use crate::provider::Provider;
+use crate::safety;
 use crate::session::Session;
 use crate::tools::Tools;
 use crate::types::{Message, Response};
@@ -64,9 +65,19 @@ pub async fn run_turn<P: Provider>(
                 let futures: Vec<_> = calls.iter().map(|call| tools.execute(call)).collect();
                 let results = join_all(futures).await;
 
-                // Add results to message history
+                // Add results to message history (with safety checks)
                 for (call, result) in calls.iter().zip(results) {
-                    let content = result.unwrap_or_else(|e| format!("Error: {e}"));
+                    let content = match result {
+                        Ok(output) => {
+                            match safety::check_tool_output(&call.function.name, &output) {
+                                Ok(wrapped) => wrapped,
+                                Err(e) => {
+                                    format!("Tool output blocked: {e}. Do not retry.")
+                                }
+                            }
+                        }
+                        Err(e) => format!("Error: {e}"),
+                    };
 
                     session.add_message(Message::Tool {
                         call_id: call.id.clone(),
@@ -85,32 +96,32 @@ mod tests {
     use super::*;
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
-    use crate::tools::{Stub, Tool};
+    use crate::tools::{MockTool, Tool};
     use crate::types::{ToolCall, ToolFunction};
 
     fn text(s: &str) -> Response {
         Response::Text(s.to_string())
     }
 
-    fn tool_call(id: &str) -> ToolCall {
+    fn mock_call(id: &str) -> ToolCall {
         ToolCall::new(
             id.to_string(),
             ToolFunction {
-                name: "stub".to_string(),
+                name: MockTool::NAME.to_string(),
                 arguments: "{}".to_string(),
             },
         )
     }
 
-    fn tool_calls(ids: &[&str]) -> Response {
+    fn mock_tool_calls(ids: &[&str]) -> Response {
         Response::ToolCalls {
             content: String::new(),
-            calls: ids.iter().map(|&id| tool_call(id)).collect(),
+            calls: ids.iter().map(|&id| mock_call(id)).collect(),
         }
     }
 
-    fn tools_with_stub() -> Tools {
-        Tools::new(vec![Tool::Stub(Stub)])
+    fn mock_tools(output: &str) -> Tools {
+        Tools::new(vec![Tool::Mock(MockTool::new(output))])
     }
 
     const SYSTEM: &str = "You are a test assistant.";
@@ -138,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_call_execution() {
         let provider = MockProvider::new(vec![
-            Ok(tool_calls(&["call-1"])),
+            Ok(mock_tool_calls(&["call-1"])),
             Ok(text("Tool result processed")),
         ]);
         let mut session = Session::new();
@@ -148,7 +159,7 @@ mod tests {
             SYSTEM,
             "Use a tool",
             &provider,
-            &tools_with_stub(),
+            &mock_tools("mock output"),
             MAX_ITER,
         )
         .await;
@@ -157,7 +168,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_iterations() {
-        let provider = MockProvider::new(vec![Ok(tool_calls(&["call-infinite"])); MAX_ITER]);
+        let provider = MockProvider::new(vec![Ok(mock_tool_calls(&["call-infinite"])); MAX_ITER]);
         let mut session = Session::new();
 
         let result = run_turn(
@@ -165,7 +176,7 @@ mod tests {
             SYSTEM,
             "Infinite loop",
             &provider,
-            &tools_with_stub(),
+            &mock_tools("mock output"),
             MAX_ITER,
         )
         .await;
@@ -193,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn test_parallel_tool_calls() {
         let provider = MockProvider::new(vec![
-            Ok(tool_calls(&["call-1", "call-2"])),
+            Ok(mock_tool_calls(&["call-1", "call-2"])),
             Ok(text("Multiple tools executed")),
         ]);
         let mut session = Session::new();
@@ -203,10 +214,71 @@ mod tests {
             SYSTEM,
             "Parallel tools",
             &provider,
-            &tools_with_stub(),
+            &mock_tools("mock output"),
             MAX_ITER,
         )
         .await;
         assert_eq!(result.unwrap(), "Multiple tools executed");
+    }
+
+    #[tokio::test]
+    async fn test_safety_blocks_leaked_secret() {
+        let provider = MockProvider::new(vec![
+            Ok(mock_tool_calls(&["call-leak"])),
+            Ok(text("Handled")),
+        ]);
+        let mut session = Session::new();
+
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Leak test",
+            &provider,
+            &mock_tools("Here is your key: sk-1234567890abcdef"),
+            MAX_ITER,
+        )
+        .await;
+        assert_eq!(result.unwrap(), "Handled");
+
+        // The tool message in session should contain the blocked message, not the secret
+        let tool_msg = session
+            .messages()
+            .iter()
+            .find(|m| matches!(m, Message::Tool { .. }))
+            .expect("should have a tool message");
+
+        if let Message::Tool { content, .. } = tool_msg {
+            assert!(content.contains("Tool output blocked"));
+            assert!(content.contains("Do not retry"));
+            assert!(!content.contains("sk-1234567890abcdef"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_clean_tool_output_wrapped() {
+        let provider = MockProvider::new(vec![Ok(mock_tool_calls(&["call-1"])), Ok(text("Done"))]);
+        let mut session = Session::new();
+
+        run_turn(
+            &mut session,
+            SYSTEM,
+            "Wrap test",
+            &provider,
+            &mock_tools("mock output"),
+            MAX_ITER,
+        )
+        .await
+        .unwrap();
+
+        let tool_msg = session
+            .messages()
+            .iter()
+            .find(|m| matches!(m, Message::Tool { .. }))
+            .expect("should have a tool message");
+
+        if let Message::Tool { content, .. } = tool_msg {
+            assert!(content.contains("<tool_output name=\"mock\">"));
+            assert!(content.contains("</tool_output>"));
+        }
     }
 }
