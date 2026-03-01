@@ -19,6 +19,7 @@
 //! Real isolation requires OS-level sandboxing (namespaces, seccomp, landlock).
 
 use std::borrow::Cow;
+use std::ffi::OsString;
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -44,6 +45,52 @@ static DENY_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
     ])
     .expect("invalid deny patterns")
 });
+
+/// Environment variables forwarded to child processes.
+///
+/// Everything else is scrubbed. Notably absent: `CREDENTIALS_DIRECTORY`.
+const SAFE_ENV_VARS: &[&str] = &[
+    // Execution
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    // Locale
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    // Terminal
+    "TERM",
+    "COLORTERM",
+    // Temp
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    // Nix
+    "NIX_PATH",
+    "NIX_PROFILES",
+    "NIX_SSL_CERT_FILE",
+    // TLS
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CURL_CA_BUNDLE",
+    // Workspace
+    "KITAEBOT_WORKSPACE",
+    // Misc
+    "TZ",
+    "EDITOR",
+    "VISUAL",
+    // XDG
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+];
+
+/// Build a filtered environment from the current process, keeping only known-safe variables.
+fn safe_env() -> impl Iterator<Item = (OsString, OsString)> {
+    std::env::vars_os().filter(|(key, _)| key.to_str().is_some_and(|k| SAFE_ENV_VARS.contains(&k)))
+}
 
 /// Arguments for the exec tool.
 #[derive(Deserialize, JsonSchema)]
@@ -93,6 +140,8 @@ impl Exec {
                 .arg("-c")
                 .arg(&args.command)
                 .current_dir(&self.working_dir)
+                .env_clear()
+                .envs(safe_env())
                 .output(),
         )
         .await
@@ -235,5 +284,33 @@ mod tests {
         let args = serde_json::json!({"command": "cat ../secret"});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::Blocked(_))));
+    }
+
+    #[tokio::test]
+    async fn test_exec_env_scrubbed() {
+        // Set a variable that is NOT on the allowlist
+        // SAFETY: test-only, no concurrent threads depend on this var.
+        unsafe { std::env::set_var("KITAEBOT_TEST_SECRET", "leaked") };
+        let tool = Exec::new(".", &ExecConfig::default());
+        let args = serde_json::json!({"command": "echo $KITAEBOT_TEST_SECRET"});
+        let result = tool.execute(args).await.unwrap();
+        // Shell expands unset vars to empty string, so output should just be a blank line
+        assert!(
+            !result.contains("leaked"),
+            "secret leaked through env: {result}"
+        );
+        unsafe { std::env::remove_var("KITAEBOT_TEST_SECRET") };
+    }
+
+    #[tokio::test]
+    async fn test_exec_path_available() {
+        let tool = Exec::new(".", &ExecConfig::default());
+        let args = serde_json::json!({"command": "echo $PATH"});
+        let result = tool.execute(args).await.unwrap();
+        // PATH should be forwarded — output should contain something (not just "$ echo $PATH\n\n")
+        let lines: Vec<&str> = result.lines().collect();
+        // Line 0 is "$ echo $PATH", line 1 is the actual PATH value
+        assert!(lines.len() >= 2, "expected PATH output: {result}");
+        assert!(!lines[1].is_empty(), "PATH was empty: {result}");
     }
 }
