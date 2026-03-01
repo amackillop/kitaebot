@@ -6,6 +6,7 @@ mod lock;
 mod provider;
 mod repl;
 mod safety;
+mod secrets;
 mod session;
 mod tools;
 mod types;
@@ -19,7 +20,7 @@ use provider::StubProvider;
 use tools::{Exec, Tool, Tools};
 use workspace::Workspace;
 #[cfg(not(feature = "mock-network"))]
-use {error::SecretError, provider::OpenRouterProvider, std::path::Path};
+use {provider::OpenRouterProvider, secrets::load_secret};
 
 #[tokio::main]
 async fn main() {
@@ -70,27 +71,6 @@ async fn main() {
             std::process::exit(1);
         }
     }
-}
-
-/// Load a secret from the credential directory provisioned by systemd `LoadCredential=`.
-///
-/// Reads `$CREDENTIALS_DIRECTORY/<name>` and returns the trimmed contents.
-/// For local dev, set `CREDENTIALS_DIRECTORY=./secrets` and place one file per secret.
-#[cfg(not(feature = "mock-network"))]
-fn load_secret(name: &str) -> Result<String, SecretError> {
-    let dir = std::env::var("CREDENTIALS_DIRECTORY").map_err(|_| SecretError::NoCredentialsDir)?;
-    let path = Path::new(&dir).join(name);
-    std::fs::read_to_string(&path)
-        .map(|s| s.trim().to_string())
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => SecretError::NotFound {
-                name: name.to_string(),
-            },
-            _ => SecretError::Read {
-                name: name.to_string(),
-                source: e,
-            },
-        })
 }
 
 async fn run_heartbeat<P: Provider>(

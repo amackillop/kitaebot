@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
+use crate::secrets::Secret;
 use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
 use super::Provider;
@@ -16,7 +17,7 @@ use super::Provider;
 /// Makes HTTP requests to `OpenRouter`'s chat completions endpoint.
 pub struct OpenRouterProvider {
     client: Client,
-    api_key: String,
+    api_key: Secret,
     model: String,
     max_tokens: u32,
     temperature: f32,
@@ -26,7 +27,7 @@ impl OpenRouterProvider {
     const ENDPOINT: &'static str = "https://openrouter.ai/api/v1/chat/completions";
 
     /// Create a new provider with the given API key and configuration.
-    pub fn new(api_key: String, config: &ProviderConfig) -> Self {
+    pub fn new(api_key: Secret, config: &ProviderConfig) -> Self {
         Self {
             client: Client::new(),
             api_key,
@@ -83,7 +84,7 @@ impl Provider for OpenRouterProvider {
         let response = self
             .client
             .post(Self::ENDPOINT)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Authorization", format!("Bearer {}", self.api_key.expose()))
             .header("HTTP-Referer", "https://github.com/amackillop/kitaebot")
             .header("X-Title", "kitaebot")
             .json(&request)
