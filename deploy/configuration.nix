@@ -2,7 +2,9 @@
 #
 # Add your SSH public key below to enable access.
 #
-# Secrets: echo 'OPENROUTER_API_KEY=sk-or-...' > secrets/.env
+# Secrets: one file per credential in secrets/
+#   echo 'sk-or-...' > secrets/openrouter-api-key
+#
 # Update the sharedDirectories source path to match your checkout.
 _: {
   kitaebot = {
@@ -10,7 +12,7 @@ _: {
     sshKeys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKj473/+eAlgy1rQwuO+nCRrqhiPAWEgYPIn5j/NdN1Q desktop"
     ];
-    secretsFile = "/mnt/kitaebot-secrets/.env";
+    secretsDir = "/mnt/kitaebot-secrets";
   };
 
   # 9p shared directory for secrets. "none" skips POSIX ownership mapping
@@ -20,4 +22,11 @@ _: {
     target = "/mnt/kitaebot-secrets";
     securityModel = "none";
   };
+
+  # Lock down the mount point so only root (and thus LoadCredential) can read it.
+  # The 9p mount itself ignores POSIX permissions, but restricting the mount point
+  # directory prevents the kitaebot user from traversing into it.
+  systemd.tmpfiles.rules = [
+    "d /mnt/kitaebot-secrets 0700 root root -"
+  ];
 }

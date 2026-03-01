@@ -4,10 +4,10 @@
 #   kitaebot.nixosModules.vm
 #
 # Options:
-#   kitaebot.package         - The kitaebot package (required)
-#   kitaebot.sshKeys         - List of SSH public keys for root access
-#   kitaebot.dev             - Enable dev mode (shares host nix store for faster builds)
-#   kitaebot.secretsFile - Path to env file with API keys (guest path, optional)
+#   kitaebot.package    - The kitaebot package (required)
+#   kitaebot.sshKeys    - List of SSH public keys for root access
+#   kitaebot.dev        - Enable dev mode (shares host nix store for faster builds)
+#   kitaebot.secretsDir - Directory containing one file per credential
 #
 # For local development, see deploy/configuration.nix
 {
@@ -41,10 +41,10 @@
       description = "The kitaebot package";
     };
 
-    secretsFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = null;
-      description = "Path to environment file containing API keys (guest path)";
+    secretsDir = lib.mkOption {
+      type = lib.types.path;
+      default = "/var/lib/kitaebot-secrets";
+      description = "Directory containing secret files (one per credential)";
     };
   };
 
@@ -89,9 +89,55 @@
           User = "kitaebot";
           Group = "kitaebot";
           WorkingDirectory = "/var/lib/kitaebot";
-        }
-        // lib.optionalAttrs (config.kitaebot.secretsFile != null) {
-          EnvironmentFile = config.kitaebot.secretsFile;
+
+          # Secrets as files, not env vars.
+          # systemd copies these to /run/credentials/kitaebot-heartbeat.service/
+          # with mode 0400 and sets CREDENTIALS_DIRECTORY automatically.
+          LoadCredential = [
+            "openrouter-api-key:${config.kitaebot.secretsDir}/openrouter-api-key"
+          ];
+
+          # Process isolation
+          ProtectProc = "invisible";
+          ProcSubset = "pid";
+
+          # Filesystem
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          ReadWritePaths = [ "/var/lib/kitaebot" ];
+          PrivateTmp = true;
+
+          # Privilege
+          NoNewPrivileges = true;
+          CapabilityBoundingSet = "";
+          AmbientCapabilities = "";
+
+          # Syscalls
+          SystemCallFilter = [
+            "@system-service"
+            "~@privileged"
+            "~@resources"
+          ];
+          SystemCallArchitectures = "native";
+
+          # Network
+          RestrictAddressFamilies = [
+            "AF_INET"
+            "AF_INET6"
+            "AF_UNIX"
+          ];
+
+          # Kernel
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          ProtectClock = true;
+          LockPersonality = true;
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          MemoryDenyWriteExecute = true;
         };
         environment.KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
       };
