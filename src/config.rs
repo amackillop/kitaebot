@@ -20,6 +20,8 @@ pub struct Config {
     pub agent: AgentConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
 }
 
 /// LLM provider settings.
@@ -53,6 +55,13 @@ pub struct ExecConfig {
     pub max_output_bytes: usize,
 }
 
+/// Heartbeat daemon settings.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HeartbeatConfig {
+    pub interval_secs: u64,
+}
+
 // --- Default impls ---
 
 impl Default for ProviderConfig {
@@ -76,6 +85,14 @@ impl Default for ExecConfig {
         Self {
             timeout_secs: 60,
             max_output_bytes: 10 * 1024,
+        }
+    }
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: 1800,
         }
     }
 }
@@ -119,6 +136,11 @@ impl Config {
         }
         if self.tools.exec.max_output_bytes == 0 {
             return Err(ConfigError::Invalid("max_output_bytes must be > 0".into()));
+        }
+        if self.heartbeat.interval_secs == 0 {
+            return Err(ConfigError::Invalid(
+                "heartbeat interval_secs must be > 0".into(),
+            ));
         }
         Ok(())
     }
@@ -211,5 +233,29 @@ max_output_bytes = 20480
     fn reject_malformed_toml() {
         let result = load_toml("not valid [[[toml");
         assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn heartbeat_defaults() {
+        let cfg = load_toml("").unwrap();
+        assert_eq!(cfg.heartbeat.interval_secs, 1800);
+    }
+
+    #[test]
+    fn heartbeat_parse() {
+        let cfg = load_toml("[heartbeat]\ninterval_secs = 600\n").unwrap();
+        assert_eq!(cfg.heartbeat.interval_secs, 600);
+    }
+
+    #[test]
+    fn heartbeat_reject_unknown_field() {
+        let result = load_toml("[heartbeat]\ntypo = 1\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn heartbeat_reject_zero_interval() {
+        let result = load_toml("[heartbeat]\ninterval_secs = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 }
