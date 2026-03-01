@@ -50,6 +50,22 @@ Commands are checked against deny patterns before execution:
 
 **Note**: These are defense-in-depth heuristics, not a sandbox. The VM is the real isolation.
 
+### Environment Scrubbing
+
+Child processes run with a scrubbed environment. Only a known-safe allowlist of variables is forwarded:
+
+- **Execution**: `PATH`, `HOME`, `USER`, `SHELL`
+- **Locale**: `LANG`, `LC_ALL`, `LC_CTYPE`
+- **Terminal**: `TERM`, `COLORTERM`
+- **Temp**: `TMPDIR`, `TMP`, `TEMP`
+- **Nix**: `NIX_PATH`, `NIX_PROFILES`, `NIX_SSL_CERT_FILE`
+- **TLS**: `SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`
+- **Workspace**: `KITAEBOT_WORKSPACE`
+- **Misc**: `TZ`, `EDITOR`, `VISUAL`
+- **XDG**: `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`
+
+Notably absent: `CREDENTIALS_DIRECTORY`. The agent's shell commands cannot discover or read the credential files path. See [spec 13](13-credentials.md) for the credential isolation design.
+
 ### Restrictions
 
 Timeout and output size are configurable via `config.toml` (see `src/config.rs`). Defaults shown below.

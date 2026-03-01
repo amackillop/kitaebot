@@ -10,6 +10,8 @@ A lightweight safety layer providing two cheap, high-value defenses: leak detect
 2. **Prompt injection is cheap to mitigate** — Wrapping tool output in tags tells the LLM to treat content as data, not instructions. Near-zero cost.
 3. **No policy engine** — No severity levels, no sanitizer, no configurability. Just two hard rules.
 
+Output scanning is layer 4 in a five-layer defense-in-depth stack. Secrets should never reach tool output in the first place — they're loaded from credential files (not env vars) and the exec tool scrubs the child environment. See [spec 13](13-credentials.md) for the full stack.
+
 ## Architecture
 
 A `Safety` struct with one method:
@@ -80,3 +82,4 @@ enum SafetyError {
 - **Scan LLM responses** — Also check model output before delivering to the user. Adds latency but catches reflection attacks.
 - **Custom patterns** — Allow users to add workspace-specific patterns via `config.toml`.
 - **Allowlisting** — Let specific tool invocations bypass leak detection (e.g., a secrets-management tool).
+- **Defense-in-depth audit** — Periodically verify all five layers (VM, credential files, systemd hardening, env scrubbing, output scanning) are active and correctly configured.
