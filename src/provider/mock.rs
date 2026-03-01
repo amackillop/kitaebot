@@ -23,6 +23,10 @@ impl MockProvider {
             call_count: Arc::new(AtomicUsize::new(0)),
         }
     }
+
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
 }
 
 impl Provider for MockProvider {

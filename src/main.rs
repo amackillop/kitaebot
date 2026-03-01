@@ -1,5 +1,6 @@
 mod agent;
 mod config;
+mod daemon;
 mod error;
 mod heartbeat;
 mod lock;
@@ -58,6 +59,20 @@ async fn main() {
         Some("heartbeat") => {
             run_heartbeat(&workspace, &provider, &tools, config.agent.max_iterations).await;
         }
+        Some("run") => {
+            eprintln!(
+                "kitaebot daemon starting (heartbeat every {}s)",
+                config.heartbeat.interval_secs,
+            );
+            daemon::run(
+                &workspace,
+                &provider,
+                &tools,
+                config.agent.max_iterations,
+                config.heartbeat.interval_secs,
+            )
+            .await;
+        }
         Some(cmd) => {
             eprintln!("Unknown command: {cmd}");
             std::process::exit(1);
@@ -67,7 +82,8 @@ async fn main() {
             eprintln!();
             eprintln!("Commands:");
             eprintln!("  chat       Interactive conversation");
-            eprintln!("  heartbeat  Run periodic tasks");
+            eprintln!("  heartbeat  One-shot heartbeat cycle");
+            eprintln!("  run        Start daemon (heartbeat loop)");
             std::process::exit(1);
         }
     }
