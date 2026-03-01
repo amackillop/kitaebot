@@ -128,6 +128,25 @@ pub enum SafetyError {
     LeakDetected { pattern_name: String },
 }
 
+/// Secret loading errors.
+#[derive(Debug, Error)]
+pub enum SecretError {
+    /// `CREDENTIALS_DIRECTORY` not set in environment.
+    #[error("CREDENTIALS_DIRECTORY not set")]
+    NoCredentialsDir,
+
+    /// Secret file does not exist.
+    #[error("Secret not found: {name}")]
+    NotFound { name: String },
+
+    /// I/O error reading secret file.
+    #[error("Failed to read secret {name}: {source}")]
+    Read {
+        name: String,
+        source: std::io::Error,
+    },
+}
+
 /// Session persistence errors.
 #[derive(Debug, Error)]
 pub enum SessionError {
