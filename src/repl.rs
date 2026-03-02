@@ -7,13 +7,16 @@
 //! and dispatches. All parsing logic lives in [`Command::parse`] so it
 //! can be tested without touching stdin/stdout.
 
+use std::io::{self, Write};
+
+use tracing::error;
+
 use crate::agent;
 use crate::lock::Lock;
 use crate::provider::Provider;
 use crate::session::Session;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
-use std::io::{self, Write};
 
 /// Parsed user input.
 #[derive(Debug, PartialEq, Eq)]
@@ -68,12 +71,12 @@ pub async fn run<P: Provider>(
     max_iterations: usize,
 ) {
     let Ok(_lock) = Lock::acquire(&workspace.repl_lock_path()) else {
-        eprintln!("Another session is already running");
+        error!("Another session is already running");
         std::process::exit(1);
     };
 
     let mut session = Session::load(&workspace.repl_session_path()).unwrap_or_else(|e| {
-        eprintln!("Failed to load session: {e}");
+        error!("Failed to load session: {e}");
         std::process::exit(1);
     });
 
@@ -97,13 +100,13 @@ pub async fn run<P: Provider>(
             Command::NewSession => {
                 session.clear();
                 if let Err(e) = session.save(&workspace.repl_session_path()) {
-                    eprintln!("Failed to save session: {e}");
+                    error!("Failed to save session: {e}");
                 }
                 system_prompt = workspace.system_prompt();
                 println!("Session cleared.\n");
             }
             Command::Unknown(cmd) => {
-                eprintln!("Unknown command: {cmd}\n");
+                println!("Unknown command: {cmd}\n");
             }
             Command::Message(msg) => {
                 match agent::run_turn(
@@ -119,10 +122,10 @@ pub async fn run<P: Provider>(
                     Ok(response) => {
                         println!("{response}\n");
                         if let Err(e) = session.save(&workspace.repl_session_path()) {
-                            eprintln!("Failed to save session: {e}");
+                            error!("Failed to save session: {e}");
                         }
                     }
-                    Err(e) => eprintln!("Error: {e}\n"),
+                    Err(e) => error!("Error: {e}"),
                 }
             }
         }

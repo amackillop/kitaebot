@@ -19,19 +19,28 @@ use provider::Provider;
 #[cfg(feature = "mock-network")]
 use provider::StubProvider;
 use tools::{Exec, Tool, Tools};
+use tracing::{error, info};
 use workspace::Workspace;
 #[cfg(not(feature = "mock-network"))]
 use {provider::OpenRouterProvider, secrets::load_secret};
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "kitaebot=info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let workspace = Workspace::init().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize workspace: {e}");
+        error!("Failed to initialize workspace: {e}");
         std::process::exit(1);
     });
 
     let config = Config::load(workspace.path()).unwrap_or_else(|e| {
-        eprintln!("Failed to load config: {e}");
+        error!("Failed to load config: {e}");
         std::process::exit(1);
     });
 
@@ -41,7 +50,7 @@ async fn main() {
     #[cfg(not(feature = "mock-network"))]
     let provider = {
         let api_key = load_secret("openrouter-api-key").unwrap_or_else(|e| {
-            eprintln!("Failed to load API key: {e}");
+            error!("Failed to load API key: {e}");
             std::process::exit(1);
         });
         OpenRouterProvider::new(api_key, &config.provider)
@@ -60,9 +69,9 @@ async fn main() {
             run_heartbeat(&workspace, &provider, &tools, config.agent.max_iterations).await;
         }
         Some("run") => {
-            eprintln!(
-                "kitaebot daemon starting (heartbeat every {}s)",
-                config.heartbeat.interval_secs,
+            info!(
+                interval_secs = config.heartbeat.interval_secs,
+                "Daemon starting",
             );
             daemon::run(
                 &workspace,
@@ -74,7 +83,7 @@ async fn main() {
             .await;
         }
         Some(cmd) => {
-            eprintln!("Unknown command: {cmd}");
+            error!("Unknown command: {cmd}");
             std::process::exit(1);
         }
         None => {
@@ -97,13 +106,13 @@ async fn run_heartbeat<P: Provider>(
 ) {
     match heartbeat::run(workspace, provider, tools, max_iterations).await {
         Ok(Outcome::Executed(response)) => {
-            eprintln!("Heartbeat complete: {response}");
+            info!("Heartbeat complete: {response}");
         }
         Ok(Outcome::Skipped(reason)) => {
-            eprintln!("Heartbeat skipped: {reason}");
+            info!("Heartbeat skipped: {reason}");
         }
         Err(e) => {
-            eprintln!("Heartbeat failed: {e}");
+            error!("Heartbeat failed: {e}");
             std::process::exit(1);
         }
     }

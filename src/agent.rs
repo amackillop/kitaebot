@@ -4,13 +4,15 @@
 //! Each turn sends context to the LLM and either returns a text response
 //! or executes tool calls until the LLM completes.
 
+use futures::future::join_all;
+use tracing::{debug, error, warn};
+
 use crate::error::Error;
 use crate::provider::Provider;
 use crate::safety;
 use crate::session::Session;
 use crate::tools::Tools;
 use crate::types::{Message, Response};
-use futures::future::join_all;
 
 /// Run a single turn of the agent loop.
 ///
@@ -35,7 +37,8 @@ pub async fn run_turn<P: Provider>(
 
     let tool_definitions = tools.definitions();
 
-    for _iteration in 0..max_iterations {
+    for iteration in 0..max_iterations {
+        debug!(iteration, "Agent loop iteration");
         // Prepend system prompt for each provider call (not stored in session)
         let mut messages = vec![Message::System {
             content: system_prompt.to_string(),
@@ -72,11 +75,21 @@ pub async fn run_turn<P: Provider>(
                             match safety::check_tool_output(&call.function.name, &output) {
                                 Ok(wrapped) => wrapped,
                                 Err(e) => {
+                                    warn!(
+                                        tool = %call.function.name,
+                                        "Tool output blocked: {e}",
+                                    );
                                     format!("Tool output blocked: {e}. Do not retry.")
                                 }
                             }
                         }
-                        Err(e) => format!("Error: {e}"),
+                        Err(e) => {
+                            error!(
+                                tool = %call.function.name,
+                                "Tool execution failed: {e}",
+                            );
+                            format!("Error: {e}")
+                        }
                     };
 
                     session.add_message(Message::Tool {

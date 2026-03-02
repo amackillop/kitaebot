@@ -4,6 +4,7 @@
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, trace};
 
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
@@ -81,6 +82,9 @@ impl Provider for OpenRouterProvider {
             temperature: self.temperature,
         };
 
+        debug!(model = %self.model, message_count = messages.len(), "Sending chat request");
+        trace!(request = %serde_json::to_string(&request).unwrap_or_default(), "Request body");
+
         let response = self
             .client
             .post(Self::ENDPOINT)
@@ -90,21 +94,34 @@ impl Provider for OpenRouterProvider {
             .json(&request)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .map_err(|e| {
+                error!("Network error: {e}");
+                ProviderError::Network(e.to_string())
+            })?;
 
-        match response.status() {
-            status if status.is_success() => {
+        let status = response.status();
+        debug!(%status, "Received response");
+
+        match status {
+            s if s.is_success() => {
                 let chat_response: ChatResponse = response
                     .json()
                     .await
                     .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
                 Self::parse_response(chat_response)
             }
-            reqwest::StatusCode::UNAUTHORIZED => Err(ProviderError::Authentication),
-            reqwest::StatusCode::TOO_MANY_REQUESTS => Err(ProviderError::RateLimited),
-            status => {
+            reqwest::StatusCode::UNAUTHORIZED => {
+                error!("Authentication failed");
+                Err(ProviderError::Authentication)
+            }
+            reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                error!("Rate limited");
+                Err(ProviderError::RateLimited)
+            }
+            s => {
                 let body = response.text().await.unwrap_or_default();
-                Err(ProviderError::Network(format!("{status}: {body}")))
+                error!(%s, "Provider error: {body}");
+                Err(ProviderError::Network(format!("{s}: {body}")))
             }
         }
     }

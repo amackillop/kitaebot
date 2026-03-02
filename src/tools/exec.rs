@@ -29,6 +29,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
+use tracing::{debug, warn};
 
 use crate::config::ExecConfig;
 use crate::error::ToolError;
@@ -127,12 +128,16 @@ impl Exec {
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         if has_path_traversal(&args.command) {
+            warn!(command = %args.command, "Path traversal detected");
             return Err(ToolError::Blocked("path traversal detected".into()));
         }
 
         if is_blocked(&args.command) {
+            warn!(command = %args.command, "Command matches deny pattern");
             return Err(ToolError::Blocked("command matches deny pattern".into()));
         }
+
+        debug!(command = %args.command, "Executing command");
 
         let output = timeout(
             self.timeout,

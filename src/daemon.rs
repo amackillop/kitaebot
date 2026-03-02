@@ -12,6 +12,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use tokio::time::{MissedTickBehavior, interval};
+use tracing::{error, info};
 
 use crate::heartbeat;
 use crate::provider::Provider;
@@ -57,7 +58,7 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
                 run_heartbeat_cycle(workspace, provider, tools, max_iterations).await;
             }
             () = &mut shutdown => {
-                eprintln!("Shutdown signal received, exiting.");
+                info!("Shutdown signal received, exiting.");
                 return;
             }
         }
@@ -75,13 +76,13 @@ async fn run_heartbeat_cycle<P: Provider>(
 ) {
     match heartbeat::run(workspace, provider, tools, max_iterations).await {
         Ok(heartbeat::Outcome::Executed(response)) => {
-            eprintln!("Heartbeat complete: {response}");
+            info!("Heartbeat complete: {response}");
         }
         Ok(heartbeat::Outcome::Skipped(reason)) => {
-            eprintln!("Heartbeat skipped: {reason}");
+            info!("Heartbeat skipped: {reason}");
         }
         Err(e) => {
-            eprintln!("Heartbeat error (will retry next tick): {e}");
+            error!("Heartbeat error (will retry next tick): {e}");
         }
     }
 }
