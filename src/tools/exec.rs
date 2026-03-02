@@ -40,7 +40,7 @@ static DENY_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
         r"rm\s+-[rf]",          // rm -r, rm -rf
         r"mkfs",                // filesystem creation
         r"dd\s+if=",            // disk operations
-        r">\s*/dev/",           // write to devices
+        r"(^|[^0-9])>\s*/dev/", // write to devices (not fd redirects like 2>/dev/null)
         r"shutdown|reboot",     // system power
         r":\(\)\s*\{.*\};\s*:", // fork bomb
     ])
@@ -236,6 +236,7 @@ mod tests {
         assert!(!is_blocked("ls -la"));
         assert!(!is_blocked("cat foo.txt"));
         assert!(!is_blocked("echo hello"));
+        assert!(!is_blocked("find / -name justfile 2>/dev/null"));
     }
 
     #[test]
