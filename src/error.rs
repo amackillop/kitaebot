@@ -147,6 +147,25 @@ pub enum SecretError {
     },
 }
 
+/// Telegram channel errors.
+#[derive(Debug, Error)]
+pub enum TelegramError {
+    /// HTTP request failed (timeout, DNS, connection reset, etc.).
+    #[error("Network error: {0}")]
+    Network(#[from] reqwest::Error),
+
+    /// Telegram Bot API returned `"ok": false`.
+    #[error("Telegram API error ({error_code}): {description}")]
+    Api {
+        error_code: i32,
+        description: String,
+    },
+
+    /// Session load/save failure.
+    #[error("Session error: {0}")]
+    Session(String),
+}
+
 /// Session persistence errors.
 #[derive(Debug, Error)]
 pub enum SessionError {

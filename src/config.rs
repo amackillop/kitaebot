@@ -22,6 +22,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
 }
 
 /// LLM provider settings.
@@ -62,6 +64,19 @@ pub struct HeartbeatConfig {
     pub interval_secs: u64,
 }
 
+/// Telegram channel settings.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelegramConfig {
+    /// Enable the Telegram channel. Defaults to `false` so the daemon
+    /// can start without Telegram credentials.
+    pub enabled: bool,
+    /// Telegram chat ID to accept messages from. Must be set when enabled.
+    pub chat_id: i64,
+    /// Long-poll timeout in seconds sent to `getUpdates`.
+    pub poll_timeout_secs: u64,
+}
+
 // --- Default impls ---
 
 impl Default for ProviderConfig {
@@ -93,6 +108,16 @@ impl Default for HeartbeatConfig {
     fn default() -> Self {
         Self {
             interval_secs: 1800,
+        }
+    }
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chat_id: 0,
+            poll_timeout_secs: 30,
         }
     }
 }
@@ -141,6 +166,18 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "heartbeat interval_secs must be > 0".into(),
             ));
+        }
+        if self.telegram.enabled {
+            if self.telegram.chat_id == 0 {
+                return Err(ConfigError::Invalid(
+                    "telegram chat_id must be set when enabled".into(),
+                ));
+            }
+            if self.telegram.poll_timeout_secs == 0 {
+                return Err(ConfigError::Invalid(
+                    "telegram poll_timeout_secs must be > 0".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -257,5 +294,48 @@ max_output_bytes = 20480
     fn heartbeat_reject_zero_interval() {
         let result = load_toml("[heartbeat]\ninterval_secs = 0\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn telegram_defaults() {
+        let cfg = load_toml("").unwrap();
+        assert!(!cfg.telegram.enabled);
+        assert_eq!(cfg.telegram.chat_id, 0);
+        assert_eq!(cfg.telegram.poll_timeout_secs, 30);
+    }
+
+    #[test]
+    fn telegram_parse() {
+        let cfg =
+            load_toml("[telegram]\nenabled = true\nchat_id = 123456789\npoll_timeout_secs = 60\n")
+                .unwrap();
+        assert!(cfg.telegram.enabled);
+        assert_eq!(cfg.telegram.chat_id, 123_456_789);
+        assert_eq!(cfg.telegram.poll_timeout_secs, 60);
+    }
+
+    #[test]
+    fn telegram_reject_unknown_field() {
+        let result = load_toml("[telegram]\ntypo = 1\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn telegram_reject_zero_chat_id_when_enabled() {
+        let result = load_toml("[telegram]\nenabled = true\nchat_id = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn telegram_reject_zero_poll_timeout_when_enabled() {
+        let result = load_toml("[telegram]\nenabled = true\nchat_id = 1\npoll_timeout_secs = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn telegram_disabled_skips_validation() {
+        // chat_id=0 is fine when disabled — no credentials needed
+        let cfg = load_toml("[telegram]\nenabled = false\nchat_id = 0\n").unwrap();
+        assert!(!cfg.telegram.enabled);
     }
 }

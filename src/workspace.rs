@@ -112,6 +112,12 @@ impl Workspace {
         self.0.join("sessions/heartbeat.json")
     }
 
+    /// Path to the Telegram channel session file.
+    #[allow(dead_code)]
+    pub fn telegram_session_path(&self) -> PathBuf {
+        self.0.join("sessions/telegram.json")
+    }
+
     /// Path to the heartbeat task file.
     pub fn heartbeat_path(&self) -> PathBuf {
         self.0.join("HEARTBEAT.md")
@@ -251,6 +257,16 @@ mod tests {
         assert_eq!(
             ws.heartbeat_session_path(),
             dir.path().join("sessions/heartbeat.json")
+        );
+    }
+
+    #[test]
+    fn telegram_session_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        assert_eq!(
+            ws.telegram_session_path(),
+            dir.path().join("sessions/telegram.json")
         );
     }
 
