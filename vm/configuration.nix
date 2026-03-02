@@ -153,6 +153,7 @@
     virtualisation = {
       memorySize = 1024;
       cores = 2;
+      graphics = false;
       # Port forwarding for SSH (host 2222 -> guest 22)
       forwardPorts = [
         {
