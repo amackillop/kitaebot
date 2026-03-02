@@ -63,7 +63,7 @@
 
     users = {
       users.root.openssh.authorizedKeys.keys = config.kitaebot.sshKeys;
-      # Dedicated system user for the heartbeat service
+      # Dedicated system user for the daemon service
       users.kitaebot = {
         isSystemUser = true;
         group = "kitaebot";
@@ -80,18 +80,23 @@
         "d /var/lib/kitaebot/projects 0750 kitaebot kitaebot -"
       ];
 
-      # Heartbeat service (oneshot, triggered by timer)
-      services.kitaebot-heartbeat = {
-        description = "Kitaebot heartbeat";
+      # Kitaebot daemon
+      services.kitaebot = {
+        description = "Kitaebot daemon";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network-online.target" ];
+        wants = [ "network-online.target" ];
         serviceConfig = {
-          Type = "oneshot";
-          ExecStart = "${config.kitaebot.package}/bin/kitaebot heartbeat";
+          Type = "simple";
+          ExecStart = "${config.kitaebot.package}/bin/kitaebot run";
+          Restart = "on-failure";
+          RestartSec = "10s";
           User = "kitaebot";
           Group = "kitaebot";
           WorkingDirectory = "/var/lib/kitaebot";
 
           # Secrets as files, not env vars.
-          # systemd copies these to /run/credentials/kitaebot-heartbeat.service/
+          # systemd copies these to /run/credentials/kitaebot.service/
           # with mode 0400 and sets CREDENTIALS_DIRECTORY automatically.
           LoadCredential = [
             "openrouter-api-key:${config.kitaebot.secretsDir}/openrouter-api-key"
@@ -140,17 +145,6 @@
           MemoryDenyWriteExecute = true;
         };
         environment.KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
-      };
-
-      # Heartbeat timer (5min after boot, then every 30min)
-      timers.kitaebot-heartbeat = {
-        description = "Kitaebot heartbeat timer";
-        wantedBy = [ "timers.target" ];
-        timerConfig = {
-          OnBootSec = "5min";
-          OnUnitActiveSec = "30min";
-          Persistent = true;
-        };
       };
     };
 
