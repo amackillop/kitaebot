@@ -9,6 +9,7 @@ mod repl;
 mod safety;
 mod secrets;
 mod session;
+mod telegram;
 mod tools;
 mod types;
 mod workspace;
