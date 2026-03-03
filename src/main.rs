@@ -1,5 +1,6 @@
 mod agent;
 mod config;
+mod context;
 mod daemon;
 mod error;
 mod heartbeat;

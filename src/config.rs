@@ -85,8 +85,8 @@ pub struct TelegramConfig {
 pub struct ContextConfig {
     /// Maximum context window size in tokens.
     pub max_tokens: u32,
-    /// Fraction of `max_tokens` at which compaction triggers.
-    pub budget_ratio: f32,
+    /// Percentage of `max_tokens` at which compaction triggers (1–100).
+    pub budget_percent: u8,
 }
 
 // --- Default impls ---
@@ -128,7 +128,7 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             max_tokens: 200_000,
-            budget_ratio: 0.8,
+            budget_percent: 80,
         }
     }
 }
@@ -193,9 +193,9 @@ impl Config {
                 "context max_tokens must be > 0".into(),
             ));
         }
-        if self.context.budget_ratio <= 0.0 || self.context.budget_ratio > 1.0 {
+        if self.context.budget_percent == 0 || self.context.budget_percent > 100 {
             return Err(ConfigError::Invalid(
-                "context budget_ratio must be in (0.0, 1.0]".into(),
+                "context budget_percent must be 1..=100".into(),
             ));
         }
         if self.telegram.enabled {
@@ -374,14 +374,14 @@ max_output_bytes = 20480
     fn context_defaults() {
         let cfg = load_toml("").unwrap();
         assert_eq!(cfg.context.max_tokens, 200_000);
-        assert!((cfg.context.budget_ratio - 0.8).abs() < f32::EPSILON);
+        assert_eq!(cfg.context.budget_percent, 80);
     }
 
     #[test]
     fn context_parse() {
-        let cfg = load_toml("[context]\nmax_tokens = 64000\nbudget_ratio = 0.6\n").unwrap();
+        let cfg = load_toml("[context]\nmax_tokens = 64000\nbudget_percent = 60\n").unwrap();
         assert_eq!(cfg.context.max_tokens, 64_000);
-        assert!((cfg.context.budget_ratio - 0.6).abs() < f32::EPSILON);
+        assert_eq!(cfg.context.budget_percent, 60);
     }
 
     #[test]
@@ -397,14 +397,14 @@ max_output_bytes = 20480
     }
 
     #[test]
-    fn context_reject_zero_budget_ratio() {
-        let result = load_toml("[context]\nbudget_ratio = 0.0\n");
+    fn context_reject_zero_budget_percent() {
+        let result = load_toml("[context]\nbudget_percent = 0\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 
     #[test]
-    fn context_reject_budget_ratio_over_one() {
-        let result = load_toml("[context]\nbudget_ratio = 1.1\n");
+    fn context_reject_budget_percent_over_100() {
+        let result = load_toml("[context]\nbudget_percent = 101\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 }
