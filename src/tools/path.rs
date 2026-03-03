@@ -38,29 +38,12 @@ impl PathGuard {
 
     /// Resolve a relative path for a file that may not exist yet.
     ///
-    /// Canonicalizes the parent directory (which must exist) and appends
-    /// the filename, then verifies the result is under the workspace.
-    #[allow(dead_code)] // Used by file_write in next commit
+    /// Validates the path (no traversal, no absolute, no null bytes) and
+    /// joins it to the workspace root. Does not require the parent to exist
+    /// — callers are expected to `create_dir_all` as needed.
     pub fn resolve_new(&self, path: &str) -> Result<PathBuf, ToolError> {
         let candidate = self.validate_and_join(path)?;
-        let parent = candidate
-            .parent()
-            .ok_or_else(|| ToolError::InvalidArguments("path has no parent".into()))?;
-        let file_name = candidate
-            .file_name()
-            .ok_or_else(|| ToolError::InvalidArguments("path has no filename".into()))?;
-
-        // Parent must exist (or be the root itself).
-        let resolved_parent = if parent == self.root || parent.as_os_str().is_empty() {
-            self.root.clone()
-        } else {
-            parent
-                .canonicalize()
-                .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", parent.display())))?
-        };
-
-        let resolved = resolved_parent.join(file_name);
-        self.ensure_under_root(&resolved, path)
+        self.ensure_under_root(&candidate, path)
     }
 
     fn validate_and_join(&self, path: &str) -> Result<PathBuf, ToolError> {

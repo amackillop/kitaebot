@@ -4,12 +4,14 @@
 
 mod exec;
 mod file_read;
+mod file_write;
 #[cfg(test)]
 mod mock;
 pub mod path;
 
 pub use exec::Exec;
 pub use file_read::FileRead;
+pub use file_write::FileWrite;
 #[cfg(test)]
 pub use mock::MockTool;
 
