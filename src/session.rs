@@ -62,6 +62,23 @@ impl Session {
         Ok(())
     }
 
+    /// Replace all messages with a single summary message.
+    ///
+    /// Used by context compaction to shrink conversation history while
+    /// preserving a condensed record of what happened.
+    #[allow(dead_code)] // Will be used by context compaction
+    pub fn compact(&mut self, summary: Message) {
+        self.messages.clear();
+        self.messages.push(summary);
+        self.updated_at = Timestamp::now();
+    }
+
+    /// Number of messages in the session.
+    #[allow(dead_code)] // Will be used by context compaction
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
     /// Clear conversation history, preserving `created_at`.
     pub fn clear(&mut self) {
         self.messages.clear();
@@ -156,5 +173,35 @@ mod tests {
         fs::write(&path, "not json").unwrap();
         let result = Session::load(&path);
         assert!(matches!(result, Err(SessionError::Parse(_))));
+    }
+
+    #[test]
+    fn compact_replaces_all_messages_with_summary() {
+        let mut session = Session::new();
+        for i in 0..5 {
+            session.add_message(Message::User {
+                content: format!("msg{i}"),
+            });
+        }
+
+        let summary = Message::System {
+            content: "summary of conversation".to_string(),
+        };
+        session.compact(summary);
+
+        assert_eq!(session.messages.len(), 1);
+        assert!(
+            matches!(&session.messages[0], Message::System { content } if content == "summary of conversation")
+        );
+    }
+
+    #[test]
+    fn len_returns_message_count() {
+        let mut session = Session::new();
+        assert_eq!(session.len(), 0);
+        session.add_message(Message::User {
+            content: "x".to_string(),
+        });
+        assert_eq!(session.len(), 1);
     }
 }

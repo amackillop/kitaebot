@@ -90,6 +90,33 @@ pub struct ToolFunction {
     pub arguments: String,
 }
 
+impl Message {
+    /// Total character count across all content fields.
+    ///
+    /// Used for token estimation (`chars / 4`). Counts content strings
+    /// and, for assistant messages, tool call function names + arguments.
+    pub fn char_count(&self) -> usize {
+        match self {
+            Message::System { content }
+            | Message::User { content }
+            | Message::Tool { content, .. } => content.len(),
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
+                let base = content.len();
+                let calls = tool_calls.as_ref().map_or(0, |calls| {
+                    calls
+                        .iter()
+                        .map(|tc| tc.function.name.len() + tc.function.arguments.len())
+                        .sum()
+                });
+                base + calls
+            }
+        }
+    }
+}
+
 /// LLM response - either final text or tool call requests.
 ///
 /// The agent loop handles these differently:
@@ -150,5 +177,68 @@ impl ToolDefinition {
                 parameters,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn char_count_system() {
+        let msg = Message::System {
+            content: "hello".to_string(),
+        };
+        assert_eq!(msg.char_count(), 5);
+    }
+
+    #[test]
+    fn char_count_user() {
+        let msg = Message::User {
+            content: "abc".to_string(),
+        };
+        assert_eq!(msg.char_count(), 3);
+    }
+
+    #[test]
+    fn char_count_tool() {
+        let msg = Message::Tool {
+            call_id: "id_ignored".to_string(),
+            content: "result".to_string(),
+        };
+        assert_eq!(msg.char_count(), 6);
+    }
+
+    #[test]
+    fn char_count_assistant_text_only() {
+        let msg = Message::Assistant {
+            content: "response".to_string(),
+            tool_calls: None,
+        };
+        assert_eq!(msg.char_count(), 8);
+    }
+
+    #[test]
+    fn char_count_assistant_with_tool_calls() {
+        let msg = Message::Assistant {
+            content: "ok".to_string(),
+            tool_calls: Some(vec![ToolCall::new(
+                "id".to_string(),
+                ToolFunction {
+                    name: "exec".to_string(),                 // 4
+                    arguments: r#"{"cmd":"ls"}"#.to_string(), // 12
+                },
+            )]),
+        };
+        // "ok" (2) + "exec" (4) + arguments (12) = 18
+        assert_eq!(msg.char_count(), 18);
+    }
+
+    #[test]
+    fn char_count_empty_message() {
+        let msg = Message::User {
+            content: String::new(),
+        };
+        assert_eq!(msg.char_count(), 0);
     }
 }
