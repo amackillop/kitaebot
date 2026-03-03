@@ -12,6 +12,7 @@ for specific things like running the formatter or just the tests.
 If there is a common thing you want to do that isn't already a just recipe, add it.
 
 ## Workflow
+Review STATUS.md to see what work is in progress and what is next.
 Structure your plans by atomic and verifiable commits.
 When building, go one commit at a time and run `just check` before asking the human for a review.
 Stage the changes. Including any tweaks made to pass the code checks.

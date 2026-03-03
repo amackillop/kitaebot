@@ -42,7 +42,7 @@ fix:
 
 # Run the binary
 run:
-    cargo run
+    CREDENTIALS_DIRECTORY=./secrets cargo run -- chat
 
 # Build the VM
 vm-build:
@@ -58,10 +58,9 @@ vm-ssh:
     ssh -i ~/.ssh/id_ed25519 -p 2222 root@localhost
 
 # Start VM in background and SSH in (terminates VM on exit)
-vm-dev:
+vm-dev: vm-build
     #!/usr/bin/env bash
     set -euo pipefail
-    just vm-build
     echo "Starting VM in background..."
     ./result/bin/run-kitaebot-vm > /dev/null 2>&1 &
     VM_PID=$!

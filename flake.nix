@@ -87,6 +87,7 @@
 
           packages = with pkgs; [
             just
+            jq
             rust-analyzer
             # Nix tooling
             nixfmt-rfc-style
