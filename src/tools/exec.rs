@@ -18,7 +18,6 @@
 //! These are heuristics, not a sandbox. A determined attacker can bypass them.
 //! Real isolation requires OS-level sandboxing (namespaces, seccomp, landlock).
 
-use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -174,7 +173,7 @@ impl Tool for Exec {
             let mut result = format!("$ {}\n", args.command);
 
             if !stdout.is_empty() {
-                result.push_str(&truncate_output(&stdout, self.max_output_bytes));
+                result.push_str(&super::truncate_output(&stdout, self.max_output_bytes));
             }
 
             if !stderr.is_empty() {
@@ -182,7 +181,7 @@ impl Tool for Exec {
                     result.push('\n');
                 }
                 result.push_str("STDERR:\n");
-                result.push_str(&truncate_output(&stderr, self.max_output_bytes));
+                result.push_str(&super::truncate_output(&stderr, self.max_output_bytes));
             }
 
             let _ = write!(
@@ -193,20 +192,6 @@ impl Tool for Exec {
 
             Ok(result)
         })
-    }
-}
-
-/// Truncate string at byte boundary without splitting UTF-8.
-fn truncate_output(s: &str, max_bytes: usize) -> Cow<'_, str> {
-    if s.len() <= max_bytes {
-        Cow::Borrowed(s)
-    } else {
-        let end = s.floor_char_boundary(max_bytes);
-        Cow::Owned(format!(
-            "{}...\n[truncated {} bytes]",
-            &s[..end],
-            s.len() - end
-        ))
     }
 }
 
@@ -263,17 +248,6 @@ mod tests {
 
         assert!(!has_path_traversal("ls ./foo"));
         assert!(!has_path_traversal("cat /etc/passwd"));
-    }
-
-    #[test]
-    fn test_truncate_output() {
-        let short = "hello";
-        assert_eq!(truncate_output(short, 100), Cow::Borrowed("hello"));
-
-        let long = "a".repeat(100);
-        let truncated = truncate_output(&long, 10);
-        assert!(truncated.ends_with("[truncated 90 bytes]"));
-        assert!(truncated.starts_with("aaaaaaaaaa"));
     }
 
     #[tokio::test]

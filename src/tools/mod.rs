@@ -5,11 +5,13 @@
 mod exec;
 #[cfg(test)]
 mod mock;
+pub(super) mod path;
 
 pub use exec::Exec;
 #[cfg(test)]
 pub use mock::MockTool;
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -72,6 +74,23 @@ impl Default for Tools {
     }
 }
 
+/// Truncate string at byte boundary without splitting UTF-8.
+///
+/// If `s` exceeds `max_bytes`, it is cut at the nearest character boundary
+/// and a summary of dropped bytes is appended.
+pub(crate) fn truncate_output(s: &str, max_bytes: usize) -> Cow<'_, str> {
+    if s.len() <= max_bytes {
+        Cow::Borrowed(s)
+    } else {
+        let end = s.floor_char_boundary(max_bytes);
+        Cow::Owned(format!(
+            "{}...\n[truncated {} bytes]",
+            &s[..end],
+            s.len() - end
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +133,37 @@ mod tests {
         );
         let result = tools.execute(&call).await;
         assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
+    }
+
+    #[test]
+    fn truncate_short_string_borrowed() {
+        assert!(matches!(
+            truncate_output("hello", 100),
+            Cow::Borrowed("hello")
+        ));
+    }
+
+    #[test]
+    fn truncate_exact_length_borrowed() {
+        assert!(matches!(
+            truncate_output("hello", 5),
+            Cow::Borrowed("hello")
+        ));
+    }
+
+    #[test]
+    fn truncate_long_string() {
+        let long = "a".repeat(100);
+        let result = truncate_output(&long, 10);
+        assert!(result.starts_with("aaaaaaaaaa"));
+        assert!(result.ends_with("[truncated 90 bytes]"));
+    }
+
+    #[test]
+    fn truncate_utf8_boundary() {
+        // '€' is 3 bytes. Truncating at byte 2 should cut back to 0.
+        let result = truncate_output("€", 2);
+        assert!(result.starts_with("...\n[truncated 3 bytes]"));
     }
 
     #[tokio::test]
