@@ -20,7 +20,8 @@ use heartbeat::Outcome;
 use provider::Provider;
 #[cfg(feature = "mock-network")]
 use provider::StubProvider;
-use tools::{Exec, Tools};
+use tools::path::PathGuard;
+use tools::{Exec, FileRead, Tools};
 use tracing::{error, info};
 use workspace::Workspace;
 #[cfg(not(feature = "mock-network"))]
@@ -58,10 +59,12 @@ async fn main() {
         OpenRouterProvider::new(api_key, &config.provider)
     };
 
-    let tools = Tools::new(vec![Box::new(Exec::new(
-        workspace.path(),
-        &config.tools.exec,
-    ))]);
+    let guard = PathGuard::new(workspace.path());
+
+    let tools = Tools::new(vec![
+        Box::new(Exec::new(workspace.path(), &config.tools.exec)),
+        Box::new(FileRead::new(guard.clone())),
+    ]);
 
     match std::env::args().nth(1).as_deref() {
         Some("chat") => {

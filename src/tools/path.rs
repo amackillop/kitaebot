@@ -4,8 +4,6 @@
 //! Rejects null bytes, `../` traversal, and absolute paths. Canonicalizes the
 //! result and verifies it is under the workspace.
 
-#![allow(dead_code)] // Used by file tools in upcoming commits
-
 use std::path::{Path, PathBuf};
 
 use crate::error::ToolError;
@@ -42,6 +40,7 @@ impl PathGuard {
     ///
     /// Canonicalizes the parent directory (which must exist) and appends
     /// the filename, then verifies the result is under the workspace.
+    #[allow(dead_code)] // Used by file_write in next commit
     pub fn resolve_new(&self, path: &str) -> Result<PathBuf, ToolError> {
         let candidate = self.validate_and_join(path)?;
         let parent = candidate

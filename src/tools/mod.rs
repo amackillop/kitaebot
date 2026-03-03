@@ -3,11 +3,13 @@
 //! Tools are functions the agent can call (exec, `read_file`, `web_search`, etc.).
 
 mod exec;
+mod file_read;
 #[cfg(test)]
 mod mock;
-pub(super) mod path;
+pub mod path;
 
 pub use exec::Exec;
+pub use file_read::FileRead;
 #[cfg(test)]
 pub use mock::MockTool;
 

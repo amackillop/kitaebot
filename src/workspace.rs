@@ -44,6 +44,7 @@ const DEFAULT_AGENTS: &str = "\
 
 You have access to:
 - `exec` — Run shell commands in the workspace
+- `file_read` — Read file contents with line numbers, offset, and limit
 
 ## Guidelines
 
