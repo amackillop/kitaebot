@@ -13,6 +13,7 @@ use tracing::error;
 
 use crate::agent;
 use crate::config::ContextConfig;
+use crate::context;
 use crate::lock::Lock;
 use crate::provider::Provider;
 use crate::session::Session;
@@ -28,6 +29,10 @@ pub enum Command<'a> {
     Exit,
     /// `/new` — clear session and start fresh.
     NewSession,
+    /// `/context` — display token usage.
+    Context,
+    /// `/compact` — force context compaction.
+    Compact,
     /// Send a message to the agent.
     Message(&'a str),
     /// Unrecognized `/` command.
@@ -44,6 +49,10 @@ impl<'a> Command<'a> {
             Self::Exit
         } else if trimmed == "/new" {
             Self::NewSession
+        } else if trimmed == "/context" {
+            Self::Context
+        } else if trimmed == "/compact" {
+            Self::Compact
         } else if trimmed.starts_with('/') {
             Self::Unknown(trimmed)
         } else {
@@ -106,6 +115,38 @@ pub async fn run<P: Provider>(
                 }
                 system_prompt = workspace.system_prompt();
                 println!("Session cleared.\n");
+            }
+            Command::Context => {
+                let tokens = context::session_tokens(&session, system_prompt.len());
+                let budget = context::budget(ctx);
+                // #[allow(clippy::cast_precision_loss)]
+                let pct = if budget > 0 {
+                    (tokens / budget) * 100
+                } else {
+                    0
+                };
+                println!(
+                    "Context: {tokens} / {budget} tokens ({pct:.1}%)\n\
+                     Messages: {}\n\
+                     Budget: {}% of {}\n",
+                    session.len(),
+                    ctx.budget_percent,
+                    ctx.max_tokens,
+                );
+            }
+            Command::Compact => {
+                let before = context::session_tokens(&session, system_prompt.len());
+                match context::force_compact(&mut session, provider).await {
+                    Ok(true) => {
+                        let after = context::session_tokens(&session, system_prompt.len());
+                        println!("Compacted: {before} -> {after} tokens\n");
+                        if let Err(e) = session.save(&workspace.repl_session_path()) {
+                            error!("Failed to save session: {e}");
+                        }
+                    }
+                    Ok(false) => println!("Nothing to compact.\n"),
+                    Err(e) => error!("Compaction failed: {e}"),
+                }
             }
             Command::Unknown(cmd) => {
                 println!("Unknown command: {cmd}\n");
@@ -189,6 +230,20 @@ mod tests {
             Command::parse("/new session"),
             Command::Unknown("/new session")
         );
+    }
+
+    #[test]
+    fn parse_context() {
+        assert_eq!(Command::parse("/context"), Command::Context);
+        assert_eq!(Command::parse("/context\n"), Command::Context);
+        assert_eq!(Command::parse("  /context  "), Command::Context);
+    }
+
+    #[test]
+    fn parse_compact() {
+        assert_eq!(Command::parse("/compact"), Command::Compact);
+        assert_eq!(Command::parse("/compact\n"), Command::Compact);
+        assert_eq!(Command::parse("  /compact  "), Command::Compact);
     }
 
     #[test]
