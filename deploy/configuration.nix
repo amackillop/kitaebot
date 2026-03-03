@@ -6,13 +6,27 @@
 #   echo 'sk-or-...' > secrets/openrouter-api-key
 #
 # Update the sharedDirectories source path to match your checkout.
-_: {
+{ pkgs, ... }:
+{
   kitaebot = {
     dev = false;
     sshKeys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKj473/+eAlgy1rQwuO+nCRrqhiPAWEgYPIn5j/NdN1Q desktop"
     ];
     secretsDir = "/mnt/kitaebot-secrets";
+    logLevel = "kitaebot=debug";
+    tools = with pkgs; [
+      coreutils
+      findutils
+      gnugrep
+      gnused
+      curl
+      git
+    ];
+    settings.telegram = {
+      enabled = true;
+      chat_id = 7658696350;
+    };
   };
 
   # 9p shared directory for secrets. "none" skips POSIX ownership mapping

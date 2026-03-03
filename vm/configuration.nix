@@ -8,6 +8,9 @@
 #   kitaebot.sshKeys    - List of SSH public keys for root access
 #   kitaebot.dev        - Enable dev mode (shares host nix store for faster builds)
 #   kitaebot.secretsDir - Directory containing one file per credential
+#   kitaebot.settings   - Attrset written as config.toml (uses pkgs.formats.toml)
+#   kitaebot.logLevel   - RUST_LOG filter string (default: "kitaebot=info")
+#   kitaebot.tools      - Packages available to the exec tool via PATH
 #
 # For local development, see deploy/configuration.nix
 {
@@ -18,6 +21,12 @@
   ...
 }:
 
+let
+  format = pkgs.formats.toml { };
+  cfg = config.kitaebot;
+  configFile = format.generate "config.toml" cfg.settings;
+  toolPath = lib.makeBinPath cfg.tools;
+in
 {
   imports = [
     (modulesPath + "/virtualisation/qemu-vm.nix")
@@ -45,6 +54,26 @@
       type = lib.types.path;
       default = "/var/lib/kitaebot-secrets";
       description = "Directory containing secret files (one per credential)";
+    };
+
+    settings = lib.mkOption {
+      inherit (format) type;
+      default = { };
+      description = "Configuration written to config.toml in the workspace";
+    };
+
+    logLevel = lib.mkOption {
+      type = lib.types.str;
+      default = "kitaebot=info";
+      description = "RUST_LOG filter string";
+      example = "kitaebot=debug";
+    };
+
+    tools = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = [ ];
+      description = "Packages whose bin/ directories are available to the exec tool";
+      example = lib.literalExpression "[ pkgs.coreutils pkgs.git pkgs.curl ]";
     };
   };
 
@@ -78,6 +107,7 @@
         "d /var/lib/kitaebot 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/memory 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/projects 0750 kitaebot kitaebot -"
+        "L+ /var/lib/kitaebot/config.toml - - - - ${configFile}"
       ];
 
       # Kitaebot daemon
@@ -100,6 +130,7 @@
           # with mode 0400 and sets CREDENTIALS_DIRECTORY automatically.
           LoadCredential = [
             "openrouter-api-key:${config.kitaebot.secretsDir}/openrouter-api-key"
+            "telegram-bot-token:${config.kitaebot.secretsDir}/telegram-bot-token"
           ];
 
           # Process isolation
@@ -144,7 +175,11 @@
           RestrictSUIDSGID = true;
           MemoryDenyWriteExecute = true;
         };
-        environment.KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
+        environment = {
+          KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
+          RUST_LOG = cfg.logLevel;
+          PATH = lib.mkForce toolPath;
+        };
       };
     };
 
