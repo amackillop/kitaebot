@@ -10,6 +10,7 @@ use std::io::Write;
 use std::time::SystemTime;
 
 use crate::agent;
+use crate::config::ContextConfig;
 use crate::error::{Error, HeartbeatError};
 use crate::lock::Lock;
 use crate::provider::Provider;
@@ -61,6 +62,7 @@ pub async fn run<P: Provider>(
     provider: &P,
     tools: &Tools,
     max_iterations: usize,
+    ctx: &ContextConfig,
 ) -> Result<Outcome, Error> {
     let Ok(_lock) = Lock::acquire(&workspace.heartbeat_lock_path()) else {
         return Ok(Outcome::Skipped(SkipReason::HeartbeatLocked));
@@ -92,6 +94,7 @@ pub async fn run<P: Provider>(
         provider,
         tools,
         max_iterations,
+        ctx,
     )
     .await?;
 
@@ -172,6 +175,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ContextConfig;
     use crate::provider::MockProvider;
     use crate::tools::Tools;
     use crate::types::Response;
@@ -264,7 +268,15 @@ mod tests {
     async fn run_skips_when_no_heartbeat_file() {
         let (_dir, ws) = workspace();
         let provider = MockProvider::new(vec![]);
-        let outcome = run(&ws, &provider, &Tools::default(), 1).await.unwrap();
+        let outcome = run(
+            &ws,
+            &provider,
+            &Tools::default(),
+            1,
+            &ContextConfig::default(),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             outcome,
             Outcome::Skipped(SkipReason::NoHeartbeatFile)
@@ -277,7 +289,15 @@ mod tests {
         fs::write(ws.heartbeat_path(), "- [x] Done\n- [x] Also done\n").unwrap();
 
         let provider = MockProvider::new(vec![]);
-        let outcome = run(&ws, &provider, &Tools::default(), 1).await.unwrap();
+        let outcome = run(
+            &ws,
+            &provider,
+            &Tools::default(),
+            1,
+            &ContextConfig::default(),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             outcome,
             Outcome::Skipped(SkipReason::NoActiveTasks)
@@ -292,7 +312,15 @@ mod tests {
         let _lock = Lock::acquire(&ws.heartbeat_lock_path()).unwrap();
 
         let provider = MockProvider::new(vec![]);
-        let outcome = run(&ws, &provider, &Tools::default(), 1).await.unwrap();
+        let outcome = run(
+            &ws,
+            &provider,
+            &Tools::default(),
+            1,
+            &ContextConfig::default(),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             outcome,
             Outcome::Skipped(SkipReason::HeartbeatLocked)
@@ -305,7 +333,15 @@ mod tests {
         fs::write(ws.heartbeat_path(), "- [ ] Check builds\n").unwrap();
 
         let provider = MockProvider::new(vec![Ok(Response::Text("All builds green".into()))]);
-        let outcome = run(&ws, &provider, &Tools::default(), 1).await.unwrap();
+        let outcome = run(
+            &ws,
+            &provider,
+            &Tools::default(),
+            1,
+            &ContextConfig::default(),
+        )
+        .await
+        .unwrap();
 
         match outcome {
             Outcome::Executed(ref text) => assert_eq!(text, "All builds green"),

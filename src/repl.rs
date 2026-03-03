@@ -12,6 +12,7 @@ use std::io::{self, Write};
 use tracing::error;
 
 use crate::agent;
+use crate::config::ContextConfig;
 use crate::lock::Lock;
 use crate::provider::Provider;
 use crate::session::Session;
@@ -69,6 +70,7 @@ pub async fn run<P: Provider>(
     provider: &P,
     tools: &Tools,
     max_iterations: usize,
+    ctx: &ContextConfig,
 ) {
     let Ok(_lock) = Lock::acquire(&workspace.repl_lock_path()) else {
         error!("Another session is already running");
@@ -116,6 +118,7 @@ pub async fn run<P: Provider>(
                     provider,
                     tools,
                     max_iterations,
+                    ctx,
                 )
                 .await
                 {

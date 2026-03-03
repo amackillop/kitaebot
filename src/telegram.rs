@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::agent;
-use crate::config::TelegramConfig;
+use crate::config::{ContextConfig, TelegramConfig};
 use crate::error::TelegramError;
 use crate::provider::Provider;
 use crate::secrets::{Secret, load_secret};
@@ -199,6 +199,7 @@ pub async fn poll_loop<P: Provider>(
     provider: &P,
     tools: &Tools,
     max_iterations: usize,
+    ctx: &ContextConfig,
 ) -> ! {
     info!(chat_id = channel.chat_id, "Telegram poller starting");
     let mut offset: i64 = 0;
@@ -239,7 +240,16 @@ pub async fn poll_loop<P: Provider>(
                 continue;
             };
 
-            handle_message(channel, workspace, provider, tools, max_iterations, &text).await;
+            handle_message(
+                channel,
+                workspace,
+                provider,
+                tools,
+                max_iterations,
+                ctx,
+                &text,
+            )
+            .await;
         }
     }
 }
@@ -251,6 +261,7 @@ async fn handle_message<P: Provider>(
     provider: &P,
     tools: &Tools,
     max_iterations: usize,
+    ctx: &ContextConfig,
     text: &str,
 ) {
     let session_path = workspace.telegram_session_path();
@@ -272,6 +283,7 @@ async fn handle_message<P: Provider>(
         provider,
         tools,
         max_iterations,
+        ctx,
     )
     .await
     {

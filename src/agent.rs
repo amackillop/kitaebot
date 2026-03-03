@@ -7,6 +7,8 @@
 use futures::future::join_all;
 use tracing::{debug, error, warn};
 
+use crate::config::ContextConfig;
+use crate::context;
 use crate::error::Error;
 use crate::provider::Provider;
 use crate::safety;
@@ -30,7 +32,12 @@ pub async fn run_turn<P: Provider>(
     provider: &P,
     tools: &Tools,
     max_iterations: usize,
+    ctx: &ContextConfig,
 ) -> Result<String, Error> {
+    context::compact_if_needed(session, system_prompt, provider, ctx)
+        .await
+        .map_err(Error::Provider)?;
+
     session.add_message(Message::User {
         content: user_message.to_string(),
     });
@@ -107,6 +114,7 @@ pub async fn run_turn<P: Provider>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ContextConfig;
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
     use crate::tools::{MockTool, Tool};
@@ -152,6 +160,7 @@ mod tests {
             &provider,
             &Tools::new(vec![]),
             MAX_ITER,
+            &ContextConfig::default(),
         )
         .await;
         assert_eq!(result.unwrap(), "Hello from LLM");
@@ -174,6 +183,7 @@ mod tests {
             &provider,
             &mock_tools("mock output"),
             MAX_ITER,
+            &ContextConfig::default(),
         )
         .await;
         assert_eq!(result.unwrap(), "Tool result processed");
@@ -191,6 +201,7 @@ mod tests {
             &provider,
             &mock_tools("mock output"),
             MAX_ITER,
+            &ContextConfig::default(),
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
@@ -209,6 +220,7 @@ mod tests {
             &provider,
             &Tools::new(vec![]),
             MAX_ITER,
+            &ContextConfig::default(),
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::Provider(_)));
@@ -229,6 +241,7 @@ mod tests {
             &provider,
             &mock_tools("mock output"),
             MAX_ITER,
+            &ContextConfig::default(),
         )
         .await;
         assert_eq!(result.unwrap(), "Multiple tools executed");
@@ -249,6 +262,7 @@ mod tests {
             &provider,
             &mock_tools("Here is your key: sk-1234567890abcdef"),
             MAX_ITER,
+            &ContextConfig::default(),
         )
         .await;
         assert_eq!(result.unwrap(), "Handled");
@@ -279,6 +293,7 @@ mod tests {
             &provider,
             &mock_tools("mock output"),
             MAX_ITER,
+            &ContextConfig::default(),
         )
         .await
         .unwrap();

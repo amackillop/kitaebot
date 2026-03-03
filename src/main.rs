@@ -65,10 +65,24 @@ async fn main() {
 
     match std::env::args().nth(1).as_deref() {
         Some("chat") => {
-            repl::run(&workspace, &provider, &tools, config.agent.max_iterations).await;
+            repl::run(
+                &workspace,
+                &provider,
+                &tools,
+                config.agent.max_iterations,
+                &config.context,
+            )
+            .await;
         }
         Some("heartbeat") => {
-            run_heartbeat(&workspace, &provider, &tools, config.agent.max_iterations).await;
+            run_heartbeat(
+                &workspace,
+                &provider,
+                &tools,
+                config.agent.max_iterations,
+                &config.context,
+            )
+            .await;
         }
         Some("run") => {
             let telegram = if config.telegram.enabled {
@@ -94,6 +108,7 @@ async fn main() {
                 config.agent.max_iterations,
                 config.heartbeat.interval_secs,
                 telegram.as_ref(),
+                &config.context,
             )
             .await;
         }
@@ -118,8 +133,9 @@ async fn run_heartbeat<P: Provider>(
     provider: &P,
     tools: &Tools,
     max_iterations: usize,
+    context: &config::ContextConfig,
 ) {
-    match heartbeat::run(workspace, provider, tools, max_iterations).await {
+    match heartbeat::run(workspace, provider, tools, max_iterations, context).await {
         Ok(Outcome::Executed(response)) => {
             info!("Heartbeat complete: {response}");
         }

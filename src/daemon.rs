@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info};
 
+use crate::config::ContextConfig;
 use crate::heartbeat;
 use crate::provider::Provider;
 use crate::telegram::{self, TelegramChannel};
@@ -30,6 +31,7 @@ pub async fn run<P: Provider>(
     max_iterations: usize,
     interval_secs: u64,
     telegram: Option<&TelegramChannel>,
+    ctx: &ContextConfig,
 ) {
     run_with_shutdown(
         workspace,
@@ -38,12 +40,14 @@ pub async fn run<P: Provider>(
         max_iterations,
         interval_secs,
         telegram,
+        ctx,
         shutdown_signal(),
     )
     .await;
 }
 
 /// Testable core: runs heartbeat + telegram until `shutdown` resolves.
+#[allow(clippy::too_many_arguments)]
 async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
     workspace: &Workspace,
     provider: &P,
@@ -51,6 +55,7 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
     max_iterations: usize,
     interval_secs: u64,
     telegram: Option<&TelegramChannel>,
+    ctx: &ContextConfig,
     shutdown: S,
 ) {
     let mut tick = interval(Duration::from_secs(interval_secs));
@@ -59,13 +64,15 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
     let heartbeat_loop = async {
         loop {
             tick.tick().await;
-            run_heartbeat_cycle(workspace, provider, tools, max_iterations).await;
+            run_heartbeat_cycle(workspace, provider, tools, max_iterations, ctx).await;
         }
     };
 
     let telegram_loop = async {
         match telegram {
-            Some(ch) => telegram::poll_loop(ch, workspace, provider, tools, max_iterations).await,
+            Some(ch) => {
+                telegram::poll_loop(ch, workspace, provider, tools, max_iterations, ctx).await;
+            }
             None => std::future::pending().await,
         }
     };
@@ -85,8 +92,9 @@ async fn run_heartbeat_cycle<P: Provider>(
     provider: &P,
     tools: &Tools,
     max_iterations: usize,
+    ctx: &ContextConfig,
 ) {
-    match heartbeat::run(workspace, provider, tools, max_iterations).await {
+    match heartbeat::run(workspace, provider, tools, max_iterations, ctx).await {
         Ok(heartbeat::Outcome::Executed(response)) => {
             info!("Heartbeat complete: {response}");
         }
@@ -115,6 +123,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ContextConfig;
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
     use crate::types::Response;
@@ -138,6 +147,7 @@ mod tests {
             1,
             3600, // large interval — only the immediate first tick matters
             None,
+            &ContextConfig::default(),
             tokio::time::sleep(Duration::from_millis(50)),
         )
         .await;
@@ -161,6 +171,7 @@ mod tests {
             1,
             1, // 1-second interval
             None,
+            &ContextConfig::default(),
             async {
                 // Let 3 ticks fire: immediate + 2 more.
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -190,6 +201,7 @@ mod tests {
             1,
             3600,
             None,
+            &ContextConfig::default(),
             tokio::time::sleep(Duration::from_millis(50)),
         )
         .await;

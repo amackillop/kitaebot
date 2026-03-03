@@ -66,7 +66,6 @@ impl Session {
     ///
     /// Used by context compaction to shrink conversation history while
     /// preserving a condensed record of what happened.
-    #[allow(dead_code)] // Will be used by context compaction
     pub fn compact(&mut self, summary: Message) {
         self.messages.clear();
         self.messages.push(summary);
@@ -74,7 +73,6 @@ impl Session {
     }
 
     /// Number of messages in the session.
-    #[allow(dead_code)] // Will be used by context compaction
     pub fn len(&self) -> usize {
         self.messages.len()
     }
