@@ -4,8 +4,6 @@
 //! agent, and sends responses back via `sendMessage`. Designed to run as
 //! an async loop alongside the heartbeat in the daemon's `tokio::select!`.
 
-#![allow(dead_code)] // Wired into daemon in the next commit
-
 use std::time::Duration;
 
 use reqwest::Client;

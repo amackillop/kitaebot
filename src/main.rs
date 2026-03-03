@@ -70,8 +70,20 @@ async fn main() {
             run_heartbeat(&workspace, &provider, &tools, config.agent.max_iterations).await;
         }
         Some("run") => {
+            let telegram = if config.telegram.enabled {
+                Some(
+                    telegram::TelegramChannel::new(&config.telegram).unwrap_or_else(|e| {
+                        error!("Failed to load Telegram credentials: {e}");
+                        std::process::exit(1);
+                    }),
+                )
+            } else {
+                None
+            };
+
             info!(
                 interval_secs = config.heartbeat.interval_secs,
+                telegram = config.telegram.enabled,
                 "Daemon starting",
             );
             daemon::run(
@@ -80,6 +92,7 @@ async fn main() {
                 &tools,
                 config.agent.max_iterations,
                 config.heartbeat.interval_secs,
+                telegram.as_ref(),
             )
             .await;
         }

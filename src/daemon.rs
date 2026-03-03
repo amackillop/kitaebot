@@ -1,8 +1,10 @@
-//! Long-running daemon that drives the heartbeat loop.
+//! Long-running daemon that drives the heartbeat and Telegram loops.
 //!
-//! The daemon ticks on a configurable interval, running one heartbeat
-//! cycle per tick. Errors within a cycle are logged and swallowed —
-//! the loop survives until an external shutdown signal arrives.
+//! The daemon runs two concurrent loops — heartbeat ticks on a
+//! configurable interval, and the Telegram poller long-polls for
+//! incoming messages. Both are pinned futures inside a single
+//! `tokio::select!`, so they make progress concurrently without
+//! spawning tasks or requiring `Arc`.
 //!
 //! The core loop ([`run_with_shutdown`]) is generic over its shutdown
 //! future so tests can substitute a simple `sleep` instead of real
@@ -16,6 +18,7 @@ use tracing::{error, info};
 
 use crate::heartbeat;
 use crate::provider::Provider;
+use crate::telegram::{self, TelegramChannel};
 use crate::tools::Tools;
 use crate::workspace::Workspace;
 
@@ -26,6 +29,7 @@ pub async fn run<P: Provider>(
     tools: &Tools,
     max_iterations: usize,
     interval_secs: u64,
+    telegram: Option<&TelegramChannel>,
 ) {
     run_with_shutdown(
         workspace,
@@ -33,35 +37,43 @@ pub async fn run<P: Provider>(
         tools,
         max_iterations,
         interval_secs,
+        telegram,
         shutdown_signal(),
     )
     .await;
 }
 
-/// Testable core: ticks heartbeat cycles until `shutdown` resolves.
+/// Testable core: runs heartbeat + telegram until `shutdown` resolves.
 async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
     workspace: &Workspace,
     provider: &P,
     tools: &Tools,
     max_iterations: usize,
     interval_secs: u64,
+    telegram: Option<&TelegramChannel>,
     shutdown: S,
 ) {
     let mut tick = interval(Duration::from_secs(interval_secs));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    tokio::pin!(shutdown);
-
-    loop {
-        tokio::select! {
-            _ = tick.tick() => {
-                run_heartbeat_cycle(workspace, provider, tools, max_iterations).await;
-            }
-            () = &mut shutdown => {
-                info!("Shutdown signal received, exiting.");
-                return;
-            }
+    let heartbeat_loop = async {
+        loop {
+            tick.tick().await;
+            run_heartbeat_cycle(workspace, provider, tools, max_iterations).await;
         }
+    };
+
+    let telegram_loop = async {
+        match telegram {
+            Some(ch) => telegram::poll_loop(ch, workspace, provider, tools, max_iterations).await,
+            None => std::future::pending().await,
+        }
+    };
+
+    tokio::select! {
+        () = heartbeat_loop => unreachable!("heartbeat loop never exits"),
+        () = telegram_loop => unreachable!("telegram loop never exits"),
+        () = shutdown => info!("Shutdown signal received, exiting."),
     }
 }
 
@@ -125,6 +137,7 @@ mod tests {
             &Tools::default(),
             1,
             3600, // large interval — only the immediate first tick matters
+            None,
             tokio::time::sleep(Duration::from_millis(50)),
         )
         .await;
@@ -147,6 +160,7 @@ mod tests {
             &Tools::default(),
             1,
             1, // 1-second interval
+            None,
             async {
                 // Let 3 ticks fire: immediate + 2 more.
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -175,6 +189,7 @@ mod tests {
             &Tools::default(),
             1,
             3600,
+            None,
             tokio::time::sleep(Duration::from_millis(50)),
         )
         .await;

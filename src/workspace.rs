@@ -113,7 +113,6 @@ impl Workspace {
     }
 
     /// Path to the Telegram channel session file.
-    #[allow(dead_code)]
     pub fn telegram_session_path(&self) -> PathBuf {
         self.0.join("sessions/telegram.json")
     }
