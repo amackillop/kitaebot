@@ -20,7 +20,7 @@ use heartbeat::Outcome;
 use provider::Provider;
 #[cfg(feature = "mock-network")]
 use provider::StubProvider;
-use tools::{Exec, Tool, Tools};
+use tools::{Exec, Tools};
 use tracing::{error, info};
 use workspace::Workspace;
 #[cfg(not(feature = "mock-network"))]
@@ -58,7 +58,7 @@ async fn main() {
         OpenRouterProvider::new(api_key, &config.provider)
     };
 
-    let tools = Tools::new(vec![Tool::Exec(Exec::new(
+    let tools = Tools::new(vec![Box::new(Exec::new(
         workspace.path(),
         &config.tools.exec,
     ))]);

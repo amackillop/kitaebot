@@ -31,6 +31,10 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
+use std::future::Future;
+use std::pin::Pin;
+
+use super::Tool;
 use crate::config::ExecConfig;
 use crate::error::ToolError;
 
@@ -108,13 +112,6 @@ pub struct Exec {
 }
 
 impl Exec {
-    pub const NAME: &str = "exec";
-    pub const DESCRIPTION: &str = "Execute a shell command in the workspace";
-
-    pub fn parameters() -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
-    }
-
     pub fn new(working_dir: impl Into<PathBuf>, config: &ExecConfig) -> Self {
         Self {
             working_dir: working_dir.into(),
@@ -122,61 +119,80 @@ impl Exec {
             max_output_bytes: config.max_output_bytes,
         }
     }
+}
 
-    pub async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError> {
-        let args: Args =
-            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+impl Tool for Exec {
+    fn name(&self) -> &'static str {
+        "exec"
+    }
 
-        if has_path_traversal(&args.command) {
-            warn!(command = %args.command, "Path traversal detected");
-            return Err(ToolError::Blocked("path traversal detected".into()));
-        }
+    fn description(&self) -> &'static str {
+        "Execute a shell command in the workspace"
+    }
 
-        if is_blocked(&args.command) {
-            warn!(command = %args.command, "Command matches deny pattern");
-            return Err(ToolError::Blocked("command matches deny pattern".into()));
-        }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+    }
 
-        debug!(command = %args.command, "Executing command");
+    fn execute(
+        &self,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
+        Box::pin(async move {
+            let args: Args = serde_json::from_value(args)
+                .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        let output = timeout(
-            self.timeout,
-            Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&args.command)
-                .current_dir(&self.working_dir)
-                .env_clear()
-                .envs(safe_env())
-                .output(),
-        )
-        .await
-        .map_err(|_| ToolError::Timeout)?
-        .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        let mut result = format!("$ {}\n", args.command);
-
-        if !stdout.is_empty() {
-            result.push_str(&truncate_output(&stdout, self.max_output_bytes));
-        }
-
-        if !stderr.is_empty() {
-            if !stdout.is_empty() {
-                result.push('\n');
+            if has_path_traversal(&args.command) {
+                warn!(command = %args.command, "Path traversal detected");
+                return Err(ToolError::Blocked("path traversal detected".into()));
             }
-            result.push_str("STDERR:\n");
-            result.push_str(&truncate_output(&stderr, self.max_output_bytes));
-        }
 
-        let _ = write!(
-            result,
-            "\nExit code: {}",
-            output.status.code().unwrap_or(-1)
-        );
+            if is_blocked(&args.command) {
+                warn!(command = %args.command, "Command matches deny pattern");
+                return Err(ToolError::Blocked("command matches deny pattern".into()));
+            }
 
-        Ok(result)
+            debug!(command = %args.command, "Executing command");
+
+            let output = timeout(
+                self.timeout,
+                Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(&args.command)
+                    .current_dir(&self.working_dir)
+                    .env_clear()
+                    .envs(safe_env())
+                    .output(),
+            )
+            .await
+            .map_err(|_| ToolError::Timeout)?
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            let mut result = format!("$ {}\n", args.command);
+
+            if !stdout.is_empty() {
+                result.push_str(&truncate_output(&stdout, self.max_output_bytes));
+            }
+
+            if !stderr.is_empty() {
+                if !stdout.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str("STDERR:\n");
+                result.push_str(&truncate_output(&stderr, self.max_output_bytes));
+            }
+
+            let _ = write!(
+                result,
+                "\nExit code: {}",
+                output.status.code().unwrap_or(-1)
+            );
+
+            Ok(result)
+        })
     }
 }
 
@@ -210,7 +226,8 @@ mod tests {
 
     #[test]
     fn test_parameters_schema() {
-        let schema = Exec::parameters();
+        let tool = Exec::new(".", &ExecConfig::default());
+        let schema = tool.parameters();
 
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["properties"]["command"]["type"], "string");

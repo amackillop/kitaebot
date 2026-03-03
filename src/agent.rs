@@ -117,7 +117,7 @@ mod tests {
     use crate::config::ContextConfig;
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
-    use crate::tools::{MockTool, Tool};
+    use crate::tools::MockTool;
     use crate::types::{ToolCall, ToolFunction};
 
     fn text(s: &str) -> Response {
@@ -128,7 +128,7 @@ mod tests {
         ToolCall::new(
             id.to_string(),
             ToolFunction {
-                name: MockTool::NAME.to_string(),
+                name: "mock".to_string(),
                 arguments: "{}".to_string(),
             },
         )
@@ -142,7 +142,7 @@ mod tests {
     }
 
     fn mock_tools(output: &str) -> Tools {
-        Tools::new(vec![Tool::Mock(MockTool::new(output))])
+        Tools::new(vec![Box::new(MockTool::new(output))])
     }
 
     const SYSTEM: &str = "You are a test assistant.";

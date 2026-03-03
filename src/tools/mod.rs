@@ -10,56 +10,21 @@ pub use exec::Exec;
 #[cfg(test)]
 pub use mock::MockTool;
 
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::error::ToolError;
 use crate::types::{ToolCall, ToolDefinition};
 
-/// Available tools for the agent.
-pub enum Tool {
-    Exec(Exec),
-    #[cfg(test)]
-    Mock(MockTool),
-}
-
-impl Tool {
-    fn name(&self) -> &str {
-        match self {
-            Self::Exec(_) => Exec::NAME,
-            #[cfg(test)]
-            Self::Mock(_) => MockTool::NAME,
-        }
-    }
-
-    fn description(&self) -> &str {
-        match self {
-            Self::Exec(_) => Exec::DESCRIPTION,
-            #[cfg(test)]
-            Self::Mock(_) => MockTool::DESCRIPTION,
-        }
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        match self {
-            Self::Exec(_) => Exec::parameters(),
-            #[cfg(test)]
-            Self::Mock(_) => MockTool::parameters(),
-        }
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(
-            self.name().to_string(),
-            self.description().to_string(),
-            self.parameters(),
-        )
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError> {
-        match self {
-            Self::Exec(e) => e.execute(args).await,
-            #[cfg(test)]
-            Self::Mock(m) => m.execute(args).await,
-        }
-    }
+/// A tool the agent can invoke.
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
+    fn parameters(&self) -> serde_json::Value;
+    fn execute(
+        &self,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>>;
 }
 
 /// Collection of available tools.
@@ -67,15 +32,24 @@ impl Tool {
 /// Uses `Vec` with linear scan for lookup. For small tool counts (<50),
 /// this outperforms `HashMap` due to cache locality and no hashing overhead.
 /// Tool execution involves HTTP calls to an LLM (100ms+), so lookup time is noise.
-pub struct Tools(Vec<Tool>);
+pub struct Tools(Vec<Box<dyn Tool>>);
 
 impl Tools {
-    pub fn new(tools: Vec<Tool>) -> Self {
+    pub fn new(tools: Vec<Box<dyn Tool>>) -> Self {
         Self(tools)
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.0.iter().map(Tool::definition).collect()
+        self.0
+            .iter()
+            .map(|t| {
+                ToolDefinition::new(
+                    t.name().to_string(),
+                    t.description().to_string(),
+                    t.parameters(),
+                )
+            })
+            .collect()
     }
 
     pub async fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
@@ -107,7 +81,7 @@ mod tests {
         ToolCall::new(
             id.to_string(),
             ToolFunction {
-                name: MockTool::NAME.to_string(),
+                name: "mock".to_string(),
                 arguments: "{}".to_string(),
             },
         )
@@ -115,7 +89,7 @@ mod tests {
 
     #[test]
     fn test_definitions() {
-        let tools = Tools::new(vec![Tool::Mock(MockTool::new("ok"))]);
+        let tools = Tools::new(vec![Box::new(MockTool::new("ok"))]);
         let defs = tools.definitions();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].function.name, "mock");
@@ -123,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute() {
-        let tools = Tools::new(vec![Tool::Mock(MockTool::new("executed"))]);
+        let tools = Tools::new(vec![Box::new(MockTool::new("executed"))]);
         let result = tools.execute(&mock_call("test-123")).await.unwrap();
         assert_eq!(result, "executed");
     }
@@ -144,11 +118,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_arguments() {
-        let tools = Tools::new(vec![Tool::Mock(MockTool::new("ok"))]);
+        let tools = Tools::new(vec![Box::new(MockTool::new("ok"))]);
         let call = ToolCall::new(
             "test-123".to_string(),
             ToolFunction {
-                name: MockTool::NAME.to_string(),
+                name: "mock".to_string(),
                 arguments: "invalid json".to_string(),
             },
         );
