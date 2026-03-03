@@ -24,6 +24,8 @@ pub struct Config {
     pub heartbeat: HeartbeatConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub context: ContextConfig,
 }
 
 /// LLM provider settings.
@@ -77,6 +79,16 @@ pub struct TelegramConfig {
     pub poll_timeout_secs: u64,
 }
 
+/// Context window management settings.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContextConfig {
+    /// Maximum context window size in tokens.
+    pub max_tokens: u32,
+    /// Fraction of `max_tokens` at which compaction triggers.
+    pub budget_ratio: f32,
+}
+
 // --- Default impls ---
 
 impl Default for ProviderConfig {
@@ -108,6 +120,15 @@ impl Default for HeartbeatConfig {
     fn default() -> Self {
         Self {
             interval_secs: 1800,
+        }
+    }
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens: 200_000,
+            budget_ratio: 0.8,
         }
     }
 }
@@ -165,6 +186,16 @@ impl Config {
         if self.heartbeat.interval_secs == 0 {
             return Err(ConfigError::Invalid(
                 "heartbeat interval_secs must be > 0".into(),
+            ));
+        }
+        if self.context.max_tokens == 0 {
+            return Err(ConfigError::Invalid(
+                "context max_tokens must be > 0".into(),
+            ));
+        }
+        if self.context.budget_ratio <= 0.0 || self.context.budget_ratio > 1.0 {
+            return Err(ConfigError::Invalid(
+                "context budget_ratio must be in (0.0, 1.0]".into(),
             ));
         }
         if self.telegram.enabled {
@@ -337,5 +368,43 @@ max_output_bytes = 20480
         // chat_id=0 is fine when disabled — no credentials needed
         let cfg = load_toml("[telegram]\nenabled = false\nchat_id = 0\n").unwrap();
         assert!(!cfg.telegram.enabled);
+    }
+
+    #[test]
+    fn context_defaults() {
+        let cfg = load_toml("").unwrap();
+        assert_eq!(cfg.context.max_tokens, 200_000);
+        assert!((cfg.context.budget_ratio - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn context_parse() {
+        let cfg = load_toml("[context]\nmax_tokens = 64000\nbudget_ratio = 0.6\n").unwrap();
+        assert_eq!(cfg.context.max_tokens, 64_000);
+        assert!((cfg.context.budget_ratio - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn context_reject_unknown_field() {
+        let result = load_toml("[context]\ntypo = 1\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn context_reject_zero_max_tokens() {
+        let result = load_toml("[context]\nmax_tokens = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn context_reject_zero_budget_ratio() {
+        let result = load_toml("[context]\nbudget_ratio = 0.0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn context_reject_budget_ratio_over_one() {
+        let result = load_toml("[context]\nbudget_ratio = 1.1\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 }
