@@ -141,7 +141,7 @@ impl Exec {
 
         let output = timeout(
             self.timeout,
-            Command::new("sh")
+            Command::new("/bin/sh")
                 .arg("-c")
                 .arg(&args.command)
                 .current_dir(&self.working_dir)
