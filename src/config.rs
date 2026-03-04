@@ -50,6 +50,7 @@ pub struct AgentConfig {
 pub struct ToolsConfig {
     pub exec: ExecConfig,
     pub web_fetch: WebFetchConfig,
+    pub web_search: WebSearchConfig,
 }
 
 /// Settings for the `exec` tool.
@@ -66,6 +67,15 @@ pub struct ExecConfig {
 pub struct WebFetchConfig {
     pub timeout_secs: u64,
     pub max_response_bytes: usize,
+}
+
+/// Settings for the `web_search` tool.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebSearchConfig {
+    pub model: String,
+    pub max_tokens: u32,
+    pub timeout_secs: u64,
 }
 
 /// Heartbeat daemon settings.
@@ -130,6 +140,16 @@ impl Default for WebFetchConfig {
         Self {
             timeout_secs: 30,
             max_response_bytes: 50 * 1024,
+        }
+    }
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            model: "perplexity/sonar".to_string(),
+            max_tokens: 1024,
+            timeout_secs: 30,
         }
     }
 }
@@ -209,6 +229,16 @@ impl Config {
         if self.tools.web_fetch.max_response_bytes == 0 {
             return Err(ConfigError::Invalid(
                 "web_fetch max_response_bytes must be > 0".into(),
+            ));
+        }
+        if self.tools.web_search.max_tokens == 0 {
+            return Err(ConfigError::Invalid(
+                "web_search max_tokens must be > 0".into(),
+            ));
+        }
+        if self.tools.web_search.timeout_secs == 0 {
+            return Err(ConfigError::Invalid(
+                "web_search timeout_secs must be > 0".into(),
             ));
         }
         if self.heartbeat.interval_secs == 0 {

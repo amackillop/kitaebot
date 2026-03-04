@@ -25,7 +25,7 @@ use tools::{Exec, FileEdit, FileRead, FileWrite, GlobSearch, Grep, Tools};
 use tracing::{error, info};
 use workspace::Workspace;
 #[cfg(not(feature = "mock-network"))]
-use {provider::OpenRouterProvider, secrets::load_secret, tools::WebFetch};
+use {provider::OpenRouterProvider, secrets::load_secret, tools::WebFetch, tools::WebSearch};
 
 #[tokio::main]
 async fn main() {
@@ -140,12 +140,25 @@ fn build_tools(workspace: &Workspace, config: &Config) -> Tools {
     ];
 
     #[cfg(not(feature = "mock-network"))]
-    tools.push(Box::new(
-        WebFetch::new(&config.tools.web_fetch).unwrap_or_else(|e| {
-            error!("Failed to initialize web_fetch: {e}");
+    {
+        tools.push(Box::new(
+            WebFetch::new(&config.tools.web_fetch).unwrap_or_else(|e| {
+                error!("Failed to initialize web_fetch: {e}");
+                std::process::exit(1);
+            }),
+        ));
+
+        let search_key = load_secret("openrouter-api-key").unwrap_or_else(|e| {
+            error!("Failed to load API key for web_search: {e}");
             std::process::exit(1);
-        }),
-    ));
+        });
+        tools.push(Box::new(
+            WebSearch::new(search_key, &config.tools.web_search).unwrap_or_else(|e| {
+                error!("Failed to initialize web_search: {e}");
+                std::process::exit(1);
+            }),
+        ));
+    }
 
     Tools::new(tools)
 }

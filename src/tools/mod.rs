@@ -13,6 +13,8 @@ mod mock;
 pub mod path;
 #[cfg(not(feature = "mock-network"))]
 mod web_fetch;
+#[cfg(not(feature = "mock-network"))]
+mod web_search;
 
 pub use exec::Exec;
 pub use file_edit::FileEdit;
@@ -24,6 +26,8 @@ pub use grep::Grep;
 pub use mock::MockTool;
 #[cfg(not(feature = "mock-network"))]
 pub use web_fetch::WebFetch;
+#[cfg(not(feature = "mock-network"))]
+pub use web_search::WebSearch;
 
 use std::borrow::Cow;
 use std::future::Future;
