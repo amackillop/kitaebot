@@ -49,6 +49,7 @@ pub struct AgentConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
     pub exec: ExecConfig,
+    pub web_fetch: WebFetchConfig,
 }
 
 /// Settings for the `exec` tool.
@@ -57,6 +58,14 @@ pub struct ToolsConfig {
 pub struct ExecConfig {
     pub timeout_secs: u64,
     pub max_output_bytes: usize,
+}
+
+/// Settings for the `web_fetch` tool.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebFetchConfig {
+    pub timeout_secs: u64,
+    pub max_response_bytes: usize,
 }
 
 /// Heartbeat daemon settings.
@@ -112,6 +121,15 @@ impl Default for ExecConfig {
         Self {
             timeout_secs: 60,
             max_output_bytes: 10 * 1024,
+        }
+    }
+}
+
+impl Default for WebFetchConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 30,
+            max_response_bytes: 50 * 1024,
         }
     }
 }
@@ -182,6 +200,16 @@ impl Config {
         }
         if self.tools.exec.max_output_bytes == 0 {
             return Err(ConfigError::Invalid("max_output_bytes must be > 0".into()));
+        }
+        if self.tools.web_fetch.timeout_secs == 0 {
+            return Err(ConfigError::Invalid(
+                "web_fetch timeout_secs must be > 0".into(),
+            ));
+        }
+        if self.tools.web_fetch.max_response_bytes == 0 {
+            return Err(ConfigError::Invalid(
+                "web_fetch max_response_bytes must be > 0".into(),
+            ));
         }
         if self.heartbeat.interval_secs == 0 {
             return Err(ConfigError::Invalid(

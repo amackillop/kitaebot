@@ -25,7 +25,7 @@ use tools::{Exec, FileEdit, FileRead, FileWrite, GlobSearch, Grep, Tools};
 use tracing::{error, info};
 use workspace::Workspace;
 #[cfg(not(feature = "mock-network"))]
-use {provider::OpenRouterProvider, secrets::load_secret};
+use {provider::OpenRouterProvider, secrets::load_secret, tools::WebFetch};
 
 #[tokio::main]
 async fn main() {
@@ -59,16 +59,7 @@ async fn main() {
         OpenRouterProvider::new(api_key, &config.provider)
     };
 
-    let guard = PathGuard::new(workspace.path());
-
-    let tools = Tools::new(vec![
-        Box::new(Exec::new(workspace.path(), &config.tools.exec)),
-        Box::new(FileRead::new(guard.clone())),
-        Box::new(FileWrite::new(guard.clone())),
-        Box::new(FileEdit::new(guard.clone())),
-        Box::new(GlobSearch::new(workspace.path())),
-        Box::new(Grep::new(guard.clone())),
-    ]);
+    let tools = build_tools(&workspace, &config);
 
     match std::env::args().nth(1).as_deref() {
         Some("chat") => {
@@ -133,6 +124,30 @@ async fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn build_tools(workspace: &Workspace, config: &Config) -> Tools {
+    let guard = PathGuard::new(workspace.path());
+
+    #[allow(unused_mut)]
+    let mut tools: Vec<Box<dyn tools::Tool>> = vec![
+        Box::new(Exec::new(workspace.path(), &config.tools.exec)),
+        Box::new(FileRead::new(guard.clone())),
+        Box::new(FileWrite::new(guard.clone())),
+        Box::new(FileEdit::new(guard.clone())),
+        Box::new(GlobSearch::new(workspace.path())),
+        Box::new(Grep::new(guard.clone())),
+    ];
+
+    #[cfg(not(feature = "mock-network"))]
+    tools.push(Box::new(
+        WebFetch::new(&config.tools.web_fetch).unwrap_or_else(|e| {
+            error!("Failed to initialize web_fetch: {e}");
+            std::process::exit(1);
+        }),
+    ));
+
+    Tools::new(tools)
 }
 
 async fn run_heartbeat<P: Provider>(
