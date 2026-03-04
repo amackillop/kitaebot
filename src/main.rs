@@ -21,7 +21,7 @@ use provider::Provider;
 #[cfg(feature = "mock-network")]
 use provider::StubProvider;
 use tools::path::PathGuard;
-use tools::{Exec, FileEdit, FileRead, FileWrite, Tools};
+use tools::{Exec, FileEdit, FileRead, FileWrite, GlobSearch, Tools};
 use tracing::{error, info};
 use workspace::Workspace;
 #[cfg(not(feature = "mock-network"))]
@@ -66,6 +66,7 @@ async fn main() {
         Box::new(FileRead::new(guard.clone())),
         Box::new(FileWrite::new(guard.clone())),
         Box::new(FileEdit::new(guard.clone())),
+        Box::new(GlobSearch::new(workspace.path())),
     ]);
 
     match std::env::args().nth(1).as_deref() {
