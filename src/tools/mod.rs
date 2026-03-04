@@ -7,6 +7,7 @@ mod file_edit;
 mod file_read;
 mod file_write;
 mod glob_search;
+mod grep;
 #[cfg(test)]
 mod mock;
 pub mod path;
@@ -16,6 +17,7 @@ pub use file_edit::FileEdit;
 pub use file_read::FileRead;
 pub use file_write::FileWrite;
 pub use glob_search::GlobSearch;
+pub use grep::Grep;
 #[cfg(test)]
 pub use mock::MockTool;
 

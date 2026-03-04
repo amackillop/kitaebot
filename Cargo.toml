@@ -36,6 +36,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "pro
 futures = "0.3"
 reqwest = { version = "0.13", features = ["json"] }
 glob = "0.3"
+grep = "0.4.1"
+ignore = "0.4"
 regex = "1"
 toml = "0.8"
 tracing = "0.1"
