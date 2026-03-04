@@ -8,6 +8,7 @@ use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tracing::debug;
 
 use super::Tool;
 use super::path::PathGuard;
@@ -62,6 +63,7 @@ impl Tool for FileEdit {
             }
 
             let resolved = self.guard.resolve(&args.path)?;
+            debug!(path = %args.path, "Editing file");
             let content = std::fs::read_to_string(&resolved)
                 .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
 

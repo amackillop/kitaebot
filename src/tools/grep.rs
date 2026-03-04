@@ -14,6 +14,7 @@ use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tracing::debug;
 
 use super::Tool;
 use super::path::PathGuard;
@@ -63,6 +64,8 @@ impl Tool for Grep {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+
+            debug!(pattern = %args.pattern, path = ?args.path, include = ?args.include, "Searching file contents");
 
             let search_dir = match &args.path {
                 Some(p) => self.guard.resolve(p)?,

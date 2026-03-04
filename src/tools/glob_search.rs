@@ -10,6 +10,7 @@ use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tracing::debug;
 
 use super::Tool;
 use crate::error::ToolError;
@@ -58,6 +59,8 @@ impl Tool for GlobSearch {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+
+            debug!(pattern = %args.pattern, "Searching files");
 
             if args.pattern.contains("../") || args.pattern.contains("..\\") {
                 return Err(ToolError::Blocked("path traversal in pattern".into()));

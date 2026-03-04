@@ -9,6 +9,7 @@ use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tracing::{debug, warn};
 
 use super::Tool;
 use super::path::PathGuard;
@@ -63,11 +64,13 @@ impl Tool for FileRead {
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
             let resolved = self.guard.resolve(&args.path)?;
+            debug!(path = %args.path, "Reading file");
 
             let meta = std::fs::metadata(&resolved)
                 .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
 
             if meta.len() > MAX_FILE_SIZE {
+                warn!(path = %args.path, size = meta.len(), "File too large");
                 return Err(ToolError::Blocked(format!(
                     "file too large: {} bytes (max {})",
                     meta.len(),

@@ -12,6 +12,7 @@ use reqwest::Client;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
+use tracing::{debug, warn};
 
 use super::Tool;
 use crate::config::WebSearchConfig;
@@ -68,6 +69,8 @@ impl Tool for WebSearch {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
+            debug!(query = %args.query, model = %self.model, "Searching web");
+
             let request = SearchRequest {
                 model: &self.model,
                 max_tokens: self.max_tokens,
@@ -92,6 +95,7 @@ impl Tool for WebSearch {
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
+                warn!(%status, "Search API error");
                 return Err(ToolError::ExecutionFailed(format!("HTTP {status}: {body}")));
             }
 

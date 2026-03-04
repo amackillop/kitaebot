@@ -12,6 +12,7 @@ use reqwest::Client;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::time::Duration;
+use tracing::{debug, warn};
 
 use super::Tool;
 use crate::config::WebFetchConfig;
@@ -62,6 +63,7 @@ impl Tool for WebFetch {
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
             validate_url(&args.url)?;
+            debug!(url = %args.url, "Fetching URL");
 
             let response = tokio::time::timeout(self.timeout, self.client.get(&args.url).send())
                 .await
@@ -70,6 +72,7 @@ impl Tool for WebFetch {
 
             let status = response.status();
             if !status.is_success() {
+                warn!(url = %args.url, %status, "Fetch failed");
                 return Err(ToolError::ExecutionFailed(format!("HTTP {status}")));
             }
 

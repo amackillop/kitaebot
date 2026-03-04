@@ -8,6 +8,7 @@ use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tracing::debug;
 
 use super::Tool;
 use super::path::PathGuard;
@@ -62,6 +63,7 @@ impl Tool for FileWrite {
             }
 
             let bytes = args.content.len();
+            debug!(path = %args.path, bytes, "Writing file");
             std::fs::write(&resolved, &args.content)
                 .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
 
