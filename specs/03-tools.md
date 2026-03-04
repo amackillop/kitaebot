@@ -16,20 +16,23 @@ Tools implement a `Tool` trait with async execution. Each tool is a struct that 
 
 ```rust
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
+    fn name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
     fn parameters(&self) -> serde_json::Value;
-    async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError>;
+    fn execute(&self, args: serde_json::Value)
+        -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>>;
 }
 
 pub struct Tools(Vec<Box<dyn Tool>>);
 ```
 
+Native `async fn` in traits is not dyn-compatible, so `execute` returns a pinned boxed future instead.
+
 The `Tools` struct uses `Vec` with linear scan for lookup. For small tool counts (<50), this outperforms `HashMap` due to cache locality and no hashing overhead.
 
 ### Shared Utilities
 
-- **`output::truncate_output`** — UTF-8 aware string truncation with byte count reporting. Used by `exec`, `grep`, and any tool producing large output.
+- **`truncate_output`** — UTF-8 aware string truncation with byte count reporting. Defined in `tools/mod.rs`. Used by `exec`, `grep`, `web_fetch`, and any tool producing large output.
 - **`PathGuard`** — Workspace-confined path resolution. Rejects null bytes, `../`, and absolute paths. Canonicalizes and verifies the result is under the workspace root. Provides `resolve()` for existing files and `resolve_new()` for files that don't exist yet. Used by all file tools.
 
 ## Tools
@@ -216,8 +219,11 @@ Search for a regex pattern in files within the workspace.
 #### Behavior
 
 1. Resolve directory via `PathGuard`
-2. Shell out to `rg -n --max-count 200` (fallback to `grep -rn -E`)
-3. Truncate output to configured limit
+2. Walk files using the `ignore` crate's `WalkBuilder` (respects `.gitignore`)
+3. Search each file with `grep-searcher` + `grep-regex` (ripgrep as a library)
+4. Accumulate up to 200 matches, truncate output
+
+No external binary required — uses the `grep` facade crate (v0.4) which bundles the same regex engine as `rg`.
 
 ---
 
@@ -272,6 +278,7 @@ Direct HTTP POST (not via `Provider` trait — avoids circular dependency). Owns
 |-------------|---------|------------|
 | Model | `perplexity/sonar` | `tools.web_search.model` |
 | Max tokens | 1024 | `tools.web_search.max_tokens` |
+| Timeout | 30 seconds | `tools.web_search.timeout_secs` |
 
 ## Error Handling
 

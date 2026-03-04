@@ -45,12 +45,20 @@ const DEFAULT_AGENTS: &str = "\
 You have access to:
 - `exec` — Run shell commands in the workspace
 - `file_read` — Read file contents with line numbers, offset, and limit
+- `file_write` — Write content to a file (creates parent dirs)
+- `file_edit` — Find-and-replace editing (old string must match exactly once)
+- `glob_search` — Find files matching a glob pattern
+- `grep` — Search file contents for a regex pattern
+- `web_fetch` — Fetch a URL and return its text content
+- `web_search` — Search the web via Perplexity and get a synthesized answer
 
 ## Guidelines
 
 - Explain what you're doing before taking action
 - Ask for clarification when the request is ambiguous
-- All file operations happen via shell commands
+- Prefer `file_read`/`file_write`/`file_edit` over shell commands for file operations
+- Use `grep` and `glob_search` to explore the codebase before making changes
+- Use `web_search` for current information beyond your training data
 
 ## Memory
 
