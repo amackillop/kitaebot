@@ -78,6 +78,7 @@ Both are independent processes sharing the workspace. No IPC — coordination vi
 | [11](11-safety.md) | Safety | Leak detection and output wrapping |
 | [12](12-context.md) | Context | Token budget and conversation windowing |
 | [13](13-credentials.md) | Credentials | Credential isolation and secret loading |
+| [14](14-memory.md) | Memory | Long-term recall across sessions and channels |
 
 ## Data Flow
 

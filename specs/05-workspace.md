@@ -80,14 +80,7 @@ The `memory/` directory is shared across all channels. Any channel can read or w
 
 ### Memory Search
 
-The agent searches memory files using `rg` via the exec tool. No custom search infrastructure needed.
-
-- `rg -l "query" memory/` — file discovery
-- `rg -C2 "query" memory/` — matching lines with context
-
-This is sufficient while memory is small (dozens of files). When memory grows to hundreds of files or queries need semantic understanding, graduate to FTS (SQLite FTS5) then hybrid search (FTS + embeddings via RRF).
-
-The agent's system prompt should mention that `memory/` is searchable and encourage using `rg` to find prior context before asking the user.
+See [spec 14 (Memory)](14-memory.md) for the full retrieval system. Storage lives in `memory/memory.db` (SQLite with FTS5). The original `memory/*.md` files are migrated on first run and retained as a read-only archive.
 
 ### Daily Logs
 
