@@ -5,6 +5,7 @@
 //! `Provider` trait — the provider abstraction is for the agent's main LLM,
 //! not for tool-internal API calls.
 
+use std::fmt::Write;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -104,11 +105,23 @@ impl Tool for WebSearch {
                 .await
                 .map_err(|e| ToolError::ExecutionFailed(format!("invalid response: {e}")))?;
 
-            body.choices
+            let mut answer = body
+                .choices
                 .into_iter()
                 .next()
                 .and_then(|c| c.message.content)
-                .ok_or_else(|| ToolError::ExecutionFailed("no content in search response".into()))
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed("no content in search response".into())
+                })?;
+
+            if !body.citations.is_empty() {
+                answer.push_str("\n\nSources:\n");
+                for (i, url) in body.citations.iter().enumerate() {
+                    let _ = writeln!(answer, "[{}] {}", i + 1, url);
+                }
+            }
+
+            Ok(answer)
         })
     }
 }
@@ -131,6 +144,8 @@ struct RequestMessage<'a> {
 #[derive(Deserialize)]
 struct SearchResponse {
     choices: Vec<Choice>,
+    #[serde(default)]
+    citations: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +193,26 @@ mod tests {
             response.choices[0].message.content.as_deref(),
             Some("Rust is a systems programming language.")
         );
+        assert!(response.citations.is_empty());
+    }
+
+    #[test]
+    fn response_with_citations() {
+        let json = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Rust is fast [1] and safe [2]."
+                }
+            }],
+            "citations": [
+                "https://www.rust-lang.org/",
+                "https://doc.rust-lang.org/book/"
+            ]
+        });
+        let response: SearchResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(response.citations.len(), 2);
+        assert_eq!(response.citations[0], "https://www.rust-lang.org/");
+        assert_eq!(response.citations[1], "https://doc.rust-lang.org/book/");
     }
 
     #[test]
