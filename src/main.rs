@@ -11,6 +11,7 @@ mod safety;
 mod sandbox;
 mod secrets;
 mod session;
+mod stats;
 mod telegram;
 mod tools;
 mod types;
@@ -43,6 +44,11 @@ async fn main() {
         error!("Failed to initialize workspace: {e}");
         std::process::exit(1);
     });
+
+    if std::env::args().nth(1).as_deref() == Some("stats") {
+        stats::run(workspace.path());
+        return;
+    }
 
     let config = Config::load(workspace.path()).unwrap_or_else(|e| {
         error!("Failed to load config: {e}");
@@ -141,6 +147,7 @@ async fn main() {
             eprintln!("  chat       Interactive conversation");
             eprintln!("  heartbeat  One-shot heartbeat cycle");
             eprintln!("  run        Start daemon (heartbeat loop)");
+            eprintln!("  stats      Show session tool usage statistics");
             std::process::exit(1);
         }
     }

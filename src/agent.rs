@@ -75,7 +75,8 @@ pub async fn run_turn<P: Provider>(
                 let futures: Vec<_> = calls.iter().map(|call| tools.execute(call)).collect();
                 let results = join_all(futures).await;
 
-                // Add results to message history (with safety checks)
+                // Add results to session in the same order as tool_calls.
+                // stats::analyze relies on this for positional correlation.
                 for (call, result) in calls.iter().zip(results) {
                     let content = match result {
                         Ok(output) => {
