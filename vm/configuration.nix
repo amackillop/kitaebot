@@ -26,6 +26,24 @@ let
   cfg = config.kitaebot;
   configFile = format.generate "config.toml" cfg.settings;
   toolPath = lib.makeBinPath cfg.tools;
+
+  # Interactive chat wrapper that drops privileges to the kitaebot user.
+  # Mirrors systemd's LoadCredential: reads secrets as root, copies them to a
+  # temporary directory owned by kitaebot, then drops privileges.
+  # Usage: kchat (from root SSH session)
+  kchat = pkgs.writeShellScriptBin "kchat" ''
+    CREDS=$(mktemp -d /run/kchat-creds.XXXXXX)
+    trap 'rm -rf "$CREDS"' EXIT
+    install -o kitaebot -g kitaebot -m 0400 \
+      ${cfg.secretsDir}/* "$CREDS"/
+    chown kitaebot:kitaebot "$CREDS"
+    ${pkgs.util-linux}/bin/runuser -u kitaebot -- \
+      env KITAEBOT_WORKSPACE=/var/lib/kitaebot \
+          CREDENTIALS_DIRECTORY="$CREDS" \
+          RUST_LOG=${cfg.logLevel} \
+          PATH=${toolPath} \
+      ${cfg.package}/bin/kitaebot chat
+  '';
 in
 {
   imports = [
@@ -205,6 +223,7 @@ in
 
     environment.systemPackages = [
       config.kitaebot.package
+      kchat
       pkgs.vim
       pkgs.git
       pkgs.curl
