@@ -17,6 +17,7 @@ use crate::context;
 use crate::lock::Lock;
 use crate::provider::Provider;
 use crate::session::Session;
+use crate::stats;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
 
@@ -33,6 +34,8 @@ pub enum Command<'a> {
     Context,
     /// `/compact` — force context compaction.
     Compact,
+    /// `/stats` — show session tool usage statistics.
+    Stats,
     /// Send a message to the agent.
     Message(&'a str),
     /// Unrecognized `/` command.
@@ -53,6 +56,8 @@ impl<'a> Command<'a> {
             Self::Context
         } else if trimmed == "/compact" {
             Self::Compact
+        } else if trimmed == "/stats" {
+            Self::Stats
         } else if trimmed.starts_with('/') {
             Self::Unknown(trimmed)
         } else {
@@ -147,6 +152,9 @@ pub async fn run<P: Provider>(
                     Ok(false) => println!("Nothing to compact.\n"),
                     Err(e) => error!("Compaction failed: {e}"),
                 }
+            }
+            Command::Stats => {
+                stats::run(workspace.path());
             }
             Command::Unknown(cmd) => {
                 println!("Unknown command: {cmd}\n");
@@ -244,6 +252,13 @@ mod tests {
         assert_eq!(Command::parse("/compact"), Command::Compact);
         assert_eq!(Command::parse("/compact\n"), Command::Compact);
         assert_eq!(Command::parse("  /compact  "), Command::Compact);
+    }
+
+    #[test]
+    fn parse_stats() {
+        assert_eq!(Command::parse("/stats"), Command::Stats);
+        assert_eq!(Command::parse("/stats\n"), Command::Stats);
+        assert_eq!(Command::parse("  /stats  "), Command::Stats);
     }
 
     #[test]

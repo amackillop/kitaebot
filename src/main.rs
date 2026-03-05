@@ -45,11 +45,6 @@ async fn main() {
         std::process::exit(1);
     });
 
-    if std::env::args().nth(1).as_deref() == Some("stats") {
-        stats::run(workspace.path());
-        return;
-    }
-
     let config = Config::load(workspace.path()).unwrap_or_else(|e| {
         error!("Failed to load config: {e}");
         std::process::exit(1);
@@ -147,7 +142,6 @@ async fn main() {
             eprintln!("  chat       Interactive conversation");
             eprintln!("  heartbeat  One-shot heartbeat cycle");
             eprintln!("  run        Start daemon (heartbeat loop)");
-            eprintln!("  stats      Show session tool usage statistics");
             std::process::exit(1);
         }
     }
