@@ -166,6 +166,22 @@ pub enum TelegramError {
     Session(String),
 }
 
+/// Sandbox application errors.
+///
+/// Not wired into the top-level `Error` enum — sandbox failures are
+/// handled at the call site in `main` via `warn!` (defense-in-depth,
+/// not fatal) and never propagated through the agent loop.
+#[derive(Debug, Error)]
+pub enum SandboxError {
+    /// Failed to configure or apply Landlock ruleset.
+    #[error("Landlock ruleset error: {0}")]
+    Ruleset(String),
+
+    /// Failed to open a path for Landlock rule.
+    #[error("Failed to open path {path}: {reason}")]
+    OpenPath { path: String, reason: String },
+}
+
 /// Session persistence errors.
 #[derive(Debug, Error)]
 pub enum SessionError {

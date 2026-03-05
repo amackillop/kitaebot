@@ -12,6 +12,7 @@ use crate::error::SecretError;
 ///
 /// `Debug` and `Display` both produce `[REDACTED]`. Use `.expose()` to
 /// access the inner value when you actually need it (e.g., HTTP headers).
+#[derive(Clone)]
 pub struct Secret(String);
 
 impl Secret {

@@ -8,6 +8,7 @@ mod lock;
 mod provider;
 mod repl;
 mod safety;
+mod sandbox;
 mod secrets;
 mod session;
 mod telegram;
@@ -22,12 +23,13 @@ use provider::Provider;
 use provider::StubProvider;
 use tools::path::PathGuard;
 use tools::{Exec, FileEdit, FileRead, FileWrite, GlobSearch, Grep, Tools};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use workspace::Workspace;
 #[cfg(not(feature = "mock-network"))]
 use {provider::OpenRouterProvider, secrets::load_secret, tools::WebFetch, tools::WebSearch};
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -47,19 +49,41 @@ async fn main() {
         std::process::exit(1);
     });
 
+    // Load all secrets before sandboxing. After enforcement, credential
+    // files are inaccessible — secrets exist only in memory.
+    #[cfg(not(feature = "mock-network"))]
+    let api_key = load_secret("openrouter-api-key").unwrap_or_else(|e| {
+        error!("Failed to load API key: {e}");
+        std::process::exit(1);
+    });
+    #[cfg(not(feature = "mock-network"))]
+    let telegram_token = if config.telegram.enabled {
+        Some(load_secret("telegram-bot-token").unwrap_or_else(|e| {
+            error!("Failed to load Telegram credentials: {e}");
+            std::process::exit(1);
+        }))
+    } else {
+        None
+    };
+
+    if let Err(e) = sandbox::apply(workspace.path()) {
+        warn!("Sandbox not applied: {e}");
+    }
+
+    // --- Everything below runs under Landlock confinement ---
+
     #[cfg(feature = "mock-network")]
     let provider = StubProvider;
 
     #[cfg(not(feature = "mock-network"))]
-    let provider = {
-        let api_key = load_secret("openrouter-api-key").unwrap_or_else(|e| {
-            error!("Failed to load API key: {e}");
-            std::process::exit(1);
-        });
-        OpenRouterProvider::new(api_key, &config.provider)
-    };
+    let provider = OpenRouterProvider::new(api_key.clone(), &config.provider);
 
-    let tools = build_tools(&workspace, &config);
+    let tools = build_tools(
+        &workspace,
+        &config,
+        #[cfg(not(feature = "mock-network"))]
+        api_key,
+    );
 
     match std::env::args().nth(1).as_deref() {
         Some("chat") => {
@@ -83,16 +107,12 @@ async fn main() {
             .await;
         }
         Some("run") => {
-            let telegram = if config.telegram.enabled {
-                Some(
-                    telegram::TelegramChannel::new(&config.telegram).unwrap_or_else(|e| {
-                        error!("Failed to load Telegram credentials: {e}");
-                        std::process::exit(1);
-                    }),
-                )
-            } else {
-                None
-            };
+            #[cfg(not(feature = "mock-network"))]
+            let telegram =
+                telegram_token.map(|t| telegram::TelegramChannel::new(t, &config.telegram));
+
+            #[cfg(feature = "mock-network")]
+            let telegram: Option<telegram::TelegramChannel> = None;
 
             info!(
                 interval_secs = config.heartbeat.interval_secs,
@@ -126,7 +146,11 @@ async fn main() {
     }
 }
 
-fn build_tools(workspace: &Workspace, config: &Config) -> Tools {
+fn build_tools(
+    workspace: &Workspace,
+    config: &Config,
+    #[cfg(not(feature = "mock-network"))] search_key: secrets::Secret,
+) -> Tools {
     let guard = PathGuard::new(workspace.path());
 
     #[allow(unused_mut)]
@@ -148,10 +172,6 @@ fn build_tools(workspace: &Workspace, config: &Config) -> Tools {
             }),
         ));
 
-        let search_key = load_secret("openrouter-api-key").unwrap_or_else(|e| {
-            error!("Failed to load API key for web_search: {e}");
-            std::process::exit(1);
-        });
         tools.push(Box::new(
             WebSearch::new(search_key, &config.tools.web_search).unwrap_or_else(|e| {
                 error!("Failed to initialize web_search: {e}");

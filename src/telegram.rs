@@ -14,7 +14,7 @@ use crate::agent;
 use crate::config::{ContextConfig, TelegramConfig};
 use crate::error::TelegramError;
 use crate::provider::Provider;
-use crate::secrets::{Secret, load_secret};
+use crate::secrets::Secret;
 use crate::session::Session;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
@@ -98,19 +98,19 @@ pub struct TelegramChannel {
 }
 
 impl TelegramChannel {
-    /// Build a channel from config, loading the bot token from credentials.
-    pub fn new(config: &TelegramConfig) -> Result<Self, crate::error::SecretError> {
-        let token = load_secret("telegram-bot-token")?;
+    /// Build a channel from a pre-loaded token.
+    #[cfg_attr(feature = "mock-network", allow(dead_code))]
+    pub fn new(token: Secret, config: &TelegramConfig) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.poll_timeout_secs + 10))
             .build()
             .expect("failed to build HTTP client");
-        Ok(Self {
+        Self {
             client,
             token,
             chat_id: config.chat_id,
             poll_timeout: config.poll_timeout_secs,
-        })
+        }
     }
 
     fn api_url(&self, method: &str) -> String {
