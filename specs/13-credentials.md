@@ -45,17 +45,18 @@ Startup fails hard on any variant. No fallback to env vars — that would defeat
 | 0 | NixOS VM boundary | Done (spec 09) |
 | 1 | Secrets as files, not env vars | Done (this spec) |
 | 2 | systemd service hardening | Done (spec 09) |
-| 3 | Process-level env scrubbing | Done (spec 03) |
-| 4 | Output scanning | Done (spec 11) |
+| 3 | Landlock filesystem confinement | Done (spec 15) |
+| 4 | Process-level env scrubbing | Done (spec 03) |
+| 5 | Output scanning | Done (spec 11) |
 
-No single layer is sufficient. All five together make credential exfiltration require escaping the VM.
+No single layer is sufficient. All six together make credential exfiltration require escaping the VM.
 
 ## Required Credentials
 
 | File | Purpose |
 |------|---------|
 | `openrouter-api-key` | LLM provider authentication |
-| `telegram-bot-token` | Telegram Bot API token (future) |
+| `telegram-bot-token` | Telegram Bot API token |
 | `telegram-chat-id` | Authorized Telegram chat ID (future) |
 
 ## Dev Workflow

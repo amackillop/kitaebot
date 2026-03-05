@@ -66,7 +66,7 @@ Commands are checked against deny patterns before execution:
 - `shutdown`, `reboot` — system power
 - Fork bomb pattern
 
-**Note**: These are defense-in-depth heuristics, not a sandbox. The VM is the real isolation.
+**Note**: These are defense-in-depth heuristics providing friendly error messages. The real filesystem boundary is the Landlock sandbox applied at startup (see [spec 15](15-sandbox.md)), which confines all child processes — including `sh -c` — to the workspace, `/nix/store`, `/tmp`, and read-only system paths.
 
 #### Environment Scrubbing
 
