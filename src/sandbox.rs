@@ -64,6 +64,15 @@ pub fn apply(workspace: &Path) -> Result<(), SandboxError> {
     let read_files = AccessFs::ReadFile | AccessFs::ReadDir;
     ruleset = try_add_path_rule(ruleset, Path::new("/etc"), read_files)?;
 
+    // /run/kitaebot/ — Unix socket bind + cleanup (RuntimeDirectory).
+    // More specific than the general /run rule below.
+    let socket_dir_access = AccessFs::MakeSock
+        | AccessFs::ReadFile
+        | AccessFs::WriteFile
+        | AccessFs::ReadDir
+        | AccessFs::RemoveFile;
+    ruleset = try_add_path_rule(ruleset, Path::new("/run/kitaebot"), socket_dir_access)?;
+
     // /run — read-only (systemd runtime state, resolv.conf stub).
     ruleset = try_add_path_rule(ruleset, Path::new("/run"), read_files)?;
 
