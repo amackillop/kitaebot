@@ -111,6 +111,12 @@ impl Workspace {
         self.0.join("sessions/telegram.json")
     }
 
+    /// Path to the Unix socket channel session file.
+    #[allow(unused)]
+    pub fn socket_session_path(&self) -> PathBuf {
+        self.0.join("sessions/socket.json")
+    }
+
     /// Path to the heartbeat task file.
     pub fn heartbeat_path(&self) -> PathBuf {
         self.0.join("HEARTBEAT.md")
@@ -260,6 +266,16 @@ mod tests {
         assert_eq!(
             ws.telegram_session_path(),
             dir.path().join("sessions/telegram.json")
+        );
+    }
+
+    #[test]
+    fn socket_session_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        assert_eq!(
+            ws.socket_session_path(),
+            dir.path().join("sessions/socket.json")
         );
     }
 
