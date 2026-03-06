@@ -32,7 +32,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 schemars = "0.8"
 thiserror = "2.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "process", "signal", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "process", "signal", "time"] }
 futures = "0.3"
 reqwest = { version = "0.13", features = ["json"] }
 glob = "0.3"

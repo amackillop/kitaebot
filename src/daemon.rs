@@ -1,16 +1,17 @@
-//! Long-running daemon that drives the heartbeat and Telegram loops.
+//! Long-running daemon that drives the heartbeat, Telegram, and socket loops.
 //!
-//! The daemon runs two concurrent loops — heartbeat ticks on a
-//! configurable interval, and the Telegram poller long-polls for
-//! incoming messages. Both are pinned futures inside a single
-//! `tokio::select!`, so they make progress concurrently without
-//! spawning tasks or requiring `Arc`.
+//! The daemon runs three concurrent loops — heartbeat ticks on a
+//! configurable interval, the Telegram poller long-polls for incoming
+//! messages, and the socket listener accepts Unix domain socket clients.
+//! All are pinned futures inside a single `tokio::select!`, so they
+//! make progress concurrently without spawning tasks or requiring `Arc`.
 //!
 //! The core loop ([`run_with_shutdown`]) is generic over its shutdown
 //! future so tests can substitute a simple `sleep` instead of real
 //! Unix signals.
 
 use std::future::Future;
+use std::path::Path;
 use std::time::Duration;
 
 use tokio::time::{MissedTickBehavior, interval};
@@ -19,6 +20,7 @@ use tracing::{error, info};
 use crate::config::ContextConfig;
 use crate::heartbeat;
 use crate::provider::Provider;
+use crate::socket;
 use crate::telegram::{self, TelegramChannel};
 use crate::tools::Tools;
 use crate::workspace::Workspace;
@@ -77,10 +79,17 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
         }
     };
 
+    let socket_path = Path::new(socket::SOCKET_PATH);
+    let socket_loop = socket::listen(socket_path, workspace, provider, tools, max_iterations, ctx);
+
     tokio::select! {
         () = heartbeat_loop => unreachable!("heartbeat loop never exits"),
         () = telegram_loop => unreachable!("telegram loop never exits"),
-        () = shutdown => info!("Shutdown signal received, exiting."),
+        () = socket_loop => unreachable!("socket loop never exits"),
+        () = shutdown => {
+            info!("Shutdown signal received, exiting.");
+            let _ = std::fs::remove_file(socket::SOCKET_PATH);
+        }
     }
 }
 

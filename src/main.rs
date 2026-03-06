@@ -12,6 +12,7 @@ mod safety;
 mod sandbox;
 mod secrets;
 mod session;
+mod socket;
 mod stats;
 mod telegram;
 mod tools;
