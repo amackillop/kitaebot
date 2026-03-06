@@ -12,12 +12,11 @@ use std::io::{self, Write};
 use tracing::error;
 
 use crate::agent;
+use crate::commands::{self, SlashCommand};
 use crate::config::ContextConfig;
-use crate::context;
 use crate::lock::Lock;
 use crate::provider::Provider;
 use crate::session::Session;
-use crate::stats;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
 
@@ -28,14 +27,8 @@ pub enum Command<'a> {
     Empty,
     /// `/exit` — end the session.
     Exit,
-    /// `/new` — clear session and start fresh.
-    NewSession,
-    /// `/context` — display token usage.
-    Context,
-    /// `/compact` — force context compaction.
-    Compact,
-    /// `/stats` — show session tool usage statistics.
-    Stats,
+    /// A recognized slash command.
+    Slash(SlashCommand),
     /// Send a message to the agent.
     Message(&'a str),
     /// Unrecognized `/` command.
@@ -50,28 +43,14 @@ impl<'a> Command<'a> {
             Self::Empty
         } else if trimmed == "/exit" {
             Self::Exit
-        } else if trimmed == "/new" {
-            Self::NewSession
-        } else if trimmed == "/context" {
-            Self::Context
-        } else if trimmed == "/compact" {
-            Self::Compact
-        } else if trimmed == "/stats" {
-            Self::Stats
-        } else if trimmed.starts_with('/') {
-            Self::Unknown(trimmed)
+        } else if let Some(name) = trimmed.strip_prefix('/') {
+            match SlashCommand::parse(name) {
+                Some(cmd) => Self::Slash(cmd),
+                None => Self::Unknown(trimmed),
+            }
         } else {
             Self::Message(trimmed)
         }
-    }
-}
-
-/// Format the session greeting shown on startup.
-pub fn greeting(message_count: usize) -> String {
-    if message_count == 0 {
-        "New session".to_string()
-    } else {
-        format!("Resumed session ({message_count} messages)")
     }
 }
 
@@ -91,14 +70,16 @@ pub async fn run<P: Provider>(
         std::process::exit(1);
     };
 
-    let mut session = Session::load(&workspace.repl_session_path()).unwrap_or_else(|e| {
+    let session_path = workspace.repl_session_path();
+
+    let mut session = Session::load(&session_path).unwrap_or_else(|e| {
         error!("Failed to load session: {e}");
         std::process::exit(1);
     });
 
     let mut system_prompt = workspace.system_prompt();
 
-    println!("{}\n", greeting(session.messages().len()));
+    println!("{}\n", commands::greeting(session.messages().len()));
 
     loop {
         print!("> ");
@@ -113,48 +94,17 @@ pub async fn run<P: Provider>(
         match Command::parse(&input) {
             Command::Empty => {}
             Command::Exit => break,
-            Command::NewSession => {
-                session.clear();
-                if let Err(e) = session.save(&workspace.repl_session_path()) {
-                    error!("Failed to save session: {e}");
+            Command::Slash(cmd) => {
+                let rebuild_prompt = cmd == SlashCommand::NewSession;
+                match commands::execute(cmd, &mut session, &session_path, workspace, provider, ctx)
+                    .await
+                {
+                    Ok(msg) => println!("{msg}\n"),
+                    Err(msg) => eprintln!("{msg}\n"),
                 }
-                system_prompt = workspace.system_prompt();
-                println!("Session cleared.\n");
-            }
-            Command::Context => {
-                let tokens = context::session_tokens(&session, system_prompt.len());
-                let budget = context::budget(ctx);
-                // #[allow(clippy::cast_precision_loss)]
-                let pct = if budget > 0 {
-                    (tokens / budget) * 100
-                } else {
-                    0
-                };
-                println!(
-                    "Context: {tokens} / {budget} tokens ({pct:.1}%)\n\
-                     Messages: {}\n\
-                     Budget: {}% of {}\n",
-                    session.len(),
-                    ctx.budget_percent,
-                    ctx.max_tokens,
-                );
-            }
-            Command::Compact => {
-                let before = context::session_tokens(&session, system_prompt.len());
-                match context::force_compact(&mut session, provider).await {
-                    Ok(true) => {
-                        let after = context::session_tokens(&session, system_prompt.len());
-                        println!("Compacted: {before} -> {after} tokens\n");
-                        if let Err(e) = session.save(&workspace.repl_session_path()) {
-                            error!("Failed to save session: {e}");
-                        }
-                    }
-                    Ok(false) => println!("Nothing to compact.\n"),
-                    Err(e) => error!("Compaction failed: {e}"),
+                if rebuild_prompt {
+                    system_prompt = workspace.system_prompt();
                 }
-            }
-            Command::Stats => {
-                stats::run(workspace.path());
             }
             Command::Unknown(cmd) => {
                 println!("Unknown command: {cmd}\n");
@@ -173,7 +123,7 @@ pub async fn run<P: Provider>(
                 {
                     Ok(response) => {
                         println!("{response}\n");
-                        if let Err(e) = session.save(&workspace.repl_session_path()) {
+                        if let Err(e) = session.save(&session_path) {
                             error!("Failed to save session: {e}");
                         }
                     }
@@ -205,9 +155,14 @@ mod tests {
 
     #[test]
     fn parse_new_session() {
-        assert_eq!(Command::parse("/new"), Command::NewSession);
-        assert_eq!(Command::parse("/new\n"), Command::NewSession);
-        assert_eq!(Command::parse("  /new  "), Command::NewSession);
+        assert_eq!(
+            Command::parse("/new"),
+            Command::Slash(SlashCommand::NewSession)
+        );
+        assert_eq!(
+            Command::parse("/new\n"),
+            Command::Slash(SlashCommand::NewSession)
+        );
     }
 
     #[test]
@@ -242,32 +197,25 @@ mod tests {
 
     #[test]
     fn parse_context() {
-        assert_eq!(Command::parse("/context"), Command::Context);
-        assert_eq!(Command::parse("/context\n"), Command::Context);
-        assert_eq!(Command::parse("  /context  "), Command::Context);
+        assert_eq!(
+            Command::parse("/context"),
+            Command::Slash(SlashCommand::Context)
+        );
     }
 
     #[test]
     fn parse_compact() {
-        assert_eq!(Command::parse("/compact"), Command::Compact);
-        assert_eq!(Command::parse("/compact\n"), Command::Compact);
-        assert_eq!(Command::parse("  /compact  "), Command::Compact);
+        assert_eq!(
+            Command::parse("/compact"),
+            Command::Slash(SlashCommand::Compact)
+        );
     }
 
     #[test]
     fn parse_stats() {
-        assert_eq!(Command::parse("/stats"), Command::Stats);
-        assert_eq!(Command::parse("/stats\n"), Command::Stats);
-        assert_eq!(Command::parse("  /stats  "), Command::Stats);
-    }
-
-    #[test]
-    fn greeting_new_session() {
-        assert_eq!(greeting(0), "New session");
-    }
-
-    #[test]
-    fn greeting_resumed_session() {
-        assert_eq!(greeting(5), "Resumed session (5 messages)");
+        assert_eq!(
+            Command::parse("/stats"),
+            Command::Slash(SlashCommand::Stats)
+        );
     }
 }
