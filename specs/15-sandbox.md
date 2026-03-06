@@ -7,7 +7,7 @@ Kernel-enforced filesystem confinement via Linux Landlock LSM. Applied at proces
 ## Why Landlock?
 
 1. **Self-applied, unprivileged** — No root, no external dependencies, no container runtime
-2. **Complements systemd** — Also covers the `kchat` path which bypasses systemd sandboxing
+2. **Complements systemd** — Covers paths that bypass systemd sandboxing
 3. **Graceful degradation** — Falls back to warning on unsupported kernels
 4. **One-shot** — Applied at startup, cannot be removed or weakened
 
@@ -20,6 +20,7 @@ Kernel-enforced filesystem confinement via Linux Landlock LSM. Applied at proces
 | `CREDENTIALS_DIRECTORY` | Read-only files              |
 | `/tmp`                  | Full read-write              |
 | `/etc`, `/run`          | Read-only (resolv.conf, CAs) |
+| `/run/kitaebot/`        | Socket (bind, read, write, unlink) |
 | Everything else         | Denied                       |
 
 NixOS note: `/usr` and `/bin` don't exist. All binaries live in `/nix/store`. `/etc` is a symlink farm into `/nix/store`.

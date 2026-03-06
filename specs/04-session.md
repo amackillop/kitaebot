@@ -10,7 +10,8 @@ Each channel has its own session file under `sessions/`:
 
 ```
 sessions/
-├── telegram.json      # Primary communication channel
+├── telegram.json      # Telegram channel
+├── socket.json        # Unix socket channel
 ├── heartbeat.json     # Periodic awareness checks
 └── repl.json          # Local debug/testing
 ```
@@ -94,7 +95,7 @@ Writes use atomic rename to prevent corruption: write to `sessions/<channel>.jso
 
 | Command | Action | Scope |
 |---------|--------|-------|
-| `/new` | Clear session, start fresh | REPL only |
+| `/new` | Clear session, start fresh | REPL and socket |
 
 ## MVP Simplifications
 

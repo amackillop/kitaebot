@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A channel is a frontend that translates external messages into agent turns and delivers responses back. Telegram is the primary channel. The REPL (`kitaebot chat`) is a local debug channel.
+A channel is a frontend that translates external messages into agent turns and delivers responses back. Telegram and the Unix socket are the two external channels. The REPL (`kitaebot chat`) is a local debug channel.
 
 ## Why Channels?
 
@@ -10,52 +10,53 @@ The agent core (provider, tools, session, workspace) is interface-agnostic. It t
 
 Separating channels from the core means:
 
-1. **Multiple interfaces** — Telegram, Discord, Matrix, REPL — all drive the same agent
+1. **Multiple interfaces** — Telegram, Unix socket, REPL — all drive the same agent
 2. **Shared memory, isolated conversations** — Each channel has its own session but reads/writes the same workspace and long-term memory
 3. **Independent lifecycles** — Adding a channel doesn't change the agent loop, provider, or tools
 
 ## Architecture
 
 ```
-              ┌─────────────────────────────┐
-              │        kitaebot run          │
-              │                             │
-              │  ┌─────────┐  ┌───────────┐ │
-              │  │Telegram │  │ Heartbeat │ │
-              │  │ poller  │  │  timer    │ │
-              │  └────┬────┘  └─────┬─────┘ │
-              │       │             │       │
-              │       ▼             ▼       │
-              │  ┌──────────────────────┐   │
-              │  │    agent::run_turn() │   │
-              │  └──────────┬───────────┘   │
-              │             │               │
-              │  ┌──────────▼───────────┐   │
-              │  │ Provider / Tools     │   │
-              │  └──────────────────────┘   │
-              └─────────────────────────────┘
+              ┌──────────────────────────────────────────┐
+              │             kitaebot run  (daemon)       │
+              │                                          │
+              │  ┌──────────┐ ┌──────────┐ ┌───────────┐ │
+              │  │ Telegram │ │  Socket  │ │ Heartbeat │ │
+              │  │  poller  │ │ listener │ │   timer   │ │
+              │  └─────┬────┘ └─────┬────┘ └─────┬─────┘ │
+              │        │            │            │       │
+              │        ▼            ▼            ▼       │
+              │  ┌──────────────────────────────────┐    │
+              │  │         agent::run_turn()        │    │
+              │  └───────────────┬──────────────────┘    │
+              │                  │                       │
+              │   ┌──────────────▼───────────────┐       │
+              │   │      Provider / Tools        │       │
+              │   └──────────────────────────────┘       │
+              └──────────────────────────────────────────┘
 
-              ┌─────────────────────────────┐
-              │       kitaebot chat          │
-              │                             │
-              │  ┌─────────┐                │
-              │  │  REPL   │                │
-              │  └────┬────┘                │
-              │       │                     │
-              │       ▼                     │
-              │  ┌──────────────────────┐   │
-              │  │    agent::run_turn() │   │
-              │  └──────────┬───────────┘   │
-              │             │               │
-              │  ┌──────────▼───────────┐   │
-              │  │ Provider / Tools     │   │
-              │  └──────────────────────┘   │
-              └─────────────────────────────┘
+              ┌─────────────────────────────────┐
+              │       kitaebot chat             │
+              │                                 │
+              │  ┌─────────┐                    │
+              │  │  REPL   │                    │
+              │  └────┬────┘                    │
+              │       │                         │
+              │       ▼                         │
+              │  ┌──────────────────────┐       │
+              │  │    agent::run_turn() │       │
+              │  └──────────┬───────────┘       │
+              │             │                   │
+              │  ┌──────────▼───────────┐       │
+              │  │ Provider / Tools     │       │
+              │  └──────────────────────┘       │
+              └─────────────────────────────────┘
 
 Shared:
   ~/.local/share/kitaebot/
   ├── sessions/
   │   ├── telegram.json      # Telegram channel session
+  │   ├── socket.json        # Unix socket channel session
   │   ├── heartbeat.json     # Heartbeat session
   │   └── repl.json          # REPL session
   └── memory/                # Long-term memory (all channels)
@@ -122,20 +123,85 @@ The bot should only respond to authorized users. MVP: a single allowed `chat_id`
 TELEGRAM_CHAT_ID=123456789
 ```
 
+## Socket Channel
+
+A Unix domain socket at `/run/kitaebot/chat.sock` providing an interactive
+chat channel from the host machine. Telegram is for the phone; the socket
+is for the computer.
+
+### Protocol
+
+Newline-delimited JSON (NDJSON). One JSON object per `\n`-terminated line.
+
+#### Client → Daemon
+
+| Type      | Fields           | Behavior               |
+|-----------|------------------|------------------------|
+| `message` | `content: String`| Send to agent          |
+| `command` | `name: String`   | Execute slash command  |
+
+Unknown types or command names → error response. Connection stays open.
+
+#### Daemon → Client
+
+| Type             | When                              |
+|------------------|-----------------------------------|
+| `greeting`       | Immediately on connect            |
+| `response`       | Agent turn completed              |
+| `command_result` | Slash command completed           |
+| `error`          | Invalid request or agent failure  |
+
+All responses carry a `content: String` field. Embedded newlines are
+JSON-escaped (`\n` in the string, not literal on the wire).
+
+### Session
+
+Persistent at `sessions/socket.json`. Same lifecycle as Telegram:
+loaded per-message, saved after each turn, cleared via `/new`.
+
+### Concurrency
+
+Single client at a time. A second connection receives an error and is
+closed immediately.
+
+### Connection Lifecycle
+
+1. Client connects → daemon rejects if another client is connected
+2. Daemon sends `greeting`
+3. Client sends messages/commands, daemon responds
+4. Client disconnects (EOF) → daemon resumes accepting
+
+No keepalives, no timeouts.
+
+### Client Binary
+
+`kchat <socket-path>` — a dumb REPL that wraps stdin lines into the
+NDJSON protocol and prints response `content`. Lines starting with `/`
+are sent as commands; everything else as messages.
+
+### Error Handling
+
+| Error                       | Behavior                               |
+|-----------------------------|----------------------------------------|
+| Socket bind fails           | Fatal — exit                           |
+| Accept fails                | Log, continue accepting                |
+| Invalid JSON from client    | Error response, keep connection        |
+| Agent turn fails            | Error response, keep connection        |
+| Session load/save fails     | Log, error/response respectively       |
+| Client disconnects mid-turn | Complete turn, save session, discard response |
+
 ## Channel as Pattern, Not Trait
 
 Each channel follows the same shape:
 
-1. Wait for input (poll Telegram, read stdin, timer tick)
+1. Wait for input (poll Telegram, accept on socket, read stdin, timer tick)
 2. Acquire lock (if needed — only when multiple OS processes can collide)
 3. Load per-channel session
 4. Call `run_turn()` with the input as `Message::User`
-5. Deliver the response (send Telegram message, print to stdout, write to HISTORY.md)
+5. Deliver the response (send Telegram message, write to socket, print to stdout, write to HISTORY.md)
 6. Save session
 
-There is no `Channel` trait. Each channel module implements this pattern directly. The specifics vary enough (chat IDs, message threading, media types, delivery confirmation) that a shared trait would be either too thin to enforce anything useful or too leaky to accommodate real differences.
-
-Extract the trait when the second channel arrives and the common shape is concrete, not before.
+There is no `Channel` trait. Each channel module implements this pattern directly. The specifics vary enough (HTTP polling vs NDJSON stream vs stdio) that a shared trait would be either too thin to enforce anything useful or too leaky to accommodate real differences.
 
 ## Per-Channel Locking
 
@@ -147,6 +213,8 @@ Lock files prevent concurrent access where multiple OS processes could collide:
 | `locks/heartbeat.lock` | Heartbeat invocation (`kitaebot heartbeat` / systemd timer) |
 
 Telegram needs no lock — the poller is a single sequential loop inside the daemon process. The loop itself serializes message processing. Messages arriving during a turn are queued by Telegram's `getUpdates` offset mechanism and picked up on the next poll.
+
+The socket channel needs no lock — it enforces single-client at the listener level.
 
 Different channels can run turns concurrently — the provider is stateless (full context sent each call) and sessions are isolated.
 
@@ -172,11 +240,10 @@ Not in scope now, but the pattern accommodates:
 
 Each would be a new module under `src/channels/`, following the same pattern.
 
-## MVP Simplifications
+## Simplifications
 
-1. **Telegram only** — Single external channel
-2. **Text only** — No images, documents, or media
-3. **Single user** — One authorized chat_id
-4. **No message queuing** — Process one message at a time, Telegram buffers the rest
-5. **No typing indicators** — Agent appears offline until response is ready
-6. **No message splitting** — Long responses sent as a single message (Telegram's 4096 char limit may need handling later)
+1. **Text only** — No images, documents, or media
+2. **Single user** — One authorized Telegram chat_id; single socket client
+3. **No message queuing** — Process one message at a time, Telegram buffers the rest
+4. **No typing indicators** — Agent appears offline until response is ready
+5. **No message splitting** — Long responses sent as a single message (Telegram's 4096 char limit may need handling later)

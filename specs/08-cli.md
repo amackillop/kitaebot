@@ -9,7 +9,7 @@ The `kitaebot` CLI is the user-facing entry point. A single binary with subcomma
 1. **Simple deployment** — One artifact to build, ship, and manage
 2. **Shared code** — Both modes use the same agent core, provider, and tools
 3. **No IPC** — Daemon and REPL are independent processes, coordinated via file locks
-4. **No protocol** — No unix socket, no gRPC, no client/server split
+4. **Minimal protocol** — The daemon exposes a Unix socket for the `kchat` client; no gRPC, no REST
 
 ## Subcommands
 
@@ -17,7 +17,7 @@ The `kitaebot` CLI is the user-facing entry point. A single binary with subcomma
 $ kitaebot <command>
 
 Commands:
-  run        Start the daemon (Telegram poller + heartbeat timer)
+  run        Start the daemon (Telegram poller + socket listener + heartbeat timer)
   chat       Interactive REPL (debug/backup interface)
 ```
 
@@ -32,7 +32,8 @@ $ kitaebot run
 Long-lived process that runs until signaled (SIGTERM/SIGINT). Spawns two async tasks on the tokio runtime:
 
 1. **Telegram poller** — Long-polls `getUpdates`, processes messages, sends responses
-2. **Heartbeat timer** — Fires every 30 minutes, runs awareness check
+2. **Socket listener** — Accepts connections on `/run/kitaebot/chat.sock`, NDJSON protocol
+3. **Heartbeat timer** — Fires every 30 minutes, runs awareness check
 
 Both tasks share the provider and tools instances. Each acquires its own channel lock before calling `run_turn()`.
 
@@ -66,7 +67,7 @@ Your workspace contains:
 > /exit
 ```
 
-The REPL is a debug and backup interface. The primary communication channel is Telegram (see [10-channels.md](10-channels.md)).
+The REPL is a debug and backup interface. The primary communication channels are Telegram and the Unix socket (see [10-channels.md](10-channels.md)).
 
 On resume:
 
