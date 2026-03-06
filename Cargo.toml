@@ -24,6 +24,14 @@ must_use_candidate = "allow"
 # Cargo exceptions (transitive deps outside our control)
 multiple_crate_versions = "allow"
 
+[[bin]]
+name = "kitaebot"
+path = "src/main.rs"
+
+[[bin]]
+name = "kchat"
+path = "src/bin/kchat.rs"
+
 [features]
 mock-network = []
 
