@@ -22,7 +22,7 @@ const ABI_VERSION: ABI = ABI::V5;
 ///
 /// Returns `Ok(())` on success or if Landlock is unsupported (best-effort).
 /// Returns `Err` only on unexpected failures (e.g. bad file descriptors).
-pub fn apply(workspace: &Path) -> Result<(), SandboxError> {
+pub fn apply(workspace: &Path, socket_path: &Path) -> Result<(), SandboxError> {
     let abi = ABI_VERSION;
     let all = AccessFs::from_all(abi);
     let read_only = AccessFs::from_read(abi);
@@ -64,14 +64,16 @@ pub fn apply(workspace: &Path) -> Result<(), SandboxError> {
     let read_files = AccessFs::ReadFile | AccessFs::ReadDir;
     ruleset = try_add_path_rule(ruleset, Path::new("/etc"), read_files)?;
 
-    // /run/kitaebot/ — Unix socket bind + cleanup (RuntimeDirectory).
-    // More specific than the general /run rule below.
+    // Socket directory — bind + cleanup. Derived from configured socket path
+    // so custom paths work. More specific than the general /run rule below.
     let socket_dir_access = AccessFs::MakeSock
         | AccessFs::ReadFile
         | AccessFs::WriteFile
         | AccessFs::ReadDir
         | AccessFs::RemoveFile;
-    ruleset = try_add_path_rule(ruleset, Path::new("/run/kitaebot"), socket_dir_access)?;
+    if let Some(socket_dir) = socket_path.parent() {
+        ruleset = try_add_path_rule(ruleset, socket_dir, socket_dir_access)?;
+    }
 
     // /run — read-only (systemd runtime state, resolv.conf stub).
     ruleset = try_add_path_rule(ruleset, Path::new("/run"), read_files)?;

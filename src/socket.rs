@@ -22,9 +22,6 @@ use crate::session::Session;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
 
-/// Default socket path (created by systemd `RuntimeDirectory=kitaebot`).
-pub const SOCKET_PATH: &str = "/run/kitaebot/chat.sock";
-
 // ── Protocol types ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

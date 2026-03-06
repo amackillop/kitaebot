@@ -26,6 +26,7 @@ use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// Production entry point — runs until SIGINT or SIGTERM.
+#[allow(clippy::too_many_arguments)]
 pub async fn run<P: Provider>(
     workspace: &Workspace,
     provider: &P,
@@ -33,6 +34,7 @@ pub async fn run<P: Provider>(
     max_iterations: usize,
     interval_secs: u64,
     telegram: Option<&TelegramChannel>,
+    socket_path: &Path,
     ctx: &ContextConfig,
 ) {
     run_with_shutdown(
@@ -42,6 +44,7 @@ pub async fn run<P: Provider>(
         max_iterations,
         interval_secs,
         telegram,
+        socket_path,
         ctx,
         shutdown_signal(),
     )
@@ -57,6 +60,7 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
     max_iterations: usize,
     interval_secs: u64,
     telegram: Option<&TelegramChannel>,
+    socket_path: &Path,
     ctx: &ContextConfig,
     shutdown: S,
 ) {
@@ -79,7 +83,6 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
         }
     };
 
-    let socket_path = Path::new(socket::SOCKET_PATH);
     let socket_loop = socket::listen(socket_path, workspace, provider, tools, max_iterations, ctx);
 
     tokio::select! {
@@ -88,7 +91,7 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
         () = socket_loop => unreachable!("socket loop never exits"),
         () = shutdown => {
             info!("Shutdown signal received, exiting.");
-            let _ = std::fs::remove_file(socket::SOCKET_PATH);
+            let _ = std::fs::remove_file(socket_path);
         }
     }
 }
@@ -143,9 +146,17 @@ mod tests {
         (dir, ws)
     }
 
+    /// Socket path in a temp dir — avoids collisions and `/run` dependency.
+    fn sock_path() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sock");
+        (dir, path)
+    }
+
     #[tokio::test]
     async fn fires_immediately_then_shuts_down() {
         let (_dir, ws) = workspace();
+        let (_sock_dir, sock_path) = sock_path();
         // No HEARTBEAT.md → skipped, but proves the tick fired.
         let provider = MockProvider::new(vec![]);
 
@@ -156,6 +167,7 @@ mod tests {
             1,
             3600, // large interval — only the immediate first tick matters
             None,
+            &sock_path,
             &ContextConfig::default(),
             tokio::time::sleep(Duration::from_millis(50)),
         )
@@ -168,6 +180,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_cycles_with_short_interval() {
         let (_dir, ws) = workspace();
+        let (_sock_dir, sock_path) = sock_path();
         std::fs::write(ws.heartbeat_path(), "- [ ] task\n").unwrap();
 
         // Over-provision: we expect ~3 ticks but provide enough headroom.
@@ -180,6 +193,7 @@ mod tests {
             1,
             1, // 1-second interval
             None,
+            &sock_path,
             &ContextConfig::default(),
             async {
                 // Let 3 ticks fire: immediate + 2 more.
@@ -198,6 +212,7 @@ mod tests {
     #[tokio::test]
     async fn error_does_not_crash_loop() {
         let (_dir, ws) = workspace();
+        let (_sock_dir, sock_path) = sock_path();
         std::fs::write(ws.heartbeat_path(), "- [ ] task\n").unwrap();
 
         // Provider returns an error — loop should survive.
@@ -210,6 +225,7 @@ mod tests {
             1,
             3600,
             None,
+            &sock_path,
             &ContextConfig::default(),
             tokio::time::sleep(Duration::from_millis(50)),
         )

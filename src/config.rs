@@ -25,6 +25,8 @@ pub struct Config {
     #[serde(default)]
     pub telegram: TelegramConfig,
     #[serde(default)]
+    pub socket: SocketConfig,
+    #[serde(default)]
     pub context: ContextConfig,
 }
 
@@ -96,6 +98,14 @@ pub struct TelegramConfig {
     pub chat_id: i64,
     /// Long-poll timeout in seconds sent to `getUpdates`.
     pub poll_timeout_secs: u64,
+}
+
+/// Unix domain socket channel settings.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SocketConfig {
+    /// Path to the Unix domain socket.
+    pub path: String,
 }
 
 /// Context window management settings.
@@ -177,6 +187,14 @@ impl Default for TelegramConfig {
             enabled: false,
             chat_id: 0,
             poll_timeout_secs: 30,
+        }
+    }
+}
+
+impl Default for SocketConfig {
+    fn default() -> Self {
+        Self {
+            path: "/run/kitaebot/chat.sock".to_string(),
         }
     }
 }

@@ -69,7 +69,9 @@ async fn main() {
         None
     };
 
-    if let Err(e) = sandbox::apply(workspace.path()) {
+    let socket_path = std::path::Path::new(&config.socket.path);
+
+    if let Err(e) = sandbox::apply(workspace.path(), socket_path) {
         warn!("Sandbox not applied: {e}");
     }
 
@@ -129,6 +131,7 @@ async fn main() {
                 config.agent.max_iterations,
                 config.heartbeat.interval_secs,
                 telegram.as_ref(),
+                socket_path,
                 &config.context,
             )
             .await;
