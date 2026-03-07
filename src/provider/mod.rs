@@ -5,12 +5,10 @@
 
 #[cfg(test)]
 mod mock;
-#[cfg(not(feature = "mock-network"))]
 mod openrouter;
 
 #[cfg(test)]
 pub use mock::MockProvider;
-#[cfg(not(feature = "mock-network"))]
 pub use openrouter::OpenRouterProvider;
 
 use crate::error::ProviderError;
@@ -34,25 +32,4 @@ pub trait Provider: Send + Sync {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<Response, ProviderError>;
-}
-
-/// Stub provider for testing.
-///
-/// Returns a fixed response without making any API calls.
-/// Used for testing the agent loop before implementing the real `OpenRouter` client.
-#[cfg(feature = "mock-network")]
-pub struct StubProvider;
-
-#[cfg(feature = "mock-network")]
-impl Provider for StubProvider {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-    ) -> Result<Response, ProviderError> {
-        Ok(Response::Text(
-            "This is a stub response. Implement OpenRouter provider to get real responses."
-                .to_string(),
-        ))
-    }
 }

@@ -1,15 +1,12 @@
 //! Web search tool.
 //!
 //! Searches the web via Perplexity (routed through `OpenRouter`) and returns
-//! a synthesized answer. Direct HTTP POST rather than going through the
-//! `Provider` trait — the provider abstraction is for the agent's main LLM,
-//! not for tool-internal API calls.
+//! a synthesized answer.
 
 use std::fmt::Write;
 use std::future::Future;
 use std::pin::Pin;
 
-use reqwest::Client;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
@@ -17,8 +14,8 @@ use tracing::{debug, warn};
 
 use super::Tool;
 use crate::config::WebSearchConfig;
-use crate::error::ToolError;
-use crate::secrets::Secret;
+use crate::error::{ProviderError, ToolError};
+use crate::openrouter::{CompletionsClient, OpenRouterClient};
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -28,24 +25,20 @@ struct Args {
 
 /// Tool that searches the web via Perplexity on `OpenRouter`.
 pub struct WebSearch {
-    client: Client,
-    api_key: Secret,
+    client: OpenRouterClient,
     model: String,
     max_tokens: u32,
     timeout: Duration,
 }
 
 impl WebSearch {
-    const ENDPOINT: &'static str = "https://openrouter.ai/api/v1/chat/completions";
-
-    pub fn new(api_key: Secret, config: &WebSearchConfig) -> Result<Self, reqwest::Error> {
-        Ok(Self {
-            client: Client::builder().build()?,
-            api_key,
+    pub fn new(client: OpenRouterClient, config: &WebSearchConfig) -> Self {
+        Self {
+            client,
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             timeout: Duration::from_secs(config.timeout_secs),
-        })
+        }
     }
 }
 
@@ -81,31 +74,27 @@ impl Tool for WebSearch {
                 }],
             };
 
-            let response = tokio::time::timeout(
-                self.timeout,
-                self.client
-                    .post(Self::ENDPOINT)
-                    .header("Authorization", format!("Bearer {}", self.api_key.expose()))
-                    .json(&request)
-                    .send(),
-            )
-            .await
-            .map_err(|_| ToolError::Timeout)?
-            .map_err(|e| ToolError::ExecutionFailed(format!("search request failed: {e}")))?;
+            let response =
+                tokio::time::timeout(self.timeout, self.client.chat_completions(&request))
+                    .await
+                    .map_err(|_| ToolError::Timeout)?
+                    .map_err(|e| match e {
+                        ProviderError::Authentication => {
+                            ToolError::ExecutionFailed("authentication failed".into())
+                        }
+                        ProviderError::RateLimited => {
+                            ToolError::ExecutionFailed("rate limited".into())
+                        }
+                        ProviderError::InvalidResponse(msg) => {
+                            ToolError::ExecutionFailed(format!("invalid response: {msg}"))
+                        }
+                        ProviderError::Network(msg) => {
+                            warn!("Search API error: {msg}");
+                            ToolError::ExecutionFailed(format!("search request failed: {msg}"))
+                        }
+                    })?;
 
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                warn!(%status, "Search API error");
-                return Err(ToolError::ExecutionFailed(format!("HTTP {status}: {body}")));
-            }
-
-            let body: SearchResponse = response
-                .json()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed(format!("invalid response: {e}")))?;
-
-            let mut answer = body
+            let mut answer = response
                 .choices
                 .into_iter()
                 .next()
@@ -114,9 +103,9 @@ impl Tool for WebSearch {
                     ToolError::ExecutionFailed("no content in search response".into())
                 })?;
 
-            if !body.citations.is_empty() {
+            if !response.citations.is_empty() {
                 answer.push_str("\n\nSources:\n");
-                for (i, url) in body.citations.iter().enumerate() {
+                for (i, url) in response.citations.iter().enumerate() {
                     let _ = writeln!(answer, "[{}] {}", i + 1, url);
                 }
             }
@@ -126,7 +115,7 @@ impl Tool for WebSearch {
     }
 }
 
-// --- Wire format (private) ---
+// --- Wire format (request only — response types are in openrouter.rs) ---
 
 #[derive(Serialize)]
 struct SearchRequest<'a> {
@@ -141,26 +130,10 @@ struct RequestMessage<'a> {
     content: &'a str,
 }
 
-#[derive(Deserialize)]
-struct SearchResponse {
-    choices: Vec<Choice>,
-    #[serde(default)]
-    citations: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: ResponseMessage,
-}
-
-#[derive(Deserialize)]
-struct ResponseMessage {
-    content: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::openrouter::ChatResponse;
 
     #[test]
     fn request_serialization() {
@@ -188,7 +161,7 @@ mod tests {
                 }
             }]
         });
-        let response: SearchResponse = serde_json::from_value(json).unwrap();
+        let response: ChatResponse = serde_json::from_value(json).unwrap();
         assert_eq!(
             response.choices[0].message.content.as_deref(),
             Some("Rust is a systems programming language.")
@@ -209,7 +182,7 @@ mod tests {
                 "https://doc.rust-lang.org/book/"
             ]
         });
-        let response: SearchResponse = serde_json::from_value(json).unwrap();
+        let response: ChatResponse = serde_json::from_value(json).unwrap();
         assert_eq!(response.citations.len(), 2);
         assert_eq!(response.citations[0], "https://www.rust-lang.org/");
         assert_eq!(response.citations[1], "https://doc.rust-lang.org/book/");
@@ -218,7 +191,7 @@ mod tests {
     #[test]
     fn response_empty_choices() {
         let json = serde_json::json!({"choices": []});
-        let response: SearchResponse = serde_json::from_value(json).unwrap();
+        let response: ChatResponse = serde_json::from_value(json).unwrap();
         assert!(response.choices.is_empty());
     }
 
@@ -227,7 +200,7 @@ mod tests {
         let json = serde_json::json!({
             "choices": [{"message": {"content": null}}]
         });
-        let response: SearchResponse = serde_json::from_value(json).unwrap();
+        let response: ChatResponse = serde_json::from_value(json).unwrap();
         assert!(response.choices[0].message.content.is_none());
     }
 }

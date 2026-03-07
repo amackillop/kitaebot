@@ -8,6 +8,7 @@ mod dispatch;
 mod error;
 mod heartbeat;
 mod lock;
+mod openrouter;
 mod provider;
 mod safety;
 mod sandbox;
@@ -23,15 +24,14 @@ mod workspace;
 use agent::TurnConfig;
 use config::Config;
 use heartbeat::Outcome;
-use provider::Provider;
-#[cfg(feature = "mock-network")]
-use provider::StubProvider;
+use openrouter::OpenRouterClient;
+use provider::{OpenRouterProvider, Provider};
 use tools::path::PathGuard;
 use tools::{Exec, FileEdit, FileRead, FileWrite, GlobSearch, Grep, Tools};
 use tracing::{error, info, warn};
 use workspace::Workspace;
 #[cfg(not(feature = "mock-network"))]
-use {provider::OpenRouterProvider, secrets::load_secret, tools::WebFetch, tools::WebSearch};
+use {secrets::load_secret, tools::WebFetch, tools::WebSearch};
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
@@ -79,17 +79,18 @@ async fn main() {
 
     // --- Everything below runs under Landlock confinement ---
 
-    #[cfg(feature = "mock-network")]
-    let provider = StubProvider;
-
     #[cfg(not(feature = "mock-network"))]
-    let provider = OpenRouterProvider::new(api_key.clone(), &config.provider);
+    let openrouter = OpenRouterClient::new(api_key);
+
+    #[cfg(feature = "mock-network")]
+    let openrouter = OpenRouterClient;
+    let provider = OpenRouterProvider::new(openrouter.clone(), &config.provider);
 
     let tools = build_tools(
         &workspace,
         &config,
         #[cfg(not(feature = "mock-network"))]
-        api_key,
+        openrouter,
     );
 
     let turn_config = TurnConfig {
@@ -143,7 +144,7 @@ async fn main() {
 fn build_tools(
     workspace: &Workspace,
     config: &Config,
-    #[cfg(not(feature = "mock-network"))] search_key: secrets::Secret,
+    #[cfg(not(feature = "mock-network"))] openrouter: OpenRouterClient,
 ) -> Tools {
     let guard = PathGuard::new(workspace.path());
 
@@ -166,12 +167,10 @@ fn build_tools(
             }),
         ));
 
-        tools.push(Box::new(
-            WebSearch::new(search_key, &config.tools.web_search).unwrap_or_else(|e| {
-                error!("Failed to initialize web_search: {e}");
-                std::process::exit(1);
-            }),
-        ));
+        tools.push(Box::new(WebSearch::new(
+            openrouter,
+            &config.tools.web_search,
+        )));
     }
 
     Tools::new(tools)

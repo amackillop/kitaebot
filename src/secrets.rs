@@ -39,6 +39,7 @@ impl std::fmt::Display for Secret {
 ///
 /// Reads `$CREDENTIALS_DIRECTORY/<name>` and returns the trimmed contents.
 /// For local dev, set `CREDENTIALS_DIRECTORY=./secrets` and place one file per secret.
+#[cfg_attr(feature = "mock-network", allow(dead_code))]
 pub fn load_secret(name: &str) -> Result<Secret, SecretError> {
     let dir = std::env::var("CREDENTIALS_DIRECTORY").map_err(|_| SecretError::NoCredentialsDir)?;
     let path = Path::new(&dir).join(name);
