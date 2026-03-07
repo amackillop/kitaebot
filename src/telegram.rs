@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::TurnConfig;
@@ -199,6 +200,7 @@ pub async fn poll_loop<P: Provider>(
 ) -> ! {
     info!(chat_id = channel.chat_id, "Telegram poller starting");
     let mut offset: i64 = 0;
+    let mut verbose = false;
 
     loop {
         let updates = match channel.get_updates(offset).await {
@@ -236,7 +238,7 @@ pub async fn poll_loop<P: Provider>(
                 continue;
             };
 
-            handle_message(channel, workspace, config, &text).await;
+            handle_message(channel, workspace, config, &text, &mut verbose).await;
         }
     }
 }
@@ -247,10 +249,51 @@ async fn handle_message<P: Provider>(
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
     text: &str,
+    verbose: &mut bool,
 ) {
-    let session_path = workspace.telegram_session_path();
+    let trimmed = text.trim();
 
-    let reply = match dispatch::dispatch(text, &session_path, workspace, config, None).await {
+    // /verbose is UI state, not a slash command — intercept before dispatch.
+    if trimmed == "/verbose" {
+        *verbose = !*verbose;
+        let label = if *verbose { "on" } else { "off" };
+        if let Err(e) = channel.send_message(&format!("Verbose: {label}")).await {
+            error!("Failed to send verbose toggle: {e}");
+        }
+        return;
+    }
+
+    let session_path = workspace.telegram_session_path();
+    let (tx, mut rx) = mpsc::channel(64);
+
+    let result = {
+        let dispatch_fut = dispatch::dispatch(trimmed, &session_path, workspace, config, Some(&tx));
+        tokio::pin!(dispatch_fut);
+
+        loop {
+            tokio::select! {
+                biased;
+                Some(event) = rx.recv() => {
+                    if *verbose
+                        && let Err(e) = channel.send_message(&event.to_string()).await
+                    {
+                        error!("Failed to send activity: {e}");
+                    }
+                }
+                result = &mut dispatch_fut => break result,
+            }
+        }
+    };
+
+    // Drain remaining buffered events.
+    drop(tx);
+    while let Some(event) = rx.recv().await {
+        if *verbose && let Err(e) = channel.send_message(&event.to_string()).await {
+            error!("Failed to send activity: {e}");
+        }
+    }
+
+    let reply = match result {
         Ok(response) => response,
         Err(msg) => msg,
     };
