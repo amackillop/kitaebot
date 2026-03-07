@@ -57,14 +57,21 @@ fn main() {
 
     // Read and print greeting.
     let greeting = recv(&mut reader);
-    println!("{}", greeting.content());
+    println!("{}\n", greeting.content());
 
     // REPL loop.
-    let stdin = io::stdin().lock();
-    for line in stdin.lines() {
-        let Ok(line) = line else { break };
+    let mut input = String::new();
+    loop {
+        print!("> ");
+        io::stdout().flush().unwrap();
 
-        let trimmed = line.trim();
+        input.clear();
+        match io::stdin().read_line(&mut input) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+
+        let trimmed = input.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -81,7 +88,7 @@ fn main() {
 
         send(&mut writer, &msg);
         let response = recv(&mut reader);
-        println!("{}", response.content());
+        println!("{}\n", response.content());
     }
 }
 
