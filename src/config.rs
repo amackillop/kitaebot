@@ -132,7 +132,9 @@ impl Default for ProviderConfig {
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self { max_iterations: 20 }
+        Self {
+            max_iterations: 100,
+        }
     }
 }
 
@@ -308,7 +310,7 @@ mod tests {
         assert_eq!(cfg.provider.model, "arcee-ai/trinity-large-preview:free");
         assert_eq!(cfg.provider.max_tokens, 4096);
         assert!((cfg.provider.temperature - 0.7).abs() < f32::EPSILON);
-        assert_eq!(cfg.agent.max_iterations, 20);
+        assert_eq!(cfg.agent.max_iterations, 100);
         assert_eq!(cfg.tools.exec.timeout_secs, 60);
         assert_eq!(cfg.tools.exec.max_output_bytes, 10240);
     }
@@ -317,7 +319,7 @@ mod tests {
     fn load_empty_string_returns_defaults() {
         let cfg = load_toml("").unwrap();
         assert_eq!(cfg.provider.max_tokens, 4096);
-        assert_eq!(cfg.agent.max_iterations, 20);
+        assert_eq!(cfg.agent.max_iterations, 100);
     }
 
     #[test]
@@ -326,7 +328,7 @@ mod tests {
         assert_eq!(cfg.provider.model, "anthropic/claude-sonnet-4");
         // Other fields keep defaults
         assert_eq!(cfg.provider.max_tokens, 4096);
-        assert_eq!(cfg.agent.max_iterations, 20);
+        assert_eq!(cfg.agent.max_iterations, 100);
     }
 
     #[test]
