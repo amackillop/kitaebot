@@ -15,7 +15,6 @@ use crate::config::TelegramConfig;
 use crate::error::TelegramError;
 use crate::provider::Provider;
 use crate::secrets::Secret;
-use crate::session::Session;
 use crate::workspace::Workspace;
 
 // --- Telegram Bot API types ---
@@ -250,18 +249,12 @@ async fn handle_message<P: Provider>(
 ) {
     let session_path = workspace.telegram_session_path();
 
-    let mut session = match Session::load(&session_path) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to load telegram session: {e}");
-            return;
+    match agent::process_message(&session_path, workspace, text, config).await {
+        Ok(response) => {
+            if let Err(e) = channel.send_message(&response).await {
+                error!("Failed to send response: {e}");
+            }
         }
-    };
-
-    let system_prompt = workspace.system_prompt();
-
-    let response = match agent::run_turn(&mut session, &system_prompt, text, config).await {
-        Ok(r) => r,
         Err(e) => {
             error!("Agent error: {e}");
             if let Err(send_err) = channel
@@ -270,16 +263,7 @@ async fn handle_message<P: Provider>(
             {
                 error!("Failed to send error message: {send_err}");
             }
-            return;
         }
-    };
-
-    if let Err(e) = session.save(&session_path) {
-        error!("Failed to save telegram session: {e}");
-    }
-
-    if let Err(e) = channel.send_message(&response).await {
-        error!("Failed to send response: {e}");
     }
 }
 

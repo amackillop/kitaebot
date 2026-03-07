@@ -13,7 +13,6 @@ use crate::agent::{self, TurnConfig};
 use crate::error::{Error, HeartbeatError};
 use crate::lock::Lock;
 use crate::provider::Provider;
-use crate::session::Session;
 use crate::workspace::Workspace;
 
 /// Why a heartbeat was skipped (not an error).
@@ -77,16 +76,10 @@ pub async fn run<P: Provider>(
     }
 
     let prompt = build_prompt(&tasks);
-    let system_prompt = workspace.system_prompt();
     let session_path = workspace.heartbeat_session_path();
-    let mut session =
-        Session::load(&session_path).map_err(|e| HeartbeatError::Session(e.to_string()))?;
 
-    let response = agent::run_turn(&mut session, &system_prompt, &prompt, config).await?;
+    let response = agent::process_message(&session_path, workspace, &prompt, config).await?;
 
-    session
-        .save(&session_path)
-        .map_err(|e| HeartbeatError::Session(e.to_string()))?;
     append_history(&workspace.history_path(), &response).map_err(HeartbeatError::WriteHistory)?;
 
     Ok(Outcome::Executed(response))
@@ -163,6 +156,7 @@ mod tests {
     use super::*;
     use crate::config::ContextConfig;
     use crate::provider::MockProvider;
+    use crate::session::Session;
     use crate::tools::Tools;
     use crate::types::Response;
 

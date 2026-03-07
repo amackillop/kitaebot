@@ -186,29 +186,8 @@ async fn handle_message<P: Provider>(
 ) {
     let session_path = workspace.socket_session_path();
 
-    let mut session = match Session::load(&session_path) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to load socket session: {e}");
-            let _ = send(
-                writer,
-                &ServerMsg::Error {
-                    content: format!("Session load error: {e}"),
-                },
-            )
-            .await
-            .inspect_err(|e| debug!("Failed to send error response: {e}"));
-            return;
-        }
-    };
-
-    let system_prompt = workspace.system_prompt();
-
-    match agent::run_turn(&mut session, &system_prompt, text, config).await {
+    match agent::process_message(&session_path, workspace, text, config).await {
         Ok(response) => {
-            if let Err(e) = session.save(&session_path) {
-                error!("Failed to save socket session: {e}");
-            }
             let _ = send(writer, &ServerMsg::Response { content: response })
                 .await
                 .inspect_err(|e| debug!("Failed to send response: {e}"));
@@ -217,7 +196,7 @@ async fn handle_message<P: Provider>(
             let _ = send(
                 writer,
                 &ServerMsg::Error {
-                    content: format!("Agent error: {e}"),
+                    content: format!("{e}"),
                 },
             )
             .await

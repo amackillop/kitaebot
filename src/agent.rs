@@ -4,6 +4,8 @@
 //! Each turn sends context to the LLM and either returns a text response
 //! or executes tool calls until the LLM completes.
 
+use std::path::Path;
+
 use futures::future::join_all;
 use tracing::{debug, error, warn};
 
@@ -15,6 +17,7 @@ use crate::safety;
 use crate::session::Session;
 use crate::tools::Tools;
 use crate::types::{Message, Response};
+use crate::workspace::Workspace;
 
 /// Static dependencies for an agent turn.
 ///
@@ -25,6 +28,24 @@ pub struct TurnConfig<'a, P: Provider> {
     pub tools: &'a Tools,
     pub max_iterations: usize,
     pub context: &'a ContextConfig,
+}
+
+/// Load session, run a single turn, save on success.
+///
+/// Shared by all daemon channels (telegram, socket, heartbeat).
+/// The REPL keeps its own in-memory session loop and calls
+/// [`run_turn`] directly.
+pub async fn process_message<P: Provider>(
+    session_path: &Path,
+    workspace: &Workspace,
+    user_message: &str,
+    config: &TurnConfig<'_, P>,
+) -> Result<String, Error> {
+    let mut session = Session::load(session_path)?;
+    let system_prompt = workspace.system_prompt();
+    let response = run_turn(&mut session, &system_prompt, user_message, config).await?;
+    session.save(session_path)?;
+    Ok(response)
 }
 
 /// Run a single turn of the agent loop.

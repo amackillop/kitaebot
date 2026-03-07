@@ -31,6 +31,10 @@ pub enum Error {
     #[error("Safety error: {0}")]
     Safety(#[from] SafetyError),
 
+    /// Session load or save failure.
+    #[error("Session error: {0}")]
+    Session(#[from] SessionError),
+
     /// Tool execution error.
     #[error("Tool error: {0}")]
     Tool(#[from] ToolError),
@@ -94,10 +98,6 @@ pub enum HeartbeatError {
     /// Failed to read HEARTBEAT.md.
     #[error("Failed to read tasks: {0}")]
     ReadTasks(#[source] std::io::Error),
-
-    /// Failed to load or save the heartbeat session.
-    #[error("Session error: {0}")]
-    Session(String),
 
     /// Failed to append to HISTORY.md.
     #[error("Failed to write history: {0}")]
