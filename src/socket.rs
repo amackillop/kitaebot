@@ -1,7 +1,8 @@
 //! Unix domain socket channel.
 //!
-//! Listens on `/run/kitaebot/chat.sock` for NDJSON clients. Same slash
-//! commands and session semantics as Telegram, different transport.
+//! Listens on `/run/kitaebot/chat.sock` for NDJSON clients. Clients send
+//! `{"content": "..."}` — the server parses slash commands from content,
+//! same as the REPL.
 //!
 //! Single client at a time: while one client is connected, new
 //! connections are accepted only to send an error and close them.
@@ -15,8 +16,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info};
 
 use crate::agent::{self, TurnConfig};
-use crate::commands;
-use crate::config::ContextConfig;
+use crate::commands::{self, ParseError};
 use crate::provider::Provider;
 use crate::workspace::Workspace;
 
@@ -24,22 +24,14 @@ use crate::workspace::Workspace;
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ClientMsg {
-    Message {
-        content: String,
-    },
-    /// Slash command with the leading `/` (e.g. `"/new"`).
-    Command {
-        name: String,
-    },
+struct ClientMsg {
+    content: String,
 }
 
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(Deserialize))]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
-    CommandResult { content: String },
     Error { content: String },
     Greeting { content: String },
     Response { content: String },
@@ -165,76 +157,35 @@ async fn handle_line<P: Provider>(
         }
     };
 
-    match msg {
-        ClientMsg::Message { content } => {
-            handle_message(writer, workspace, config, &content).await;
-        }
-        ClientMsg::Command { name } => {
-            handle_command(writer, workspace, config.provider, config.context, &name).await;
-        }
-    }
-}
-
-async fn handle_message<P: Provider>(
-    writer: &mut OwnedWriteHalf,
-    workspace: &Workspace,
-    config: &TurnConfig<'_, P>,
-    text: &str,
-) {
+    let input = msg.content.trim();
     let session_path = workspace.socket_session_path();
 
-    match agent::process_message(&session_path, workspace, text, config).await {
-        Ok(response) => {
-            let _ = send(writer, &ServerMsg::Response { content: response })
-                .await
-                .inspect_err(|e| debug!("Failed to send response: {e}"));
-        }
-        Err(e) => {
-            let _ = send(
-                writer,
-                &ServerMsg::Error {
-                    content: format!("{e}"),
-                },
+    let result = match input.parse() {
+        Ok(cmd) => {
+            commands::execute(
+                cmd,
+                &session_path,
+                workspace,
+                config.provider,
+                config.context,
             )
             .await
-            .inspect_err(|e| debug!("Failed to send error response: {e}"));
         }
-    }
-}
-
-async fn handle_command<P: Provider>(
-    writer: &mut OwnedWriteHalf,
-    workspace: &Workspace,
-    provider: &P,
-    ctx: &ContextConfig,
-    name: &str,
-) {
-    let Ok(cmd) = name.parse() else {
-        let _ = send(
-            writer,
-            &ServerMsg::Error {
-                content: format!("Unknown command: {name}"),
-            },
-        )
-        .await
-        .inspect_err(|e| debug!("Failed to send error response: {e}"));
-        return;
+        Err(ParseError::MustStartWithSlash) => {
+            agent::process_message(&session_path, workspace, input, config)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        Err(ParseError::UnknownCommand) => Err(format!("Unknown command: {input}")),
     };
 
-    let session_path = workspace.socket_session_path();
-
-    match commands::execute(cmd, &session_path, workspace, provider, ctx).await {
-        Ok(content) => {
-            let _ = send(writer, &ServerMsg::CommandResult { content })
-                .await
-                .inspect_err(|e| debug!("Failed to send command result: {e}"));
-        }
-        Err(content) => {
-            let _ = send(writer, &ServerMsg::Error { content })
-                .await
-                .inspect_err(|e| debug!("Failed to send error response: {e}"));
-        }
-    }
+    let response = match result {
+        Ok(content) => ServerMsg::Response { content },
+        Err(content) => ServerMsg::Error { content },
+    };
+    let _ = send(writer, &response)
+        .await
+        .inspect_err(|e| debug!("Failed to send response: {e}"));
 }
 
 // ── Wire helpers ────────────────────────────────────────────────────
@@ -295,8 +246,11 @@ mod tests {
         }
 
         /// Serialize and send a client message.
-        async fn send_msg(&mut self, msg: &ClientMsg) {
-            let mut line = serde_json::to_string(msg).unwrap();
+        async fn send(&mut self, content: &str) {
+            let msg = ClientMsg {
+                content: content.into(),
+            };
+            let mut line = serde_json::to_string(&msg).unwrap();
             line.push('\n');
             self.writer.write_all(line.as_bytes()).await.unwrap();
         }
@@ -351,11 +305,7 @@ mod tests {
 
         assert!(matches!(client.recv().await, ServerMsg::Greeting { .. }));
 
-        client
-            .send_msg(&ClientMsg::Message {
-                content: "ping".into(),
-            })
-            .await;
+        client.send("ping").await;
 
         match client.recv().await {
             ServerMsg::Response { content } => assert_eq!(content, "pong"),
@@ -373,11 +323,7 @@ mod tests {
         client.recv().await; // greeting
 
         // Send a message so serve() enters the select! that rejects.
-        client
-            .send_msg(&ClientMsg::Message {
-                content: "hold".into(),
-            })
-            .await;
+        client.send("hold").await;
         client.recv().await; // response
 
         let mut client2 = TestClient::connect(&sock_dir.path().join("test.sock")).await;
@@ -407,22 +353,16 @@ mod tests {
 
     #[test]
     fn deserialize_message() {
-        let json = r#"{"type":"message","content":"hello"}"#;
+        let json = r#"{"content":"hello"}"#;
         let msg: ClientMsg = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, ClientMsg::Message { content } if content == "hello"));
+        assert_eq!(msg.content, "hello");
     }
 
     #[test]
     fn deserialize_command() {
-        let json = r#"{"type":"command","name":"new"}"#;
+        let json = r#"{"content":"/new"}"#;
         let msg: ClientMsg = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, ClientMsg::Command { name } if name == "new"));
-    }
-
-    #[test]
-    fn deserialize_unknown_type_is_error() {
-        let json = r#"{"type":"bogus","data":"x"}"#;
-        assert!(serde_json::from_str::<ClientMsg>(json).is_err());
+        assert_eq!(msg.content, "/new");
     }
 
     #[test]
@@ -453,14 +393,5 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"error""#));
-    }
-
-    #[test]
-    fn serialize_command_result() {
-        let msg = ServerMsg::CommandResult {
-            content: "done".into(),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains(r#""type":"command_result""#));
     }
 }

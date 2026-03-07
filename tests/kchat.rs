@@ -14,10 +14,8 @@ use serde::{Deserialize, Serialize};
 // ── Protocol types (mirrored from socket.rs) ────────────────────────
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ClientMsg {
-    Message { content: String },
-    Command { name: String },
+struct ClientMsg {
+    content: String,
 }
 
 #[derive(Serialize)]
@@ -26,7 +24,6 @@ enum ClientMsg {
 enum ServerMsg {
     Greeting { content: String },
     Response { content: String },
-    CommandResult { content: String },
     Error { content: String },
 }
 
@@ -113,7 +110,7 @@ fn message_roundtrip() {
         );
 
         let msg = recv_line(&mut reader);
-        assert!(matches!(msg, ClientMsg::Message { content } if content == "hello"));
+        assert_eq!(msg.content, "hello");
 
         send_line(
             &mut writer,
@@ -136,7 +133,7 @@ fn message_roundtrip() {
 }
 
 #[test]
-fn slash_command_sent_as_command_type() {
+fn slash_command_sent_as_content() {
     let (_dir, path) = sock_path();
 
     let server = spawn_echo_server(&path, |stream| {
@@ -151,11 +148,11 @@ fn slash_command_sent_as_command_type() {
         );
 
         let msg = recv_line(&mut reader);
-        assert!(matches!(msg, ClientMsg::Command { name } if name == "/new"));
+        assert_eq!(msg.content, "/new");
 
         send_line(
             &mut writer,
-            &ServerMsg::CommandResult {
+            &ServerMsg::Response {
                 content: "Session cleared.".into(),
             },
         );

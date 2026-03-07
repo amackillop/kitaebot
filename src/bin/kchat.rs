@@ -1,8 +1,8 @@
 //! Thin NDJSON client for the kitaebot Unix socket channel.
 //!
-//! Connects to a socket, prints the greeting, and enters a REPL:
-//! lines starting with `/` become command messages, everything else
-//! becomes chat messages. Exits on EOF or `/exit`.
+//! Connects to a socket, prints the greeting, and enters a REPL.
+//! All input is sent as `{"content": "..."}` — the server handles
+//! slash command parsing. Exits on EOF or `/exit`.
 
 use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixStream;
@@ -13,10 +13,8 @@ use serde::{Deserialize, Serialize};
 // ── Protocol types (mirrored from socket.rs) ────────────────────────
 
 #[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ClientMsg<'a> {
-    Message { content: &'a str },
-    Command { name: &'a str },
+struct ClientMsg<'a> {
+    content: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -24,17 +22,15 @@ enum ClientMsg<'a> {
 enum ServerMsg {
     Greeting { content: String },
     Response { content: String },
-    CommandResult { content: String },
     Error { content: String },
 }
 
 impl ServerMsg {
     fn content(&self) -> &str {
         match self {
-            Self::Greeting { content }
-            | Self::Response { content }
-            | Self::CommandResult { content }
-            | Self::Error { content } => content,
+            Self::Greeting { content } | Self::Response { content } | Self::Error { content } => {
+                content
+            }
         }
     }
 }
@@ -80,13 +76,7 @@ fn main() {
             break;
         }
 
-        let msg = if trimmed.starts_with('/') {
-            ClientMsg::Command { name: trimmed }
-        } else {
-            ClientMsg::Message { content: trimmed }
-        };
-
-        send(&mut writer, &msg);
+        send(&mut writer, &ClientMsg { content: trimmed });
         let response = recv(&mut reader);
         println!("{}\n", response.content());
     }
