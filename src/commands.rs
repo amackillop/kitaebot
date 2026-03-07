@@ -5,6 +5,7 @@
 //! lives here so every channel behaves identically.
 
 use std::path::Path;
+use std::str::FromStr;
 
 use tracing::error;
 
@@ -18,25 +19,35 @@ use crate::workspace::Workspace;
 /// A recognized slash command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashCommand {
-    /// Clear session and start fresh.
-    NewSession,
-    /// Display token usage.
-    Context,
     /// Force context compaction.
     Compact,
+    /// Display token usage.
+    Context,
+    /// Clear session and start fresh.
+    New,
     /// Show session tool usage statistics.
     Stats,
 }
 
-impl SlashCommand {
-    /// Parse a command name.
-    pub fn parse(command: &str) -> Option<Self> {
-        match command {
-            "/new" => Some(Self::NewSession),
-            "/context" => Some(Self::Context),
-            "/compact" => Some(Self::Compact),
-            "/stats" => Some(Self::Stats),
-            _ => None,
+#[derive(Debug, PartialEq)]
+pub enum ParseError {
+    MustStartWithSlash,
+    UnknownCommand,
+}
+
+impl FromStr for SlashCommand {
+    type Err = ParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        if !input.starts_with('/') {
+            return Err(ParseError::MustStartWithSlash);
+        }
+        match input {
+            "/compact" => Ok(Self::Compact),
+            "/context" => Ok(Self::Context),
+            "/new" => Ok(Self::New),
+            "/stats" => Ok(Self::Stats),
+            _ => Err(ParseError::UnknownCommand),
         }
     }
 }
@@ -63,12 +74,20 @@ pub async fn execute<P: Provider>(
     ctx: &ContextConfig,
 ) -> Result<String, String> {
     match cmd {
-        SlashCommand::NewSession => {
-            session.clear();
-            if let Err(e) = session.save(session_path) {
-                error!("Failed to save session: {e}");
+        SlashCommand::Compact => {
+            let system_prompt = workspace.system_prompt();
+            let before = context::session_tokens(session, system_prompt.len());
+            match context::force_compact(session, provider).await {
+                Ok(true) => {
+                    let after = context::session_tokens(session, system_prompt.len());
+                    if let Err(e) = session.save(session_path) {
+                        error!("Failed to save session: {e}");
+                    }
+                    Ok(format!("Compacted: {before} -> {after} tokens"))
+                }
+                Ok(false) => Ok("Nothing to compact.".into()),
+                Err(e) => Err(format!("Compaction failed: {e}")),
             }
-            Ok("Session cleared.".into())
         }
         SlashCommand::Context => {
             let system_prompt = workspace.system_prompt();
@@ -88,20 +107,12 @@ pub async fn execute<P: Provider>(
                 ctx.max_tokens,
             ))
         }
-        SlashCommand::Compact => {
-            let system_prompt = workspace.system_prompt();
-            let before = context::session_tokens(session, system_prompt.len());
-            match context::force_compact(session, provider).await {
-                Ok(true) => {
-                    let after = context::session_tokens(session, system_prompt.len());
-                    if let Err(e) = session.save(session_path) {
-                        error!("Failed to save session: {e}");
-                    }
-                    Ok(format!("Compacted: {before} -> {after} tokens"))
-                }
-                Ok(false) => Ok("Nothing to compact.".into()),
-                Err(e) => Err(format!("Compaction failed: {e}")),
+        SlashCommand::New => {
+            session.clear();
+            if let Err(e) = session.save(session_path) {
+                error!("Failed to save session: {e}");
             }
+            Ok("Session cleared.".into())
         }
         SlashCommand::Stats => {
             stats::run(workspace.path());
@@ -116,19 +127,26 @@ mod tests {
 
     #[test]
     fn parse_known_commands() {
-        assert_eq!(SlashCommand::parse("/new"), Some(SlashCommand::NewSession));
-        assert_eq!(SlashCommand::parse("/context"), Some(SlashCommand::Context));
-        assert_eq!(SlashCommand::parse("/compact"), Some(SlashCommand::Compact));
-        assert_eq!(SlashCommand::parse("/stats"), Some(SlashCommand::Stats));
+        assert_eq!("/new".parse(), Ok(SlashCommand::New));
+        assert_eq!("/context".parse(), Ok(SlashCommand::Context));
+        assert_eq!("/compact".parse(), Ok(SlashCommand::Compact));
+        assert_eq!("/stats".parse(), Ok(SlashCommand::Stats));
     }
 
     #[test]
-    fn parse_unknown_returns_none() {
-        assert_eq!(SlashCommand::parse("/help"), None);
-        assert_eq!(SlashCommand::parse("/exit"), None);
-        assert_eq!(SlashCommand::parse(""), None);
-        assert_eq!(SlashCommand::parse("new"), None);
-        assert_eq!(SlashCommand::parse("context"), None);
+    fn parse_unknown_command() {
+        assert_eq!(
+            "/adsjhfbakj".parse::<SlashCommand>(),
+            Err(ParseError::UnknownCommand)
+        );
+    }
+
+    #[test]
+    fn parse_missing_slash() {
+        assert_eq!(
+            "missingslash".parse::<SlashCommand>(),
+            Err(ParseError::MustStartWithSlash)
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info};
 
 use crate::agent;
-use crate::commands::{self, SlashCommand};
+use crate::commands;
 use crate::config::ContextConfig;
 use crate::provider::Provider;
 use crate::session::Session;
@@ -279,7 +279,7 @@ async fn handle_command<P: Provider>(
 ) {
     let session_path = workspace.socket_session_path();
 
-    let Some(cmd) = SlashCommand::parse(name) else {
+    let Ok(cmd) = name.parse() else {
         let _ = send(
             writer,
             &ServerMsg::Error {
