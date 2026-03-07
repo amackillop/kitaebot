@@ -33,7 +33,7 @@ struct CallInfo {
 
 // ── Public entry point ──────────────────────────────────────────────
 
-pub fn run(workspace: &Path) {
+pub fn run(workspace: &Path) -> String {
     let pattern = workspace.join("sessions/*.json");
     let pattern = pattern.to_string_lossy();
 
@@ -49,7 +49,7 @@ pub fn run(workspace: &Path) {
 
     let sessions: Vec<_> = sessions.into_iter().map(Result::unwrap).collect();
     let report = analyze(&sessions);
-    print!("{}", format_report(&report));
+    format_report(&report)
 }
 
 // ── Analysis (pure, testable) ───────────────────────────────────────

@@ -115,10 +115,7 @@ pub async fn execute<P: Provider>(
             }
             Ok("Session cleared.".into())
         }
-        SlashCommand::Stats => {
-            stats::run(workspace.path());
-            Ok("Stats printed to logs.".into())
-        }
+        SlashCommand::Stats => Ok(stats::run(workspace.path())),
     }
 }
 
