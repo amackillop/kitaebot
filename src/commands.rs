@@ -53,33 +53,40 @@ impl FromStr for SlashCommand {
 }
 
 /// Format the session greeting shown on connect/startup.
-pub fn greeting(message_count: usize) -> String {
-    if message_count == 0 {
+///
+/// Loads the session from disk to count messages. Returns "New session"
+/// if the file is missing or empty.
+pub fn greeting(session_path: &Path) -> String {
+    let count = Session::load(session_path).map_or(0, |s| s.messages().len());
+    if count == 0 {
         "New session".to_string()
     } else {
-        format!("Resumed session ({message_count} messages)")
+        format!("Resumed session ({count} messages)")
     }
 }
 
-/// Execute a slash command, mutating the session in place.
+/// Execute a slash command.
 ///
-/// Returns the result message on success, or an error message on failure.
-/// Saves the session to disk when the command modifies it.
+/// Loads the session from disk, runs the command, and saves when the
+/// command modifies it. Returns the result message on success, or an
+/// error message on failure.
 pub async fn execute<P: Provider>(
     cmd: SlashCommand,
-    session: &mut Session,
     session_path: &Path,
     workspace: &Workspace,
     provider: &P,
     ctx: &ContextConfig,
 ) -> Result<String, String> {
+    let mut session =
+        Session::load(session_path).map_err(|e| format!("Session load error: {e}"))?;
+
     match cmd {
         SlashCommand::Compact => {
             let system_prompt = workspace.system_prompt();
-            let before = context::session_tokens(session, system_prompt.len());
-            match context::force_compact(session, provider).await {
+            let before = context::session_tokens(&session, system_prompt.len());
+            match context::force_compact(&mut session, provider).await {
                 Ok(true) => {
-                    let after = context::session_tokens(session, system_prompt.len());
+                    let after = context::session_tokens(&session, system_prompt.len());
                     if let Err(e) = session.save(session_path) {
                         error!("Failed to save session: {e}");
                     }
@@ -91,7 +98,7 @@ pub async fn execute<P: Provider>(
         }
         SlashCommand::Context => {
             let system_prompt = workspace.system_prompt();
-            let tokens = context::session_tokens(session, system_prompt.len());
+            let tokens = context::session_tokens(&session, system_prompt.len());
             let budget = context::budget(ctx);
             let pct = if budget > 0 {
                 (tokens / budget) * 100
@@ -151,11 +158,24 @@ mod tests {
 
     #[test]
     fn greeting_new_session() {
-        assert_eq!(greeting(0), "New session");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        assert_eq!(greeting(&path), "New session");
     }
 
     #[test]
     fn greeting_resumed_session() {
-        assert_eq!(greeting(5), "Resumed session (5 messages)");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+
+        let mut session = Session::new();
+        for i in 0..5 {
+            session.add_message(crate::types::Message::User {
+                content: format!("msg {i}"),
+            });
+        }
+        session.save(&path).unwrap();
+
+        assert_eq!(greeting(&path), "Resumed session (5 messages)");
     }
 }

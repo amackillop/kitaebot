@@ -15,7 +15,6 @@ use crate::agent::{self, TurnConfig};
 use crate::commands::{self, ParseError, SlashCommand};
 use crate::lock::Lock;
 use crate::provider::Provider;
-use crate::session::Session;
 use crate::workspace::Workspace;
 
 /// Parsed user input.
@@ -62,14 +61,7 @@ pub async fn run<P: Provider>(workspace: &Workspace, config: &TurnConfig<'_, P>)
 
     let session_path = workspace.repl_session_path();
 
-    let mut session = Session::load(&session_path).unwrap_or_else(|e| {
-        error!("Failed to load session: {e}");
-        std::process::exit(1);
-    });
-
-    let mut system_prompt = workspace.system_prompt();
-
-    println!("{}\n", commands::greeting(session.messages().len()));
+    println!("{}\n", commands::greeting(&session_path));
 
     loop {
         print!("> ");
@@ -85,21 +77,14 @@ pub async fn run<P: Provider>(workspace: &Workspace, config: &TurnConfig<'_, P>)
             Command::Empty => {}
             Command::Exit => break,
             Command::Message(msg) => {
-                match agent::run_turn(&mut session, &system_prompt, msg, config).await {
-                    Ok(response) => {
-                        println!("{response}\n");
-                        if let Err(e) = session.save(&session_path) {
-                            error!("Failed to save session: {e}");
-                        }
-                    }
+                match agent::process_message(&session_path, workspace, msg, config).await {
+                    Ok(response) => println!("{response}\n"),
                     Err(e) => error!("Error: {e}"),
                 }
             }
             Command::Slash(cmd) => {
-                let rebuild_prompt = cmd == SlashCommand::New;
                 match commands::execute(
                     cmd,
-                    &mut session,
                     &session_path,
                     workspace,
                     config.provider,
@@ -109,9 +94,6 @@ pub async fn run<P: Provider>(workspace: &Workspace, config: &TurnConfig<'_, P>)
                 {
                     Ok(msg) => println!("{msg}\n"),
                     Err(msg) => eprintln!("{msg}\n"),
-                }
-                if rebuild_prompt {
-                    system_prompt = workspace.system_prompt();
                 }
             }
             Command::UnknownSlash(cmd) => {

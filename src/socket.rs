@@ -18,7 +18,6 @@ use crate::agent::{self, TurnConfig};
 use crate::commands;
 use crate::config::ContextConfig;
 use crate::provider::Provider;
-use crate::session::Session;
 use crate::workspace::Workspace;
 
 // ── Protocol types ──────────────────────────────────────────────────
@@ -100,9 +99,7 @@ async fn serve<P: Provider>(
     let mut reader = BufReader::new(reader);
 
     // Greeting
-    let msg_count =
-        Session::load(&workspace.socket_session_path()).map_or(0, |s| s.messages().len());
-    let greeting = commands::greeting(msg_count);
+    let greeting = commands::greeting(&workspace.socket_session_path());
     if send(&mut writer, &ServerMsg::Greeting { content: greeting })
         .await
         .is_err()
@@ -212,8 +209,6 @@ async fn handle_command<P: Provider>(
     ctx: &ContextConfig,
     name: &str,
 ) {
-    let session_path = workspace.socket_session_path();
-
     let Ok(cmd) = name.parse() else {
         let _ = send(
             writer,
@@ -226,23 +221,9 @@ async fn handle_command<P: Provider>(
         return;
     };
 
-    let mut session = match Session::load(&session_path) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to load socket session: {e}");
-            let _ = send(
-                writer,
-                &ServerMsg::Error {
-                    content: format!("Session load error: {e}"),
-                },
-            )
-            .await
-            .inspect_err(|e| debug!("Failed to send error response: {e}"));
-            return;
-        }
-    };
+    let session_path = workspace.socket_session_path();
 
-    match commands::execute(cmd, &mut session, &session_path, workspace, provider, ctx).await {
+    match commands::execute(cmd, &session_path, workspace, provider, ctx).await {
         Ok(content) => {
             let _ = send(writer, &ServerMsg::CommandResult { content })
                 .await
