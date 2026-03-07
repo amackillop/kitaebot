@@ -15,8 +15,8 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info};
 
-use crate::agent::{self, TurnConfig};
-use crate::commands::{self, ParseError};
+use crate::agent::TurnConfig;
+use crate::commands;
 use crate::provider::Provider;
 use crate::workspace::Workspace;
 
@@ -160,24 +160,7 @@ async fn handle_line<P: Provider>(
     let input = msg.content.trim();
     let session_path = workspace.socket_session_path();
 
-    let result = match input.parse() {
-        Ok(cmd) => {
-            commands::execute(
-                cmd,
-                &session_path,
-                workspace,
-                config.provider,
-                config.context,
-            )
-            .await
-        }
-        Err(ParseError::MustStartWithSlash) => {
-            agent::process_message(&session_path, workspace, input, config)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        Err(ParseError::UnknownCommand) => Err(format!("Unknown command: {input}")),
-    };
+    let result = commands::dispatch(input, &session_path, workspace, config).await;
 
     let response = match result {
         Ok(content) => ServerMsg::Response { content },

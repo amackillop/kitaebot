@@ -10,7 +10,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
-use crate::agent::{self, TurnConfig};
+use crate::agent::TurnConfig;
+use crate::commands;
 use crate::config::TelegramConfig;
 use crate::error::TelegramError;
 use crate::provider::Provider;
@@ -249,21 +250,13 @@ async fn handle_message<P: Provider>(
 ) {
     let session_path = workspace.telegram_session_path();
 
-    match agent::process_message(&session_path, workspace, text, config).await {
-        Ok(response) => {
-            if let Err(e) = channel.send_message(&response).await {
-                error!("Failed to send response: {e}");
-            }
-        }
-        Err(e) => {
-            error!("Agent error: {e}");
-            if let Err(send_err) = channel
-                .send_message("I encountered an error, please try again.")
-                .await
-            {
-                error!("Failed to send error message: {send_err}");
-            }
-        }
+    let reply = match commands::dispatch(text, &session_path, workspace, config).await {
+        Ok(response) => response,
+        Err(msg) => msg,
+    };
+
+    if let Err(e) = channel.send_message(&reply).await {
+        error!("Failed to send response: {e}");
     }
 }
 

@@ -1,14 +1,16 @@
-//! Slash command definitions shared across channels.
+//! Slash command definitions and input dispatch shared across channels.
 //!
-//! Each channel parses its own transport format (text lines, NDJSON,
-//! Telegram messages) and maps to [`SlashCommand`]. Execution logic
-//! lives here so every channel behaves identically.
+//! [`dispatch`] is the single entry point for all user input: it parses
+//! the text, routes to either [`execute`] or [`agent::process_message`],
+//! and returns a uniform `Result<String, String>`. Channels only need to
+//! handle the result in their own transport format.
 
 use std::path::Path;
 use std::str::FromStr;
 
 use tracing::error;
 
+use crate::agent::{self, TurnConfig};
 use crate::config::ContextConfig;
 use crate::context;
 use crate::provider::Provider;
@@ -62,6 +64,37 @@ pub fn greeting(session_path: &Path) -> String {
         "New session".to_string()
     } else {
         format!("Resumed session ({count} messages)")
+    }
+}
+
+/// Dispatch user input: parse as slash command or forward to the agent.
+///
+/// This is the single entry point for all channel input. Returns
+/// `Ok(response)` on success or `Err(message)` on failure, both as
+/// displayable strings.
+pub async fn dispatch<P: Provider>(
+    input: &str,
+    session_path: &Path,
+    workspace: &Workspace,
+    config: &TurnConfig<'_, P>,
+) -> Result<String, String> {
+    match input.parse() {
+        Ok(cmd) => {
+            execute(
+                cmd,
+                session_path,
+                workspace,
+                config.provider,
+                config.context,
+            )
+            .await
+        }
+        Err(ParseError::MustStartWithSlash) => {
+            agent::process_message(session_path, workspace, input, config)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        Err(ParseError::UnknownCommand) => Err(format!("Unknown command: {input}")),
     }
 }
 

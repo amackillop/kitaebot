@@ -11,8 +11,8 @@ use std::io::{self, Write};
 
 use tracing::error;
 
-use crate::agent::{self, TurnConfig};
-use crate::commands::{self, ParseError, SlashCommand};
+use crate::agent::TurnConfig;
+use crate::commands;
 use crate::lock::Lock;
 use crate::provider::Provider;
 use crate::workspace::Workspace;
@@ -22,14 +22,10 @@ use crate::workspace::Workspace;
 pub enum Command<'a> {
     /// Blank line — do nothing.
     Empty,
-    /// Exit the session
+    /// Exit the session.
     Exit,
-    /// Send a message to the agent.
-    Message(&'a str),
-    /// A recognized slash command.
-    Slash(SlashCommand),
-    /// An unrecognized command.
-    UnknownSlash(&'a str),
+    /// Text to dispatch (message or slash command).
+    Input(&'a str),
 }
 
 impl<'a> From<&'a str> for Command<'a> {
@@ -38,13 +34,7 @@ impl<'a> From<&'a str> for Command<'a> {
         match input {
             "" => Self::Empty,
             "/exit" => Self::Exit,
-            _ => match input.parse() {
-                Ok(cmd) => Self::Slash(cmd),
-                Err(e) => match e {
-                    ParseError::MustStartWithSlash => Self::Message(input),
-                    ParseError::UnknownCommand => Self::UnknownSlash(input),
-                },
-            },
+            _ => Self::Input(input),
         }
     }
 }
@@ -76,28 +66,11 @@ pub async fn run<P: Provider>(workspace: &Workspace, config: &TurnConfig<'_, P>)
         match Command::from(input.as_str()) {
             Command::Empty => {}
             Command::Exit => break,
-            Command::Message(msg) => {
-                match agent::process_message(&session_path, workspace, msg, config).await {
-                    Ok(response) => println!("{response}\n"),
-                    Err(e) => error!("Error: {e}"),
-                }
-            }
-            Command::Slash(cmd) => {
-                match commands::execute(
-                    cmd,
-                    &session_path,
-                    workspace,
-                    config.provider,
-                    config.context,
-                )
-                .await
-                {
+            Command::Input(text) => {
+                match commands::dispatch(text, &session_path, workspace, config).await {
                     Ok(msg) => println!("{msg}\n"),
                     Err(msg) => eprintln!("{msg}\n"),
                 }
-            }
-            Command::UnknownSlash(cmd) => {
-                println!("Unknown command: {cmd}\n");
             }
         }
     }
@@ -123,59 +96,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_new_session() {
-        assert_eq!(Command::from("/new"), Command::Slash(SlashCommand::New));
-        assert_eq!(Command::from("/new\n"), Command::Slash(SlashCommand::New));
-    }
-
-    #[test]
     fn parse_message() {
-        assert_eq!(Command::from("hello\n"), Command::Message("hello"));
+        assert_eq!(Command::from("hello\n"), Command::Input("hello"));
         assert_eq!(
             Command::from("  what is rust  \n"),
-            Command::Message("what is rust")
+            Command::Input("what is rust")
         );
     }
 
     #[test]
-    fn parse_exit_is_a_message() {
-        assert_eq!(Command::from("exit"), Command::Message("exit"));
-        assert_eq!(Command::from("exit now"), Command::Message("exit now"));
+    fn parse_exit_without_slash_is_input() {
+        assert_eq!(Command::from("exit"), Command::Input("exit"));
+        assert_eq!(Command::from("exit now"), Command::Input("exit now"));
     }
 
     #[test]
-    fn parse_unknown_slash_commands() {
-        assert_eq!(Command::from("/nwe"), Command::UnknownSlash("/nwe"));
-        assert_eq!(Command::from("  /foo  \n"), Command::UnknownSlash("/foo"));
-        assert_eq!(Command::from("//new"), Command::UnknownSlash("//new"));
-    }
-
-    #[test]
-    fn parse_slash_with_args_is_unknown() {
+    fn parse_slash_commands_are_input() {
+        assert_eq!(Command::from("/new"), Command::Input("/new"));
+        assert_eq!(Command::from("/context\n"), Command::Input("/context"));
+        assert_eq!(Command::from("/compact"), Command::Input("/compact"));
+        assert_eq!(Command::from("/stats"), Command::Input("/stats"));
+        assert_eq!(Command::from("/nwe"), Command::Input("/nwe"));
         assert_eq!(
             Command::from("/new session"),
-            Command::UnknownSlash("/new session")
+            Command::Input("/new session")
         );
-    }
-
-    #[test]
-    fn parse_context() {
-        assert_eq!(
-            Command::from("/context"),
-            Command::Slash(SlashCommand::Context)
-        );
-    }
-
-    #[test]
-    fn parse_compact() {
-        assert_eq!(
-            Command::from("/compact"),
-            Command::Slash(SlashCommand::Compact)
-        );
-    }
-
-    #[test]
-    fn parse_stats() {
-        assert_eq!(Command::from("/stats"), Command::Slash(SlashCommand::Stats));
     }
 }
