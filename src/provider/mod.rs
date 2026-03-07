@@ -3,13 +3,13 @@
 //! The Provider trait abstracts over different LLM APIs (`OpenRouter`, `OpenAI`, etc.).
 //! All providers must implement the same chat interface.
 
+mod completions;
 #[cfg(test)]
 mod mock;
-mod openrouter;
 
+pub use completions::CompletionsProvider;
 #[cfg(test)]
 pub use mock::MockProvider;
-pub use openrouter::OpenRouterProvider;
 
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolDefinition};

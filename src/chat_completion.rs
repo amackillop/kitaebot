@@ -1,9 +1,9 @@
-//! Shared `OpenRouter` HTTP client.
+//! OpenAI-compatible chat completions client.
 //!
 //! Thin wrapper around `reqwest` that handles authentication, the chat
-//! completions endpoint, and status-code-to-error mapping. Used by both
-//! the [`Provider`] implementation and tool-internal API calls (e.g.
-//! web search).
+//! completions endpoint, and status-code-to-error mapping. Works with
+//! any provider that implements the `OpenAI` chat completions API
+//! (`OpenAI`, `OpenRouter`, Groq, Together, Mistral, etc.).
 
 #[cfg(not(feature = "mock-network"))]
 use reqwest::Client;
@@ -19,12 +19,13 @@ use crate::secrets::Secret;
 // Trait
 // ---------------------------------------------------------------------------
 
-/// Abstraction over the `OpenRouter` chat completions endpoint.
+/// Abstraction over the chat completions endpoint.
 ///
 /// Implemented by the real HTTP client, the `mock-network` stub, and the
-/// test mock. `OpenRouterProvider` is generic over this trait so that
-/// tests exercise the real response-parsing code.
-pub trait CompletionsClient: Send + Sync {
+/// test mock. [`ChatProvider`](crate::provider::ChatProvider) is
+/// generic over this trait so that tests exercise the real
+/// response-parsing code.
+pub trait CompletionsApi: Send + Sync {
     async fn chat_completions<R: Serialize + Send + Sync>(
         &self,
         request: &R,
@@ -35,38 +36,38 @@ pub trait CompletionsClient: Send + Sync {
 // Real client
 // ---------------------------------------------------------------------------
 
-/// `OpenRouter` HTTP client.
+/// HTTP client for any OpenAI-compatible chat completions endpoint.
 ///
-/// Owns the `reqwest::Client` and API key. Cheap to clone (both are
-/// `Arc`-backed internally).
+/// Owns the `reqwest::Client`, API key, and endpoint URL. Cheap to
+/// clone (both `reqwest::Client` and `Secret` are `Arc`-backed).
 #[cfg(not(feature = "mock-network"))]
 #[derive(Clone)]
-pub struct OpenRouterClient {
+pub struct ChatCompletionsClient {
     client: Client,
+    endpoint: String,
     api_key: Secret,
 }
 
 #[cfg(not(feature = "mock-network"))]
-impl OpenRouterClient {
-    const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
-
-    pub fn new(api_key: Secret) -> Self {
+impl ChatCompletionsClient {
+    pub fn new(api_key: Secret, endpoint: &str) -> Self {
         Self {
             client: Client::new(),
+            endpoint: endpoint.to_string(),
             api_key,
         }
     }
 }
 
 #[cfg(not(feature = "mock-network"))]
-impl CompletionsClient for OpenRouterClient {
+impl CompletionsApi for ChatCompletionsClient {
     async fn chat_completions<R: Serialize + Send + Sync>(
         &self,
         request: &R,
     ) -> Result<ChatResponse, ProviderError> {
         let response = self
             .client
-            .post(Self::ENDPOINT)
+            .post(&self.endpoint)
             .header("Authorization", format!("Bearer {}", self.api_key.expose()))
             .header("HTTP-Referer", "https://github.com/amackillop/kitaebot")
             .header("X-Title", "kitaebot")
@@ -79,7 +80,7 @@ impl CompletionsClient for OpenRouterClient {
             })?;
 
         let status = response.status();
-        debug!(%status, "OpenRouter response");
+        debug!(%status, "Chat completions response");
 
         match status {
             s if s.is_success() => response
@@ -109,10 +110,10 @@ impl CompletionsClient for OpenRouterClient {
 
 #[cfg(feature = "mock-network")]
 #[derive(Clone)]
-pub struct OpenRouterClient;
+pub struct ChatCompletionsClient;
 
 #[cfg(feature = "mock-network")]
-impl CompletionsClient for OpenRouterClient {
+impl CompletionsApi for ChatCompletionsClient {
     async fn chat_completions<R: Serialize + Send + Sync>(
         &self,
         _request: &R,
@@ -190,15 +191,15 @@ pub mod mock {
     /// Mock client that returns pre-configured responses in sequence.
     ///
     /// Uses `Arc` internally — cloning shares state, so you can hand one
-    /// clone to `OpenRouterProvider` and keep another to inspect
+    /// clone to `ChatProvider` and keep another to inspect
     /// `call_count()`.
     #[derive(Clone)]
-    pub struct MockOpenRouterClient {
+    pub struct MockCompletionsClient {
         responses: Arc<Vec<Result<ChatResponse, ProviderError>>>,
         call_count: Arc<AtomicUsize>,
     }
 
-    impl MockOpenRouterClient {
+    impl MockCompletionsClient {
         pub fn new(responses: Vec<Result<ChatResponse, ProviderError>>) -> Self {
             Self {
                 responses: Arc::new(responses),
@@ -211,7 +212,7 @@ pub mod mock {
         }
     }
 
-    impl CompletionsClient for MockOpenRouterClient {
+    impl CompletionsApi for MockCompletionsClient {
         async fn chat_completions<R: Serialize + Send + Sync>(
             &self,
             _request: &R,

@@ -13,9 +13,9 @@ use tokio::time::Duration;
 use tracing::{debug, warn};
 
 use super::Tool;
+use crate::chat_completion::{ChatCompletionsClient, CompletionsApi};
 use crate::config::WebSearchConfig;
 use crate::error::{ProviderError, ToolError};
-use crate::openrouter::{CompletionsClient, OpenRouterClient};
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -25,14 +25,14 @@ struct Args {
 
 /// Tool that searches the web via Perplexity on `OpenRouter`.
 pub struct WebSearch {
-    client: OpenRouterClient,
+    client: ChatCompletionsClient,
     model: String,
     max_tokens: u32,
     timeout: Duration,
 }
 
 impl WebSearch {
-    pub fn new(client: OpenRouterClient, config: &WebSearchConfig) -> Self {
+    pub fn new(client: ChatCompletionsClient, config: &WebSearchConfig) -> Self {
         Self {
             client,
             model: config.model.clone(),
@@ -115,7 +115,7 @@ impl Tool for WebSearch {
     }
 }
 
-// --- Wire format (request only — response types are in openrouter.rs) ---
+// --- Wire format (request only — response types are in chat_completion.rs) ---
 
 #[derive(Serialize)]
 struct SearchRequest<'a> {
@@ -133,7 +133,7 @@ struct RequestMessage<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::openrouter::ChatResponse;
+    use crate::chat_completion::ChatResponse;
 
     #[test]
     fn request_serialization() {

@@ -1,29 +1,30 @@
-//! `OpenRouter` provider implementation.
+//! OpenAI-compatible provider implementation.
 //!
-//! Communicates with `OpenRouter`'s OpenAI-compatible API to get LLM responses.
+//! Bridges the [`Provider`] trait with any endpoint that speaks the
+//! `OpenAI` chat completions wire format.
 
 use serde::Serialize;
 use tracing::{debug, trace};
 
+use crate::chat_completion::{ApiToolCall, ChatResponse, CompletionsApi};
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
-use crate::openrouter::{ApiToolCall, ChatResponse, CompletionsClient};
 use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
 use super::Provider;
 
-/// `OpenRouter` LLM provider.
+/// Provider for any OpenAI-compatible chat completions endpoint.
 ///
 /// Generic over the [`CompletionsClient`] so that tests can substitute a
 /// mock without bypassing response parsing.
-pub struct OpenRouterProvider<C> {
+pub struct CompletionsProvider<C> {
     client: C,
     model: String,
     max_tokens: u32,
     temperature: f32,
 }
 
-impl<C: CompletionsClient> OpenRouterProvider<C> {
+impl<C: CompletionsApi> CompletionsProvider<C> {
     /// Create a new provider with the given client and configuration.
     pub fn new(client: C, config: &ProviderConfig) -> Self {
         Self {
@@ -53,7 +54,7 @@ impl<C: CompletionsClient> OpenRouterProvider<C> {
     }
 }
 
-impl<C: CompletionsClient> Provider for OpenRouterProvider<C> {
+impl<C: CompletionsApi> Provider for CompletionsProvider<C> {
     async fn chat(
         &self,
         messages: &[Message],
@@ -85,7 +86,7 @@ fn into_tool_call(tc: ApiToolCall) -> ToolCall {
     )
 }
 
-// --- Wire format (request only — response types are in openrouter.rs) ---
+// --- Wire format (request only — response types are in chat_completion.rs) ---
 
 #[derive(Serialize)]
 struct ChatRequest<'a> {

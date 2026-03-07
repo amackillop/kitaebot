@@ -34,9 +34,40 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProviderConfig {
+    /// `OpenAI`-compatible API to use.
+    pub api: Api,
     pub model: String,
     pub max_tokens: u32,
     pub temperature: f32,
+}
+
+/// `OpenAI`-compatible chat completions API.
+///
+/// Each variant maps to a known endpoint URL. Invalid values are
+/// rejected at config parse time.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Api {
+    #[default]
+    OpenRouter,
+    OpenAi,
+    Groq,
+    Together,
+    Mistral,
+}
+
+impl Api {
+    /// Endpoint URL for the chat completions API.
+    #[cfg_attr(feature = "mock-network", allow(dead_code))]
+    pub fn endpoint(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "https://openrouter.ai/api/v1/chat/completions",
+            Self::OpenAi => "https://api.openai.com/v1/chat/completions",
+            Self::Groq => "https://api.groq.com/openai/v1/chat/completions",
+            Self::Together => "https://api.together.xyz/v1/chat/completions",
+            Self::Mistral => "https://api.mistral.ai/v1/chat/completions",
+        }
+    }
 }
 
 /// Agent loop settings.
@@ -123,6 +154,7 @@ pub struct ContextConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
+            api: Api::default(),
             model: "arcee-ai/trinity-large-preview:free".to_string(),
             max_tokens: 4096,
             temperature: 0.7,

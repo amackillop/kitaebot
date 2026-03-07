@@ -1,5 +1,6 @@
 mod activity;
 mod agent;
+mod chat_completion;
 mod commands;
 mod config;
 mod context;
@@ -8,7 +9,6 @@ mod dispatch;
 mod error;
 mod heartbeat;
 mod lock;
-mod openrouter;
 mod provider;
 mod safety;
 mod sandbox;
@@ -22,10 +22,10 @@ mod types;
 mod workspace;
 
 use agent::TurnConfig;
+use chat_completion::ChatCompletionsClient;
 use config::Config;
 use heartbeat::Outcome;
-use openrouter::OpenRouterClient;
-use provider::{OpenRouterProvider, Provider};
+use provider::{CompletionsProvider, Provider};
 use tools::path::PathGuard;
 use tools::{Exec, FileEdit, FileRead, FileWrite, GlobSearch, Grep, Tools};
 use tracing::{error, info, warn};
@@ -57,7 +57,7 @@ async fn main() {
     // Load all secrets before sandboxing. After enforcement, credential
     // files are inaccessible — secrets exist only in memory.
     #[cfg(not(feature = "mock-network"))]
-    let api_key = load_secret("openrouter-api-key").unwrap_or_else(|e| {
+    let api_key = load_secret("provider-api-key").unwrap_or_else(|e| {
         error!("Failed to load API key: {e}");
         std::process::exit(1);
     });
@@ -80,17 +80,17 @@ async fn main() {
     // --- Everything below runs under Landlock confinement ---
 
     #[cfg(not(feature = "mock-network"))]
-    let openrouter = OpenRouterClient::new(api_key);
+    let client = ChatCompletionsClient::new(api_key, config.provider.api.endpoint());
 
     #[cfg(feature = "mock-network")]
-    let openrouter = OpenRouterClient;
-    let provider = OpenRouterProvider::new(openrouter.clone(), &config.provider);
+    let client = ChatCompletionsClient;
+    let provider = CompletionsProvider::new(client.clone(), &config.provider);
 
     let tools = build_tools(
         &workspace,
         &config,
         #[cfg(not(feature = "mock-network"))]
-        openrouter,
+        client,
     );
 
     let turn_config = TurnConfig {
@@ -144,7 +144,7 @@ async fn main() {
 fn build_tools(
     workspace: &Workspace,
     config: &Config,
-    #[cfg(not(feature = "mock-network"))] openrouter: OpenRouterClient,
+    #[cfg(not(feature = "mock-network"))] client: ChatCompletionsClient,
 ) -> Tools {
     let guard = PathGuard::new(workspace.path());
 
@@ -167,10 +167,7 @@ fn build_tools(
             }),
         ));
 
-        tools.push(Box::new(WebSearch::new(
-            openrouter,
-            &config.tools.web_search,
-        )));
+        tools.push(Box::new(WebSearch::new(client, &config.tools.web_search)));
     }
 
     Tools::new(tools)
