@@ -96,11 +96,6 @@ impl Workspace {
         &self.0
     }
 
-    /// Path to the REPL session file.
-    pub fn repl_session_path(&self) -> PathBuf {
-        self.0.join("sessions/repl.json")
-    }
-
     /// Path to the heartbeat session file.
     pub fn heartbeat_session_path(&self) -> PathBuf {
         self.0.join("sessions/heartbeat.json")
@@ -130,11 +125,6 @@ impl Workspace {
     /// Path to the heartbeat lock file.
     pub fn heartbeat_lock_path(&self) -> PathBuf {
         self.0.join("locks/heartbeat.lock")
-    }
-
-    /// Path to the REPL lock file.
-    pub fn repl_lock_path(&self) -> PathBuf {
-        self.0.join("locks/repl.lock")
     }
 
     /// Build the system prompt from workspace files.
@@ -240,16 +230,6 @@ mod tests {
     }
 
     #[test]
-    fn repl_session_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        assert_eq!(
-            ws.repl_session_path(),
-            dir.path().join("sessions/repl.json")
-        );
-    }
-
-    #[test]
     fn heartbeat_session_path() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
@@ -301,12 +281,5 @@ mod tests {
             ws.heartbeat_lock_path(),
             dir.path().join("locks/heartbeat.lock")
         );
-    }
-
-    #[test]
-    fn repl_lock_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        assert_eq!(ws.repl_lock_path(), dir.path().join("locks/repl.lock"));
     }
 }

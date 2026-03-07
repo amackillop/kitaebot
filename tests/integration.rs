@@ -10,12 +10,6 @@ fn kitaebot_with_workspace(dir: &TempDir) -> Command {
     cmd
 }
 
-fn kitaebot_chat(dir: &TempDir) -> Command {
-    let mut cmd = kitaebot_with_workspace(dir);
-    cmd.arg("chat");
-    cmd
-}
-
 // --- CLI dispatch tests ---
 
 #[test]
@@ -25,7 +19,7 @@ fn bare_invocation_prints_usage() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("Usage: kitaebot <command>"))
-        .stderr(predicate::str::contains("chat"));
+        .stderr(predicate::str::contains("heartbeat"));
 }
 
 #[test]
@@ -38,104 +32,12 @@ fn unknown_subcommand_fails() {
         .stderr(predicate::str::contains("Unknown command: bogus"));
 }
 
-// --- Chat REPL tests ---
-
-#[test]
-fn new_session_status() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_chat(&dir)
-        .write_stdin("/exit\n")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("New session"));
-}
-
-#[test]
-fn resumed_session_status() {
-    let dir = tempfile::tempdir().unwrap();
-
-    // First run: create a session with one turn
-    kitaebot_chat(&dir)
-        .write_stdin("hello\n/exit\n")
-        .assert()
-        .success();
-
-    // Second run: should show resumed
-    kitaebot_chat(&dir)
-        .write_stdin("/exit\n")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Resumed session"));
-}
-
-#[test]
-fn exit_command() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_chat(&dir)
-        .write_stdin("/exit\n")
-        .assert()
-        .success();
-}
-
-#[test]
-fn eof_exits_cleanly() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_chat(&dir).write_stdin("").assert().success();
-}
-
-#[test]
-fn stub_response() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_chat(&dir)
-        .write_stdin("hello\n/exit\n")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("This is a stub response"));
-}
-
-#[test]
-fn multiple_inputs() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_chat(&dir)
-        .write_stdin("first\nsecond\nthird\n/exit\n")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("This is a stub response")
-                .count(3)
-                .from_utf8(),
-        );
-}
-
-#[test]
-fn empty_input_skipped() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_chat(&dir)
-        .write_stdin("\n\nhello\n/exit\n")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("This is a stub response")
-                .count(1)
-                .from_utf8(),
-        );
-}
-
-#[test]
-fn prompts_displayed() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_chat(&dir)
-        .write_stdin("test\n/exit\n")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(">"));
-}
-
 #[test]
 fn workspace_initialized_on_start() {
     let dir = tempfile::tempdir().unwrap();
-    kitaebot_chat(&dir)
-        .write_stdin("/exit\n")
+    // heartbeat skips cleanly (no HEARTBEAT.md) but still inits workspace.
+    kitaebot_with_workspace(&dir)
+        .arg("heartbeat")
         .assert()
         .success();
 
@@ -145,25 +47,4 @@ fn workspace_initialized_on_start() {
     assert!(dir.path().join("locks").is_dir());
     assert!(dir.path().join("memory").is_dir());
     assert!(dir.path().join("projects").is_dir());
-}
-
-#[test]
-fn session_persisted_after_turn() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_chat(&dir)
-        .write_stdin("hello\n/exit\n")
-        .assert()
-        .success();
-
-    assert!(dir.path().join("sessions/repl.json").exists());
-}
-
-#[test]
-fn new_command_clears_session() {
-    let dir = tempfile::tempdir().unwrap();
-    kitaebot_chat(&dir)
-        .write_stdin("hello\n/new\n/exit\n")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Session cleared."));
 }

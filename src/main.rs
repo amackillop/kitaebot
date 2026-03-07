@@ -9,7 +9,6 @@ mod error;
 mod heartbeat;
 mod lock;
 mod provider;
-mod repl;
 mod safety;
 mod sandbox;
 mod secrets;
@@ -101,9 +100,6 @@ async fn main() {
     };
 
     match std::env::args().nth(1).as_deref() {
-        Some("chat") => {
-            repl::run(&workspace, &turn_config).await;
-        }
         Some("heartbeat") => {
             run_heartbeat(&workspace, &turn_config).await;
         }
@@ -137,9 +133,8 @@ async fn main() {
             eprintln!("Usage: kitaebot <command>");
             eprintln!();
             eprintln!("Commands:");
-            eprintln!("  chat       Interactive conversation");
             eprintln!("  heartbeat  One-shot heartbeat cycle");
-            eprintln!("  run        Start daemon (heartbeat loop)");
+            eprintln!("  run        Start daemon (heartbeat + channels)");
             std::process::exit(1);
         }
     }

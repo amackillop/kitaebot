@@ -34,9 +34,7 @@ pub struct TurnConfig<'a, P: Provider> {
 
 /// Load session, run a single turn, save on success.
 ///
-/// Shared by all daemon channels (telegram, socket, heartbeat).
-/// The REPL keeps its own in-memory session loop and calls
-/// [`run_turn`] directly.
+/// Shared by all channels (telegram, socket, heartbeat).
 pub async fn process_message<P: Provider>(
     session_path: &Path,
     workspace: &Workspace,

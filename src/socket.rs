@@ -1,8 +1,7 @@
 //! Unix domain socket channel.
 //!
 //! Listens on `/run/kitaebot/chat.sock` for NDJSON clients. Clients send
-//! `{"content": "..."}` — the server parses slash commands from content,
-//! same as the REPL.
+//! `{"content": "..."}` — the server parses slash commands from content.
 //!
 //! Single client at a time: while one client is connected, new
 //! connections are accepted only to send an error and close them.
