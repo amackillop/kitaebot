@@ -15,6 +15,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
+use crate::activity::Activity;
 use crate::agent::TurnConfig;
 use crate::commands;
 use crate::dispatch;
@@ -104,6 +105,7 @@ async fn serve<P: Provider>(
     // Message loop: read from client, reject new connections concurrently.
     let mut verbose = false;
     let mut line = String::new();
+    let (tx, mut rx) = mpsc::channel(64);
     loop {
         line.clear();
         tokio::select! {
@@ -111,7 +113,7 @@ async fn serve<P: Provider>(
                 match result {
                     Ok(0) | Err(_) => return,
                     Ok(_) => {
-                        handle_line(&line, &mut writer, workspace, config, &mut verbose).await;
+                        handle_line(&line, &mut writer, workspace, config, &mut verbose, &tx, &mut rx).await;
                     }
                 }
             }
@@ -145,6 +147,8 @@ async fn handle_line<P: Provider>(
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
     verbose: &mut bool,
+    tx: &mpsc::Sender<Activity>,
+    rx: &mut mpsc::Receiver<Activity>,
 ) {
     let msg: ClientMsg = match serde_json::from_str(line) {
         Ok(m) => m,
@@ -178,10 +182,9 @@ async fn handle_line<P: Provider>(
     }
 
     let session_path = workspace.socket_session_path();
-    let (tx, mut rx) = mpsc::channel(64);
 
     let result = {
-        let dispatch_fut = dispatch::dispatch(input, &session_path, workspace, config, Some(&tx));
+        let dispatch_fut = dispatch::dispatch(input, &session_path, workspace, config, Some(tx));
         tokio::pin!(dispatch_fut);
 
         // Drain activity events while dispatch runs.
@@ -197,11 +200,9 @@ async fn handle_line<P: Provider>(
             }
         }
     };
-    // dispatch_fut is dropped here, releasing the borrow on tx.
 
     // Drain remaining buffered events.
-    drop(tx);
-    while let Some(event) = rx.recv().await {
+    while let Ok(event) = rx.try_recv() {
         if *verbose {
             let _ = send(
                 writer,

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use crate::activity::Activity;
 use crate::agent::TurnConfig;
 use crate::config::TelegramConfig;
 use crate::dispatch;
@@ -229,6 +230,7 @@ pub async fn poll_loop<P: Provider>(
     info!(chat_id = channel.chat_id, "Telegram poller starting");
     let mut offset: i64 = 0;
     let mut verbose = false;
+    let (tx, mut rx) = mpsc::channel(64);
 
     loop {
         let updates = match channel.get_updates(offset).await {
@@ -266,7 +268,16 @@ pub async fn poll_loop<P: Provider>(
                 continue;
             };
 
-            handle_message(channel, workspace, config, &text, &mut verbose).await;
+            handle_message(
+                channel,
+                workspace,
+                config,
+                &text,
+                &mut verbose,
+                &tx,
+                &mut rx,
+            )
+            .await;
         }
     }
 }
@@ -278,6 +289,8 @@ async fn handle_message<P: Provider>(
     config: &TurnConfig<'_, P>,
     text: &str,
     verbose: &mut bool,
+    tx: &mpsc::Sender<Activity>,
+    rx: &mut mpsc::Receiver<Activity>,
 ) {
     let trimmed = text.trim();
 
@@ -292,10 +305,9 @@ async fn handle_message<P: Provider>(
     }
 
     let session_path = workspace.telegram_session_path();
-    let (tx, mut rx) = mpsc::channel(64);
 
     let result = {
-        let dispatch_fut = dispatch::dispatch(trimmed, &session_path, workspace, config, Some(&tx));
+        let dispatch_fut = dispatch::dispatch(trimmed, &session_path, workspace, config, Some(tx));
         tokio::pin!(dispatch_fut);
 
         loop {
@@ -314,8 +326,7 @@ async fn handle_message<P: Provider>(
     };
 
     // Drain remaining buffered events.
-    drop(tx);
-    while let Some(event) = rx.recv().await {
+    while let Ok(event) = rx.try_recv() {
         if *verbose && let Err(e) = channel.send_message(&event.to_string()).await {
             error!("Failed to send activity: {e}");
         }
