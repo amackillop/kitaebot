@@ -214,7 +214,9 @@ async fn handle_line<P: Provider>(
     }
 
     let response = match result {
-        Ok(content) => ServerMsg::Response { content },
+        Ok(reply) => ServerMsg::Response {
+            content: reply.content,
+        },
         Err(content) => ServerMsg::Error { content },
     };
     let _ = send(writer, &response)

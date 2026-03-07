@@ -79,6 +79,8 @@ struct GetUpdatesBody {
 struct SendMessageBody<'a> {
     chat_id: i64,
     text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parse_mode: Option<&'a str>,
 }
 
 // --- Channel ---
@@ -137,14 +139,26 @@ impl TelegramChannel {
         resp.into_result()
     }
 
-    /// Send a text message with retries on transient failures.
+    /// Send a plain text message with retries on transient failures.
     ///
     /// Retries up to [`SEND_RETRIES`] times with exponential backoff
     /// (1s, 2s, 4s) on network errors and 429/5xx API responses.
     async fn send_message(&self, text: &str) -> Result<(), TelegramError> {
+        self.send_raw(text, None).await
+    }
+
+    /// Send preformatted text rendered in a monospace font.
+    async fn send_preformatted(&self, text: &str) -> Result<(), TelegramError> {
+        let escaped = html_escape(text);
+        let html = format!("<pre>{escaped}</pre>");
+        self.send_raw(&html, Some("HTML")).await
+    }
+
+    async fn send_raw(&self, text: &str, parse_mode: Option<&str>) -> Result<(), TelegramError> {
         let body = SendMessageBody {
             chat_id: self.chat_id,
             text,
+            parse_mode,
         };
         let mut attempts = 0u32;
         loop {
@@ -175,6 +189,20 @@ impl TelegramChannel {
             .await?;
         resp.into_result().map(|_| ())
     }
+}
+
+/// Escape the three characters that are special in Telegram HTML mode.
+fn html_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Whether a [`TelegramError`] is worth retrying.
@@ -293,12 +321,12 @@ async fn handle_message<P: Provider>(
         }
     }
 
-    let reply = match result {
-        Ok(response) => response,
-        Err(msg) => msg,
+    let send_result = match result {
+        Ok(ref reply) if reply.preformatted => channel.send_preformatted(&reply.content).await,
+        Ok(ref reply) => channel.send_message(&reply.content).await,
+        Err(ref msg) => channel.send_message(msg).await,
     };
-
-    if let Err(e) = channel.send_message(&reply).await {
+    if let Err(e) = send_result {
         error!("Failed to send response: {e}");
     }
 }
@@ -428,10 +456,33 @@ mod tests {
         let body = SendMessageBody {
             chat_id: 123,
             text: "hello",
+            parse_mode: None,
         };
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["chat_id"], 123);
         assert_eq!(json["text"], "hello");
+        assert!(json.get("parse_mode").is_none());
+    }
+
+    #[test]
+    fn send_body_with_parse_mode() {
+        let body = SendMessageBody {
+            chat_id: 123,
+            text: "<pre>hi</pre>",
+            parse_mode: Some("HTML"),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["parse_mode"], "HTML");
+    }
+
+    #[test]
+    fn html_escape_special_chars() {
+        assert_eq!(html_escape("a < b & c > d"), "a &lt; b &amp; c &gt; d");
+    }
+
+    #[test]
+    fn html_escape_passthrough() {
+        assert_eq!(html_escape("hello world"), "hello world");
     }
 
     #[test]

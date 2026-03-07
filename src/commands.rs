@@ -10,6 +10,7 @@ use tracing::error;
 
 use crate::config::ContextConfig;
 use crate::context;
+use crate::dispatch::Reply;
 use crate::provider::Provider;
 use crate::session::Session;
 use crate::stats;
@@ -62,15 +63,15 @@ pub fn greeting(session_path: &Path) -> String {
 /// Execute a slash command.
 ///
 /// Loads the session from disk, runs the command, and saves when the
-/// command modifies it. Returns the result message on success, or an
-/// error message on failure.
+/// command modifies it. Returns a [`Reply`] on success or an error
+/// message on failure.
 pub async fn execute<P: Provider>(
     cmd: SlashCommand,
     session_path: &Path,
     workspace: &Workspace,
     provider: &P,
     ctx: &ContextConfig,
-) -> Result<String, String> {
+) -> Result<Reply, String> {
     let mut session =
         Session::load(session_path).map_err(|e| format!("Session load error: {e}"))?;
 
@@ -84,9 +85,11 @@ pub async fn execute<P: Provider>(
                     if let Err(e) = session.save(session_path) {
                         error!("Failed to save session: {e}");
                     }
-                    Ok(format!("Compacted: {before} -> {after} tokens"))
+                    Ok(Reply::text(format!(
+                        "Compacted: {before} -> {after} tokens"
+                    )))
                 }
-                Ok(false) => Ok("Nothing to compact.".into()),
+                Ok(false) => Ok(Reply::text("Nothing to compact.".into())),
                 Err(e) => Err(format!("Compaction failed: {e}")),
             }
         }
@@ -99,23 +102,23 @@ pub async fn execute<P: Provider>(
             } else {
                 0
             };
-            Ok(format!(
+            Ok(Reply::text(format!(
                 "Context: {tokens} / {budget} tokens ({pct}%)\n\
                  Messages: {}\n\
                  Budget: {}% of {}",
                 session.len(),
                 ctx.budget_percent,
                 ctx.max_tokens,
-            ))
+            )))
         }
         SlashCommand::New => {
             session.clear();
             if let Err(e) = session.save(session_path) {
                 error!("Failed to save session: {e}");
             }
-            Ok("Session cleared.".into())
+            Ok(Reply::text("Session cleared.".into()))
         }
-        SlashCommand::Stats => Ok(stats::run(workspace.path())),
+        SlashCommand::Stats => Ok(Reply::pre(stats::run(workspace.path()))),
     }
 }
 

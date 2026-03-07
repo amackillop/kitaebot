@@ -41,17 +41,41 @@ impl<'a> Input<'a> {
     }
 }
 
+/// Dispatch result carrying content and a formatting hint.
+///
+/// Channels inspect `preformatted` to choose an appropriate rendering
+/// (e.g. Telegram `<pre>`, terminal raw output).
+pub struct Reply {
+    pub content: String,
+    pub preformatted: bool,
+}
+
+impl Reply {
+    pub fn text(content: String) -> Self {
+        Self {
+            content,
+            preformatted: false,
+        }
+    }
+
+    pub fn pre(content: String) -> Self {
+        Self {
+            content,
+            preformatted: true,
+        }
+    }
+}
+
 /// Route user input to the appropriate handler.
 ///
-/// Returns `Ok(response)` on success or `Err(message)` on failure,
-/// both as displayable strings.
+/// Returns `Ok(reply)` on success or `Err(message)` on failure.
 pub async fn dispatch<P: Provider>(
     input: &str,
     session_path: &Path,
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
     activity_tx: Option<&mpsc::Sender<Activity>>,
-) -> Result<String, String> {
+) -> Result<Reply, String> {
     match Input::parse(input).map_err(|_| format!("Unknown command: {input}"))? {
         Input::Command(cmd) => {
             commands::execute(
@@ -66,6 +90,7 @@ pub async fn dispatch<P: Provider>(
         Input::Message(text) => {
             agent::process_message(session_path, workspace, text, config, activity_tx)
                 .await
+                .map(Reply::text)
                 .map_err(|e| e.to_string())
         }
     }
