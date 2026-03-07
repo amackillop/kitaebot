@@ -80,8 +80,8 @@ fn main() {
             break;
         }
 
-        let msg = if let Some(name) = trimmed.strip_prefix('/') {
-            ClientMsg::Command { name }
+        let msg = if trimmed.starts_with('/') {
+            ClientMsg::Command { name: trimmed }
         } else {
             ClientMsg::Message { content: trimmed }
         };

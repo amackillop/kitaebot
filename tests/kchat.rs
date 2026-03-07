@@ -151,7 +151,7 @@ fn slash_command_sent_as_command_type() {
         );
 
         let msg = recv_line(&mut reader);
-        assert!(matches!(msg, ClientMsg::Command { name } if name == "new"));
+        assert!(matches!(msg, ClientMsg::Command { name } if name == "/new"));
 
         send_line(
             &mut writer,

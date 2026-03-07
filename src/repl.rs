@@ -43,8 +43,8 @@ impl<'a> Command<'a> {
             Self::Empty
         } else if trimmed == "/exit" {
             Self::Exit
-        } else if let Some(name) = trimmed.strip_prefix('/') {
-            match SlashCommand::parse(name) {
+        } else if trimmed.starts_with('/') {
+            match SlashCommand::parse(trimmed) {
                 Some(cmd) => Self::Slash(cmd),
                 None => Self::Unknown(trimmed),
             }

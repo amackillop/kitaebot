@@ -31,7 +31,7 @@ enum ClientMsg {
     Message {
         content: String,
     },
-    /// Slash command without the leading `/` (e.g. `"new"`, not `"/new"`).
+    /// Slash command with the leading `/` (e.g. `"/new"`).
     Command {
         name: String,
     },

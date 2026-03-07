@@ -29,13 +29,13 @@ pub enum SlashCommand {
 }
 
 impl SlashCommand {
-    /// Parse a command name (without the leading `/`).
-    pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "new" => Some(Self::NewSession),
-            "context" => Some(Self::Context),
-            "compact" => Some(Self::Compact),
-            "stats" => Some(Self::Stats),
+    /// Parse a command name.
+    pub fn parse(command: &str) -> Option<Self> {
+        match command {
+            "/new" => Some(Self::NewSession),
+            "/context" => Some(Self::Context),
+            "/compact" => Some(Self::Compact),
+            "/stats" => Some(Self::Stats),
             _ => None,
         }
     }
@@ -116,17 +116,19 @@ mod tests {
 
     #[test]
     fn parse_known_commands() {
-        assert_eq!(SlashCommand::parse("new"), Some(SlashCommand::NewSession));
-        assert_eq!(SlashCommand::parse("context"), Some(SlashCommand::Context));
-        assert_eq!(SlashCommand::parse("compact"), Some(SlashCommand::Compact));
-        assert_eq!(SlashCommand::parse("stats"), Some(SlashCommand::Stats));
+        assert_eq!(SlashCommand::parse("/new"), Some(SlashCommand::NewSession));
+        assert_eq!(SlashCommand::parse("/context"), Some(SlashCommand::Context));
+        assert_eq!(SlashCommand::parse("/compact"), Some(SlashCommand::Compact));
+        assert_eq!(SlashCommand::parse("/stats"), Some(SlashCommand::Stats));
     }
 
     #[test]
     fn parse_unknown_returns_none() {
-        assert_eq!(SlashCommand::parse("help"), None);
-        assert_eq!(SlashCommand::parse("exit"), None);
+        assert_eq!(SlashCommand::parse("/help"), None);
+        assert_eq!(SlashCommand::parse("/exit"), None);
         assert_eq!(SlashCommand::parse(""), None);
+        assert_eq!(SlashCommand::parse("new"), None);
+        assert_eq!(SlashCommand::parse("context"), None);
     }
 
     #[test]
