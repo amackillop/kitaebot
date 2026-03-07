@@ -22,9 +22,10 @@ struct ClientMsg {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)]
 enum ServerMsg {
+    Activity { content: String },
+    Error { content: String },
     Greeting { content: String },
     Response { content: String },
-    Error { content: String },
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -234,6 +235,55 @@ fn empty_lines_skipped() {
         .assert()
         .success()
         .stdout(predicate::str::contains("got it"));
+
+    server.join().unwrap();
+}
+
+#[test]
+fn activity_messages_printed_to_stderr() {
+    let (_dir, path) = sock_path();
+
+    let server = spawn_echo_server(&path, |stream| {
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+
+        send_line(
+            &mut writer,
+            &ServerMsg::Greeting {
+                content: "New session".into(),
+            },
+        );
+
+        let _msg = recv_line(&mut reader);
+
+        // Send activity events before the final response.
+        send_line(
+            &mut writer,
+            &ServerMsg::Activity {
+                content: "Running tool: exec".into(),
+            },
+        );
+        send_line(
+            &mut writer,
+            &ServerMsg::Activity {
+                content: "Tool finished: exec".into(),
+            },
+        );
+        send_line(
+            &mut writer,
+            &ServerMsg::Response {
+                content: "done".into(),
+            },
+        );
+    });
+
+    kchat(&path)
+        .write_stdin("hello\n/exit\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("done"))
+        .stderr(predicate::str::contains("~ Running tool: exec"))
+        .stderr(predicate::str::contains("~ Tool finished: exec"));
 
     server.join().unwrap();
 }

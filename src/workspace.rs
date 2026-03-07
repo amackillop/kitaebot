@@ -107,7 +107,6 @@ impl Workspace {
     }
 
     /// Path to the Unix socket channel session file.
-    #[allow(unused)]
     pub fn socket_session_path(&self) -> PathBuf {
         self.0.join("sessions/socket.json")
     }
