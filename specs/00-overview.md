@@ -40,27 +40,26 @@ Existing solutions (nanobot, OpenClaw) are feature-rich but complex. Kitaebot pr
 │  │  sessions/          memory/         SOUL.md        │  │
 │  │  ├── telegram.json  └── HISTORY.md  AGENTS.md      │  │
 │  │  ├── socket.json                    HEARTBEAT.md   │  │
-│  │  ├── heartbeat.json                 config.toml    │  │
-│  │  └── repl.json                                     │  │
+│  │  └── heartbeat.json                 config.toml    │  │
 │  └────────────────────────────────────────────────────┘  │
 │                                                          │
 │  ┌──────────────┐                                        │
 │  │    sshd      │◄── user connects via SSH               │
-│  │              │    runs `kitaebot chat` (debug REPL)   │
+│  │              │    runs `kchat` (socket client)        │
 │  └──────────────┘                                        │
 └──────────────────────────────────────────────────────────┘
 ```
 
 ## Binary Design
 
-Single binary, two modes:
+Two binaries:
 
-| Command | Role | Lifecycle |
-|---------|------|-----------|
+| Binary | Role | Lifecycle |
+|--------|------|-----------|
 | `kitaebot run` | Daemon: Telegram poller + socket listener + heartbeat timer | Long-lived (systemd service) |
-| `kitaebot chat` | Local REPL for debugging and backup | Interactive, on-demand |
+| `kchat <socket-path>` | Thin NDJSON client for the Unix socket | Interactive, on-demand |
 
-Both are independent processes sharing the workspace. No IPC — coordination via per-channel file locks.
+Interactive access is through `kchat` connecting to the daemon's Unix socket. No separate REPL process.
 
 ## Components
 
@@ -80,6 +79,7 @@ Both are independent processes sharing the workspace. No IPC — coordination vi
 | [12](12-context.md) | Context | Token budget and conversation windowing |
 | [13](13-credentials.md) | Credentials | Credential isolation and secret loading |
 | [14](14-memory.md) | Memory | Long-term recall across sessions and channels |
+| [16](16-activity.md) | Activity | Structured turn events for channel observability |
 
 ## Data Flow
 
@@ -99,12 +99,6 @@ Both are independent processes sharing the workspace. No IPC — coordination vi
 2. Sends NDJSON message or command
 3. Same agent loop as Telegram, different session (`sessions/socket.json`)
 4. Response written back as NDJSON
-
-### REPL (debug)
-
-1. User SSHs into VM, runs `kitaebot chat`
-2. Same agent loop, different session (`sessions/repl.json`)
-3. Response printed to stdout
 
 ### Heartbeat
 

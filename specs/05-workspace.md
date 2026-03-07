@@ -32,12 +32,11 @@ Resolved via fallback chain:
 │
 ├── sessions/                # Per-channel conversation history
 │   ├── telegram.json
-│   ├── heartbeat.json
-│   └── repl.json
+│   ├── socket.json
+│   └── heartbeat.json
 │
 ├── locks/                   # PID lock files
-│   ├── heartbeat.lock
-│   └── repl.lock
+│   └── heartbeat.lock
 │
 ├── memory/                  # Shared long-term memory
 │   ├── HISTORY.md           # Heartbeat execution log
@@ -76,7 +75,7 @@ The `memory/` directory is shared across all channels. Any channel can read or w
 
 - Heartbeat writes execution logs to `memory/HISTORY.md`
 - Telegram conversations can write learnings to `memory/`
-- REPL sessions can read memory to debug agent behavior
+- Socket sessions can read memory to debug agent behavior
 
 ### Memory Search
 

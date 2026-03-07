@@ -18,10 +18,12 @@ $ kitaebot <command>
 
 Commands:
   run        Start the daemon (Telegram poller + socket listener + heartbeat timer)
-  chat       Interactive REPL (debug/backup interface)
+  heartbeat  One-shot heartbeat cycle
 ```
 
 Bare invocation prints usage and exits with code 1.
+
+The `chat` subcommand (interactive REPL) has been removed. Interactive access is through `kchat` over the Unix socket channel, which provides identical functionality with activity event support.
 
 ## Run Mode (Daemon)
 
@@ -46,69 +48,6 @@ All three loops share a single `TurnConfig` (provider, tools, iteration limit, c
 ### Systemd Integration
 
 The daemon runs as a systemd service (`Type=simple`). See [09-vm.md](09-vm.md) for unit file details.
-
-## Chat Mode (REPL)
-
-```
-$ kitaebot chat
-New session
-
-> What files are in my workspace?
-
-Looking at your workspace...
-
-[exec] ls -la
-
-Your workspace contains:
-- SOUL.md (agent personality)
-- session.json (conversation history)
-- projects/ (your working area)
-
-> /exit
-```
-
-The REPL is a debug and backup interface. The primary communication channels are Telegram and the Unix socket (see [10-channels.md](10-channels.md)).
-
-On resume:
-
-```
-$ kitaebot chat
-Resumed session (5 messages)
-
->
-```
-
-### REPL Commands
-
-All commands are prefixed with `/`. Unrecognized `/` commands print an
-error instead of being sent to the agent.
-
-| Input | Action |
-|-------|--------|
-| `/compact` | Force context compaction |
-| `/context` | Display token usage and budget |
-| `/new`  | Clear session, start fresh |
-| `/stats` | Print tool usage statistics to logs |
-| `/exit` | Exit the REPL |
-| EOF (Ctrl-D) | Exit the REPL |
-
-Empty/whitespace-only input is silently skipped.
-
-### Chat Startup
-
-1. Acquire REPL lock (`locks/repl.lock`) — exit 1 if another REPL session active
-2. Print session status ("New session" or "Resumed session (N messages)")
-3. Enter REPL loop
-
-### Turn Cycle
-
-1. Read line from stdin
-2. Parse into `Command` (empty, `/exit`, slash command, unknown `/cmd`, message)
-3. Skip empty, break on `/exit` or EOF
-4. Slash commands → `commands::execute()` (handles session load/save internally)
-5. Reject unknown `/` commands with error to stderr
-6. Messages → `agent::process_message()` → print response (handles session load/save internally)
-7. On error: print to stderr, continue
 
 ## Global Startup
 

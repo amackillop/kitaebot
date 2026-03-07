@@ -64,6 +64,19 @@ All values are configurable via `config.toml` (see `src/config.rs`). Defaults sh
 
 The agent loop itself is stateless. All persistence is handled by the session module. This makes the loop easy to test and reason about.
 
+## Activity Events
+
+`run_turn` and `process_message` accept an optional `mpsc::Sender<Activity>` for emitting structured events during execution. See [spec 16](16-activity.md) for the full design.
+
+Events are emitted at these points in the loop:
+
+1. **Compaction** — after `compact_if_needed` returns `Ok(true)`, emit `Activity::Compaction` with before/after token estimates
+2. **Tool start** — before `join_all`, emit `Activity::ToolStart` for each pending call
+3. **Tool end** — after each tool result, emit `Activity::ToolEnd` with tool name and error if failed/blocked
+4. **Max iterations** — at loop exhaustion, emit `Activity::MaxIterations`
+
+Callers that don't need events pass `None`. No behavior change when the sender is absent.
+
 ## Future Considerations
 
 - **Streaming**: Currently batch-only. Streaming would update the CLI in real-time.

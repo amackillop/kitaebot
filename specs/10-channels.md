@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A channel is a frontend that translates external messages into agent turns and delivers responses back. Telegram and the Unix socket are the two external channels. The REPL (`kitaebot chat`) is a local debug channel.
+A channel is a frontend that translates external messages into agent turns and delivers responses back. Telegram and the Unix socket are the two channels.
 
 ## Why Channels?
 
@@ -10,7 +10,7 @@ The agent core (provider, tools, session, workspace) is interface-agnostic. A ch
 
 Separating channels from the core means:
 
-1. **Multiple interfaces** — Telegram, Unix socket, REPL — all drive the same agent
+1. **Multiple interfaces** — Telegram and Unix socket drive the same agent
 2. **Shared memory, isolated conversations** — Each channel has its own session but reads/writes the same workspace and long-term memory
 3. **Independent lifecycles** — Adding a channel doesn't change the agent loop, provider, or tools
 
@@ -27,7 +27,7 @@ Separating channels from the core means:
               │        │            │            │       │
               │        ▼            ▼            ▼       │
               │  ┌──────────────────────────────────┐    │
-              │  │     agent::process_message()     │    │
+              │  │     dispatch::dispatch()         │    │
               │  └───────────────┬──────────────────┘    │
               │                  │                       │
               │   ┌──────────────▼───────────────┐       │
@@ -35,34 +35,16 @@ Separating channels from the core means:
               │   └──────────────────────────────┘       │
               └──────────────────────────────────────────┘
 
-              ┌─────────────────────────────────┐
-              │       kitaebot chat             │
-              │                                 │
-              │  ┌─────────┐                    │
-              │  │  REPL   │                    │
-              │  └────┬────┘                    │
-              │       │                         │
-              │       ▼                         │
-              │  ┌──────────────────────────┐   │
-              │  │ agent::process_message() │   │
-              │  └──────────┬───────────────┘   │
-              │             │                   │
-              │  ┌──────────▼───────────┐       │
-              │  │ Provider / Tools     │       │
-              │  └──────────────────────┘       │
-              └─────────────────────────────────┘
-
 Shared:
   ~/.local/share/kitaebot/
   ├── sessions/
   │   ├── telegram.json      # Telegram channel session
   │   ├── socket.json        # Unix socket channel session
-  │   ├── heartbeat.json     # Heartbeat session
-  │   └── repl.json          # REPL session
+  │   └── heartbeat.json     # Heartbeat session
   └── memory/                # Long-term memory (all channels)
 ```
 
-The daemon (`kitaebot run`) and the REPL (`kitaebot chat`) are separate processes. They share the workspace filesystem and coordinate via per-channel file locks. No IPC protocol between them.
+All channels run inside the daemon process. Interactive access from the host is through `kchat` connecting to the Unix socket.
 
 ## Telegram Channel
 
@@ -143,10 +125,17 @@ Unknown types or command names → error response. Connection stays open.
 | `greeting`       | Immediately on connect            |
 | `response`       | Agent turn completed              |
 | `command_result` | Slash command completed           |
+| `activity`       | During turn, when verbose is on   |
 | `error`          | Invalid request or agent failure  |
 
 All responses carry a `content: String` field. Embedded newlines are
 JSON-escaped (`\n` in the string, not literal on the wire).
+
+#### Activity Events
+
+When verbose mode is on, the server sends `activity` messages during a turn. These are human-readable strings describing what the agent is doing (tool calls, compaction). See [spec 16](16-activity.md) for the full event type.
+
+The client should display activity messages as transient progress — they are not part of the conversation. `kchat` prints them to stderr with a dim prefix.
 
 ### Session
 
@@ -167,6 +156,12 @@ closed immediately.
 
 No keepalives, no timeouts.
 
+### Verbose Mode
+
+`/verbose` toggles activity event forwarding for the current connection. It is intercepted before dispatch — it is UI state, not a slash command. The toggle resets on disconnect.
+
+When verbose is on, the server sends `ServerMsg::Activity` for each event emitted by the agent during a turn. When off, events are silently discarded.
+
 ### Client Binary
 
 `kchat <socket-path>` — a dumb REPL that wraps stdin lines into the
@@ -184,6 +179,12 @@ are sent as commands; everything else as messages.
 | Session load/save fails     | Log, error/response respectively       |
 | Client disconnects mid-turn | Complete turn, save session, discard response |
 
+### Telegram Verbose Mode
+
+`/verbose` toggles activity event forwarding within a polling session. It is intercepted before dispatch. The toggle resets on daemon restart.
+
+When verbose is on, activity events are sent as separate Telegram messages (fire-and-forget, errors logged). When off, events are discarded.
+
 ## Channel as Pattern, Not Trait
 
 Each channel follows the same shape:
@@ -195,7 +196,7 @@ Each channel follows the same shape:
 
 Session load/save is handled inside `process_message` and `commands::execute` — channels never manage session state directly.
 
-There is no `Channel` trait. Each channel module implements this pattern directly. The specifics vary enough (HTTP polling vs NDJSON stream vs stdio) that a shared trait would be either too thin to enforce anything useful or too leaky to accommodate real differences.
+There is no `Channel` trait. Each channel module implements this pattern directly. The specifics vary enough (HTTP polling vs NDJSON stream) that a shared trait would be either too thin to enforce anything useful or too leaky to accommodate real differences.
 
 ## Per-Channel Locking
 
@@ -203,7 +204,6 @@ Lock files prevent concurrent access where multiple OS processes could collide:
 
 | Lock | Holder |
 |------|--------|
-| `locks/repl.lock` | REPL process (`kitaebot chat`) |
 | `locks/heartbeat.lock` | Heartbeat invocation (`kitaebot heartbeat` / systemd timer) |
 
 Telegram needs no lock — the poller is a single sequential loop inside the daemon process. The loop itself serializes message processing. Messages arriving during a turn are queued by Telegram's `getUpdates` offset mechanism and picked up on the next poll.
@@ -221,7 +221,7 @@ Different channels can run turns concurrently — the provider is stateless (ful
 | `HEARTBEAT.md` | Shared | Heartbeat task definitions |
 | Workspace files | Shared | Projects, SOUL.md, config |
 
-The agent sees different conversational history depending on which channel it's serving, but its long-term memory and workspace are unified. A learning from a Telegram conversation (written to `memory/`) is visible during the next heartbeat or REPL session.
+The agent sees different conversational history depending on which channel it's serving, but its long-term memory and workspace are unified. A learning from a Telegram conversation (written to `memory/`) is visible during the next heartbeat or socket session.
 
 ## Future Channels
 
@@ -239,5 +239,5 @@ Each would be a new module under `src/channels/`, following the same pattern.
 1. **Text only** — No images, documents, or media
 2. **Single user** — One authorized Telegram chat_id; single socket client
 3. **No message queuing** — Process one message at a time, Telegram buffers the rest
-4. **No typing indicators** — Agent appears offline until response is ready
+4. **No typing indicators** — Agent appears offline until response is ready (activity events provide partial progress when verbose is on)
 5. **No message splitting** — Long responses sent as a single message (Telegram's 4096 char limit may need handling later)
