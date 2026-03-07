@@ -20,19 +20,10 @@ struct ClientMsg<'a> {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
+    Activity { content: String },
+    Error { content: String },
     Greeting { content: String },
     Response { content: String },
-    Error { content: String },
-}
-
-impl ServerMsg {
-    fn content(&self) -> &str {
-        match self {
-            Self::Greeting { content } | Self::Response { content } | Self::Error { content } => {
-                content
-            }
-        }
-    }
 }
 
 // ── Main ────────────────────────────────────────────────────────────
@@ -52,8 +43,10 @@ fn main() {
     let mut writer = stream;
 
     // Read and print greeting.
-    let greeting = recv(&mut reader);
-    println!("{}\n", greeting.content());
+    match recv(&mut reader) {
+        ServerMsg::Greeting { content } => println!("{content}\n"),
+        other => print_response(&other),
+    }
 
     // REPL loop.
     let mut input = String::new();
@@ -77,8 +70,35 @@ fn main() {
         }
 
         send(&mut writer, &ClientMsg { content: trimmed });
-        let response = recv(&mut reader);
-        println!("{}\n", response.content());
+
+        // Read responses, printing activity lines to stderr until we
+        // get the final Response or Error.
+        loop {
+            let msg = recv(&mut reader);
+            match msg {
+                ServerMsg::Activity { content } => {
+                    eprintln!("  ~ {content}");
+                }
+                other => {
+                    print_response(&other);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn print_response(msg: &ServerMsg) {
+    match msg {
+        ServerMsg::Response { content } | ServerMsg::Greeting { content } => {
+            println!("{content}\n");
+        }
+        ServerMsg::Error { content } => {
+            eprintln!("{content}\n");
+        }
+        ServerMsg::Activity { content } => {
+            eprintln!("  ~ {content}");
+        }
     }
 }
 

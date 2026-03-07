@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 use crate::agent::TurnConfig;
@@ -33,6 +34,7 @@ struct ClientMsg {
 #[cfg_attr(test, derive(Deserialize))]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
+    Activity { content: String },
     Error { content: String },
     Greeting { content: String },
     Response { content: String },
@@ -101,6 +103,7 @@ async fn serve<P: Provider>(
     }
 
     // Message loop: read from client, reject new connections concurrently.
+    let mut verbose = false;
     let mut line = String::new();
     loop {
         line.clear();
@@ -109,7 +112,7 @@ async fn serve<P: Provider>(
                 match result {
                     Ok(0) | Err(_) => return,
                     Ok(_) => {
-                        handle_line(&line, &mut writer, workspace, config).await;
+                        handle_line(&line, &mut writer, workspace, config, &mut verbose).await;
                     }
                 }
             }
@@ -142,6 +145,7 @@ async fn handle_line<P: Provider>(
     writer: &mut OwnedWriteHalf,
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
+    verbose: &mut bool,
 ) {
     let msg: ClientMsg = match serde_json::from_str(line) {
         Ok(m) => m,
@@ -159,9 +163,56 @@ async fn handle_line<P: Provider>(
     };
 
     let input = msg.content.trim();
-    let session_path = workspace.socket_session_path();
 
-    let result = dispatch::dispatch(input, &session_path, workspace, config, None).await;
+    // /verbose is UI state, not a slash command — intercept before dispatch.
+    if input == "/verbose" {
+        *verbose = !*verbose;
+        let label = if *verbose { "on" } else { "off" };
+        let _ = send(
+            writer,
+            &ServerMsg::Response {
+                content: format!("Verbose: {label}"),
+            },
+        )
+        .await;
+        return;
+    }
+
+    let session_path = workspace.socket_session_path();
+    let (tx, mut rx) = mpsc::channel(64);
+
+    let result = {
+        let dispatch_fut = dispatch::dispatch(input, &session_path, workspace, config, Some(&tx));
+        tokio::pin!(dispatch_fut);
+
+        // Drain activity events while dispatch runs.
+        loop {
+            tokio::select! {
+                biased;
+                Some(event) = rx.recv() => {
+                    if *verbose {
+                        let _ = send(writer, &ServerMsg::Activity { content: event.to_string() }).await;
+                    }
+                }
+                result = &mut dispatch_fut => break result,
+            }
+        }
+    };
+    // dispatch_fut is dropped here, releasing the borrow on tx.
+
+    // Drain remaining buffered events.
+    drop(tx);
+    while let Some(event) = rx.recv().await {
+        if *verbose {
+            let _ = send(
+                writer,
+                &ServerMsg::Activity {
+                    content: event.to_string(),
+                },
+            )
+            .await;
+        }
+    }
 
     let response = match result {
         Ok(content) => ServerMsg::Response { content },
