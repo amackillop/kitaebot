@@ -14,7 +14,7 @@ use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{self, MissedTickBehavior};
 use tracing::{error, info};
 
 use crate::config::ContextConfig;
@@ -42,7 +42,7 @@ pub async fn run<P: Provider>(
         provider,
         tools,
         max_iterations,
-        interval_secs,
+        Duration::from_secs(interval_secs),
         telegram,
         socket_path,
         ctx,
@@ -58,13 +58,13 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
     provider: &P,
     tools: &Tools,
     max_iterations: usize,
-    interval_secs: u64,
+    interval: Duration,
     telegram: Option<&TelegramChannel>,
     socket_path: &Path,
     ctx: &ContextConfig,
     shutdown: S,
 ) {
-    let mut tick = interval(Duration::from_secs(interval_secs));
+    let mut tick = time::interval(interval);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let heartbeat_loop = async {
@@ -165,7 +165,7 @@ mod tests {
             &provider,
             &Tools::default(),
             1,
-            3600, // large interval — only the immediate first tick matters
+            Duration::from_secs(3600), // large interval — only the immediate first tick matters
             None,
             &sock_path,
             &ContextConfig::default(),
@@ -191,13 +191,13 @@ mod tests {
             &provider,
             &Tools::default(),
             1,
-            1, // 1-second interval
+            Duration::from_millis(100), // 100ms interval for fast test
             None,
             &sock_path,
             &ContextConfig::default(),
             async {
                 // Let 3 ticks fire: immediate + 2 more.
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_millis(250)).await;
             },
         )
         .await;
@@ -223,7 +223,7 @@ mod tests {
             &provider,
             &Tools::default(),
             1,
-            3600,
+            Duration::from_secs(3600),
             None,
             &sock_path,
             &ContextConfig::default(),
