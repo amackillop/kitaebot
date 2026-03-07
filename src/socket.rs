@@ -41,10 +41,10 @@ enum ClientMsg {
 #[cfg_attr(test, derive(Deserialize))]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
-    Greeting { content: String },
-    Response { content: String },
     CommandResult { content: String },
     Error { content: String },
+    Greeting { content: String },
+    Response { content: String },
 }
 
 // ── Public entry point ──────────────────────────────────────────────

@@ -16,20 +16,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum Message {
-    /// System message containing instructions and context.
-    ///
-    /// Typically includes SOUL.md, AGENTS.md, and tool definitions.
-    System {
-        /// The system prompt content
-        content: String,
-    },
-
-    /// User message containing the input request.
-    User {
-        /// The user's message text
-        content: String,
-    },
-
     /// Assistant message containing either text or tool call requests.
     Assistant {
         /// Text content of the response (may be empty if tool calls are present)
@@ -38,6 +24,14 @@ pub enum Message {
         /// Optional tool calls requested by the assistant
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ToolCall>>,
+    },
+
+    /// System message containing instructions and context.
+    ///
+    /// Typically includes SOUL.md, AGENTS.md, and tool definitions.
+    System {
+        /// The system prompt content
+        content: String,
     },
 
     /// Tool execution result message.
@@ -49,6 +43,12 @@ pub enum Message {
         call_id: String,
 
         /// The tool's output (success or error message)
+        content: String,
+    },
+
+    /// User message containing the input request.
+    User {
+        /// The user's message text
         content: String,
     },
 }
@@ -97,9 +97,6 @@ impl Message {
     /// and, for assistant messages, tool call function names + arguments.
     pub fn char_count(&self) -> usize {
         match self {
-            Message::System { content }
-            | Message::User { content }
-            | Message::Tool { content, .. } => content.len(),
             Message::Assistant {
                 content,
                 tool_calls,
@@ -113,6 +110,9 @@ impl Message {
                 });
                 base + calls
             }
+            Message::System { content }
+            | Message::Tool { content, .. }
+            | Message::User { content } => content.len(),
         }
     }
 }

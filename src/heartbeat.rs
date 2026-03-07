@@ -21,20 +21,20 @@ use crate::workspace::Workspace;
 /// Why a heartbeat was skipped (not an error).
 #[derive(Debug, PartialEq, Eq)]
 pub enum SkipReason {
-    /// No `HEARTBEAT.md` file in workspace.
-    NoHeartbeatFile,
-    /// File exists but contains no unchecked tasks.
-    NoActiveTasks,
     /// Another heartbeat process is already running.
     HeartbeatLocked,
+    /// File exists but contains no unchecked tasks.
+    NoActiveTasks,
+    /// No `HEARTBEAT.md` file in workspace.
+    NoHeartbeatFile,
 }
 
 impl fmt::Display for SkipReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoHeartbeatFile => write!(f, "no HEARTBEAT.md"),
-            Self::NoActiveTasks => write!(f, "no active tasks"),
             Self::HeartbeatLocked => write!(f, "heartbeat already running"),
+            Self::NoActiveTasks => write!(f, "no active tasks"),
+            Self::NoHeartbeatFile => write!(f, "no HEARTBEAT.md"),
         }
     }
 }

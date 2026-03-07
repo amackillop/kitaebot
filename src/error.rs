@@ -12,6 +12,10 @@ use thiserror::Error;
 /// Top-level agent error.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Heartbeat execution error.
+    #[error("Heartbeat error: {0}")]
+    Heartbeat(#[from] HeartbeatError),
+
     /// Maximum iterations reached without completion.
     ///
     /// The agent loop stopped after hitting the iteration limit to prevent
@@ -23,26 +27,18 @@ pub enum Error {
     #[error("Provider error: {0}")]
     Provider(#[from] ProviderError),
 
-    /// Tool execution error.
-    #[error("Tool error: {0}")]
-    Tool(#[from] ToolError),
-
-    /// Heartbeat execution error.
-    #[error("Heartbeat error: {0}")]
-    Heartbeat(#[from] HeartbeatError),
-
     /// Safety layer blocked the output.
     #[error("Safety error: {0}")]
     Safety(#[from] SafetyError),
+
+    /// Tool execution error.
+    #[error("Tool error: {0}")]
+    Tool(#[from] ToolError),
 }
 
 /// LLM provider errors.
 #[derive(Debug, Clone, Error)]
 pub enum ProviderError {
-    /// Network error (connection failed, timeout, etc.).
-    #[error("Network error: {0}")]
-    Network(String),
-
     /// Authentication failed (invalid API key, etc.).
     #[error("Authentication failed")]
     Authentication,
@@ -50,6 +46,10 @@ pub enum ProviderError {
     /// Invalid response from provider (malformed JSON, missing fields, etc.).
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
+
+    /// Network error (connection failed, timeout, etc.).
+    #[error("Network error: {0}")]
+    Network(String),
 
     /// Rate limited by the provider.
     #[error("Rate limited")]
@@ -59,25 +59,25 @@ pub enum ProviderError {
 /// Tool execution errors.
 #[derive(Debug, Error)]
 pub enum ToolError {
-    /// Tool not found in registry.
-    #[error("Tool not found: {0}")]
-    NotFound(String),
-
-    /// Invalid arguments passed to tool.
-    #[error("Invalid arguments: {0}")]
-    InvalidArguments(String),
+    /// Tool execution blocked by policy.
+    #[error("Tool blocked: {0}")]
+    Blocked(String),
 
     /// Tool execution failed.
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
+    /// Invalid arguments passed to tool.
+    #[error("Invalid arguments: {0}")]
+    InvalidArguments(String),
+
+    /// Tool not found in registry.
+    #[error("Tool not found: {0}")]
+    NotFound(String),
+
     /// Tool execution timed out.
     #[error("Tool execution timed out")]
     Timeout,
-
-    /// Tool execution blocked by policy.
-    #[error("Tool blocked: {0}")]
-    Blocked(String),
 }
 
 /// Workspace initialization errors.
@@ -107,6 +107,10 @@ pub enum HeartbeatError {
 /// Configuration errors.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    /// Parsed successfully but values are invalid.
+    #[error("Invalid config: {0}")]
+    Invalid(String),
+
     /// I/O error reading config file.
     #[error("Config I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -114,10 +118,6 @@ pub enum ConfigError {
     /// Failed to parse TOML.
     #[error("Config parse error: {0}")]
     Parse(String),
-
-    /// Parsed successfully but values are invalid.
-    #[error("Invalid config: {0}")]
-    Invalid(String),
 }
 
 /// Safety layer errors.
@@ -150,16 +150,16 @@ pub enum SecretError {
 /// Telegram channel errors.
 #[derive(Debug, Error)]
 pub enum TelegramError {
-    /// HTTP request failed (timeout, DNS, connection reset, etc.).
-    #[error("Network error: {0}")]
-    Network(#[from] reqwest::Error),
-
     /// Telegram Bot API returned `"ok": false`.
     #[error("Telegram API error ({error_code}): {description}")]
     Api {
         error_code: i32,
         description: String,
     },
+
+    /// HTTP request failed (timeout, DNS, connection reset, etc.).
+    #[error("Network error: {0}")]
+    Network(#[from] reqwest::Error),
 
     /// Session load/save failure.
     #[error("Session error: {0}")]
@@ -173,13 +173,13 @@ pub enum TelegramError {
 /// not fatal) and never propagated through the agent loop.
 #[derive(Debug, Error)]
 pub enum SandboxError {
-    /// Failed to configure or apply Landlock ruleset.
-    #[error("Landlock ruleset error: {0}")]
-    Ruleset(String),
-
     /// Failed to open a path for Landlock rule.
     #[error("Failed to open path {path}: {reason}")]
     OpenPath { path: String, reason: String },
+
+    /// Failed to configure or apply Landlock ruleset.
+    #[error("Landlock ruleset error: {0}")]
+    Ruleset(String),
 }
 
 /// Session persistence errors.

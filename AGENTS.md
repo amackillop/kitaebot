@@ -37,3 +37,5 @@ See `STATUS.md` for implementation progress against specs, known bugs, and the b
 - Prefer static dispatch (`impl Trait` or generics) over trait objects (`&dyn Trait`)
   - Use trait objects only when runtime polymorphism is required (e.g., `Box<dyn Tool>` for dynamic registration)
   - Static dispatch avoids vtable overhead and doesn't require async-trait for async methods
+- Implement std traits (`FromStr`, `From`, `Display`) instead of ad-hoc `parse`/`new`/`to_string` methods
+- Enum variants in alphabetical order; match arms follow the same order

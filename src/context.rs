@@ -108,14 +108,6 @@ fn format_messages_for_summary(messages: &[Message]) -> String {
     let mut out = String::new();
     for msg in messages {
         match msg {
-            Message::System { content } => {
-                out.push_str("[system] ");
-                out.push_str(content);
-            }
-            Message::User { content } => {
-                out.push_str("[user] ");
-                out.push_str(content);
-            }
             Message::Assistant {
                 content,
                 tool_calls,
@@ -132,10 +124,18 @@ fn format_messages_for_summary(messages: &[Message]) -> String {
                     }
                 }
             }
+            Message::System { content } => {
+                out.push_str("[system] ");
+                out.push_str(content);
+            }
             Message::Tool { call_id, content } => {
                 out.push_str("[tool:");
                 out.push_str(call_id);
                 out.push_str("] ");
+                out.push_str(content);
+            }
+            Message::User { content } => {
+                out.push_str("[user] ");
                 out.push_str(content);
             }
         }
