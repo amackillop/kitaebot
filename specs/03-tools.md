@@ -6,6 +6,8 @@ Tools are capabilities the agent can invoke to interact with the environment. Th
 
 ## Why This Design?
 
+Every tool could be the LLM generating a shell command through `exec`. We add dedicated tools to replace that unpredictable path with something deterministic and token-efficient. The LLM declares intent via typed parameters (`file_read { path: "src/main.rs" }`) instead of reasoning about shell syntax (`exec { command: "cat src/main.rs" }`). This eliminates failure modes (wrong flags, injection risks, unparsed output) and keeps context lean. If the LLM would repeatedly use `exec` for a task, that task should be a dedicated tool.
+
 1. **Extensibility** — New tools implement the `Tool` trait; the core loop doesn't change
 2. **Discoverability** — Tools describe themselves via JSON Schema for the LLM
 3. **Safety** — Tools can validate arguments and enforce restrictions

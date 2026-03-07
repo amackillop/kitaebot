@@ -35,7 +35,7 @@ Long-lived process that runs until signaled (SIGTERM/SIGINT). Spawns two async t
 2. **Socket listener** — Accepts connections on `/run/kitaebot/chat.sock`, NDJSON protocol
 3. **Heartbeat timer** — Fires every 30 minutes, runs awareness check
 
-Both tasks share the provider and tools instances. Each acquires its own channel lock before calling `run_turn()`.
+All three loops share a single `TurnConfig` (provider, tools, iteration limit, context config) constructed once at startup and passed by reference.
 
 ### Daemon Lifecycle
 
@@ -85,7 +85,10 @@ error instead of being sent to the agent.
 
 | Input | Action |
 |-------|--------|
-| `/new`  | Clear session, rebuild system prompt, start fresh |
+| `/compact` | Force context compaction |
+| `/context` | Display token usage and budget |
+| `/new`  | Clear session, start fresh |
+| `/stats` | Print tool usage statistics to logs |
 | `/exit` | Exit the REPL |
 | EOF (Ctrl-D) | Exit the REPL |
 
@@ -94,19 +97,17 @@ Empty/whitespace-only input is silently skipped.
 ### Chat Startup
 
 1. Acquire REPL lock (`locks/repl.lock`) — exit 1 if another REPL session active
-2. Load session from `sessions/repl.json` (exit 1 on failure)
-3. Cache system prompt
-4. Print session status ("New session" or "Resumed session (N messages)")
-5. Enter REPL loop
+2. Print session status ("New session" or "Resumed session (N messages)")
+3. Enter REPL loop
 
 ### Turn Cycle
 
 1. Read line from stdin
-2. Parse into `Command` (empty, `/exit`, `/new`, unknown `/cmd`, message)
+2. Parse into `Command` (empty, `/exit`, slash command, unknown `/cmd`, message)
 3. Skip empty, break on `/exit` or EOF
-4. Handle `/new` (clear session, save, rebuild prompt)
+4. Slash commands → `commands::execute()` (handles session load/save internally)
 5. Reject unknown `/` commands with error to stderr
-6. Otherwise: `run_turn()` → print response → save session
+6. Messages → `agent::process_message()` → print response (handles session load/save internally)
 7. On error: print to stderr, continue
 
 ## Global Startup
@@ -115,8 +116,9 @@ Runs before subcommand dispatch:
 
 1. Initialize workspace (exit 1 on failure)
 2. Load `config.toml` from workspace (exit 1 on malformed file; missing file → defaults)
-3. Initialize provider from `OPENROUTER_API_KEY` env var + config (exit 1 on failure)
-4. Load tools (exec with workspace as cwd + exec config)
+3. Load secrets via `LoadCredential` (API key, optionally Telegram token)
+4. Apply Landlock sandbox (warn and continue if unsupported)
+5. Initialize provider + tools from config and secrets
 
 ## Error Behavior
 

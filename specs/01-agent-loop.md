@@ -20,7 +20,7 @@ The loop pattern is the standard approach for agentic systems because:
 4. If `Response::Text` — store assistant message, return text
 5. If `Response::ToolCalls` — store assistant message, execute all tool calls in parallel, store results, loop
 
-The system prompt is prepended per provider call but not persisted in the session. Edits to SOUL.md take effect on the next `/new` session since the prompt is cached at startup.
+The system prompt is prepended per provider call but not persisted in the session. The prompt is fetched fresh on every turn via `workspace.system_prompt()`, so edits to SOUL.md take effect on the next message without restarting or running `/new`.
 
 ## Context Building
 
@@ -47,7 +47,7 @@ All values are configurable via `config.toml` (see `src/config.rs`). Defaults sh
 
 | Constraint | Default | Config key | Rationale |
 |------------|---------|------------|-----------|
-| Max iterations | 20 | `agent.max_iterations` | Prevent infinite loops, runaway costs |
+| Max iterations | 100 | `agent.max_iterations` | Prevent infinite loops, runaway costs |
 | Timeout per tool | 60s | `tools.exec.timeout_secs` | Don't hang on slow commands |
 | Max tokens | 4096 | `provider.max_tokens` | Balance cost vs capability |
 
@@ -67,4 +67,3 @@ The agent loop itself is stateless. All persistence is handled by the session mo
 ## Future Considerations
 
 - **Streaming**: Currently batch-only. Streaming would update the CLI in real-time.
-- **Token counting**: Currently no token awareness. May need to truncate history when approaching limits.

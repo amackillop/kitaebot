@@ -6,7 +6,7 @@ A channel is a frontend that translates external messages into agent turns and d
 
 ## Why Channels?
 
-The agent core (provider, tools, session, workspace) is interface-agnostic. It takes a `Message::User`, runs `run_turn()`, and produces a `Response::Text`. A channel is the glue between an external messaging platform and this core loop.
+The agent core (provider, tools, session, workspace) is interface-agnostic. A channel is the glue between an external messaging platform and this core. Each channel parses input into one of two paths — messages go through `agent::process_message()` (LLM agent loop), slash commands go through `commands::execute()` (local operations). Both handle their own session lifecycle (load, execute, save).
 
 Separating channels from the core means:
 
@@ -27,7 +27,7 @@ Separating channels from the core means:
               │        │            │            │       │
               │        ▼            ▼            ▼       │
               │  ┌──────────────────────────────────┐    │
-              │  │         agent::run_turn()        │    │
+              │  │     agent::process_message()     │    │
               │  └───────────────┬──────────────────┘    │
               │                  │                       │
               │   ┌──────────────▼───────────────┐       │
@@ -43,9 +43,9 @@ Separating channels from the core means:
               │  └────┬────┘                    │
               │       │                         │
               │       ▼                         │
-              │  ┌──────────────────────┐       │
-              │  │    agent::run_turn() │       │
-              │  └──────────┬───────────┘       │
+              │  ┌──────────────────────────┐   │
+              │  │ agent::process_message() │   │
+              │  └──────────┬───────────────┘   │
               │             │                   │
               │  ┌──────────▼───────────┐       │
               │  │ Provider / Tools     │       │
@@ -87,10 +87,8 @@ Telegram servers
 ┌──────────────┐
 │   Telegram   │  1. Receive update
 │   poller     │  2. Extract message text + chat_id
-│              │  3. Load session (sessions/telegram.json)
-│              │  4. Call run_turn(message)
-│              │  5. Send response via sendMessage API
-│              │  6. Save session
+│              │  3. Call process_message(message)
+│              │  4. Send response via sendMessage API
 └──────────────┘
 ```
 
@@ -107,21 +105,17 @@ Both are simple HTTPS POST calls to `https://api.telegram.org/bot<token>/<method
 
 ### Configuration
 
-The bot token is a secret, not a config value. Provided via environment variable:
+The bot token is a secret loaded via systemd `LoadCredential` at startup (see [spec 13](13-credentials.md)). Non-secret settings live in `config.toml`:
 
-```
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
-```
-
-The `config.toml` may later hold non-secret Telegram settings (allowed chat IDs, polling timeout), but the token stays out of config files.
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `telegram.enabled` | `false` | Enable the Telegram channel |
+| `telegram.chat_id` | — | Authorized chat ID (required when enabled) |
+| `telegram.poll_timeout_secs` | `30` | Long-poll timeout for `getUpdates` |
 
 ### Access Control
 
-The bot should only respond to authorized users. MVP: a single allowed `chat_id` configured via environment variable or config. Messages from other chat IDs are silently ignored.
-
-```
-TELEGRAM_CHAT_ID=123456789
-```
+The bot only responds to a single authorized `chat_id`. Messages from other chats are silently ignored.
 
 ## Socket Channel
 
@@ -195,11 +189,11 @@ are sent as commands; everything else as messages.
 Each channel follows the same shape:
 
 1. Wait for input (poll Telegram, accept on socket, read stdin, timer tick)
-2. Acquire lock (if needed — only when multiple OS processes can collide)
-3. Load per-channel session
-4. Call `run_turn()` with the input as `Message::User`
-5. Deliver the response (send Telegram message, write to socket, print to stdout, write to HISTORY.md)
-6. Save session
+2. Parse input into message or slash command
+3. Dispatch: `agent::process_message()` for messages, `commands::execute()` for slash commands
+4. Route the `Result` to the transport (send Telegram message, write to socket, print to stdout)
+
+Session load/save is handled inside `process_message` and `commands::execute` — channels never manage session state directly.
 
 There is no `Channel` trait. Each channel module implements this pattern directly. The specifics vary enough (HTTP polling vs NDJSON stream vs stdio) that a shared trait would be either too thin to enforce anything useful or too leaky to accommodate real differences.
 
