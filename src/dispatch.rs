@@ -6,6 +6,9 @@
 
 use std::path::Path;
 
+use tokio::sync::mpsc;
+
+use crate::activity::Activity;
 use crate::agent::{self, TurnConfig};
 use crate::commands::{self, SlashCommand};
 use crate::provider::Provider;
@@ -47,6 +50,7 @@ pub async fn dispatch<P: Provider>(
     session_path: &Path,
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
+    activity_tx: Option<&mpsc::Sender<Activity>>,
 ) -> Result<String, String> {
     match Input::parse(input).map_err(|_| format!("Unknown command: {input}"))? {
         Input::Command(cmd) => {
@@ -59,9 +63,11 @@ pub async fn dispatch<P: Provider>(
             )
             .await
         }
-        Input::Message(text) => agent::process_message(session_path, workspace, text, config)
-            .await
-            .map_err(|e| e.to_string()),
+        Input::Message(text) => {
+            agent::process_message(session_path, workspace, text, config, activity_tx)
+                .await
+                .map_err(|e| e.to_string())
+        }
     }
 }
 

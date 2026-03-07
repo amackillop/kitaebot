@@ -250,7 +250,7 @@ async fn handle_message<P: Provider>(
 ) {
     let session_path = workspace.telegram_session_path();
 
-    let reply = match dispatch::dispatch(text, &session_path, workspace, config).await {
+    let reply = match dispatch::dispatch(text, &session_path, workspace, config, None).await {
         Ok(response) => response,
         Err(msg) => msg,
     };

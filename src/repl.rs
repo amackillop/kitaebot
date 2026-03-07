@@ -68,7 +68,7 @@ pub async fn run<P: Provider>(workspace: &Workspace, config: &TurnConfig<'_, P>)
             Command::Empty => {}
             Command::Exit => break,
             Command::Input(text) => {
-                match dispatch::dispatch(text, &session_path, workspace, config).await {
+                match dispatch::dispatch(text, &session_path, workspace, config, None).await {
                     Ok(msg) => println!("{msg}\n"),
                     Err(msg) => eprintln!("{msg}\n"),
                 }

@@ -78,7 +78,7 @@ pub async fn run<P: Provider>(
     let prompt = build_prompt(&tasks);
     let session_path = workspace.heartbeat_session_path();
 
-    let response = agent::process_message(&session_path, workspace, &prompt, config).await?;
+    let response = agent::process_message(&session_path, workspace, &prompt, config, None).await?;
 
     append_history(&workspace.history_path(), &response).map_err(HeartbeatError::WriteHistory)?;
 

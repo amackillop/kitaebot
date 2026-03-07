@@ -7,8 +7,10 @@
 use std::path::Path;
 
 use futures::future::join_all;
+use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
+use crate::activity::Activity;
 use crate::config::ContextConfig;
 use crate::context;
 use crate::error::Error;
@@ -40,10 +42,18 @@ pub async fn process_message<P: Provider>(
     workspace: &Workspace,
     user_message: &str,
     config: &TurnConfig<'_, P>,
+    activity_tx: Option<&mpsc::Sender<Activity>>,
 ) -> Result<String, Error> {
     let mut session = Session::load(session_path)?;
     let system_prompt = workspace.system_prompt();
-    let response = run_turn(&mut session, &system_prompt, user_message, config).await?;
+    let response = run_turn(
+        &mut session,
+        &system_prompt,
+        user_message,
+        config,
+        activity_tx,
+    )
+    .await?;
     session.save(session_path)?;
     Ok(response)
 }
@@ -62,6 +72,7 @@ pub async fn run_turn<P: Provider>(
     system_prompt: &str,
     user_message: &str,
     config: &TurnConfig<'_, P>,
+    _activity_tx: Option<&mpsc::Sender<Activity>>,
 ) -> Result<String, Error> {
     context::compact_if_needed(session, system_prompt, config.provider, config.context)
         .await
@@ -209,6 +220,7 @@ mod tests {
             SYSTEM,
             "Hello",
             &turn_config(&provider, &tools),
+            None,
         )
         .await;
         assert_eq!(result.unwrap(), "Hello from LLM");
@@ -230,6 +242,7 @@ mod tests {
             SYSTEM,
             "Use a tool",
             &turn_config(&provider, &tools),
+            None,
         )
         .await;
         assert_eq!(result.unwrap(), "Tool result processed");
@@ -246,6 +259,7 @@ mod tests {
             SYSTEM,
             "Infinite loop",
             &turn_config(&provider, &tools),
+            None,
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
@@ -263,6 +277,7 @@ mod tests {
             SYSTEM,
             "Error case",
             &turn_config(&provider, &tools),
+            None,
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::Provider(_)));
@@ -282,6 +297,7 @@ mod tests {
             SYSTEM,
             "Parallel tools",
             &turn_config(&provider, &tools),
+            None,
         )
         .await;
         assert_eq!(result.unwrap(), "Multiple tools executed");
@@ -301,6 +317,7 @@ mod tests {
             SYSTEM,
             "Leak test",
             &turn_config(&provider, &tools),
+            None,
         )
         .await;
         assert_eq!(result.unwrap(), "Handled");
@@ -330,6 +347,7 @@ mod tests {
             SYSTEM,
             "Wrap test",
             &turn_config(&provider, &tools),
+            None,
         )
         .await
         .unwrap();

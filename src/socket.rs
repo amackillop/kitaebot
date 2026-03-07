@@ -161,7 +161,7 @@ async fn handle_line<P: Provider>(
     let input = msg.content.trim();
     let session_path = workspace.socket_session_path();
 
-    let result = dispatch::dispatch(input, &session_path, workspace, config).await;
+    let result = dispatch::dispatch(input, &session_path, workspace, config, None).await;
 
     let response = match result {
         Ok(content) => ServerMsg::Response { content },
