@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::agent::TurnConfig;
-use crate::commands;
 use crate::config::TelegramConfig;
+use crate::dispatch;
 use crate::error::TelegramError;
 use crate::provider::Provider;
 use crate::secrets::Secret;
@@ -250,7 +250,7 @@ async fn handle_message<P: Provider>(
 ) {
     let session_path = workspace.telegram_session_path();
 
-    let reply = match commands::dispatch(text, &session_path, workspace, config).await {
+    let reply = match dispatch::dispatch(text, &session_path, workspace, config).await {
         Ok(response) => response,
         Err(msg) => msg,
     };

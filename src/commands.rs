@@ -1,16 +1,13 @@
-//! Slash command definitions and input dispatch shared across channels.
+//! Slash command definitions shared across channels.
 //!
-//! [`dispatch`] is the single entry point for all user input: it parses
-//! the text, routes to either [`execute`] or [`agent::process_message`],
-//! and returns a uniform `Result<String, String>`. Channels only need to
-//! handle the result in their own transport format.
+//! Execution logic lives here so every channel behaves identically.
+//! Input classification and routing lives in [`crate::dispatch`].
 
 use std::path::Path;
 use std::str::FromStr;
 
 use tracing::error;
 
-use crate::agent::{self, TurnConfig};
 use crate::config::ContextConfig;
 use crate::context;
 use crate::provider::Provider;
@@ -31,25 +28,20 @@ pub enum SlashCommand {
     Stats,
 }
 
+/// The input starts with `/` but doesn't match any known command.
 #[derive(Debug, PartialEq)]
-pub enum ParseError {
-    MustStartWithSlash,
-    UnknownCommand,
-}
+pub struct UnknownCommand;
 
 impl FromStr for SlashCommand {
-    type Err = ParseError;
+    type Err = UnknownCommand;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        if !input.starts_with('/') {
-            return Err(ParseError::MustStartWithSlash);
-        }
         match input {
             "/compact" => Ok(Self::Compact),
             "/context" => Ok(Self::Context),
             "/new" => Ok(Self::New),
             "/stats" => Ok(Self::Stats),
-            _ => Err(ParseError::UnknownCommand),
+            _ => Err(UnknownCommand),
         }
     }
 }
@@ -64,37 +56,6 @@ pub fn greeting(session_path: &Path) -> String {
         "New session".to_string()
     } else {
         format!("Resumed session ({count} messages)")
-    }
-}
-
-/// Dispatch user input: parse as slash command or forward to the agent.
-///
-/// This is the single entry point for all channel input. Returns
-/// `Ok(response)` on success or `Err(message)` on failure, both as
-/// displayable strings.
-pub async fn dispatch<P: Provider>(
-    input: &str,
-    session_path: &Path,
-    workspace: &Workspace,
-    config: &TurnConfig<'_, P>,
-) -> Result<String, String> {
-    match input.parse() {
-        Ok(cmd) => {
-            execute(
-                cmd,
-                session_path,
-                workspace,
-                config.provider,
-                config.context,
-            )
-            .await
-        }
-        Err(ParseError::MustStartWithSlash) => {
-            agent::process_message(session_path, workspace, input, config)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        Err(ParseError::UnknownCommand) => Err(format!("Unknown command: {input}")),
     }
 }
 
@@ -175,18 +136,7 @@ mod tests {
 
     #[test]
     fn parse_unknown_command() {
-        assert_eq!(
-            "/adsjhfbakj".parse::<SlashCommand>(),
-            Err(ParseError::UnknownCommand)
-        );
-    }
-
-    #[test]
-    fn parse_missing_slash() {
-        assert_eq!(
-            "missingslash".parse::<SlashCommand>(),
-            Err(ParseError::MustStartWithSlash)
-        );
+        assert_eq!("/adsjhfbakj".parse::<SlashCommand>(), Err(UnknownCommand));
     }
 
     #[test]

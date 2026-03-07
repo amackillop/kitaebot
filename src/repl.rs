@@ -13,6 +13,7 @@ use tracing::error;
 
 use crate::agent::TurnConfig;
 use crate::commands;
+use crate::dispatch;
 use crate::lock::Lock;
 use crate::provider::Provider;
 use crate::workspace::Workspace;
@@ -67,7 +68,7 @@ pub async fn run<P: Provider>(workspace: &Workspace, config: &TurnConfig<'_, P>)
             Command::Empty => {}
             Command::Exit => break,
             Command::Input(text) => {
-                match commands::dispatch(text, &session_path, workspace, config).await {
+                match dispatch::dispatch(text, &session_path, workspace, config).await {
                     Ok(msg) => println!("{msg}\n"),
                     Err(msg) => eprintln!("{msg}\n"),
                 }

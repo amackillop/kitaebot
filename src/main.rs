@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod context;
 mod daemon;
+mod dispatch;
 mod error;
 mod heartbeat;
 mod lock;

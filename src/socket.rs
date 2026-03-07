@@ -17,6 +17,7 @@ use tracing::{debug, error, info};
 
 use crate::agent::TurnConfig;
 use crate::commands;
+use crate::dispatch;
 use crate::provider::Provider;
 use crate::workspace::Workspace;
 
@@ -160,7 +161,7 @@ async fn handle_line<P: Provider>(
     let input = msg.content.trim();
     let session_path = workspace.socket_session_path();
 
-    let result = commands::dispatch(input, &session_path, workspace, config).await;
+    let result = dispatch::dispatch(input, &session_path, workspace, config).await;
 
     let response = match result {
         Ok(content) => ServerMsg::Response { content },
