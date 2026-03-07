@@ -16,6 +16,17 @@ use crate::session::Session;
 use crate::tools::Tools;
 use crate::types::{Message, Response};
 
+/// Static dependencies for an agent turn.
+///
+/// Bundles the provider, tools, iteration limit, and context config that
+/// remain constant across turns, keeping `run_turn` signatures small.
+pub struct TurnConfig<'a, P: Provider> {
+    pub provider: &'a P,
+    pub tools: &'a Tools,
+    pub max_iterations: usize,
+    pub context: &'a ContextConfig,
+}
+
 /// Run a single turn of the agent loop.
 ///
 /// Pushes the user message onto the session, sends the history (with system
@@ -29,12 +40,9 @@ pub async fn run_turn<P: Provider>(
     session: &mut Session,
     system_prompt: &str,
     user_message: &str,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: &ContextConfig,
+    config: &TurnConfig<'_, P>,
 ) -> Result<String, Error> {
-    context::compact_if_needed(session, system_prompt, provider, ctx)
+    context::compact_if_needed(session, system_prompt, config.provider, config.context)
         .await
         .map_err(Error::Provider)?;
 
@@ -42,9 +50,9 @@ pub async fn run_turn<P: Provider>(
         content: user_message.to_string(),
     });
 
-    let tool_definitions = tools.definitions();
+    let tool_definitions = config.tools.definitions();
 
-    for iteration in 0..max_iterations {
+    for iteration in 0..config.max_iterations {
         debug!(iteration, "Agent loop iteration");
         // Prepend system prompt for each provider call (not stored in session)
         let mut messages = vec![Message::System {
@@ -52,7 +60,8 @@ pub async fn run_turn<P: Provider>(
         }];
         messages.extend(session.messages().iter().cloned());
 
-        let response = provider
+        let response = config
+            .provider
             .chat(&messages, &tool_definitions)
             .await
             .map_err(Error::Provider)?;
@@ -72,7 +81,10 @@ pub async fn run_turn<P: Provider>(
                 });
 
                 // Execute all tool calls in parallel
-                let futures: Vec<_> = calls.iter().map(|call| tools.execute(call)).collect();
+                let futures: Vec<_> = calls
+                    .iter()
+                    .map(|call| config.tools.execute(call))
+                    .collect();
                 let results = join_all(futures).await;
 
                 // Add results to session in the same order as tool_calls.
@@ -148,20 +160,34 @@ mod tests {
 
     const SYSTEM: &str = "You are a test assistant.";
     const MAX_ITER: usize = 20;
+    const CTX: ContextConfig = ContextConfig {
+        max_tokens: 200_000,
+        budget_percent: 80,
+    };
+
+    fn turn_config<'a>(
+        provider: &'a MockProvider,
+        tools: &'a Tools,
+    ) -> TurnConfig<'a, MockProvider> {
+        TurnConfig {
+            provider,
+            tools,
+            max_iterations: MAX_ITER,
+            context: &CTX,
+        }
+    }
 
     #[tokio::test]
     async fn test_text_response() {
         let provider = MockProvider::new(vec![Ok(text("Hello from LLM"))]);
+        let tools = Tools::new(vec![]);
         let mut session = Session::new();
 
         let result = run_turn(
             &mut session,
             SYSTEM,
             "Hello",
-            &provider,
-            &Tools::new(vec![]),
-            MAX_ITER,
-            &ContextConfig::default(),
+            &turn_config(&provider, &tools),
         )
         .await;
         assert_eq!(result.unwrap(), "Hello from LLM");
@@ -175,16 +201,14 @@ mod tests {
             Ok(mock_tool_calls(&["call-1"])),
             Ok(text("Tool result processed")),
         ]);
+        let tools = mock_tools("mock output");
         let mut session = Session::new();
 
         let result = run_turn(
             &mut session,
             SYSTEM,
             "Use a tool",
-            &provider,
-            &mock_tools("mock output"),
-            MAX_ITER,
-            &ContextConfig::default(),
+            &turn_config(&provider, &tools),
         )
         .await;
         assert_eq!(result.unwrap(), "Tool result processed");
@@ -193,16 +217,14 @@ mod tests {
     #[tokio::test]
     async fn test_max_iterations() {
         let provider = MockProvider::new(vec![Ok(mock_tool_calls(&["call-infinite"])); MAX_ITER]);
+        let tools = mock_tools("mock output");
         let mut session = Session::new();
 
         let result = run_turn(
             &mut session,
             SYSTEM,
             "Infinite loop",
-            &provider,
-            &mock_tools("mock output"),
-            MAX_ITER,
-            &ContextConfig::default(),
+            &turn_config(&provider, &tools),
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
@@ -212,16 +234,14 @@ mod tests {
     async fn test_provider_error() {
         let provider =
             MockProvider::new(vec![Err(ProviderError::Network("Mock error".to_string()))]);
+        let tools = Tools::new(vec![]);
         let mut session = Session::new();
 
         let result = run_turn(
             &mut session,
             SYSTEM,
             "Error case",
-            &provider,
-            &Tools::new(vec![]),
-            MAX_ITER,
-            &ContextConfig::default(),
+            &turn_config(&provider, &tools),
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::Provider(_)));
@@ -233,16 +253,14 @@ mod tests {
             Ok(mock_tool_calls(&["call-1", "call-2"])),
             Ok(text("Multiple tools executed")),
         ]);
+        let tools = mock_tools("mock output");
         let mut session = Session::new();
 
         let result = run_turn(
             &mut session,
             SYSTEM,
             "Parallel tools",
-            &provider,
-            &mock_tools("mock output"),
-            MAX_ITER,
-            &ContextConfig::default(),
+            &turn_config(&provider, &tools),
         )
         .await;
         assert_eq!(result.unwrap(), "Multiple tools executed");
@@ -254,16 +272,14 @@ mod tests {
             Ok(mock_tool_calls(&["call-leak"])),
             Ok(text("Handled")),
         ]);
+        let tools = mock_tools("Here is your key: sk-1234567890abcdef");
         let mut session = Session::new();
 
         let result = run_turn(
             &mut session,
             SYSTEM,
             "Leak test",
-            &provider,
-            &mock_tools("Here is your key: sk-1234567890abcdef"),
-            MAX_ITER,
-            &ContextConfig::default(),
+            &turn_config(&provider, &tools),
         )
         .await;
         assert_eq!(result.unwrap(), "Handled");
@@ -285,16 +301,14 @@ mod tests {
     #[tokio::test]
     async fn test_clean_tool_output_wrapped() {
         let provider = MockProvider::new(vec![Ok(mock_tool_calls(&["call-1"])), Ok(text("Done"))]);
+        let tools = mock_tools("mock output");
         let mut session = Session::new();
 
         run_turn(
             &mut session,
             SYSTEM,
             "Wrap test",
-            &provider,
-            &mock_tools("mock output"),
-            MAX_ITER,
-            &ContextConfig::default(),
+            &turn_config(&provider, &tools),
         )
         .await
         .unwrap();

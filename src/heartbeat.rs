@@ -9,13 +9,11 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::time::SystemTime;
 
-use crate::agent;
-use crate::config::ContextConfig;
+use crate::agent::{self, TurnConfig};
 use crate::error::{Error, HeartbeatError};
 use crate::lock::Lock;
 use crate::provider::Provider;
 use crate::session::Session;
-use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// Why a heartbeat was skipped (not an error).
@@ -59,10 +57,7 @@ pub enum Outcome {
 /// 6. Save session and append result to `memory/HISTORY.md`
 pub async fn run<P: Provider>(
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: &ContextConfig,
+    config: &TurnConfig<'_, P>,
 ) -> Result<Outcome, Error> {
     let Ok(_lock) = Lock::acquire(&workspace.heartbeat_lock_path()) else {
         return Ok(Outcome::Skipped(SkipReason::HeartbeatLocked));
@@ -87,16 +82,7 @@ pub async fn run<P: Provider>(
     let mut session =
         Session::load(&session_path).map_err(|e| HeartbeatError::Session(e.to_string()))?;
 
-    let response = agent::run_turn(
-        &mut session,
-        &system_prompt,
-        &prompt,
-        provider,
-        tools,
-        max_iterations,
-        ctx,
-    )
-    .await?;
+    let response = agent::run_turn(&mut session, &system_prompt, &prompt, config).await?;
 
     session
         .save(&session_path)
@@ -258,25 +244,35 @@ mod tests {
 
     // -- integration tests for heartbeat::run --
 
+    const CTX: ContextConfig = ContextConfig {
+        max_tokens: 200_000,
+        budget_percent: 80,
+    };
+
     fn workspace() -> (tempfile::TempDir, Workspace) {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
         (dir, ws)
     }
 
+    fn turn_config<'a>(
+        provider: &'a MockProvider,
+        tools: &'a Tools,
+    ) -> TurnConfig<'a, MockProvider> {
+        TurnConfig {
+            provider,
+            tools,
+            max_iterations: 1,
+            context: &CTX,
+        }
+    }
+
     #[tokio::test]
     async fn run_skips_when_no_heartbeat_file() {
         let (_dir, ws) = workspace();
         let provider = MockProvider::new(vec![]);
-        let outcome = run(
-            &ws,
-            &provider,
-            &Tools::default(),
-            1,
-            &ContextConfig::default(),
-        )
-        .await
-        .unwrap();
+        let tools = Tools::default();
+        let outcome = run(&ws, &turn_config(&provider, &tools)).await.unwrap();
         assert!(matches!(
             outcome,
             Outcome::Skipped(SkipReason::NoHeartbeatFile)
@@ -289,15 +285,8 @@ mod tests {
         fs::write(ws.heartbeat_path(), "- [x] Done\n- [x] Also done\n").unwrap();
 
         let provider = MockProvider::new(vec![]);
-        let outcome = run(
-            &ws,
-            &provider,
-            &Tools::default(),
-            1,
-            &ContextConfig::default(),
-        )
-        .await
-        .unwrap();
+        let tools = Tools::default();
+        let outcome = run(&ws, &turn_config(&provider, &tools)).await.unwrap();
         assert!(matches!(
             outcome,
             Outcome::Skipped(SkipReason::NoActiveTasks)
@@ -312,15 +301,8 @@ mod tests {
         let _lock = Lock::acquire(&ws.heartbeat_lock_path()).unwrap();
 
         let provider = MockProvider::new(vec![]);
-        let outcome = run(
-            &ws,
-            &provider,
-            &Tools::default(),
-            1,
-            &ContextConfig::default(),
-        )
-        .await
-        .unwrap();
+        let tools = Tools::default();
+        let outcome = run(&ws, &turn_config(&provider, &tools)).await.unwrap();
         assert!(matches!(
             outcome,
             Outcome::Skipped(SkipReason::HeartbeatLocked)
@@ -333,15 +315,8 @@ mod tests {
         fs::write(ws.heartbeat_path(), "- [ ] Check builds\n").unwrap();
 
         let provider = MockProvider::new(vec![Ok(Response::Text("All builds green".into()))]);
-        let outcome = run(
-            &ws,
-            &provider,
-            &Tools::default(),
-            1,
-            &ContextConfig::default(),
-        )
-        .await
-        .unwrap();
+        let tools = Tools::default();
+        let outcome = run(&ws, &turn_config(&provider, &tools)).await.unwrap();
 
         match outcome {
             Outcome::Executed(ref text) => assert_eq!(text, "All builds green"),

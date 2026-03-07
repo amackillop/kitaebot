@@ -19,6 +19,7 @@ mod tools;
 mod types;
 mod workspace;
 
+use agent::TurnConfig;
 use config::Config;
 use heartbeat::Outcome;
 use provider::Provider;
@@ -90,26 +91,19 @@ async fn main() {
         api_key,
     );
 
+    let turn_config = TurnConfig {
+        provider: &provider,
+        tools: &tools,
+        max_iterations: config.agent.max_iterations,
+        context: &config.context,
+    };
+
     match std::env::args().nth(1).as_deref() {
         Some("chat") => {
-            repl::run(
-                &workspace,
-                &provider,
-                &tools,
-                config.agent.max_iterations,
-                &config.context,
-            )
-            .await;
+            repl::run(&workspace, &turn_config).await;
         }
         Some("heartbeat") => {
-            run_heartbeat(
-                &workspace,
-                &provider,
-                &tools,
-                config.agent.max_iterations,
-                &config.context,
-            )
-            .await;
+            run_heartbeat(&workspace, &turn_config).await;
         }
         Some("run") => {
             #[cfg(not(feature = "mock-network"))]
@@ -126,13 +120,10 @@ async fn main() {
             );
             daemon::run(
                 &workspace,
-                &provider,
-                &tools,
-                config.agent.max_iterations,
+                &turn_config,
                 config.heartbeat.interval_secs,
                 telegram.as_ref(),
                 socket_path,
-                &config.context,
             )
             .await;
         }
@@ -189,14 +180,8 @@ fn build_tools(
     Tools::new(tools)
 }
 
-async fn run_heartbeat<P: Provider>(
-    workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    context: &config::ContextConfig,
-) {
-    match heartbeat::run(workspace, provider, tools, max_iterations, context).await {
+async fn run_heartbeat<P: Provider>(workspace: &Workspace, config: &TurnConfig<'_, P>) {
+    match heartbeat::run(workspace, config).await {
         Ok(Outcome::Executed(response)) => {
             info!("Heartbeat complete: {response}");
         }

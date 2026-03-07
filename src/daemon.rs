@@ -17,51 +17,39 @@ use std::time::Duration;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{error, info};
 
-use crate::config::ContextConfig;
+use crate::agent::TurnConfig;
 use crate::heartbeat;
 use crate::provider::Provider;
 use crate::socket;
 use crate::telegram::{self, TelegramChannel};
-use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// Production entry point — runs until SIGINT or SIGTERM.
-#[allow(clippy::too_many_arguments)]
 pub async fn run<P: Provider>(
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
+    config: &TurnConfig<'_, P>,
     interval_secs: u64,
     telegram: Option<&TelegramChannel>,
     socket_path: &Path,
-    ctx: &ContextConfig,
 ) {
     run_with_shutdown(
         workspace,
-        provider,
-        tools,
-        max_iterations,
+        config,
         Duration::from_secs(interval_secs),
         telegram,
         socket_path,
-        ctx,
         shutdown_signal(),
     )
     .await;
 }
 
 /// Testable core: runs heartbeat + telegram until `shutdown` resolves.
-#[allow(clippy::too_many_arguments)]
 async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
+    config: &TurnConfig<'_, P>,
     interval: Duration,
     telegram: Option<&TelegramChannel>,
     socket_path: &Path,
-    ctx: &ContextConfig,
     shutdown: S,
 ) {
     let mut tick = time::interval(interval);
@@ -70,20 +58,20 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
     let heartbeat_loop = async {
         loop {
             tick.tick().await;
-            run_heartbeat_cycle(workspace, provider, tools, max_iterations, ctx).await;
+            run_heartbeat_cycle(workspace, config).await;
         }
     };
 
     let telegram_loop = async {
         match telegram {
             Some(ch) => {
-                telegram::poll_loop(ch, workspace, provider, tools, max_iterations, ctx).await;
+                telegram::poll_loop(ch, workspace, config).await;
             }
             None => std::future::pending().await,
         }
     };
 
-    let socket_loop = socket::listen(socket_path, workspace, provider, tools, max_iterations, ctx);
+    let socket_loop = socket::listen(socket_path, workspace, config);
 
     tokio::select! {
         () = heartbeat_loop => unreachable!("heartbeat loop never exits"),
@@ -99,14 +87,8 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
 /// Run a single heartbeat cycle, logging the outcome.
 ///
 /// Errors are logged and swallowed so the daemon loop survives.
-async fn run_heartbeat_cycle<P: Provider>(
-    workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: &ContextConfig,
-) {
-    match heartbeat::run(workspace, provider, tools, max_iterations, ctx).await {
+async fn run_heartbeat_cycle<P: Provider>(workspace: &Workspace, config: &TurnConfig<'_, P>) {
+    match heartbeat::run(workspace, config).await {
         Ok(heartbeat::Outcome::Executed(response)) => {
             info!("Heartbeat complete: {response}");
         }
@@ -138,6 +120,7 @@ mod tests {
     use crate::config::ContextConfig;
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
+    use crate::tools::Tools;
     use crate::types::Response;
 
     fn workspace() -> (tempfile::TempDir, Workspace) {
@@ -153,22 +136,31 @@ mod tests {
         (dir, path)
     }
 
+    const CTX: ContextConfig = ContextConfig {
+        max_tokens: 200_000,
+        budget_percent: 80,
+    };
+
     #[tokio::test]
     async fn fires_immediately_then_shuts_down() {
         let (_dir, ws) = workspace();
         let (_sock_dir, sock_path) = sock_path();
         // No HEARTBEAT.md → skipped, but proves the tick fired.
         let provider = MockProvider::new(vec![]);
+        let tools = Tools::default();
+        let config = TurnConfig {
+            provider: &provider,
+            tools: &tools,
+            max_iterations: 1,
+            context: &CTX,
+        };
 
         run_with_shutdown(
             &ws,
-            &provider,
-            &Tools::default(),
-            1,
+            &config,
             Duration::from_secs(3600), // large interval — only the immediate first tick matters
             None,
             &sock_path,
-            &ContextConfig::default(),
             tokio::time::sleep(Duration::from_millis(50)),
         )
         .await;
@@ -185,16 +177,20 @@ mod tests {
 
         // Over-provision: we expect ~3 ticks but provide enough headroom.
         let provider = MockProvider::new(vec![Ok(Response::Text("ok".into())); 10]);
+        let tools = Tools::default();
+        let config = TurnConfig {
+            provider: &provider,
+            tools: &tools,
+            max_iterations: 1,
+            context: &CTX,
+        };
 
         run_with_shutdown(
             &ws,
-            &provider,
-            &Tools::default(),
-            1,
+            &config,
             Duration::from_millis(100), // 100ms interval for fast test
             None,
             &sock_path,
-            &ContextConfig::default(),
             async {
                 // Let 3 ticks fire: immediate + 2 more.
                 tokio::time::sleep(Duration::from_millis(250)).await;
@@ -217,16 +213,20 @@ mod tests {
 
         // Provider returns an error — loop should survive.
         let provider = MockProvider::new(vec![Err(ProviderError::Network("test".into()))]);
+        let tools = Tools::default();
+        let config = TurnConfig {
+            provider: &provider,
+            tools: &tools,
+            max_iterations: 1,
+            context: &CTX,
+        };
 
         run_with_shutdown(
             &ws,
-            &provider,
-            &Tools::default(),
-            1,
+            &config,
             Duration::from_secs(3600),
             None,
             &sock_path,
-            &ContextConfig::default(),
             tokio::time::sleep(Duration::from_millis(50)),
         )
         .await;

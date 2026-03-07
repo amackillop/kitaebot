@@ -10,13 +10,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
-use crate::agent;
-use crate::config::{ContextConfig, TelegramConfig};
+use crate::agent::{self, TurnConfig};
+use crate::config::TelegramConfig;
 use crate::error::TelegramError;
 use crate::provider::Provider;
 use crate::secrets::Secret;
 use crate::session::Session;
-use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 // --- Telegram Bot API types ---
@@ -196,10 +195,7 @@ fn is_transient(err: &TelegramError) -> bool {
 pub async fn poll_loop<P: Provider>(
     channel: &TelegramChannel,
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: &ContextConfig,
+    config: &TurnConfig<'_, P>,
 ) -> ! {
     info!(chat_id = channel.chat_id, "Telegram poller starting");
     let mut offset: i64 = 0;
@@ -240,16 +236,7 @@ pub async fn poll_loop<P: Provider>(
                 continue;
             };
 
-            handle_message(
-                channel,
-                workspace,
-                provider,
-                tools,
-                max_iterations,
-                ctx,
-                &text,
-            )
-            .await;
+            handle_message(channel, workspace, config, &text).await;
         }
     }
 }
@@ -258,10 +245,7 @@ pub async fn poll_loop<P: Provider>(
 async fn handle_message<P: Provider>(
     channel: &TelegramChannel,
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: &ContextConfig,
+    config: &TurnConfig<'_, P>,
     text: &str,
 ) {
     let session_path = workspace.telegram_session_path();
@@ -276,17 +260,7 @@ async fn handle_message<P: Provider>(
 
     let system_prompt = workspace.system_prompt();
 
-    let response = match agent::run_turn(
-        &mut session,
-        &system_prompt,
-        text,
-        provider,
-        tools,
-        max_iterations,
-        ctx,
-    )
-    .await
-    {
+    let response = match agent::run_turn(&mut session, &system_prompt, text, config).await {
         Ok(r) => r,
         Err(e) => {
             error!("Agent error: {e}");

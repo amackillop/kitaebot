@@ -14,12 +14,11 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info};
 
-use crate::agent;
+use crate::agent::{self, TurnConfig};
 use crate::commands;
 use crate::config::ContextConfig;
 use crate::provider::Provider;
 use crate::session::Session;
-use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 // ── Protocol types ──────────────────────────────────────────────────
@@ -57,10 +56,7 @@ enum ServerMsg {
 pub async fn listen<P: Provider>(
     socket_path: &Path,
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: &ContextConfig,
+    config: &TurnConfig<'_, P>,
 ) -> ! {
     let path = socket_path;
 
@@ -84,16 +80,7 @@ pub async fn listen<P: Provider>(
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                serve(
-                    &listener,
-                    stream,
-                    workspace,
-                    provider,
-                    tools,
-                    max_iterations,
-                    ctx,
-                )
-                .await;
+                serve(&listener, stream, workspace, config).await;
             }
             Err(e) => error!("Socket accept error: {e}"),
         }
@@ -107,10 +94,7 @@ async fn serve<P: Provider>(
     listener: &UnixListener,
     stream: UnixStream,
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: &ContextConfig,
+    config: &TurnConfig<'_, P>,
 ) {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -135,10 +119,7 @@ async fn serve<P: Provider>(
                 match result {
                     Ok(0) | Err(_) => return,
                     Ok(_) => {
-                        handle_line(
-                            &line, &mut writer, workspace, provider,
-                            tools, max_iterations, ctx,
-                        ).await;
+                        handle_line(&line, &mut writer, workspace, config).await;
                     }
                 }
             }
@@ -170,10 +151,7 @@ async fn handle_line<P: Provider>(
     line: &str,
     writer: &mut OwnedWriteHalf,
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: &ContextConfig,
+    config: &TurnConfig<'_, P>,
 ) {
     let msg: ClientMsg = match serde_json::from_str(line) {
         Ok(m) => m,
@@ -192,19 +170,10 @@ async fn handle_line<P: Provider>(
 
     match msg {
         ClientMsg::Message { content } => {
-            handle_message(
-                writer,
-                workspace,
-                provider,
-                tools,
-                max_iterations,
-                ctx,
-                &content,
-            )
-            .await;
+            handle_message(writer, workspace, config, &content).await;
         }
         ClientMsg::Command { name } => {
-            handle_command(writer, workspace, provider, ctx, &name).await;
+            handle_command(writer, workspace, config.provider, config.context, &name).await;
         }
     }
 }
@@ -212,10 +181,7 @@ async fn handle_line<P: Provider>(
 async fn handle_message<P: Provider>(
     writer: &mut OwnedWriteHalf,
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: &ContextConfig,
+    config: &TurnConfig<'_, P>,
     text: &str,
 ) {
     let session_path = workspace.socket_session_path();
@@ -238,17 +204,7 @@ async fn handle_message<P: Provider>(
 
     let system_prompt = workspace.system_prompt();
 
-    match agent::run_turn(
-        &mut session,
-        &system_prompt,
-        text,
-        provider,
-        tools,
-        max_iterations,
-        ctx,
-    )
-    .await
-    {
+    match agent::run_turn(&mut session, &system_prompt, text, config).await {
         Ok(response) => {
             if let Err(e) = session.save(&session_path) {
                 error!("Failed to save socket session: {e}");
@@ -340,6 +296,11 @@ mod tests {
     use tokio::io::BufReader as TokioBufReader;
     use tokio::net::unix::OwnedWriteHalf as ClientWriteHalf;
 
+    const CTX: ContextConfig = ContextConfig {
+        max_tokens: 200_000,
+        budget_percent: 80,
+    };
+
     // ── Test harness ────────────────────────────────────────────────
 
     /// Typed NDJSON client for tests.
@@ -402,14 +363,19 @@ mod tests {
         let ws = Workspace::init_at(ws_dir.path().to_path_buf()).unwrap();
         let provider = MockProvider::new(responses);
         let tools = crate::tools::Tools::default();
-        let ctx = ContextConfig::default();
 
         let sock_dir = tempfile::tempdir().unwrap();
         let sock_path = sock_dir.path().join("test.sock");
 
         let path = sock_path.clone();
         let handle = tokio::spawn(async move {
-            listen(&path, &ws, &provider, &tools, 1, &ctx).await;
+            let config = TurnConfig {
+                provider: &provider,
+                tools: &tools,
+                max_iterations: 1,
+                context: &CTX,
+            };
+            listen(&path, &ws, &config).await;
         });
 
         let client = TestClient::connect(&sock_path).await;

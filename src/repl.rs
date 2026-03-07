@@ -11,13 +11,11 @@ use std::io::{self, Write};
 
 use tracing::error;
 
-use crate::agent;
+use crate::agent::{self, TurnConfig};
 use crate::commands::{self, ParseError, SlashCommand};
-use crate::config::ContextConfig;
 use crate::lock::Lock;
 use crate::provider::Provider;
 use crate::session::Session;
-use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// Parsed user input.
@@ -56,13 +54,7 @@ impl<'a> From<&'a str> for Command<'a> {
 ///
 /// Acquires the REPL lock, loads the session, and enters a read-eval-print
 /// loop until the user sends EOF or types `/exit`.
-pub async fn run<P: Provider>(
-    workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: &ContextConfig,
-) {
+pub async fn run<P: Provider>(workspace: &Workspace, config: &TurnConfig<'_, P>) {
     let Ok(_lock) = Lock::acquire(&workspace.repl_lock_path()) else {
         error!("Another session is already running");
         std::process::exit(1);
@@ -93,17 +85,7 @@ pub async fn run<P: Provider>(
             Command::Empty => {}
             Command::Exit => break,
             Command::Message(msg) => {
-                match agent::run_turn(
-                    &mut session,
-                    &system_prompt,
-                    msg,
-                    provider,
-                    tools,
-                    max_iterations,
-                    ctx,
-                )
-                .await
-                {
+                match agent::run_turn(&mut session, &system_prompt, msg, config).await {
                     Ok(response) => {
                         println!("{response}\n");
                         if let Err(e) = session.save(&session_path) {
@@ -115,8 +97,15 @@ pub async fn run<P: Provider>(
             }
             Command::Slash(cmd) => {
                 let rebuild_prompt = cmd == SlashCommand::New;
-                match commands::execute(cmd, &mut session, &session_path, workspace, provider, ctx)
-                    .await
+                match commands::execute(
+                    cmd,
+                    &mut session,
+                    &session_path,
+                    workspace,
+                    config.provider,
+                    config.context,
+                )
+                .await
                 {
                     Ok(msg) => println!("{msg}\n"),
                     Err(msg) => eprintln!("{msg}\n"),
