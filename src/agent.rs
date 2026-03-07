@@ -10,7 +10,7 @@ use futures::future::join_all;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
-use crate::activity::Activity;
+use crate::activity::{self, Activity};
 use crate::config::ContextConfig;
 use crate::context;
 use crate::error::Error;
@@ -72,11 +72,17 @@ pub async fn run_turn<P: Provider>(
     system_prompt: &str,
     user_message: &str,
     config: &TurnConfig<'_, P>,
-    _activity_tx: Option<&mpsc::Sender<Activity>>,
+    activity_tx: Option<&mpsc::Sender<Activity>>,
 ) -> Result<String, Error> {
-    context::compact_if_needed(session, system_prompt, config.provider, config.context)
-        .await
-        .map_err(Error::Provider)?;
+    let before = context::session_tokens(session, system_prompt.len());
+    let compacted =
+        context::compact_if_needed(session, system_prompt, config.provider, config.context)
+            .await
+            .map_err(Error::Provider)?;
+    if compacted {
+        let after = context::session_tokens(session, system_prompt.len());
+        activity::emit(activity_tx, Activity::Compaction { before, after });
+    }
 
     session.add_message(Message::User {
         content: user_message.to_string(),
@@ -112,6 +118,15 @@ pub async fn run_turn<P: Provider>(
                     tool_calls: Some(calls.clone()),
                 });
 
+                for call in &calls {
+                    activity::emit(
+                        activity_tx,
+                        Activity::ToolStart {
+                            tool: call.function.name.clone(),
+                        },
+                    );
+                }
+
                 // Execute all tool calls in parallel
                 let futures: Vec<_> = calls
                     .iter()
@@ -122,16 +137,17 @@ pub async fn run_turn<P: Provider>(
                 // Add results to session in the same order as tool_calls.
                 // stats::analyze relies on this for positional correlation.
                 for (call, result) in calls.iter().zip(results) {
-                    let content = match result {
+                    let (content, error) = match result {
                         Ok(output) => {
                             match safety::check_tool_output(&call.function.name, &output) {
-                                Ok(wrapped) => wrapped,
+                                Ok(wrapped) => (wrapped, None),
                                 Err(e) => {
                                     warn!(
                                         tool = %call.function.name,
                                         "Tool output blocked: {e}",
                                     );
-                                    format!("Tool output blocked: {e}. Do not retry.")
+                                    let msg = format!("Tool output blocked: {e}. Do not retry.");
+                                    (msg, Some(e.to_string()))
                                 }
                             }
                         }
@@ -140,9 +156,17 @@ pub async fn run_turn<P: Provider>(
                                 tool = %call.function.name,
                                 "Tool execution failed: {e}",
                             );
-                            format!("Error: {e}")
+                            (format!("Error: {e}"), Some(e.to_string()))
                         }
                     };
+
+                    activity::emit(
+                        activity_tx,
+                        Activity::ToolEnd {
+                            tool: call.function.name.clone(),
+                            error,
+                        },
+                    );
 
                     session.add_message(Message::Tool {
                         call_id: call.id.clone(),
@@ -153,6 +177,7 @@ pub async fn run_turn<P: Provider>(
         }
     }
 
+    activity::emit(activity_tx, Activity::MaxIterations);
     Err(Error::MaxIterationsReached)
 }
 
@@ -362,5 +387,65 @@ mod tests {
             assert!(content.contains("<tool_output name=\"mock\">"));
             assert!(content.contains("</tool_output>"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_activity_tool_events() {
+        let provider = MockProvider::new(vec![
+            Ok(mock_tool_calls(&["call-1", "call-2"])),
+            Ok(text("Done")),
+        ]);
+        let tools = mock_tools("mock output");
+        let mut session = Session::new();
+        let (tx, mut rx) = mpsc::channel(64);
+
+        run_turn(
+            &mut session,
+            SYSTEM,
+            "Activity test",
+            &turn_config(&provider, &tools),
+            Some(&tx),
+        )
+        .await
+        .unwrap();
+
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        // 2 ToolStart + 2 ToolEnd = 4 events
+        assert_eq!(events.len(), 4);
+        assert!(matches!(&events[0], Activity::ToolStart { tool } if tool == "mock"));
+        assert!(matches!(&events[1], Activity::ToolStart { tool } if tool == "mock"));
+        assert!(matches!(&events[2], Activity::ToolEnd { tool, error: None } if tool == "mock"));
+        assert!(matches!(&events[3], Activity::ToolEnd { tool, error: None } if tool == "mock"));
+    }
+
+    #[tokio::test]
+    async fn test_activity_max_iterations() {
+        let provider = MockProvider::new(vec![Ok(mock_tool_calls(&["call-inf"])); MAX_ITER]);
+        let tools = mock_tools("mock output");
+        let mut session = Session::new();
+        let (tx, mut rx) = mpsc::channel(256);
+
+        let _ = run_turn(
+            &mut session,
+            SYSTEM,
+            "Max iter activity",
+            &turn_config(&provider, &tools),
+            Some(&tx),
+        )
+        .await;
+
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        // Last event should be MaxIterations
+        assert!(matches!(events.last().unwrap(), Activity::MaxIterations));
     }
 }

@@ -1,4 +1,3 @@
-#[allow(dead_code)] // Consumed in subsequent commits.
 mod activity;
 mod agent;
 mod commands;
