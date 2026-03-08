@@ -51,6 +51,19 @@ All values are configurable via `config.toml` (see `src/config.rs`). Defaults sh
 | Timeout per tool | 60s | `tools.exec.timeout_secs` | Don't hang on slow commands |
 | Max tokens | 4096 | `provider.max_tokens` | Balance cost vs capability |
 
+## Repetition Detection
+
+The loop tracks consecutive identical tool call sets to detect stuck loops. A fingerprint is computed for each iteration's calls — the list of `(tool_name, parsed_args)` pairs, compared as `serde_json::Value` so JSON key reordering doesn't defeat detection.
+
+If the same fingerprint appears `REPEAT_LIMIT` times consecutively, execution is skipped and an error message is injected into the session as each call's tool result. This gives the LLM a chance to self-correct. If it keeps looping, the error repeats until `max_iterations` terminates the turn.
+
+| Repeat count | Behavior |
+|---|---|
+| 1–2 | Execute normally (LLM may legitimately retry once) |
+| 3+ | Skip execution, inject error message, `continue` loop |
+
+The counter resets when the call signature changes, so interleaved different calls (A, A, B, B, A, A) don't trigger false positives.
+
 ## Error Handling
 
 | Error | Behavior |
@@ -74,6 +87,8 @@ Events are emitted at these points in the loop:
 2. **Tool start** — before `join_all`, emit `Activity::ToolStart` for each pending call
 3. **Tool end** — after each tool result, emit `Activity::ToolEnd` with tool name and error if failed/blocked
 4. **Max iterations** — at loop exhaustion, emit `Activity::MaxIterations`
+
+When repetition detection skips execution, no `ToolStart`/`ToolEnd` events are emitted for that iteration.
 
 Callers that don't need events pass `None`. No behavior change when the sender is absent.
 

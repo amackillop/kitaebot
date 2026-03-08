@@ -23,6 +23,15 @@ use crate::tools::Tools;
 use crate::types::{Message, Response, ToolCall};
 use crate::workspace::Workspace;
 
+/// Consecutive identical tool calls before execution is skipped.
+const REPEAT_LIMIT: usize = 3;
+
+const REPEAT_ERROR: &str = "ERROR: You have called this tool with identical \
+    arguments multiple times and received the same result. \
+    Do NOT retry the same call. Either use a different tool \
+    or action, or respond to the user explaining what you \
+    tried and why it did not work.";
+
 /// Static dependencies for an agent turn.
 ///
 /// Bundles the provider, tools, iteration limit, and context config that
@@ -99,6 +108,8 @@ pub async fn run_turn<P: Provider>(
 
     let tool_definitions = config.tools.definitions();
 
+    let mut repeats = RepeatDetector::new();
+
     for iteration in 0..config.max_iterations {
         if cancel.is_cancelled() {
             activity::emit(activity_tx, Activity::Cancelled);
@@ -134,6 +145,20 @@ pub async fn run_turn<P: Provider>(
                     tool_calls: Some(calls.clone()),
                 });
 
+                if repeats.record(&calls) {
+                    warn!(
+                        iteration,
+                        "Repeated tool calls detected, skipping execution"
+                    );
+                    for call in &calls {
+                        session.add_message(Message::Tool {
+                            call_id: call.id.clone(),
+                            content: REPEAT_ERROR.to_string(),
+                        });
+                    }
+                    continue;
+                }
+
                 for call in &calls {
                     activity::emit(
                         activity_tx,
@@ -160,6 +185,42 @@ pub async fn run_turn<P: Provider>(
 }
 
 // ── Private helpers ─────────────────────────────────────────────────
+
+/// Tracks consecutive identical tool call sets to detect stuck loops.
+struct RepeatDetector {
+    prev: Option<Vec<(String, serde_json::Value)>>,
+    count: usize,
+}
+
+impl RepeatDetector {
+    fn new() -> Self {
+        Self {
+            prev: None,
+            count: 0,
+        }
+    }
+
+    /// Record a new set of tool calls. Returns `true` if the limit is reached.
+    fn record(&mut self, calls: &[ToolCall]) -> bool {
+        let fingerprint: Vec<(String, serde_json::Value)> = calls
+            .iter()
+            .map(|c| {
+                let args = serde_json::from_str(&c.function.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::String(c.function.arguments.clone()));
+                (c.function.name.clone(), args)
+            })
+            .collect();
+
+        if self.prev.as_ref() == Some(&fingerprint) {
+            self.count += 1;
+        } else {
+            self.count = 1;
+            self.prev = Some(fingerprint);
+        }
+
+        self.count >= REPEAT_LIMIT
+    }
+}
 
 /// Race a future against a cancellation token.
 ///
@@ -332,6 +393,169 @@ mod tests {
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
+    }
+
+    #[tokio::test]
+    async fn test_repeated_tool_calls_skipped() {
+        // Provider returns the same tool call 5 times, then text.
+        // With REPEAT_LIMIT=3, calls 1-2 execute normally, 3-5 are skipped.
+        let provider = MockProvider::new(vec![
+            Ok(mock_tool_calls(&["c1"])),
+            Ok(mock_tool_calls(&["c2"])),
+            Ok(mock_tool_calls(&["c3"])),
+            Ok(mock_tool_calls(&["c4"])),
+            Ok(mock_tool_calls(&["c5"])),
+            Ok(text("Gave up")),
+        ]);
+        let tools = mock_tools("same output");
+        let mut session = Session::new();
+        let (tx, mut rx) = mpsc::channel(64);
+
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Loop test",
+            &turn_config(&provider, &tools),
+            Some(&tx),
+            &noop_cancel(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), "Gave up");
+        // Provider called 6 times (5 tool-call responses + 1 text).
+        assert_eq!(provider.call_count(), 6);
+
+        // Only iterations 1 and 2 should have emitted ToolStart/ToolEnd events.
+        // Iterations 3-5 are skipped (no execution, no activity events).
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        let tool_starts = events
+            .iter()
+            .filter(|e| matches!(e, Activity::ToolStart { .. }))
+            .count();
+        let tool_ends = events
+            .iter()
+            .filter(|e| matches!(e, Activity::ToolEnd { .. }))
+            .count();
+        assert_eq!(tool_starts, 2);
+        assert_eq!(tool_ends, 2);
+
+        // Session should contain the repetition error message for skipped calls.
+        let repetition_msgs: Vec<_> = session
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, Message::Tool { content, .. } if content.starts_with("ERROR: You have called")))
+            .collect();
+        assert_eq!(repetition_msgs.len(), 3); // iterations 3, 4, 5
+    }
+
+    #[tokio::test]
+    async fn test_different_tool_calls_not_flagged() {
+        // Different arguments each time — no repetition detected.
+        let call_a = Response::ToolCalls {
+            content: String::new(),
+            calls: vec![ToolCall::new(
+                "c1".to_string(),
+                ToolFunction {
+                    name: "mock".to_string(),
+                    arguments: r#"{"x":1}"#.to_string(),
+                },
+            )],
+        };
+        let call_b = Response::ToolCalls {
+            content: String::new(),
+            calls: vec![ToolCall::new(
+                "c2".to_string(),
+                ToolFunction {
+                    name: "mock".to_string(),
+                    arguments: r#"{"x":2}"#.to_string(),
+                },
+            )],
+        };
+        let provider = MockProvider::new(vec![Ok(call_a), Ok(call_b), Ok(text("Done"))]);
+        let tools = mock_tools("output");
+        let mut session = Session::new();
+
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "No repeat",
+            &turn_config(&provider, &tools),
+            None,
+            &noop_cancel(),
+        )
+        .await;
+        assert_eq!(result.unwrap(), "Done");
+
+        // No repetition error messages.
+        let repetition_msgs: Vec<_> = session
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, Message::Tool { content, .. } if content.starts_with("ERROR: You have called")))
+            .collect();
+        assert!(repetition_msgs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_repeat_counter_resets_on_different_call() {
+        // A, A, B, B, B — only B triggers the limit, not A.
+        let call_a = || Response::ToolCalls {
+            content: String::new(),
+            calls: vec![ToolCall::new(
+                "id".to_string(),
+                ToolFunction {
+                    name: "mock".to_string(),
+                    arguments: r#"{"v":"a"}"#.to_string(),
+                },
+            )],
+        };
+        let call_b = || Response::ToolCalls {
+            content: String::new(),
+            calls: vec![ToolCall::new(
+                "id".to_string(),
+                ToolFunction {
+                    name: "mock".to_string(),
+                    arguments: r#"{"v":"b"}"#.to_string(),
+                },
+            )],
+        };
+        let provider = MockProvider::new(vec![
+            Ok(call_a()),
+            Ok(call_a()), // repeat_count=2 for A
+            Ok(call_b()), // reset to 1 for B
+            Ok(call_b()), // repeat_count=2 for B
+            Ok(call_b()), // repeat_count=3 → skipped
+            Ok(text("Done")),
+        ]);
+        let tools = mock_tools("output");
+        let mut session = Session::new();
+        let (tx, mut rx) = mpsc::channel(64);
+
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Reset test",
+            &turn_config(&provider, &tools),
+            Some(&tx),
+            &noop_cancel(),
+        )
+        .await;
+        assert_eq!(result.unwrap(), "Done");
+
+        // 4 executed iterations (A, A, B, B) + 1 skipped (B) = 4 ToolStart events
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        let tool_starts = events
+            .iter()
+            .filter(|e| matches!(e, Activity::ToolStart { .. }))
+            .count();
+        assert_eq!(tool_starts, 4);
     }
 
     #[tokio::test]
