@@ -5,6 +5,7 @@
 # Secrets: one file per credential in secrets/
 #   echo 'sk-or-...' > secrets/provider-api-key
 #   echo '0000000000:...' > secrets/telegram-bot-token
+#   echo 'ghp_...'    > secrets/github-token  (when github.enabled = true)
 #
 # Update the sharedDirectories source path to match your checkout.
 { pkgs, ... }:
@@ -23,11 +24,20 @@
       gnused
       curl
       git
+      gh
       which
     ];
-    settings.telegram = {
-      enabled = true;
-      chat_id = 7658696350;
+    gitConfig = {
+      name = "kitaebot";
+      email = "kitaebot@pm.me";
+    };
+    settings = {
+      telegram = {
+        enabled = true;
+        chat_id = 7658696350;
+      };
+      github.enabled = true;
+      git.co_authors = [ "Austin Mackillop <github.roundworm216@passmail.net>" ];
     };
   };
 

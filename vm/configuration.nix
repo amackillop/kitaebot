@@ -11,6 +11,7 @@
 #   kitaebot.settings   - Attrset written as config.toml (uses pkgs.formats.toml)
 #   kitaebot.logLevel   - RUST_LOG filter string (default: "kitaebot=info")
 #   kitaebot.tools      - Packages available to the exec tool via PATH
+#   kitaebot.gitConfig  - Attrset { name, email } for .gitconfig generation
 #
 # For local development, see deploy/configuration.nix
 {
@@ -26,6 +27,18 @@ let
   cfg = config.kitaebot;
   configFile = format.generate "config.toml" cfg.settings;
   toolPath = lib.makeBinPath cfg.tools;
+
+  githubEnabled = cfg.settings.github.enabled or false;
+
+  # Generate .gitconfig from the gitConfig option. Only produced when
+  # gitConfig is non-null, symlinked into the workspace alongside config.toml.
+  gitConfigFile = lib.optionalString (cfg.gitConfig != null) (
+    pkgs.writeText "gitconfig" ''
+      [user]
+        name = ${cfg.gitConfig.name}
+        email = ${cfg.gitConfig.email}
+    ''
+  );
 
   # Interactive chat via the daemon's Unix socket.
   kchat = pkgs.writeShellScriptBin "kchat" ''
@@ -80,6 +93,25 @@ in
       description = "Packages whose bin/ directories are available to the exec tool";
       example = lib.literalExpression "[ pkgs.coreutils pkgs.git pkgs.curl ]";
     };
+
+    gitConfig = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.submodule {
+          options = {
+            name = lib.mkOption {
+              type = lib.types.str;
+              description = "Git user.name for commits";
+            };
+            email = lib.mkOption {
+              type = lib.types.str;
+              description = "Git user.email for commits";
+            };
+          };
+        }
+      );
+      default = null;
+      description = "Git identity. When set, generates .gitconfig in the workspace.";
+    };
   };
 
   config = {
@@ -113,7 +145,8 @@ in
         "d /var/lib/kitaebot/memory 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/projects 0750 kitaebot kitaebot -"
         "L+ /var/lib/kitaebot/config.toml - - - - ${configFile}"
-      ];
+      ]
+      ++ lib.optional (cfg.gitConfig != null) "L+ /var/lib/kitaebot/.gitconfig - - - - ${gitConfigFile}";
 
       # Kitaebot daemon
       services.kitaebot = {
@@ -136,7 +169,8 @@ in
           LoadCredential = [
             "provider-api-key:${config.kitaebot.secretsDir}/provider-api-key"
             "telegram-bot-token:${config.kitaebot.secretsDir}/telegram-bot-token"
-          ];
+          ]
+          ++ lib.optional githubEnabled "github-token:${config.kitaebot.secretsDir}/github-token";
 
           # Process isolation
           ProtectProc = "invisible";
