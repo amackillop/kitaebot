@@ -6,32 +6,26 @@ mod exec;
 mod file_edit;
 mod file_read;
 mod file_write;
-#[cfg(not(feature = "mock-network"))]
-mod github;
 mod glob_search;
 mod grep;
 #[cfg(test)]
 mod mock;
+#[cfg(not(feature = "mock-network"))]
+mod network;
+
 pub mod path;
-#[cfg(not(feature = "mock-network"))]
-mod web_fetch;
-#[cfg(not(feature = "mock-network"))]
-mod web_search;
 
 pub use exec::Exec;
 pub use file_edit::FileEdit;
 pub use file_read::FileRead;
 pub use file_write::FileWrite;
-#[cfg(not(feature = "mock-network"))]
-pub use github::GitHub;
 pub use glob_search::GlobSearch;
 pub use grep::Grep;
+
 #[cfg(test)]
 pub use mock::MockTool;
 #[cfg(not(feature = "mock-network"))]
-pub use web_fetch::WebFetch;
-#[cfg(not(feature = "mock-network"))]
-pub use web_search::WebSearch;
+pub use network::{GitHub, WebFetch, WebSearch};
 
 use std::borrow::Cow;
 use std::ffi::OsString;
