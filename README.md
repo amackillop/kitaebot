@@ -27,18 +27,19 @@ The agent loop calls the LLM, dispatches tool calls, checks outputs for leaked s
 
 ### Tools
 
-8 typed tools replace a generic shell. The LLM declares intent via parameters instead of reasoning about shell syntax.
+Typed tools replace a generic shell. The LLM declares intent via parameters instead of reasoning about shell syntax.
 
 | Tool | Description |
 |------|-------------|
-| `exec` | Run a shell command (timeout, output cap, deny patterns) |
+| `exec` | Run a shell command (timeout, output cap, env scrubbing) |
 | `file_read` | Read a file |
 | `file_write` | Write a file |
 | `file_edit` | Patch a file |
 | `glob_search` | Find files by pattern |
-| `grep` | Search file contents |
-| `web_fetch` | HTTP GET |
+| `grep` | Search file contents (Ripgrep backend) |
+| `web_fetch` | HTTP GET (timeout, response size limit) |
 | `web_search` | LLM-powered web search (Perplexity) |
+| `github` | Clone, push, create PRs, list PRs, fetch reviews, post comments |
 
 All tool outputs pass through `safety::check_tool_output` and execute inside the Landlock sandbox.
 
@@ -86,53 +87,58 @@ just vm-stop         # Kill VM
 
 ## Configuration
 
-`config.toml` in the workspace root. In the VM this is `/var/lib/kitaebot/config.toml`. Missing file produces defaults. Unknown fields are rejected.
+Configuration is done through the NixOS module. The module serializes `kitaebot.settings` to `config.toml` via `pkgs.formats.toml` and symlinks it into the workspace. The daemon reads the TOML at startup; you never edit it by hand.
 
-```toml
-[provider]
-api = "openrouter"                          # openrouter | openai | groq | together | mistral
-model = "arcee-ai/trinity-large-preview:free"
-max_tokens = 4096
-temperature = 0.7                           # 0.0–2.0
+```nix
+kitaebot = {
+  package = kitaebot;                            # The kitaebot package (required)
+  secretsDir = "/path/to/secrets";               # One file per credential
+  logLevel = "kitaebot=debug";                   # RUST_LOG filter
 
-[agent]
-max_iterations = 100
+  tools = with pkgs; [                           # Packages on the exec tool's PATH
+    coreutils findutils gnugrep gnused
+    curl git gh which
+  ];
 
-[tools.exec]
-timeout_secs = 60
-max_output_bytes = 10240
+  gitConfig = {                                  # Generates .gitconfig in workspace
+    name = "kitaebot";
+    email = "kitaebot@pm.me";
+    signingKey = "D90B07BF61863EA1";             # Optional, enables GPG commit signing
+  };
 
-[tools.web_fetch]
-timeout_secs = 30
-max_response_bytes = 51200
-
-[tools.web_search]
-model = "perplexity/sonar"
-max_tokens = 1024
-timeout_secs = 30
-
-[heartbeat]
-interval_secs = 1800
-
-[telegram]
-enabled = false
-chat_id = 0                                 # Required when enabled
-poll_timeout_secs = 30
-
-[socket]
-path = "/run/kitaebot/chat.sock"
-
-[context]
-max_tokens = 200000
-budget_percent = 80                         # Compaction trigger (1–100)
+  settings = {                                   # Becomes config.toml
+    provider = {
+      api = "openrouter";                        # openrouter | openai | groq | together | mistral
+      model = "arcee-ai/trinity-large-preview:free";
+      max_tokens = 4096;
+      temperature = 0.7;                         # 0.0–2.0
+    };
+    agent.max_iterations = 100;
+    tools.exec = { timeout_secs = 60; max_output_bytes = 10240; };
+    tools.web_fetch = { timeout_secs = 30; max_response_bytes = 51200; };
+    tools.web_search = { model = "perplexity/sonar"; max_tokens = 1024; timeout_secs = 30; };
+    heartbeat.interval_secs = 1800;
+    telegram = { enabled = true; chat_id = 123456789; };
+    socket.path = "/run/kitaebot/chat.sock";
+    context = { max_tokens = 200000; budget_percent = 80; };
+    git.co_authors = [ "Name <email>" ];
+    github.enabled = true;
+  };
+};
 ```
+
+All fields in `settings` have sane defaults; an empty attrset produces a valid config. Unknown fields are rejected at daemon startup.
 
 ### Secrets
 
-Secrets are loaded from the systemd credentials directory (`$CREDENTIALS_DIRECTORY`), not environment variables. Required files:
+Secrets are loaded via systemd `LoadCredential` from `kitaebot.secretsDir`. One file per credential, not environment variables.
 
-- `provider-api-key` (or matching provider name)
-- `telegram-bot-token` (when Telegram is enabled)
+| File | Required |
+|------|----------|
+| `provider-api-key` | Always |
+| `telegram-bot-token` | When `telegram.enabled = true` |
+| `github-token` | When `github.enabled = true` |
+| `gpg-signing-key` | When `gitConfig.signingKey` is set |
 
 ## Project layout
 
@@ -142,26 +148,32 @@ src/
 ├── bin/kchat.rs          Socket client REPL
 ├── agent.rs              Core agent loop
 ├── provider/             LLM abstraction (completions, mock)
-├── tools/                Tool trait + implementations
+├── tools/                Tool trait + implementations (exec, files, grep, web, github)
 ├── sandbox.rs            Landlock policy
 ├── safety.rs             Leak detection
 ├── secrets.rs            systemd credential loading
 ├── session.rs            Atomic JSON persistence
 ├── config.rs             TOML config with validation
 ├── context.rs            Token budget management
+├── chat_completion.rs    LLM request/response formatting
 ├── telegram.rs           Telegram Bot API channel
 ├── socket.rs             Unix socket NDJSON channel
 ├── daemon.rs             Event loop (select over channels + heartbeat)
+├── dispatch.rs           Route messages to agent or slash commands
 ├── commands.rs           Slash command dispatch
+├── heartbeat.rs          Periodic autonomous task review
+├── activity.rs           Structured turn events for observability
 ├── workspace.rs          Workspace init + system prompt assembly
+├── stats.rs              Conversation statistics
+├── lock.rs               File locking for atomic operations
 ├── types.rs              Domain types (Message, ToolCall, Response)
 └── error.rs              Algebraic error types
 vm/
 └── configuration.nix     NixOS module (systemd service, options, hardening)
 deploy/
 ├── configuration.nix     Host-specific settings (SSH keys, secrets, tools)
-├── flake.nix             Deployment flake
-specs/                    Design specifications
+└── flake.nix             Deployment flake
+specs/                    Design specifications (00–16)
 ```
 
 ## License
