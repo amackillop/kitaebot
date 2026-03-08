@@ -46,20 +46,24 @@ SSH_OPTS := "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogL
 vm-build:
     nix build ./deploy
 
-# Build and start the VM if not already running, wait for SSH
+# Build and start the VM if not already running, wait for SSH (--rebuild: restart VM, --fresh: wipe state)
 vm-run *flags: vm-build
     #!/usr/bin/env bash
     set -euo pipefail
     FRESH=false
+    REBUILD=false
     for flag in {{flags}}; do
         case "$flag" in
             --fresh) FRESH=true ;;
+            --rebuild) REBUILD=true ;;
             *) echo "Unknown flag: $flag" >&2; exit 1 ;;
         esac
     done
     if $FRESH; then
-        pkill -f run-kitaebot-vm 2>/dev/null && sleep 1 || true
+        pkill -f 'qemu-system.*-name kitaebot' 2>/dev/null && sleep 1 || true
         rm -f kitaebot.qcow2
+    elif $REBUILD; then
+        pkill -f 'qemu-system.*-name kitaebot' 2>/dev/null && sleep 1 || true
     elif ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=1 {{SSH_OPTS}} root@localhost exit 2>/dev/null; then
         echo "VM already running"
         exit 0
@@ -75,14 +79,14 @@ vm-run *flags: vm-build
 
 # Stop the VM
 vm-stop:
-    pkill -f run-kitaebot-vm || echo "VM not running"
+    pkill -f 'qemu-system.*-name kitaebot' || echo "VM not running"
 
 # SSH into running VM
-vm-ssh: vm-run
+vm-ssh *flags: (vm-run flags)
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost
 
 # Chat with the daemon via SSH socket forwarding
-chat: vm-run
+chat *flags: (vm-run flags)
     #!/usr/bin/env bash
     set -euo pipefail
     SOCK=$(mktemp -d)/chat.sock

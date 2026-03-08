@@ -3,7 +3,8 @@
 # Add your SSH public key below to enable access.
 #
 # Secrets: one file per credential in secrets/
-#   echo 'sk-or-...' > secrets/openrouter-api-key
+#   echo 'sk-or-...' > secrets/provider-api-key
+#   echo '0000000000:...' > secrets/telegram-bot-token
 #
 # Update the sharedDirectories source path to match your checkout.
 { pkgs, ... }:
@@ -22,6 +23,7 @@
       gnused
       curl
       git
+      which
     ];
     settings.telegram = {
       enabled = true;
