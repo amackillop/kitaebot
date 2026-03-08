@@ -6,6 +6,8 @@ mod exec;
 mod file_edit;
 mod file_read;
 mod file_write;
+#[cfg(not(feature = "mock-network"))]
+mod github;
 mod glob_search;
 mod grep;
 #[cfg(test)]
@@ -20,6 +22,8 @@ pub use exec::Exec;
 pub use file_edit::FileEdit;
 pub use file_read::FileRead;
 pub use file_write::FileWrite;
+#[cfg(not(feature = "mock-network"))]
+pub use github::GitHub;
 pub use glob_search::GlobSearch;
 pub use grep::Grep;
 #[cfg(test)]
@@ -30,11 +34,58 @@ pub use web_fetch::WebFetch;
 pub use web_search::WebSearch;
 
 use std::borrow::Cow;
+use std::ffi::OsString;
 use std::future::Future;
 use std::pin::Pin;
 
 use crate::error::ToolError;
 use crate::types::{ToolCall, ToolDefinition};
+
+/// Environment variables forwarded to child processes.
+///
+/// Everything else is scrubbed. Notably absent: `CREDENTIALS_DIRECTORY`.
+const SAFE_ENV_VARS: &[&str] = &[
+    // Execution
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    // Locale
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    // Terminal
+    "TERM",
+    "COLORTERM",
+    // Temp
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    // Nix
+    "NIX_PATH",
+    "NIX_PROFILES",
+    "NIX_SSL_CERT_FILE",
+    // TLS
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CURL_CA_BUNDLE",
+    // Workspace
+    "KITAEBOT_WORKSPACE",
+    // Misc
+    "TZ",
+    "EDITOR",
+    "VISUAL",
+    // XDG
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+];
+
+/// Build a filtered environment from the current process, keeping only known-safe variables.
+pub(crate) fn safe_env() -> impl Iterator<Item = (OsString, OsString)> {
+    std::env::vars_os().filter(|(key, _)| key.to_str().is_some_and(|k| SAFE_ENV_VARS.contains(&k)))
+}
 
 /// A tool the agent can invoke.
 pub trait Tool: Send + Sync {

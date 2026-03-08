@@ -31,7 +31,7 @@ use tools::{Exec, FileEdit, FileRead, FileWrite, GlobSearch, Grep, Tools};
 use tracing::{error, info, warn};
 use workspace::Workspace;
 #[cfg(not(feature = "mock-network"))]
-use {secrets::load_secret, tools::WebFetch, tools::WebSearch};
+use {secrets::load_secret, tools::GitHub, tools::WebFetch, tools::WebSearch};
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
@@ -79,7 +79,7 @@ async fn main() {
         None
     };
     #[cfg(not(feature = "mock-network"))]
-    let _github_token = if config.github.enabled {
+    let github_token = if config.github.enabled {
         Some(load_secret("github-token").unwrap_or_else(|e| {
             error!("Failed to load GitHub token: {e}");
             std::process::exit(1);
@@ -106,9 +106,11 @@ async fn main() {
     let tools = build_tools(
         &workspace,
         &config,
-        git_config_path,
+        git_config_path.as_deref(),
         #[cfg(not(feature = "mock-network"))]
         client,
+        #[cfg(not(feature = "mock-network"))]
+        github_token,
     );
 
     let turn_config = TurnConfig {
@@ -162,14 +164,15 @@ async fn main() {
 fn build_tools(
     workspace: &Workspace,
     config: &Config,
-    git_config: Option<std::path::PathBuf>,
+    git_config: Option<&std::path::Path>,
     #[cfg(not(feature = "mock-network"))] client: ChatCompletionsClient,
+    #[cfg(not(feature = "mock-network"))] github_token: Option<secrets::Secret>,
 ) -> Tools {
     let guard = PathGuard::new(workspace.path());
 
     let exec = Exec::new(workspace.path(), &config.tools.exec);
     let exec = match git_config {
-        Some(path) => exec.with_git_config(path),
+        Some(path) => exec.with_git_config(path.to_path_buf()),
         None => exec,
     };
 
@@ -185,6 +188,15 @@ fn build_tools(
 
     #[cfg(not(feature = "mock-network"))]
     {
+        if let Some(token) = github_token {
+            tools.push(Box::new(GitHub::new(
+                workspace.path(),
+                token,
+                git_config.map(std::path::Path::to_path_buf),
+                config.git.co_authors.clone(),
+            )));
+        }
+
         tools.push(Box::new(
             WebFetch::new(&config.tools.web_fetch).unwrap_or_else(|e| {
                 error!("Failed to initialize web_fetch: {e}");

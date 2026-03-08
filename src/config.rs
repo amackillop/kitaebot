@@ -29,7 +29,6 @@ pub struct Config {
     #[serde(default)]
     pub context: ContextConfig,
     #[serde(default)]
-    #[allow(dead_code)] // Read by GitHub tool registration in later commits
     pub git: GitConfig,
     #[serde(default)]
     pub github: GithubConfig,

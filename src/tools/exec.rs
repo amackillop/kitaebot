@@ -18,7 +18,6 @@
 //! These are heuristics, not a sandbox. A determined attacker can bypass them.
 //! Real isolation requires OS-level sandboxing (namespaces, seccomp, landlock).
 
-use std::ffi::OsString;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -130,52 +129,6 @@ static DENY_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
     .expect("invalid deny patterns")
 });
 
-/// Environment variables forwarded to child processes.
-///
-/// Everything else is scrubbed. Notably absent: `CREDENTIALS_DIRECTORY`.
-const SAFE_ENV_VARS: &[&str] = &[
-    // Execution
-    "PATH",
-    "HOME",
-    "USER",
-    "SHELL",
-    // Locale
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    // Terminal
-    "TERM",
-    "COLORTERM",
-    // Temp
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    // Nix
-    "NIX_PATH",
-    "NIX_PROFILES",
-    "NIX_SSL_CERT_FILE",
-    // TLS
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "CURL_CA_BUNDLE",
-    // Workspace
-    "KITAEBOT_WORKSPACE",
-    // Misc
-    "TZ",
-    "EDITOR",
-    "VISUAL",
-    // XDG
-    "XDG_DATA_HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_RUNTIME_DIR",
-];
-
-/// Build a filtered environment from the current process, keeping only known-safe variables.
-fn safe_env() -> impl Iterator<Item = (OsString, OsString)> {
-    std::env::vars_os().filter(|(key, _)| key.to_str().is_some_and(|k| SAFE_ENV_VARS.contains(&k)))
-}
-
 /// Arguments for the exec tool.
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -254,7 +207,7 @@ impl Tool for Exec {
                 .arg(&args.command)
                 .current_dir(&cwd)
                 .env_clear()
-                .envs(safe_env());
+                .envs(super::safe_env());
 
             if let Some(ref path) = self.git_config {
                 cmd.env("GIT_CONFIG_GLOBAL", path);
