@@ -20,7 +20,7 @@
 
 use std::ffi::OsString;
 use std::fmt::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::RegexSet;
@@ -181,19 +181,22 @@ fn safe_env() -> impl Iterator<Item = (OsString, OsString)> {
 struct Args {
     /// The shell command to execute.
     command: String,
+    /// Working directory relative to the workspace root. Defaults to the
+    /// workspace root when omitted (e.g. `"projects/myrepo"`).
+    working_dir: Option<String>,
 }
 
 /// Tool that executes shell commands in the workspace.
 pub struct Exec {
-    working_dir: PathBuf,
+    workspace_root: PathBuf,
     timeout: Duration,
     max_output_bytes: usize,
 }
 
 impl Exec {
-    pub fn new(working_dir: impl Into<PathBuf>, config: &ExecConfig) -> Self {
+    pub fn new(workspace_root: impl Into<PathBuf>, config: &ExecConfig) -> Self {
         Self {
-            working_dir: working_dir.into(),
+            workspace_root: workspace_root.into(),
             timeout: Duration::from_secs(config.timeout_secs),
             max_output_bytes: config.max_output_bytes,
         }
@@ -231,14 +234,16 @@ impl Tool for Exec {
                 return Err(ToolError::Blocked("command matches deny pattern".into()));
             }
 
-            debug!(command = %args.command, "Executing command");
+            let cwd = resolve_working_dir(&self.workspace_root, args.working_dir.as_deref())?;
+
+            debug!(command = %args.command, cwd = %cwd.display(), "Executing command");
 
             let output = timeout(
                 self.timeout,
                 Command::new("/bin/sh")
                     .arg("-c")
                     .arg(&args.command)
-                    .current_dir(&self.working_dir)
+                    .current_dir(&cwd)
                     .env_clear()
                     .envs(safe_env())
                     .output(),
@@ -275,6 +280,32 @@ impl Tool for Exec {
     }
 }
 
+/// Resolve an optional relative working directory to an absolute path within
+/// the workspace. Returns the workspace root when `dir` is `None`.
+fn resolve_working_dir(workspace_root: &Path, dir: Option<&str>) -> Result<PathBuf, ToolError> {
+    let Some(dir) = dir else {
+        return Ok(workspace_root.to_path_buf());
+    };
+
+    if dir.contains("../") || dir.contains("..\\") || dir == ".." {
+        return Err(ToolError::Blocked(
+            "working_dir: path traversal detected".into(),
+        ));
+    }
+    if std::path::Path::new(dir).is_absolute() {
+        return Err(ToolError::Blocked(
+            "working_dir: absolute paths not allowed".into(),
+        ));
+    }
+
+    let resolved = workspace_root.join(dir);
+    if !resolved.starts_with(workspace_root) {
+        return Err(ToolError::Blocked("working_dir: escapes workspace".into()));
+    }
+
+    Ok(resolved)
+}
+
 /// Check if command contains path traversal.
 fn has_path_traversal(cmd: &str) -> bool {
     cmd.contains("../")
@@ -296,11 +327,19 @@ mod tests {
 
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["properties"]["command"]["type"], "string");
+        assert!(schema["properties"]["working_dir"].is_object());
         assert!(
             schema["required"]
                 .as_array()
                 .unwrap()
                 .contains(&serde_json::json!("command"))
+        );
+        // working_dir is optional — must not appear in required
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("working_dir"))
         );
     }
 
@@ -529,5 +568,59 @@ mod tests {
         // Line 0 is "$ echo $PATH", line 1 is the actual PATH value
         assert!(lines.len() >= 2, "expected PATH output: {result}");
         assert!(!lines[1].is_empty(), "PATH was empty: {result}");
+    }
+
+    // ── working_dir resolution ────────────────────────────────────────
+
+    #[test]
+    fn resolve_working_dir_none_returns_root() {
+        let root = Path::new("/workspace");
+        assert_eq!(resolve_working_dir(root, None).unwrap(), root);
+    }
+
+    #[test]
+    fn resolve_working_dir_subdir() {
+        let root = Path::new("/workspace");
+        assert_eq!(
+            resolve_working_dir(root, Some("projects/myrepo")).unwrap(),
+            Path::new("/workspace/projects/myrepo"),
+        );
+    }
+
+    #[test]
+    fn resolve_working_dir_rejects_traversal() {
+        let root = Path::new("/workspace");
+        assert!(matches!(
+            resolve_working_dir(root, Some("../escape")),
+            Err(ToolError::Blocked(_)),
+        ));
+    }
+
+    #[test]
+    fn resolve_working_dir_rejects_absolute() {
+        let root = Path::new("/workspace");
+        assert!(matches!(
+            resolve_working_dir(root, Some("/etc")),
+            Err(ToolError::Blocked(_)),
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_exec_working_dir_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        let tool = Exec::new(dir.path(), &ExecConfig::default());
+        let args = serde_json::json!({"command": "pwd", "working_dir": "sub"});
+        let result = tool.execute(args).await.unwrap();
+        assert!(result.contains("sub"), "expected cwd in sub: {result}");
+        assert!(result.contains("Exit code: 0"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_working_dir_traversal_blocked() {
+        let tool = Exec::new(".", &ExecConfig::default());
+        let args = serde_json::json!({"command": "pwd", "working_dir": "../escape"});
+        let result = tool.execute(args).await;
+        assert!(matches!(result, Err(ToolError::Blocked(_))));
     }
 }
