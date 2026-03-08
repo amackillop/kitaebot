@@ -77,6 +77,29 @@ enum Args {
         #[serde(default)]
         draft: bool,
     },
+    /// List pull requests.
+    PrList {
+        /// Repository directory relative to workspace root.
+        repo_dir: String,
+        /// Filter by state: `"open"` (default), `"closed"`, `"merged"`, `"all"`.
+        state: Option<String>,
+    },
+    /// Fetch reviews and comments for a pull request.
+    PrReviews {
+        /// Repository directory relative to workspace root.
+        repo_dir: String,
+        /// PR number.
+        pr_number: u64,
+    },
+    /// Add a comment to a pull request.
+    PrComment {
+        /// Repository directory relative to workspace root.
+        repo_dir: String,
+        /// PR number.
+        pr_number: u64,
+        /// Comment body (Markdown).
+        body: String,
+    },
 }
 
 /// Authenticated GitHub operations.
@@ -110,7 +133,7 @@ impl Tool for GitHub {
     }
 
     fn description(&self) -> &'static str {
-        "Authenticated GitHub operations (clone, push, pull requests)"
+        "Authenticated GitHub operations (clone, push, pull requests, reviews)"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -151,6 +174,16 @@ impl Tool for GitHub {
                     self.pr_create(&repo_dir, &title, &body, base.as_deref(), draft)
                         .await
                 }
+                Args::PrList { repo_dir, state } => self.pr_list(&repo_dir, state.as_deref()).await,
+                Args::PrReviews {
+                    repo_dir,
+                    pr_number,
+                } => self.pr_reviews(&repo_dir, pr_number).await,
+                Args::PrComment {
+                    repo_dir,
+                    pr_number,
+                    body,
+                } => self.pr_comment(&repo_dir, pr_number, &body).await,
             }
         })
     }
@@ -366,6 +399,71 @@ impl GitHub {
         }
 
         self.run_gh(&args, &cwd, "gh pr create").await
+    }
+
+    /// List pull requests via `gh pr list`.
+    async fn pr_list(&self, repo_dir: &str, state: Option<&str>) -> Result<String, ToolError> {
+        let cwd = self.resolve_repo_dir(repo_dir)?;
+
+        let state = state.unwrap_or("open");
+        let valid_states = ["open", "closed", "merged", "all"];
+        if !valid_states.contains(&state) {
+            return Err(ToolError::InvalidArguments(format!(
+                "invalid state: {state} (expected one of: {})",
+                valid_states.join(", ")
+            )));
+        }
+
+        self.run_gh(
+            &[
+                "pr",
+                "list",
+                "--state",
+                state,
+                "--json",
+                "number,title,state,url",
+            ],
+            &cwd,
+            &format!("gh pr list --state {state}"),
+        )
+        .await
+    }
+
+    /// Fetch reviews and comments for a pull request via `gh pr view`.
+    async fn pr_reviews(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
+        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let number = pr_number.to_string();
+
+        self.run_gh(
+            &[
+                "pr",
+                "view",
+                &number,
+                "--json",
+                "reviews,reviewRequests,comments",
+            ],
+            &cwd,
+            &format!("gh pr view {number} --json reviews,reviewRequests,comments"),
+        )
+        .await
+    }
+
+    /// Add a comment to a pull request via `gh pr comment`.
+    async fn pr_comment(
+        &self,
+        repo_dir: &str,
+        pr_number: u64,
+        body: &str,
+    ) -> Result<String, ToolError> {
+        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let number = pr_number.to_string();
+
+        self.run_gh(
+            &["pr", "comment", &number, "--body", body],
+            &cwd,
+            &format!("gh pr comment {number}"),
+        )
+        .await
     }
 }
 
@@ -730,6 +828,77 @@ mod tests {
                 draft: true,
                 ..
             } if b == "develop"
+        ));
+    }
+
+    // ── PrList deserialization ───────────────────────────────────
+
+    #[test]
+    fn deserialize_pr_list_minimal() {
+        let json = serde_json::json!({
+            "action": "pr_list",
+            "repo_dir": "projects/myrepo"
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::PrList { repo_dir, state: None } if repo_dir == "projects/myrepo"
+        ));
+    }
+
+    #[test]
+    fn deserialize_pr_list_with_state() {
+        let json = serde_json::json!({
+            "action": "pr_list",
+            "repo_dir": "projects/myrepo",
+            "state": "closed"
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::PrList { state: Some(s), .. } if s == "closed"
+        ));
+    }
+
+    #[test]
+    fn pr_list_rejects_invalid_state() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("projects/r/.git")).unwrap();
+        let gh = make_github(dir.path());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(gh.pr_list("projects/r", Some("bogus")));
+        assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
+    }
+
+    // ── PrReviews deserialization ───────────────────────────────
+
+    #[test]
+    fn deserialize_pr_reviews() {
+        let json = serde_json::json!({
+            "action": "pr_reviews",
+            "repo_dir": "projects/myrepo",
+            "pr_number": 42
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(args, Args::PrReviews { pr_number: 42, .. }));
+    }
+
+    // ── PrComment deserialization ───────────────────────────────
+
+    #[test]
+    fn deserialize_pr_comment() {
+        let json = serde_json::json!({
+            "action": "pr_comment",
+            "repo_dir": "projects/myrepo",
+            "pr_number": 7,
+            "body": "LGTM"
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::PrComment { pr_number: 7, body, .. } if body == "LGTM"
         ));
     }
 
