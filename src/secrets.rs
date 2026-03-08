@@ -21,6 +21,13 @@ impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// Construct a Secret from a raw string. Test-only.
+    #[cfg(test)]
+    #[allow(dead_code)] // Only used by github tests, absent under mock-network
+    pub fn test(value: &str) -> Self {
+        Self(value.to_string())
+    }
 }
 
 impl std::fmt::Debug for Secret {

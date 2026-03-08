@@ -50,6 +50,19 @@ enum Args {
         /// repository name derived from the URL.
         name: Option<String>,
     },
+    /// Push commits to a remote.
+    Push {
+        /// Repository directory relative to workspace root
+        /// (e.g. `"projects/myrepo"`).
+        repo_dir: String,
+        /// Remote name. Defaults to `"origin"`.
+        remote: Option<String>,
+        /// Branch to push. Defaults to the current branch.
+        branch: Option<String>,
+        /// Set upstream tracking (`--set-upstream`).
+        #[serde(default)]
+        set_upstream: bool,
+    },
 }
 
 /// Authenticated GitHub operations.
@@ -100,39 +113,37 @@ impl Tool for GitHub {
 
             match args {
                 Args::Clone { url, name } => self.clone_repo(&url, name.as_deref()).await,
+                Args::Push {
+                    repo_dir,
+                    remote,
+                    branch,
+                    set_upstream,
+                } => {
+                    self.push(
+                        &repo_dir,
+                        remote.as_deref(),
+                        branch.as_deref(),
+                        set_upstream,
+                    )
+                    .await
+                }
             }
         })
     }
 }
 
 impl GitHub {
-    /// Clone a repository into `projects/<name>`.
-    async fn clone_repo(&self, url: &str, name: Option<&str>) -> Result<String, ToolError> {
-        let https_url = to_https_url(url)?;
-        let repo_name = match name {
-            Some(n) => validate_name(n)?.to_string(),
-            None => extract_repo_name(&https_url)?,
-        };
-
-        let projects_dir = self.workspace_root.join("projects");
-        let target = projects_dir.join(&repo_name);
-
-        if target.exists() {
-            return Err(ToolError::ExecutionFailed(format!(
-                "projects/{repo_name} already exists"
-            )));
-        }
-
-        // Ensure projects/ exists.
-        tokio::fs::create_dir_all(&projects_dir)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("mkdir projects/: {e}")))?;
-
+    /// Run an authenticated git command with `GIT_ASKPASS` token injection.
+    ///
+    /// `args` are passed directly to `git`. `cwd` sets the working
+    /// directory. Returns the formatted output string on success,
+    /// `ToolError::ExecutionFailed` on non-zero exit.
+    async fn run_git(&self, args: &[&str], cwd: &Path, label: &str) -> Result<String, ToolError> {
         let askpass = AskPass::create(&self.token).await?;
 
         let mut cmd = Command::new("git");
-        cmd.args(["clone", "--", &https_url, &repo_name])
-            .current_dir(&projects_dir)
+        cmd.args(args)
+            .current_dir(cwd)
             .env_clear()
             .envs(super::safe_env())
             .env("GIT_ASKPASS", askpass.path())
@@ -142,20 +153,19 @@ impl GitHub {
             cmd.env("GIT_CONFIG_GLOBAL", path);
         }
 
-        debug!(url = %https_url, target = %target.display(), "Cloning repository");
+        debug!(label, ?args, cwd = %cwd.display(), "Running git command");
 
         let output = timeout(Duration::from_secs(TIMEOUT_SECS), cmd.output())
             .await
             .map_err(|_| ToolError::Timeout)?
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        // askpass is dropped here — TempDir removes the token from disk.
         drop(askpass);
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        let mut result = format!("$ git clone {https_url} projects/{repo_name}\n");
+        let mut result = format!("$ {label}\n");
 
         if !stdout.is_empty() {
             result.push_str(&super::truncate_output(&stdout, MAX_OUTPUT_BYTES));
@@ -178,6 +188,89 @@ impl GitHub {
         }
 
         Ok(result)
+    }
+
+    /// Resolve and validate a repo directory within the workspace.
+    fn resolve_repo_dir(&self, repo_dir: &str) -> Result<PathBuf, ToolError> {
+        if repo_dir.contains("..") {
+            return Err(ToolError::Blocked(
+                "repo_dir: path traversal detected".into(),
+            ));
+        }
+        if Path::new(repo_dir).is_absolute() {
+            return Err(ToolError::Blocked(
+                "repo_dir: absolute paths not allowed".into(),
+            ));
+        }
+
+        let resolved = self.workspace_root.join(repo_dir);
+        if !resolved.starts_with(&self.workspace_root) {
+            return Err(ToolError::Blocked("repo_dir: escapes workspace".into()));
+        }
+        if !resolved.join(".git").is_dir() {
+            return Err(ToolError::InvalidArguments(format!(
+                "{repo_dir} is not a git repository"
+            )));
+        }
+
+        Ok(resolved)
+    }
+
+    /// Clone a repository into `projects/<name>`.
+    async fn clone_repo(&self, url: &str, name: Option<&str>) -> Result<String, ToolError> {
+        let https_url = to_https_url(url)?;
+        let repo_name = match name {
+            Some(n) => validate_name(n)?.to_string(),
+            None => extract_repo_name(&https_url)?,
+        };
+
+        let projects_dir = self.workspace_root.join("projects");
+        let target = projects_dir.join(&repo_name);
+
+        if target.exists() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "projects/{repo_name} already exists"
+            )));
+        }
+
+        // Ensure projects/ exists.
+        tokio::fs::create_dir_all(&projects_dir)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("mkdir projects/: {e}")))?;
+
+        self.run_git(
+            &["clone", "--", &https_url, &repo_name],
+            &projects_dir,
+            &format!("git clone {https_url} projects/{repo_name}"),
+        )
+        .await
+    }
+
+    /// Push commits to a remote.
+    async fn push(
+        &self,
+        repo_dir: &str,
+        remote: Option<&str>,
+        branch: Option<&str>,
+        set_upstream: bool,
+    ) -> Result<String, ToolError> {
+        let cwd = self.resolve_repo_dir(repo_dir)?;
+
+        let remote = remote.unwrap_or("origin");
+        let mut args = vec!["push"];
+
+        if set_upstream {
+            args.push("--set-upstream");
+        }
+
+        args.push(remote);
+
+        if let Some(b) = branch {
+            args.push(b);
+        }
+
+        let label = format!("git {}", args.join(" "));
+        self.run_git(&args, &cwd, &label).await
     }
 }
 
@@ -418,5 +511,92 @@ mod tests {
         });
         let args: Args = serde_json::from_value(json).unwrap();
         assert!(matches!(args, Args::Clone { name: Some(n), .. } if n == "custom"));
+    }
+
+    // ── Push deserialization ────────────────────────────────────────
+
+    #[test]
+    fn deserialize_push_minimal() {
+        let json = serde_json::json!({
+            "action": "push",
+            "repo_dir": "projects/myrepo"
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::Push {
+                repo_dir,
+                remote: None,
+                branch: None,
+                set_upstream: false,
+            } if repo_dir == "projects/myrepo"
+        ));
+    }
+
+    #[test]
+    fn deserialize_push_full() {
+        let json = serde_json::json!({
+            "action": "push",
+            "repo_dir": "projects/myrepo",
+            "remote": "upstream",
+            "branch": "feature",
+            "set_upstream": true
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::Push {
+                remote: Some(r),
+                branch: Some(b),
+                set_upstream: true,
+                ..
+            } if r == "upstream" && b == "feature"
+        ));
+    }
+
+    // ── Repo dir validation ─────────────────────────────────────────
+
+    #[test]
+    fn resolve_repo_dir_rejects_traversal() {
+        let gh = make_github(tempfile::tempdir().unwrap().path());
+        assert!(matches!(
+            gh.resolve_repo_dir("../escape"),
+            Err(ToolError::Blocked(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_repo_dir_rejects_absolute() {
+        let gh = make_github(tempfile::tempdir().unwrap().path());
+        assert!(matches!(
+            gh.resolve_repo_dir("/etc"),
+            Err(ToolError::Blocked(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_repo_dir_rejects_non_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("projects/notrepo")).unwrap();
+        let gh = make_github(dir.path());
+        assert!(matches!(
+            gh.resolve_repo_dir("projects/notrepo"),
+            Err(ToolError::InvalidArguments(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_repo_dir_accepts_valid_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("projects/myrepo/.git")).unwrap();
+        let gh = make_github(dir.path());
+        let resolved = gh.resolve_repo_dir("projects/myrepo").unwrap();
+        assert!(resolved.ends_with("projects/myrepo"));
+    }
+
+    /// Helper to build a GitHub instance for tests.
+    fn make_github(workspace: &Path) -> GitHub {
+        use crate::secrets::Secret;
+        GitHub::new(workspace, Secret::test("fake-token"), None, vec![])
     }
 }
