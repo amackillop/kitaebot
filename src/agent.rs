@@ -43,7 +43,7 @@ pub struct TurnConfig<'a, P: Provider> {
     pub context: &'a ContextConfig,
 }
 
-/// Load session, run a single turn, save on success.
+/// Load session, run a single turn, and save regardless of outcome.
 ///
 /// Shared by all channels (telegram, socket, heartbeat).
 pub async fn process_message<P: Provider>(
@@ -56,7 +56,7 @@ pub async fn process_message<P: Provider>(
 ) -> Result<String, Error> {
     let mut session = Session::load(session_path)?;
     let system_prompt = workspace.system_prompt();
-    let response = run_turn(
+    let result = run_turn(
         &mut session,
         &system_prompt,
         user_message,
@@ -64,9 +64,9 @@ pub async fn process_message<P: Provider>(
         activity_tx,
         cancel,
     )
-    .await?;
+    .await;
     session.save(session_path)?;
-    Ok(response)
+    result
 }
 
 /// Run a single turn of the agent loop.
@@ -742,5 +742,37 @@ mod tests {
         .await;
         assert!(matches!(result.unwrap_err(), Error::Cancelled));
         assert_eq!(provider.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_message_saves_session_on_provider_error() {
+        use crate::workspace::Workspace;
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        let session_path = dir.path().join("sessions").join("test.json");
+
+        let provider = MockProvider::new(vec![Err(ProviderError::Network(
+            "connection refused".into(),
+        ))]);
+        let tools = Tools::new(vec![]);
+
+        let result = process_message(
+            &session_path,
+            &workspace,
+            "Hello?",
+            &turn_config(&provider, &tools),
+            None,
+            &noop_cancel(),
+        )
+        .await;
+        assert!(result.is_err());
+
+        let saved = Session::load(&session_path).unwrap();
+        assert_eq!(saved.messages().len(), 1);
+        assert!(matches!(
+            &saved.messages()[0],
+            Message::User { content } if content == "Hello?"
+        ));
     }
 }
