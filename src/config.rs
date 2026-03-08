@@ -28,6 +28,10 @@ pub struct Config {
     pub socket: SocketConfig,
     #[serde(default)]
     pub context: ContextConfig,
+    #[serde(default)]
+    pub git: GitConfig,
+    #[serde(default)]
+    pub github: GithubConfig,
 }
 
 /// LLM provider settings.
@@ -147,6 +151,28 @@ pub struct ContextConfig {
     pub max_tokens: u32,
     /// Percentage of `max_tokens` at which compaction triggers (1–100).
     pub budget_percent: u8,
+}
+
+/// Git commit identity settings.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitConfig {
+    /// Author and committer name for git commits.
+    pub user_name: String,
+    /// Author and committer email for git commits.
+    pub user_email: String,
+    /// `Co-authored-by` trailers appended to commit messages.
+    /// Each entry is `"Name <email>"`.
+    pub co_authors: Vec<String>,
+}
+
+/// GitHub integration settings.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubConfig {
+    /// Enable the GitHub integration. Defaults to `false` so the daemon
+    /// can start without a GitHub token.
+    pub enabled: bool,
 }
 
 // --- Default impls ---
@@ -307,6 +333,18 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "context budget_percent must be 1..=100".into(),
             ));
+        }
+        if self.github.enabled {
+            if self.git.user_name.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "git user_name must be set when github is enabled".into(),
+                ));
+            }
+            if self.git.user_email.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "git user_email must be set when github is enabled".into(),
+                ));
+            }
         }
         if self.telegram.enabled {
             if self.telegram.chat_id == 0 {
@@ -516,5 +554,87 @@ max_output_bytes = 20480
     fn context_reject_budget_percent_over_100() {
         let result = load_toml("[context]\nbudget_percent = 101\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    // ── git ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn git_defaults() {
+        let cfg = load_toml("").unwrap();
+        assert!(cfg.git.user_name.is_empty());
+        assert!(cfg.git.user_email.is_empty());
+        assert!(cfg.git.co_authors.is_empty());
+    }
+
+    #[test]
+    fn git_parse() {
+        let cfg = load_toml(
+            "\
+[git]
+user_name = \"kitaebot\"
+user_email = \"kitaebot@users.noreply.github.com\"
+co_authors = [\"Alice <alice@example.com>\"]
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.git.user_name, "kitaebot");
+        assert_eq!(cfg.git.user_email, "kitaebot@users.noreply.github.com");
+        assert_eq!(cfg.git.co_authors, vec!["Alice <alice@example.com>"]);
+    }
+
+    #[test]
+    fn git_reject_unknown_field() {
+        let result = load_toml("[git]\ntypo = 1\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    // ── github ────────────────────────────────────────────────────────
+
+    #[test]
+    fn github_defaults() {
+        let cfg = load_toml("").unwrap();
+        assert!(!cfg.github.enabled);
+    }
+
+    #[test]
+    fn github_parse() {
+        let cfg = load_toml(
+            "\
+[git]
+user_name = \"kitaebot\"
+user_email = \"bot@example.com\"
+
+[github]
+enabled = true
+",
+        )
+        .unwrap();
+        assert!(cfg.github.enabled);
+    }
+
+    #[test]
+    fn github_reject_unknown_field() {
+        let result = load_toml("[github]\ntypo = 1\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn github_enabled_requires_git_user_name() {
+        let result =
+            load_toml("[git]\nuser_email = \"bot@example.com\"\n[github]\nenabled = true\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn github_enabled_requires_git_user_email() {
+        let result = load_toml("[git]\nuser_name = \"kitaebot\"\n[github]\nenabled = true\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn github_disabled_skips_git_validation() {
+        let cfg = load_toml("[github]\nenabled = false\n").unwrap();
+        assert!(!cfg.github.enabled);
+        assert!(cfg.git.user_name.is_empty());
     }
 }
