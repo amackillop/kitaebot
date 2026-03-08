@@ -134,7 +134,7 @@ in
           # systemd copies these to /run/credentials/kitaebot.service/
           # with mode 0400 and sets CREDENTIALS_DIRECTORY automatically.
           LoadCredential = [
-            "openrouter-api-key:${config.kitaebot.secretsDir}/openrouter-api-key"
+            "provider-api-key:${config.kitaebot.secretsDir}/provider-api-key"
             "telegram-bot-token:${config.kitaebot.secretsDir}/telegram-bot-token"
           ];
 
