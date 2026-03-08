@@ -67,6 +67,14 @@ Commands are checked against deny patterns before execution:
 - `> /dev/` — device writes
 - `shutdown`, `reboot` — system power
 - Fork bomb pattern
+- `git clone`, `git push` — must use GitHub tool
+- `git reset --hard` — destructive git operations
+- `gpg --export-secret`, `.gnupg/` — GPG keyring access
+- `gpgsign=false` — cannot override commit signing config
+- Secret harvesting (`~/.ssh/id_*`, `~/.aws/`, `.config/gh/`)
+- Network exfiltration (`curl --upload-file`, `nc -l`, `socat`)
+- Privilege escalation (`sudo`, `chmod`, `chown`)
+- Process control, cron persistence, kernel modules, reverse shells
 
 **Note**: These are defense-in-depth heuristics providing friendly error messages. The real filesystem boundary is the Landlock sandbox applied at startup (see [spec 15](15-sandbox.md)), which confines all child processes — including `sh -c` — to the workspace, `/nix/store`, `/tmp`, and read-only system paths.
 
@@ -81,6 +89,7 @@ Child processes run with a scrubbed environment. Only a known-safe allowlist of 
 - **Nix**: `NIX_PATH`, `NIX_PROFILES`, `NIX_SSL_CERT_FILE`
 - **TLS**: `SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`
 - **Workspace**: `KITAEBOT_WORKSPACE`
+- **GPG**: `GNUPGHOME`
 - **Misc**: `TZ`, `EDITOR`, `VISUAL`
 - **XDG**: `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`
 
