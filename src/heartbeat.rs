@@ -9,6 +9,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::time::SystemTime;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::agent::{self, TurnConfig};
 use crate::error::{Error, HeartbeatError};
 use crate::lock::Lock;
@@ -78,7 +80,9 @@ pub async fn run<P: Provider>(
     let prompt = build_prompt(&tasks);
     let session_path = workspace.heartbeat_session_path();
 
-    let response = agent::process_message(&session_path, workspace, &prompt, config, None).await?;
+    let cancel = CancellationToken::new();
+    let response =
+        agent::process_message(&session_path, workspace, &prompt, config, None, &cancel).await?;
 
     append_history(&workspace.history_path(), &response).map_err(HeartbeatError::WriteHistory)?;
 

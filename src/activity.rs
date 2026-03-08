@@ -13,6 +13,8 @@ use tokio::sync::mpsc;
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Activity {
+    /// Turn was cancelled by client disconnect.
+    Cancelled,
     /// Context window was compacted via summarization.
     Compaction { before: usize, after: usize },
     /// Agent loop exhausted its iteration budget.
@@ -26,6 +28,7 @@ pub enum Activity {
 impl fmt::Display for Activity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => write!(f, "Turn cancelled"),
             Self::Compaction { before, after } => {
                 write!(f, "Compacting context: {before} -> {after} tokens")
             }

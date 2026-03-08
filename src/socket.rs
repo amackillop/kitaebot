@@ -13,9 +13,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
 
-use crate::activity::Activity;
 use crate::agent::TurnConfig;
 use crate::commands;
 use crate::dispatch;
@@ -112,17 +112,86 @@ async fn serve<P: Provider>(
             result = reader.read_line(&mut line) => {
                 match result {
                     Ok(0) | Err(_) => return,
-                    Ok(_) => {
-                        handle_line(&line, &mut writer, workspace, config, &mut verbose, &tx, &mut rx).await;
-                    }
+                    Ok(_) => {}
                 }
             }
             result = listener.accept() => {
                 if let Ok((stream, _)) = result {
                     reject(stream).await;
                 }
+                continue;
             }
         }
+
+        // We have a complete line from the client. Parse and dispatch.
+        let Some(input) = parse_line(&line, &mut writer, &mut verbose).await else {
+            continue;
+        };
+
+        let session_path = workspace.socket_session_path();
+        let cancel = CancellationToken::new();
+
+        let result = {
+            let dispatch_fut =
+                dispatch::dispatch(&input, &session_path, workspace, config, Some(&tx), &cancel);
+            tokio::pin!(dispatch_fut);
+
+            // Drain activity events while dispatch runs. Monitor the
+            // client reader so we can cancel on disconnect.
+            let mut disconnect_line = String::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    Some(event) = rx.recv() => {
+                        if verbose {
+                            let _ = send(&mut writer, &ServerMsg::Activity { content: event.to_string() }).await;
+                        }
+                    }
+                    result = reader.read_line(&mut disconnect_line) => {
+                        match result {
+                            Ok(0) | Err(_) => {
+                                warn!("Client disconnected during dispatch, cancelling turn");
+                                cancel.cancel();
+                            }
+                            Ok(_) => {
+                                // Client sent another line mid-dispatch; ignore it.
+                                disconnect_line.clear();
+                            }
+                        }
+                    }
+                    result = &mut dispatch_fut => break result,
+                }
+            }
+        };
+
+        // Drain remaining buffered events.
+        while let Ok(event) = rx.try_recv() {
+            if verbose {
+                let _ = send(
+                    &mut writer,
+                    &ServerMsg::Activity {
+                        content: event.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        if cancel.is_cancelled() {
+            // Client is gone. No point sending a response.
+            info!("Turn cancelled by client disconnect");
+            return;
+        }
+
+        let response = match result {
+            Ok(reply) => ServerMsg::Response {
+                content: reply.content,
+            },
+            Err(content) => ServerMsg::Error { content },
+        };
+        let _ = send(&mut writer, &response)
+            .await
+            .inspect_err(|e| debug!("Failed to send response: {e}"));
     }
 }
 
@@ -139,17 +208,13 @@ async fn reject(stream: UnixStream) {
     .inspect_err(|e| debug!("Failed to send rejection: {e}"));
 }
 
-// ── Message dispatch ────────────────────────────────────────────────
+// ── Message parsing ─────────────────────────────────────────────────
 
-async fn handle_line<P: Provider>(
-    line: &str,
-    writer: &mut OwnedWriteHalf,
-    workspace: &Workspace,
-    config: &TurnConfig<'_, P>,
-    verbose: &mut bool,
-    tx: &mpsc::Sender<Activity>,
-    rx: &mut mpsc::Receiver<Activity>,
-) {
+/// Parse a client line and handle protocol-level concerns (`/verbose`, bad JSON).
+///
+/// Returns `Some(input)` if the line should be dispatched to the agent,
+/// `None` if it was handled locally (error response, toggle, etc.).
+async fn parse_line(line: &str, writer: &mut OwnedWriteHalf, verbose: &mut bool) -> Option<String> {
     let msg: ClientMsg = match serde_json::from_str(line) {
         Ok(m) => m,
         Err(e) => {
@@ -161,11 +226,11 @@ async fn handle_line<P: Provider>(
             )
             .await
             .inspect_err(|e| debug!("Failed to send error response: {e}"));
-            return;
+            return None;
         }
     };
 
-    let input = msg.content.trim();
+    let input = msg.content.trim().to_string();
 
     // /verbose is UI state, not a slash command — intercept before dispatch.
     if input == "/verbose" {
@@ -178,51 +243,10 @@ async fn handle_line<P: Provider>(
             },
         )
         .await;
-        return;
+        return None;
     }
 
-    let session_path = workspace.socket_session_path();
-
-    let result = {
-        let dispatch_fut = dispatch::dispatch(input, &session_path, workspace, config, Some(tx));
-        tokio::pin!(dispatch_fut);
-
-        // Drain activity events while dispatch runs.
-        loop {
-            tokio::select! {
-                biased;
-                Some(event) = rx.recv() => {
-                    if *verbose {
-                        let _ = send(writer, &ServerMsg::Activity { content: event.to_string() }).await;
-                    }
-                }
-                result = &mut dispatch_fut => break result,
-            }
-        }
-    };
-
-    // Drain remaining buffered events.
-    while let Ok(event) = rx.try_recv() {
-        if *verbose {
-            let _ = send(
-                writer,
-                &ServerMsg::Activity {
-                    content: event.to_string(),
-                },
-            )
-            .await;
-        }
-    }
-
-    let response = match result {
-        Ok(reply) => ServerMsg::Response {
-            content: reply.content,
-        },
-        Err(content) => ServerMsg::Error { content },
-    };
-    let _ = send(writer, &response)
-        .await
-        .inspect_err(|e| debug!("Failed to send response: {e}"));
+    Some(input)
 }
 
 // ── Wire helpers ────────────────────────────────────────────────────

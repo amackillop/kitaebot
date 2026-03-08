@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::activity::Activity;
 use crate::agent::{self, TurnConfig};
@@ -75,6 +76,7 @@ pub async fn dispatch<P: Provider>(
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
     activity_tx: Option<&mpsc::Sender<Activity>>,
+    cancel: &CancellationToken,
 ) -> Result<Reply, String> {
     match Input::parse(input).map_err(|_| format!("Unknown command: {input}"))? {
         Input::Command(cmd) => {
@@ -88,7 +90,7 @@ pub async fn dispatch<P: Provider>(
             .await
         }
         Input::Message(text) => {
-            agent::process_message(session_path, workspace, text, config, activity_tx)
+            agent::process_message(session_path, workspace, text, config, activity_tx, cancel)
                 .await
                 .map(Reply::text)
                 .map_err(|e| e.to_string())

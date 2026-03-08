@@ -9,6 +9,7 @@ use std::time::Duration;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::activity::Activity;
@@ -306,8 +307,10 @@ async fn handle_message<P: Provider>(
 
     let session_path = workspace.telegram_session_path();
 
+    let cancel = CancellationToken::new();
     let result = {
-        let dispatch_fut = dispatch::dispatch(trimmed, &session_path, workspace, config, Some(tx));
+        let dispatch_fut =
+            dispatch::dispatch(trimmed, &session_path, workspace, config, Some(tx), &cancel);
         tokio::pin!(dispatch_fut);
 
         loop {

@@ -16,6 +16,10 @@ pub enum Error {
     #[error("Heartbeat error: {0}")]
     Heartbeat(#[from] HeartbeatError),
 
+    /// Turn cancelled by client disconnect.
+    #[error("Turn cancelled")]
+    Cancelled,
+
     /// Maximum iterations reached without completion.
     ///
     /// The agent loop stopped after hitting the iteration limit to prevent

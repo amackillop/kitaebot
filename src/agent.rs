@@ -4,21 +4,23 @@
 //! Each turn sends context to the LLM and either returns a text response
 //! or executes tool calls until the LLM completes.
 
+use std::future::Future;
 use std::path::Path;
 
 use futures::future::join_all;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use crate::activity::{self, Activity};
 use crate::config::ContextConfig;
 use crate::context;
-use crate::error::Error;
+use crate::error::{Error, ToolError};
 use crate::provider::Provider;
 use crate::safety;
 use crate::session::Session;
 use crate::tools::Tools;
-use crate::types::{Message, Response};
+use crate::types::{Message, Response, ToolCall};
 use crate::workspace::Workspace;
 
 /// Static dependencies for an agent turn.
@@ -41,6 +43,7 @@ pub async fn process_message<P: Provider>(
     user_message: &str,
     config: &TurnConfig<'_, P>,
     activity_tx: Option<&mpsc::Sender<Activity>>,
+    cancel: &CancellationToken,
 ) -> Result<String, Error> {
     let mut session = Session::load(session_path)?;
     let system_prompt = workspace.system_prompt();
@@ -50,6 +53,7 @@ pub async fn process_message<P: Provider>(
         user_message,
         config,
         activity_tx,
+        cancel,
     )
     .await?;
     session.save(session_path)?;
@@ -71,12 +75,19 @@ pub async fn run_turn<P: Provider>(
     user_message: &str,
     config: &TurnConfig<'_, P>,
     activity_tx: Option<&mpsc::Sender<Activity>>,
+    cancel: &CancellationToken,
 ) -> Result<String, Error> {
+    if cancel.is_cancelled() {
+        activity::emit(activity_tx, Activity::Cancelled);
+        return Err(Error::Cancelled);
+    }
+
     let before = context::session_tokens(session, system_prompt.len());
-    let compacted =
-        context::compact_if_needed(session, system_prompt, config.provider, config.context)
-            .await
-            .map_err(Error::Provider)?;
+    let compact_fut =
+        context::compact_if_needed(session, system_prompt, config.provider, config.context);
+    let compacted = cancellable(compact_fut, cancel, activity_tx)
+        .await?
+        .map_err(Error::Provider)?;
     if compacted {
         let after = context::session_tokens(session, system_prompt.len());
         activity::emit(activity_tx, Activity::Compaction { before, after });
@@ -89,6 +100,11 @@ pub async fn run_turn<P: Provider>(
     let tool_definitions = config.tools.definitions();
 
     for iteration in 0..config.max_iterations {
+        if cancel.is_cancelled() {
+            activity::emit(activity_tx, Activity::Cancelled);
+            return Err(Error::Cancelled);
+        }
+
         debug!(iteration, "Agent loop iteration");
         // Prepend system prompt for each provider call (not stored in session)
         let mut messages = vec![Message::System {
@@ -96,11 +112,13 @@ pub async fn run_turn<P: Provider>(
         }];
         messages.extend(session.messages().iter().cloned());
 
-        let response = config
-            .provider
-            .chat(&messages, &tool_definitions)
-            .await
-            .map_err(Error::Provider)?;
+        let response = cancellable(
+            config.provider.chat(&messages, &tool_definitions),
+            cancel,
+            activity_tx,
+        )
+        .await?
+        .map_err(Error::Provider)?;
 
         match response {
             Response::Text(content) => {
@@ -130,53 +148,74 @@ pub async fn run_turn<P: Provider>(
                     .iter()
                     .map(|call| config.tools.execute(call))
                     .collect();
-                let results = join_all(futures).await;
+                let results = cancellable(join_all(futures), cancel, activity_tx).await?;
 
-                // Add results to session in the same order as tool_calls.
-                // stats::analyze relies on this for positional correlation.
-                for (call, result) in calls.iter().zip(results) {
-                    let (content, error) = match result {
-                        Ok(output) => {
-                            match safety::check_tool_output(&call.function.name, &output) {
-                                Ok(wrapped) => (wrapped, None),
-                                Err(e) => {
-                                    warn!(
-                                        tool = %call.function.name,
-                                        "Tool output blocked: {e}",
-                                    );
-                                    let msg = format!("Tool output blocked: {e}. Do not retry.");
-                                    (msg, Some(e.to_string()))
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                tool = %call.function.name,
-                                "Tool execution failed: {e}",
-                            );
-                            (format!("Error: {e}"), Some(e.to_string()))
-                        }
-                    };
-
-                    activity::emit(
-                        activity_tx,
-                        Activity::ToolEnd {
-                            tool: call.function.name.clone(),
-                            error,
-                        },
-                    );
-
-                    session.add_message(Message::Tool {
-                        call_id: call.id.clone(),
-                        content,
-                    });
-                }
+                record_tool_results(session, &calls, results, activity_tx);
             }
         }
     }
 
     activity::emit(activity_tx, Activity::MaxIterations);
     Err(Error::MaxIterationsReached)
+}
+
+// ── Private helpers ─────────────────────────────────────────────────
+
+/// Race a future against a cancellation token.
+///
+/// Returns the future's output on completion, or `Err(Cancelled)` if the
+/// token fires first. Emits `Activity::Cancelled` before returning.
+async fn cancellable<T>(
+    future: impl Future<Output = T>,
+    cancel: &CancellationToken,
+    activity_tx: Option<&mpsc::Sender<Activity>>,
+) -> Result<T, Error> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            activity::emit(activity_tx, Activity::Cancelled);
+            Err(Error::Cancelled)
+        }
+        output = future => Ok(output),
+    }
+}
+
+/// Process tool execution results: check safety, emit events, record to session.
+fn record_tool_results(
+    session: &mut Session,
+    calls: &[ToolCall],
+    results: Vec<Result<String, ToolError>>,
+    activity_tx: Option<&mpsc::Sender<Activity>>,
+) {
+    for (call, result) in calls.iter().zip(results) {
+        let (content, err) = match result {
+            Ok(output) => match safety::check_tool_output(&call.function.name, &output) {
+                Ok(wrapped) => (wrapped, None),
+                Err(e) => {
+                    warn!(tool = %call.function.name, "Tool output blocked: {e}");
+                    let msg = format!("Tool output blocked: {e}. Do not retry.");
+                    (msg, Some(e.to_string()))
+                }
+            },
+            Err(e) => {
+                error!(tool = %call.function.name, "Tool execution failed: {e}");
+                (format!("Error: {e}"), Some(e.to_string()))
+            }
+        };
+
+        activity::emit(
+            activity_tx,
+            Activity::ToolEnd {
+                tool: call.function.name.clone(),
+                error: err,
+            },
+        );
+
+        session.add_message(Message::Tool {
+            call_id: call.id.clone(),
+            content,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +226,10 @@ mod tests {
     use crate::provider::MockProvider;
     use crate::tools::MockTool;
     use crate::types::{ToolCall, ToolFunction};
+
+    fn noop_cancel() -> CancellationToken {
+        CancellationToken::new()
+    }
 
     fn text(s: &str) -> Response {
         Response::Text(s.to_string())
@@ -244,6 +287,7 @@ mod tests {
             "Hello",
             &turn_config(&provider, &tools),
             None,
+            &noop_cancel(),
         )
         .await;
         assert_eq!(result.unwrap(), "Hello from LLM");
@@ -266,6 +310,7 @@ mod tests {
             "Use a tool",
             &turn_config(&provider, &tools),
             None,
+            &noop_cancel(),
         )
         .await;
         assert_eq!(result.unwrap(), "Tool result processed");
@@ -283,6 +328,7 @@ mod tests {
             "Infinite loop",
             &turn_config(&provider, &tools),
             None,
+            &noop_cancel(),
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
@@ -301,6 +347,7 @@ mod tests {
             "Error case",
             &turn_config(&provider, &tools),
             None,
+            &noop_cancel(),
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::Provider(_)));
@@ -321,6 +368,7 @@ mod tests {
             "Parallel tools",
             &turn_config(&provider, &tools),
             None,
+            &noop_cancel(),
         )
         .await;
         assert_eq!(result.unwrap(), "Multiple tools executed");
@@ -341,6 +389,7 @@ mod tests {
             "Leak test",
             &turn_config(&provider, &tools),
             None,
+            &noop_cancel(),
         )
         .await;
         assert_eq!(result.unwrap(), "Handled");
@@ -371,6 +420,7 @@ mod tests {
             "Wrap test",
             &turn_config(&provider, &tools),
             None,
+            &noop_cancel(),
         )
         .await
         .unwrap();
@@ -403,6 +453,7 @@ mod tests {
             "Activity test",
             &turn_config(&provider, &tools),
             Some(&tx),
+            &noop_cancel(),
         )
         .await
         .unwrap();
@@ -434,6 +485,7 @@ mod tests {
             "Max iter activity",
             &turn_config(&provider, &tools),
             Some(&tx),
+            &noop_cancel(),
         )
         .await;
 
@@ -445,5 +497,26 @@ mod tests {
 
         // Last event should be MaxIterations
         assert!(matches!(events.last().unwrap(), Activity::MaxIterations));
+    }
+
+    #[tokio::test]
+    async fn test_pre_cancelled_token_returns_cancelled() {
+        let provider = MockProvider::new(vec![]);
+        let tools = Tools::new(vec![]);
+        let mut session = Session::new();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Should not run",
+            &turn_config(&provider, &tools),
+            None,
+            &cancel,
+        )
+        .await;
+        assert!(matches!(result.unwrap_err(), Error::Cancelled));
+        assert_eq!(provider.call_count(), 0);
     }
 }
