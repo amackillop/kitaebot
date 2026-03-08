@@ -63,6 +63,20 @@ enum Args {
         #[serde(default)]
         set_upstream: bool,
     },
+    /// Create a pull request.
+    PrCreate {
+        /// Repository directory relative to workspace root.
+        repo_dir: String,
+        /// PR title.
+        title: String,
+        /// PR body / description.
+        body: String,
+        /// Base branch to merge into. Defaults to the repo's default branch.
+        base: Option<String>,
+        /// Create as draft PR.
+        #[serde(default)]
+        draft: bool,
+    },
 }
 
 /// Authenticated GitHub operations.
@@ -127,6 +141,16 @@ impl Tool for GitHub {
                     )
                     .await
                 }
+                Args::PrCreate {
+                    repo_dir,
+                    title,
+                    body,
+                    base,
+                    draft,
+                } => {
+                    self.pr_create(&repo_dir, &title, &body, base.as_deref(), draft)
+                        .await
+                }
             }
         })
     }
@@ -138,6 +162,11 @@ impl GitHub {
     /// `args` are passed directly to `git`. `cwd` sets the working
     /// directory. Returns the formatted output string on success,
     /// `ToolError::ExecutionFailed` on non-zero exit.
+    ///
+    /// The token is written to a temp script in a 0700 directory and
+    /// removed when `AskPass` drops (even on early return or panic).
+    /// The token is on disk for the duration of one git command only,
+    /// readable only by the current user.
     async fn run_git(&self, args: &[&str], cwd: &Path, label: &str) -> Result<String, ToolError> {
         let askpass = AskPass::create(&self.token).await?;
 
@@ -188,6 +217,49 @@ impl GitHub {
         }
 
         Ok(result)
+    }
+
+    /// Run an authenticated `gh` CLI command with `GH_TOKEN` env injection.
+    ///
+    /// `args` are passed directly to `gh`. `cwd` sets the working
+    /// directory. Returns stdout on success.
+    ///
+    /// The token lives in the child process environment for the duration
+    /// of the `gh` command (visible via `/proc/<pid>/environ` to the same
+    /// user). There is no `GH_ASKPASS` equivalent — `GH_TOKEN` env is
+    /// the `gh` CLI's intended auth mechanism. The alternative
+    /// (`gh auth login`) persists the token to `~/.config/gh/hosts.yml`,
+    /// which is strictly worse.
+    async fn run_gh(&self, args: &[&str], cwd: &Path, label: &str) -> Result<String, ToolError> {
+        let mut cmd = Command::new("gh");
+        cmd.args(args)
+            .current_dir(cwd)
+            .env_clear()
+            .envs(super::safe_env())
+            .env("GH_TOKEN", self.token.expose())
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("NO_COLOR", "1");
+
+        debug!(label, ?args, cwd = %cwd.display(), "Running gh command");
+
+        let output = timeout(Duration::from_secs(TIMEOUT_SECS), cmd.output())
+            .await
+            .map_err(|_| ToolError::Timeout)?
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if !output.status.success() {
+            let mut err = format!("$ {label}\n");
+            if !stderr.is_empty() {
+                err.push_str(&super::truncate_output(&stderr, MAX_OUTPUT_BYTES));
+            }
+            let _ = write!(err, "\nExit code: {}", output.status.code().unwrap_or(-1));
+            return Err(ToolError::ExecutionFailed(err));
+        }
+
+        Ok(super::truncate_output(&stdout, MAX_OUTPUT_BYTES).into_owned())
     }
 
     /// Resolve and validate a repo directory within the workspace.
@@ -271,6 +343,29 @@ impl GitHub {
 
         let label = format!("git {}", args.join(" "));
         self.run_git(&args, &cwd, &label).await
+    }
+
+    /// Create a pull request via `gh pr create`.
+    async fn pr_create(
+        &self,
+        repo_dir: &str,
+        title: &str,
+        body: &str,
+        base: Option<&str>,
+        draft: bool,
+    ) -> Result<String, ToolError> {
+        let cwd = self.resolve_repo_dir(repo_dir)?;
+
+        let mut args = vec!["pr", "create", "--title", title, "--body", body];
+
+        if let Some(b) = base {
+            args.extend(["--base", b]);
+        }
+        if draft {
+            args.push("--draft");
+        }
+
+        self.run_gh(&args, &cwd, "gh pr create").await
     }
 }
 
@@ -592,6 +687,50 @@ mod tests {
         let gh = make_github(dir.path());
         let resolved = gh.resolve_repo_dir("projects/myrepo").unwrap();
         assert!(resolved.ends_with("projects/myrepo"));
+    }
+
+    // ── PrCreate deserialization ──────────────────────────────────
+
+    #[test]
+    fn deserialize_pr_create_minimal() {
+        let json = serde_json::json!({
+            "action": "pr_create",
+            "repo_dir": "projects/myrepo",
+            "title": "Fix bug",
+            "body": "Fixes the thing"
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::PrCreate {
+                title,
+                body,
+                base: None,
+                draft: false,
+                ..
+            } if title == "Fix bug" && body == "Fixes the thing"
+        ));
+    }
+
+    #[test]
+    fn deserialize_pr_create_full() {
+        let json = serde_json::json!({
+            "action": "pr_create",
+            "repo_dir": "projects/myrepo",
+            "title": "Feature",
+            "body": "Add feature",
+            "base": "develop",
+            "draft": true
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::PrCreate {
+                base: Some(b),
+                draft: true,
+                ..
+            } if b == "develop"
+        ));
     }
 
     /// Helper to build a GitHub instance for tests.
