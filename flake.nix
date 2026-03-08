@@ -110,6 +110,6 @@
     )
     // {
       # Reusable NixOS module for kitaebot VM
-      nixosModules.vm = ./vm/configuration.nix;
+      nixosModules.vm = import ./vm/configuration.nix;
     };
 }
