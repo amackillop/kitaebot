@@ -84,7 +84,11 @@ enum Args {
         /// Filter by state: `"open"` (default), `"closed"`, `"merged"`, `"all"`.
         state: Option<String>,
     },
-    /// Fetch reviews and comments for a pull request.
+    /// Fetch top-level review verdicts and PR conversation comments.
+    ///
+    /// Returns review approvals/rejections and top-level PR comments only.
+    /// Does NOT return inline code comments on specific lines — use
+    /// `pr_diff_comments` for those.
     PrReviews {
         /// Repository directory relative to workspace root.
         repo_dir: String,
@@ -100,11 +104,11 @@ enum Args {
         /// Comment body (Markdown).
         body: String,
     },
-    /// Fetch inline review comments (comments on specific lines of code).
+    /// Fetch inline code review comments on specific lines in the diff.
     ///
-    /// Unlike `pr_reviews` which returns top-level review verdicts,
-    /// this returns comments attached to specific file/line locations
-    /// in the diff — the most actionable code review feedback.
+    /// This is the action to use when looking for code review feedback.
+    /// Returns comments attached to specific file/line locations — the
+    /// most actionable review feedback. `pr_reviews` does NOT include these.
     PrDiffComments {
         /// Repository directory relative to workspace root.
         repo_dir: String,

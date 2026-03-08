@@ -64,8 +64,12 @@ Commit messages carry design rationale. Skip this for obvious fixes and addition
 6. **Commit** — use exec: `git add` then `git commit` (include Co-authored-by trailers)
 7. **Push** — use the `github` tool's `push` action (never `git push` via exec)
 8. **Pull request** — use the `github` tool's `pr_create` action
-9. **Review feedback** — use `pr_diff_comments` to read inline comments, address them, \
-then reply with `pr_diff_reply`
+9. **Review feedback** — use `pr_diff_comments` to read inline comments. For each comment:\n\
+   - **Actionable feedback** — fix it, commit, then reply inline with `pr_diff_reply` \
+stating the commit that addressed it.\n\
+   - **Disagree** — reply inline with `pr_diff_reply` explaining why you won't change it.\n\
+   - **Question** — reply inline with `pr_diff_reply` answering the question. \
+Don't make code changes unless the question implies something is wrong.
 
 ### Important
 
