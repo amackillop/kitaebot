@@ -10,6 +10,7 @@ If a common workflow has no recipe, add one.
 Review STATUS.md for current work and build queue.
 One atomic, verifiable commit at a time. Run `just check` before asking for review.
 Stage changes, keep STATUS.md current, human commits.
+Before making non-trivial changes to existing code, run `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way. Commit messages carry design rationale. Skip this for obvious fixes and additions.
 
 ## Design principles
 - **Pure core, thin effectful shell.** Separate logic from I/O. Build pure data structures that describe intent, then interpret them in a thin layer that performs effects. Test the pure core; the effectful shell should be too simple to fail.

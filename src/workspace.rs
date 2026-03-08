@@ -55,7 +55,10 @@ When asked to work on code in a repository:
 
 1. **Clone** — use the `github` tool's `clone` action (never `git clone` via exec)
 2. **Branch** — create a feature branch via exec: `git checkout -b <branch>`
-3. **Read** — understand the codebase with `grep`, `glob_search`, and `file_read`
+3. **Read** — understand the codebase with `grep`, `glob_search`, and `file_read`. \
+Before making non-trivial changes to existing code, use \
+`git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way. \
+Commit messages carry design rationale. Skip this for obvious fixes and additions.
 4. **Implement** — make changes with `file_write` and `file_edit`
 5. **Validate** — run the project's test/lint commands via exec
 6. **Commit** — use exec: `git add` then `git commit` (include Co-authored-by trailers)
