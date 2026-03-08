@@ -11,7 +11,7 @@
 #   kitaebot.settings   - Attrset written as config.toml (uses pkgs.formats.toml)
 #   kitaebot.logLevel   - RUST_LOG filter string (default: "kitaebot=info")
 #   kitaebot.tools      - Packages available to the exec tool via PATH
-#   kitaebot.gitConfig  - Attrset { name, email } for .gitconfig generation
+#   kitaebot.gitConfig  - Attrset { name, email, signingKey? } for .gitconfig generation
 #
 # For local development, see deploy/configuration.nix
 {
@@ -29,15 +29,26 @@ let
   toolPath = lib.makeBinPath cfg.tools;
 
   githubEnabled = cfg.settings.github.enabled or false;
+  signingEnabled = cfg.gitConfig != null && cfg.gitConfig.signingKey != null;
 
   # Generate .gitconfig from the gitConfig option. Only produced when
   # gitConfig is non-null, symlinked into the workspace alongside config.toml.
   gitConfigFile = lib.optionalString (cfg.gitConfig != null) (
-    pkgs.writeText "gitconfig" ''
-      [user]
-        name = ${cfg.gitConfig.name}
-        email = ${cfg.gitConfig.email}
-    ''
+    pkgs.writeText "gitconfig" (
+      ''
+        [user]
+          name = ${cfg.gitConfig.name}
+          email = ${cfg.gitConfig.email}
+      ''
+      + lib.optionalString signingEnabled ''
+        [commit]
+          gpgsign = true
+        [user]
+          signingkey = ${cfg.gitConfig.signingKey}
+        [gpg]
+          program = ${pkgs.gnupg}/bin/gpg
+      ''
+    )
   );
 
   # Interactive chat via the daemon's Unix socket.
@@ -106,6 +117,11 @@ in
               type = lib.types.str;
               description = "Git user.email for commits";
             };
+            signingKey = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "GPG key fingerprint for commit signing. Requires gpg-signing-key secret.";
+            };
           };
         }
       );
@@ -156,6 +172,16 @@ in
         wants = [ "network-online.target" ];
         serviceConfig = {
           Type = "simple";
+          ExecStartPre = lib.optional signingEnabled (
+            let
+              gpgImport = pkgs.writeShellScript "kitaebot-gpg-import" ''
+                export GNUPGHOME=/var/lib/kitaebot/.gnupg
+                mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
+                ${pkgs.gnupg}/bin/gpg --batch --import "$CREDENTIALS_DIRECTORY/gpg-signing-key"
+              '';
+            in
+            "${gpgImport}"
+          );
           ExecStart = "${config.kitaebot.package}/bin/kitaebot run";
           Restart = "on-failure";
           RestartSec = "10s";
@@ -170,7 +196,8 @@ in
             "provider-api-key:${config.kitaebot.secretsDir}/provider-api-key"
             "telegram-bot-token:${config.kitaebot.secretsDir}/telegram-bot-token"
           ]
-          ++ lib.optional githubEnabled "github-token:${config.kitaebot.secretsDir}/github-token";
+          ++ lib.optional githubEnabled "github-token:${config.kitaebot.secretsDir}/github-token"
+          ++ lib.optional signingEnabled "gpg-signing-key:${config.kitaebot.secretsDir}/gpg-signing-key";
 
           # Process isolation
           ProtectProc = "invisible";
@@ -219,6 +246,9 @@ in
           KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
           RUST_LOG = cfg.logLevel;
           PATH = lib.mkForce toolPath;
+        }
+        // lib.optionalAttrs signingEnabled {
+          GNUPGHOME = "/var/lib/kitaebot/.gnupg";
         };
       };
     };

@@ -281,6 +281,15 @@ const DENY_RULES: &[DenyRule] = &[
         pattern: r"\bcat\b.*~/\.aws/",
         guidance: BLOCKED,
     },
+    // GPG keyring — block export and direct reads of private key material
+    DenyRule {
+        pattern: r"\bgpg\b.*--export-secret",
+        guidance: BLOCKED,
+    },
+    DenyRule {
+        pattern: r"\.gnupg/",
+        guidance: BLOCKED,
+    },
     // Library injection
     DenyRule {
         pattern: r"\bLD_PRELOAD\b",
@@ -326,6 +335,12 @@ const DENY_RULES: &[DenyRule] = &[
     DenyRule {
         pattern: r"\bgit\b\s+push\b",
         guidance: "use the github tool's push action",
+    },
+    // Git signing is configured via .gitconfig with an absolute gpg path.
+    // The agent must not override it.
+    DenyRule {
+        pattern: r"gpgsign=false",
+        guidance: "GPG commit signing is configured — do not disable it",
     },
     // Git destructive operations
     DenyRule {
@@ -660,6 +675,15 @@ mod tests {
     }
 
     #[test]
+    fn test_deny_gpg_keyring() {
+        assert_blocked("gpg --export-secret-keys");
+        assert_blocked("gpg --export-secret-subkeys D90B07BF");
+        assert_blocked("cat .gnupg/private-keys-v1.d/foo.key");
+        assert_blocked("ls .gnupg/");
+        assert_blocked("tar czf keys.tar.gz .gnupg/");
+    }
+
+    #[test]
     fn test_deny_injection() {
         assert_blocked("LD_PRELOAD=/tmp/evil.so ls");
         assert_blocked("nsenter -t 1 -m -u -i -n -p");
@@ -677,6 +701,12 @@ mod tests {
         assert_blocked("crontab -e");
         assert_blocked("at now + 1 minute");
         assert_blocked(":() { :|:& }; :");
+    }
+
+    #[test]
+    fn test_deny_gpg_signing_override() {
+        assert_blocked("git -c commit.gpgsign=false commit -m 'unsigned'");
+        assert_blocked("git -c \"commit.gpgsign=false\" commit -m 'unsigned'");
     }
 
     #[test]

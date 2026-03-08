@@ -71,6 +71,8 @@ const SAFE_ENV_VARS: &[&str] = &[
     "CURL_CA_BUNDLE",
     // Workspace
     "KITAEBOT_WORKSPACE",
+    // GPG
+    "GNUPGHOME",
     // Misc
     "TZ",
     "EDITOR",

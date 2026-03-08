@@ -6,6 +6,7 @@
 #   echo 'sk-or-...' > secrets/provider-api-key
 #   echo '0000000000:...' > secrets/telegram-bot-token
 #   echo 'ghp_...'    > secrets/github-token  (when github.enabled = true)
+#   gpg --export-secret-keys --armor KEY_ID > secrets/gpg-signing-key
 #
 # Update the sharedDirectories source path to match your checkout.
 { pkgs, ... }:
@@ -30,6 +31,7 @@
     gitConfig = {
       name = "kitaebot";
       email = "kitaebot@pm.me";
+      signingKey = "D90B07BF61863EA1";
     };
     settings = {
       telegram = {
