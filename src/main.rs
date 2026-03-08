@@ -78,6 +78,15 @@ async fn main() {
     } else {
         None
     };
+    #[cfg(not(feature = "mock-network"))]
+    let _github_token = if config.github.enabled {
+        Some(load_secret("github-token").unwrap_or_else(|e| {
+            error!("Failed to load GitHub token: {e}");
+            std::process::exit(1);
+        }))
+    } else {
+        None
+    };
 
     let socket_path = std::path::Path::new(&config.socket.path);
 

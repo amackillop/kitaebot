@@ -32,7 +32,6 @@ pub struct Config {
     #[allow(dead_code)] // Read by GitHub tool registration in later commits
     pub git: GitConfig,
     #[serde(default)]
-    #[allow(dead_code)] // Gates GitHub tool registration in later commits
     pub github: GithubConfig,
 }
 
