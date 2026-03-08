@@ -12,6 +12,8 @@
 //! - Device writes (`> /dev/`)
 //! - System power (`shutdown`, `reboot`)
 //! - Fork bombs
+//! - Authenticated git operations (`git clone`, `git push`) — must use the GitHub tool
+//! - `gh` CLI config reads (token may persist to disk)
 //!
 //! Path traversal (`../`) is also blocked to confine execution to the workspace.
 //!
@@ -122,9 +124,13 @@ static DENY_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
         // Cron / persistence
         r"\bcrontab\b",
         r"\bat\b\s",
-        // Git destructive operations on main branches
-        r"\bgit\b\s+push\s+(-f|--force)\b",
+        // Git operations that must go through the GitHub tool
+        r"\bgit\b\s+clone\b",
+        r"\bgit\b\s+push\b",
+        // Git destructive operations
         r"\bgit\b\s+reset\s+--hard\b",
+        // gh CLI config (token may leak to disk)
+        r"\bcat\b.*\.config/gh/",
     ])
     .expect("invalid deny patterns")
 });
@@ -442,11 +448,20 @@ mod tests {
     }
 
     #[test]
-    fn test_deny_git_destructive() {
+    fn test_deny_git_authenticated_ops() {
+        assert!(is_blocked("git clone https://github.com/o/r.git"));
+        assert!(is_blocked("git clone git@github.com:o/r.git"));
+        assert!(is_blocked("git push origin main"));
         assert!(is_blocked("git push --force origin main"));
         assert!(is_blocked("git push -f origin master"));
         assert!(is_blocked("git reset --hard origin/main"));
         assert!(is_blocked("git reset --hard HEAD~3"));
+    }
+
+    #[test]
+    fn test_deny_gh_config_read() {
+        assert!(is_blocked("cat .config/gh/hosts.yml"));
+        assert!(is_blocked("cat ~/.config/gh/hosts.yml"));
     }
 
     #[test]
@@ -458,8 +473,8 @@ mod tests {
         assert!(!is_blocked("grep -r 'TODO' ."));
         assert!(!is_blocked("curl https://api.example.com"));
         assert!(!is_blocked("git status"));
-        assert!(!is_blocked("git push origin feature-branch"));
         assert!(!is_blocked("git commit -m 'fix bug'"));
+        assert!(!is_blocked("git branch feature-xyz"));
         assert!(!is_blocked("find / -name justfile 2>/dev/null"));
     }
 
