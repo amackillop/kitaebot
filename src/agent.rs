@@ -78,7 +78,7 @@ pub async fn process_message<P: Provider>(
 ///
 /// # Errors
 /// Returns error if max iterations reached or provider fails
-pub async fn run_turn<P: Provider>(
+async fn run_turn<P: Provider>(
     session: &mut Session,
     system_prompt: &str,
     user_message: &str,
