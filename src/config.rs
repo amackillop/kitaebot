@@ -29,8 +29,10 @@ pub struct Config {
     #[serde(default)]
     pub context: ContextConfig,
     #[serde(default)]
+    #[allow(dead_code)] // Read by GitHub tool registration in later commits
     pub git: GitConfig,
     #[serde(default)]
+    #[allow(dead_code)] // Gates GitHub tool registration in later commits
     pub github: GithubConfig,
 }
 
@@ -153,14 +155,14 @@ pub struct ContextConfig {
     pub budget_percent: u8,
 }
 
-/// Git commit identity settings.
+/// Git settings.
+///
+/// Identity (user.name, user.email) is managed externally via `.gitconfig`
+/// provisioned alongside `config.toml`. This section holds agent-level
+/// settings that don't belong in gitconfig.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitConfig {
-    /// Author and committer name for git commits.
-    pub user_name: String,
-    /// Author and committer email for git commits.
-    pub user_email: String,
     /// `Co-authored-by` trailers appended to commit messages.
     /// Each entry is `"Name <email>"`.
     pub co_authors: Vec<String>,
@@ -333,18 +335,6 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "context budget_percent must be 1..=100".into(),
             ));
-        }
-        if self.github.enabled {
-            if self.git.user_name.is_empty() {
-                return Err(ConfigError::Invalid(
-                    "git user_name must be set when github is enabled".into(),
-                ));
-            }
-            if self.git.user_email.is_empty() {
-                return Err(ConfigError::Invalid(
-                    "git user_email must be set when github is enabled".into(),
-                ));
-            }
         }
         if self.telegram.enabled {
             if self.telegram.chat_id == 0 {
@@ -561,24 +551,12 @@ max_output_bytes = 20480
     #[test]
     fn git_defaults() {
         let cfg = load_toml("").unwrap();
-        assert!(cfg.git.user_name.is_empty());
-        assert!(cfg.git.user_email.is_empty());
         assert!(cfg.git.co_authors.is_empty());
     }
 
     #[test]
     fn git_parse() {
-        let cfg = load_toml(
-            "\
-[git]
-user_name = \"kitaebot\"
-user_email = \"kitaebot@users.noreply.github.com\"
-co_authors = [\"Alice <alice@example.com>\"]
-",
-        )
-        .unwrap();
-        assert_eq!(cfg.git.user_name, "kitaebot");
-        assert_eq!(cfg.git.user_email, "kitaebot@users.noreply.github.com");
+        let cfg = load_toml("[git]\nco_authors = [\"Alice <alice@example.com>\"]\n").unwrap();
         assert_eq!(cfg.git.co_authors, vec!["Alice <alice@example.com>"]);
     }
 
@@ -598,17 +576,7 @@ co_authors = [\"Alice <alice@example.com>\"]
 
     #[test]
     fn github_parse() {
-        let cfg = load_toml(
-            "\
-[git]
-user_name = \"kitaebot\"
-user_email = \"bot@example.com\"
-
-[github]
-enabled = true
-",
-        )
-        .unwrap();
+        let cfg = load_toml("[github]\nenabled = true\n").unwrap();
         assert!(cfg.github.enabled);
     }
 
@@ -616,25 +584,5 @@ enabled = true
     fn github_reject_unknown_field() {
         let result = load_toml("[github]\ntypo = 1\n");
         assert!(matches!(result, Err(ConfigError::Parse(_))));
-    }
-
-    #[test]
-    fn github_enabled_requires_git_user_name() {
-        let result =
-            load_toml("[git]\nuser_email = \"bot@example.com\"\n[github]\nenabled = true\n");
-        assert!(matches!(result, Err(ConfigError::Invalid(_))));
-    }
-
-    #[test]
-    fn github_enabled_requires_git_user_email() {
-        let result = load_toml("[git]\nuser_name = \"kitaebot\"\n[github]\nenabled = true\n");
-        assert!(matches!(result, Err(ConfigError::Invalid(_))));
-    }
-
-    #[test]
-    fn github_disabled_skips_git_validation() {
-        let cfg = load_toml("[github]\nenabled = false\n").unwrap();
-        assert!(!cfg.github.enabled);
-        assert!(cfg.git.user_name.is_empty());
     }
 }

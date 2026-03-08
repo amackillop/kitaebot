@@ -54,6 +54,14 @@ async fn main() {
         std::process::exit(1);
     });
 
+    // .gitconfig is provisioned externally (e.g. by the NixOS module)
+    // alongside config.toml. If present, the exec tool sets
+    // GIT_CONFIG_GLOBAL so child processes pick up git identity.
+    let git_config_path = {
+        let path = workspace.path().join(".gitconfig");
+        path.exists().then_some(path)
+    };
+
     // Load all secrets before sandboxing. After enforcement, credential
     // files are inaccessible — secrets exist only in memory.
     #[cfg(not(feature = "mock-network"))]
@@ -89,6 +97,7 @@ async fn main() {
     let tools = build_tools(
         &workspace,
         &config,
+        git_config_path,
         #[cfg(not(feature = "mock-network"))]
         client,
     );
@@ -144,13 +153,20 @@ async fn main() {
 fn build_tools(
     workspace: &Workspace,
     config: &Config,
+    git_config: Option<std::path::PathBuf>,
     #[cfg(not(feature = "mock-network"))] client: ChatCompletionsClient,
 ) -> Tools {
     let guard = PathGuard::new(workspace.path());
 
+    let exec = Exec::new(workspace.path(), &config.tools.exec);
+    let exec = match git_config {
+        Some(path) => exec.with_git_config(path),
+        None => exec,
+    };
+
     #[allow(unused_mut)]
     let mut tools: Vec<Box<dyn tools::Tool>> = vec![
-        Box::new(Exec::new(workspace.path(), &config.tools.exec)),
+        Box::new(exec),
         Box::new(FileRead::new(guard.clone())),
         Box::new(FileWrite::new(guard.clone())),
         Box::new(FileEdit::new(guard.clone())),
