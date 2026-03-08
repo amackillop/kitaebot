@@ -13,15 +13,21 @@ Kernel-enforced filesystem confinement via Linux Landlock LSM. Applied at proces
 
 ## Filesystem Policy
 
-| Path                    | Access                       |
-|-------------------------|------------------------------|
-| Workspace               | Full read-write              |
-| `/nix/store`            | Read + execute               |
-| `CREDENTIALS_DIRECTORY` | Read-only files              |
-| `/tmp`                  | Full read-write              |
-| `/etc`, `/run`          | Read-only (resolv.conf, CAs) |
-| `/run/kitaebot/`        | Socket (bind, read, write, unlink) |
-| Everything else         | Denied                       |
+| Path                    | Access                                   |
+|-------------------------|------------------------------------------|
+| Workspace               | Full read-write                          |
+| `/nix/store`            | Read + execute                           |
+| `/tmp`                  | Working access (no device creation)            |
+| `/etc`                  | Read-only (resolv.conf, CA certs)        |
+| `/run`                  | Read-only (systemd runtime, resolv.conf) |
+| Socket directory†       | Socket (bind, read, write, unlink)       |
+| `/dev`                  | Read + write (/dev/null, /dev/urandom)   |
+| `/proc`                 | Read-only (/proc/self/\*, /proc/meminfo) |
+| Everything else         | Denied                                   |
+
+† Derived from the configured `socket.path` parent. Not hardcoded.
+
+`CREDENTIALS_DIRECTORY` is intentionally **excluded**. All secrets are loaded into memory before sandbox enforcement; credential files become inaccessible after.
 
 NixOS note: `/usr` and `/bin` don't exist. All binaries live in `/nix/store`. `/etc` is a symlink farm into `/nix/store`.
 
