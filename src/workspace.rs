@@ -49,6 +49,26 @@ const DEFAULT_AGENTS: &str = "\
 - Use web_search for current information beyond your training data
 - When multiple tool calls are independent, call them all in a single response instead of one at a time
 
+## Developer Workflow
+
+When asked to work on code in a repository:
+
+1. **Clone** — use the `github` tool's `clone` action (never `git clone` via exec)
+2. **Branch** — create a feature branch via exec: `git checkout -b <branch>`
+3. **Read** — understand the codebase with `grep`, `glob_search`, and `file_read`
+4. **Implement** — make changes with `file_write` and `file_edit`
+5. **Validate** — run the project's test/lint commands via exec
+6. **Commit** — use exec: `git add` then `git commit` (include Co-authored-by trailers)
+7. **Push** — use the `github` tool's `push` action (never `git push` via exec)
+8. **Pull request** — use the `github` tool's `pr_create` action
+9. **Review feedback** — use `pr_diff_comments` to read inline comments, address them, \
+then reply with `pr_diff_reply`
+
+### Important
+
+- `git clone` and `git push` are **blocked in exec** — always use the `github` tool
+- When committing, append `Co-authored-by` trailers for each co-author in your config
+- Push with `set_upstream: true` the first time you push a new branch
 ";
 
 /// An initialized workspace directory.
