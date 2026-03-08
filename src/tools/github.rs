@@ -100,6 +100,32 @@ enum Args {
         /// Comment body (Markdown).
         body: String,
     },
+    /// Fetch inline review comments (comments on specific lines of code).
+    ///
+    /// Unlike `pr_reviews` which returns top-level review verdicts,
+    /// this returns comments attached to specific file/line locations
+    /// in the diff — the most actionable code review feedback.
+    PrDiffComments {
+        /// Repository directory relative to workspace root.
+        repo_dir: String,
+        /// PR number.
+        pr_number: u64,
+    },
+    /// Reply to an inline review comment.
+    ///
+    /// Use `pr_diff_comments` first to get comment IDs, then reply
+    /// to a specific one. This creates a threaded reply on the same
+    /// line/file, not a top-level PR comment.
+    PrDiffReply {
+        /// Repository directory relative to workspace root.
+        repo_dir: String,
+        /// PR number.
+        pr_number: u64,
+        /// ID of the review comment to reply to (from `pr_diff_comments`).
+        comment_id: u64,
+        /// Reply body (Markdown).
+        body: String,
+    },
 }
 
 /// Authenticated GitHub operations.
@@ -184,6 +210,19 @@ impl Tool for GitHub {
                     pr_number,
                     body,
                 } => self.pr_comment(&repo_dir, pr_number, &body).await,
+                Args::PrDiffComments {
+                    repo_dir,
+                    pr_number,
+                } => self.pr_diff_comments(&repo_dir, pr_number).await,
+                Args::PrDiffReply {
+                    repo_dir,
+                    pr_number,
+                    comment_id,
+                    body,
+                } => {
+                    self.pr_diff_reply(&repo_dir, pr_number, comment_id, &body)
+                        .await
+                }
             }
         })
     }
@@ -462,6 +501,48 @@ impl GitHub {
             &["pr", "comment", &number, "--body", body],
             &cwd,
             &format!("gh pr comment {number}"),
+        )
+        .await
+    }
+
+    /// Fetch inline review comments (line-level) via the REST API.
+    ///
+    /// `gh pr view --json` has no field for these — they live at a
+    /// separate REST endpoint. `gh api` resolves `{owner}` and `{repo}`
+    /// from the git remote when run inside a repository directory.
+    async fn pr_diff_comments(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
+        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments");
+
+        self.run_gh(
+            &["api", &endpoint],
+            &cwd,
+            &format!("gh api ...pulls/{pr_number}/comments"),
+        )
+        .await
+    }
+
+    /// Reply to an inline review comment via the REST API.
+    ///
+    /// Creates a threaded reply on the same file/line as the original
+    /// comment. The `comment_id` comes from the `id` field in the
+    /// `pr_diff_comments` response.
+    async fn pr_diff_reply(
+        &self,
+        repo_dir: &str,
+        pr_number: u64,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<String, ToolError> {
+        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let endpoint =
+            format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments/{comment_id}/replies");
+        let body_field = format!("body={body}");
+
+        self.run_gh(
+            &["api", &endpoint, "-f", &body_field],
+            &cwd,
+            &format!("gh api ...comments/{comment_id}/replies"),
         )
         .await
     }
@@ -899,6 +980,42 @@ mod tests {
         assert!(matches!(
             args,
             Args::PrComment { pr_number: 7, body, .. } if body == "LGTM"
+        ));
+    }
+
+    // ── PrDiffComments deserialization ────────────────────────────
+
+    #[test]
+    fn deserialize_pr_diff_comments() {
+        let json = serde_json::json!({
+            "action": "pr_diff_comments",
+            "repo_dir": "projects/myrepo",
+            "pr_number": 99
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(args, Args::PrDiffComments { pr_number: 99, .. }));
+    }
+
+    // ── PrDiffReply deserialization ────────────────────────────
+
+    #[test]
+    fn deserialize_pr_diff_reply() {
+        let json = serde_json::json!({
+            "action": "pr_diff_reply",
+            "repo_dir": "projects/myrepo",
+            "pr_number": 5,
+            "comment_id": 123456,
+            "body": "Fixed in the latest push"
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::PrDiffReply {
+                pr_number: 5,
+                comment_id: 123456,
+                body,
+                ..
+            } if body == "Fixed in the latest push"
         ));
     }
 
