@@ -100,7 +100,7 @@ kitaebot = {
     curl git gh which
   ];
 
-  gitConfig = {                                  # Generates .gitconfig in workspace
+  gitConfig = {                                  # Git identity via programs.git
     name = "kitaebot";
     email = "kitaebot@pm.me";
     signingKey = "D90B07BF61863EA1";             # Optional, enables GPG commit signing

@@ -336,7 +336,7 @@ const DENY_RULES: &[DenyRule] = &[
         pattern: r"\bgit\b\s+push\b",
         guidance: "use the github tool's push action",
     },
-    // Git signing is configured via .gitconfig with an absolute gpg path.
+    // Git signing is configured via programs.git with an absolute gpg path.
     // The agent must not override it.
     DenyRule {
         pattern: r"gpgsign=false",
@@ -375,9 +375,6 @@ pub struct Exec {
     workspace_root: PathBuf,
     timeout: Duration,
     max_output_bytes: usize,
-    /// Path to a `.gitconfig` file injected as `GIT_CONFIG_GLOBAL` into
-    /// child processes. `None` when git identity is not configured.
-    git_config: Option<PathBuf>,
 }
 
 impl Exec {
@@ -386,15 +383,7 @@ impl Exec {
             workspace_root: workspace_root.into(),
             timeout: Duration::from_secs(config.timeout_secs),
             max_output_bytes: config.max_output_bytes,
-            git_config: None,
         }
-    }
-
-    /// Set the path to a `.gitconfig` file. Child processes will receive
-    /// `GIT_CONFIG_GLOBAL` pointing at this file.
-    pub fn with_git_config(mut self, path: PathBuf) -> Self {
-        self.git_config = Some(path);
-        self
     }
 }
 
@@ -439,10 +428,6 @@ impl Tool for Exec {
                 .current_dir(&cwd)
                 .env_clear()
                 .envs(super::safe_env());
-
-            if let Some(ref path) = self.git_config {
-                cmd.env("GIT_CONFIG_GLOBAL", path);
-            }
 
             let output = timeout(self.timeout, cmd.output())
                 .await

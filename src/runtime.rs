@@ -3,8 +3,6 @@
 //! All `mock-network` conditional compilation for construction lives here,
 //! keeping the rest of the codebase cfg-free.
 
-use std::path::Path;
-
 use tracing::error;
 
 use crate::chat_completion::ChatCompletionsClient;
@@ -26,7 +24,7 @@ pub struct Runtime {
 // ---------------------------------------------------------------------------
 
 #[cfg(not(feature = "mock-network"))]
-pub fn build(config: &Config, workspace: &Workspace, git_config: Option<&Path>) -> Runtime {
+pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::secrets::load_secret;
     use crate::tools::network;
 
@@ -54,14 +52,8 @@ pub fn build(config: &Config, workspace: &Workspace, git_config: Option<&Path>) 
     let client = ChatCompletionsClient::new(api_key, config.provider.api.endpoint());
     let provider = CompletionsProvider::new(client.clone(), &config.provider);
 
-    let mut tools = Tools::local(workspace, config, git_config);
-    tools.extend(network::build(
-        workspace,
-        config,
-        git_config,
-        client,
-        github_token,
-    ));
+    let mut tools = Tools::local(workspace, config);
+    tools.extend(network::build(workspace, config, client, github_token));
 
     let telegram = telegram_token.map(|t| TelegramChannel::new(t, &config.telegram));
 
@@ -80,10 +72,10 @@ pub fn build(config: &Config, workspace: &Workspace, git_config: Option<&Path>) 
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "mock-network")]
-pub fn build(config: &Config, workspace: &Workspace, git_config: Option<&Path>) -> Runtime {
+pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     let client = ChatCompletionsClient;
     let provider = CompletionsProvider::new(client, &config.provider);
-    let tools = Tools::local(workspace, config, git_config);
+    let tools = Tools::local(workspace, config);
 
     Runtime {
         provider,

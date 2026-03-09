@@ -157,9 +157,8 @@ pub struct ContextConfig {
 
 /// Git settings.
 ///
-/// Identity (user.name, user.email) is managed externally via `.gitconfig`
-/// provisioned alongside `config.toml`. This section holds agent-level
-/// settings that don't belong in gitconfig.
+/// Identity (user.name, user.email) is managed at the system level via
+/// NixOS `programs.git`. This section holds agent-level settings only.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitConfig {

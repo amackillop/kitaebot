@@ -11,7 +11,7 @@
 #   kitaebot.settings   - Attrset written as config.toml (uses pkgs.formats.toml)
 #   kitaebot.logLevel   - RUST_LOG filter string (default: "kitaebot=info")
 #   kitaebot.tools      - Packages available to the exec tool via PATH
-#   kitaebot.gitConfig  - Attrset { name, email, signingKey? } for .gitconfig generation
+#   kitaebot.gitConfig  - Attrset { name, email, signingKey? } for git identity via programs.git
 #
 # For local development, see deploy/configuration.nix
 {
@@ -30,26 +30,6 @@ let
 
   githubEnabled = cfg.settings.github.enabled or false;
   signingEnabled = cfg.gitConfig != null && cfg.gitConfig.signingKey != null;
-
-  # Generate .gitconfig from the gitConfig option. Only produced when
-  # gitConfig is non-null, symlinked into the workspace alongside config.toml.
-  gitConfigFile = lib.optionalString (cfg.gitConfig != null) (
-    pkgs.writeText "gitconfig" (
-      ''
-        [user]
-          name = ${cfg.gitConfig.name}
-          email = ${cfg.gitConfig.email}
-      ''
-      + lib.optionalString signingEnabled ''
-        [commit]
-          gpgsign = true
-        [user]
-          signingkey = ${cfg.gitConfig.signingKey}
-        [gpg]
-          program = ${pkgs.gnupg}/bin/gpg
-      ''
-    )
-  );
 
   # Interactive chat via the daemon's Unix socket.
   kchat = pkgs.writeShellScriptBin "kchat" ''
@@ -126,7 +106,7 @@ in
         }
       );
       default = null;
-      description = "Git identity. When set, generates .gitconfig in the workspace.";
+      description = "Git identity configured via programs.git.";
     };
   };
 
@@ -161,8 +141,7 @@ in
         "d /var/lib/kitaebot/memory 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/projects 0750 kitaebot kitaebot -"
         "L+ /var/lib/kitaebot/config.toml - - - - ${configFile}"
-      ]
-      ++ lib.optional (cfg.gitConfig != null) "L+ /var/lib/kitaebot/.gitconfig - - - - ${gitConfigFile}";
+      ];
 
       # Kitaebot daemon
       services.kitaebot = {
@@ -250,6 +229,21 @@ in
         // lib.optionalAttrs signingEnabled {
           GNUPGHOME = "/var/lib/kitaebot/.gnupg";
         };
+      };
+    };
+
+    # Git identity — configured system-wide via /etc/gitconfig so all
+    # child processes (exec tool, github tool) inherit it automatically.
+    programs.git = lib.mkIf (cfg.gitConfig != null) {
+      enable = true;
+      config = {
+        user.name = cfg.gitConfig.name;
+        user.email = cfg.gitConfig.email;
+      }
+      // lib.optionalAttrs signingEnabled {
+        commit.gpgsign = true;
+        user.signingkey = cfg.gitConfig.signingKey;
+        gpg.program = "${pkgs.gnupg}/bin/gpg";
       };
     };
 

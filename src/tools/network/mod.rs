@@ -14,8 +14,6 @@ pub use web_search::WebSearch;
 // Re-export parent utilities so child modules can use `super::`.
 pub(crate) use super::{Tool, safe_env, truncate_output};
 
-use std::path::Path;
-
 use tracing::error;
 
 use crate::chat_completion::ChatCompletionsClient;
@@ -28,7 +26,6 @@ use crate::workspace::Workspace;
 pub fn build(
     workspace: &Workspace,
     config: &Config,
-    git_config: Option<&Path>,
     client: ChatCompletionsClient,
     github_token: Option<Secret>,
 ) -> Vec<Box<dyn Tool>> {
@@ -38,7 +35,6 @@ pub fn build(
         tools.push(Box::new(GitHub::new(
             workspace.path(),
             token,
-            git_config.map(Path::to_path_buf),
             config.git.co_authors.clone(),
         )));
     }

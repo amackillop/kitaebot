@@ -136,22 +136,15 @@ enum Args {
 pub struct GitHub {
     workspace_root: PathBuf,
     token: Secret,
-    git_config: Option<PathBuf>,
     #[allow(dead_code)] // Used by later commits (PrCreate, commit trailers)
     co_authors: Vec<String>,
 }
 
 impl GitHub {
-    pub fn new(
-        workspace_root: impl Into<PathBuf>,
-        token: Secret,
-        git_config: Option<PathBuf>,
-        co_authors: Vec<String>,
-    ) -> Self {
+    pub fn new(workspace_root: impl Into<PathBuf>, token: Secret, co_authors: Vec<String>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
             token,
-            git_config,
             co_authors,
         }
     }
@@ -253,10 +246,6 @@ impl GitHub {
             .envs(super::safe_env())
             .env("GIT_ASKPASS", askpass.path())
             .env("GIT_TERMINAL_PROMPT", "0");
-
-        if let Some(ref path) = self.git_config {
-            cmd.env("GIT_CONFIG_GLOBAL", path);
-        }
 
         debug!(label, ?args, cwd = %cwd.display(), "Running git command");
 
@@ -1026,6 +1015,6 @@ mod tests {
     /// Helper to build a GitHub instance for tests.
     fn make_github(workspace: &Path) -> GitHub {
         use crate::secrets::Secret;
-        GitHub::new(workspace, Secret::test("fake-token"), None, vec![])
+        GitHub::new(workspace, Secret::test("fake-token"), vec![])
     }
 }

@@ -28,7 +28,6 @@ pub use mock::MockTool;
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 
 use crate::config::Config;
@@ -129,21 +128,11 @@ impl Tools {
     }
 
     /// Build the set of local (non-network) tools.
-    pub fn local(
-        workspace: &Workspace,
-        config: &Config,
-        git_config: Option<&Path>,
-    ) -> Vec<Box<dyn Tool>> {
+    pub fn local(workspace: &Workspace, config: &Config) -> Vec<Box<dyn Tool>> {
         let guard = path::PathGuard::new(workspace.path());
 
-        let exec = Exec::new(workspace.path(), &config.tools.exec);
-        let exec = match git_config {
-            Some(path) => exec.with_git_config(path.to_path_buf()),
-            None => exec,
-        };
-
         vec![
-            Box::new(exec),
+            Box::new(Exec::new(workspace.path(), &config.tools.exec)),
             Box::new(FileRead::new(guard.clone())),
             Box::new(FileWrite::new(guard.clone())),
             Box::new(FileEdit::new(guard.clone())),

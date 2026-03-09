@@ -49,19 +49,11 @@ async fn main() {
         std::process::exit(1);
     });
 
-    // .gitconfig is provisioned externally (e.g. by the NixOS module)
-    // alongside config.toml. If present, the exec tool sets
-    // GIT_CONFIG_GLOBAL so child processes pick up git identity.
-    let git_config_path = {
-        let path = workspace.path().join(".gitconfig");
-        path.exists().then_some(path)
-    };
-
     let socket_path = std::path::Path::new(&config.socket.path);
 
     // Load all secrets before sandboxing. After enforcement, credential
     // files are inaccessible — secrets exist only in memory.
-    let rt = runtime::build(&config, &workspace, git_config_path.as_deref());
+    let rt = runtime::build(&config, &workspace);
 
     if let Err(e) = sandbox::apply(workspace.path(), socket_path) {
         warn!("Sandbox not applied: {e}");
