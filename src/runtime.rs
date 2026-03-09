@@ -5,15 +5,13 @@
 
 use std::path::Path;
 
-#[cfg(not(feature = "mock-network"))]
 use tracing::error;
 
 use crate::chat_completion::ChatCompletionsClient;
 use crate::config::Config;
 use crate::provider::CompletionsProvider;
 use crate::telegram::TelegramChannel;
-use crate::tools::path::PathGuard;
-use crate::tools::{Exec, FileEdit, FileRead, FileWrite, GlobSearch, Grep, Tools};
+use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// Fully-assembled application runtime returned by [`build`].
@@ -30,7 +28,7 @@ pub struct Runtime {
 #[cfg(not(feature = "mock-network"))]
 pub fn build(config: &Config, workspace: &Workspace, git_config: Option<&Path>) -> Runtime {
     use crate::secrets::load_secret;
-    use crate::tools::{GitHub, WebFetch, WebSearch};
+    use crate::tools::network;
 
     let api_key = load_secret("provider-api-key").unwrap_or_else(|e| {
         error!("Failed to load API key: {e}");
@@ -56,31 +54,23 @@ pub fn build(config: &Config, workspace: &Workspace, git_config: Option<&Path>) 
     let client = ChatCompletionsClient::new(api_key, config.provider.api.endpoint());
     let provider = CompletionsProvider::new(client.clone(), &config.provider);
 
-    let mut tools = local_tools(workspace, config, git_config);
-
-    if let Some(token) = github_token {
-        tools.push(Box::new(GitHub::new(
-            workspace.path(),
-            token,
-            git_config.map(Path::to_path_buf),
-            config.git.co_authors.clone(),
-        )));
-    }
-
-    tools.push(Box::new(
-        WebFetch::new(&config.tools.web_fetch).unwrap_or_else(|e| {
-            error!("Failed to initialize web_fetch: {e}");
-            std::process::exit(1);
-        }),
+    let mut tools = Tools::local(workspace, config, git_config);
+    tools.extend(network::build(
+        workspace,
+        config,
+        git_config,
+        client,
+        github_token,
     ));
-
-    tools.push(Box::new(WebSearch::new(client, &config.tools.web_search)));
 
     let telegram = telegram_token.map(|t| TelegramChannel::new(t, &config.telegram));
 
     Runtime {
         provider,
-        tools: Tools::new(tools),
+        tools: Tools::new(tools, &config.tools.disabled).unwrap_or_else(|e| {
+            error!("{e}");
+            std::process::exit(1);
+        }),
         telegram,
     }
 }
@@ -93,39 +83,14 @@ pub fn build(config: &Config, workspace: &Workspace, git_config: Option<&Path>) 
 pub fn build(config: &Config, workspace: &Workspace, git_config: Option<&Path>) -> Runtime {
     let client = ChatCompletionsClient;
     let provider = CompletionsProvider::new(client, &config.provider);
-    let tools = local_tools(workspace, config, git_config);
+    let tools = Tools::local(workspace, config, git_config);
 
     Runtime {
         provider,
-        tools: Tools::new(tools),
+        tools: Tools::new(tools, &config.tools.disabled).unwrap_or_else(|e| {
+            error!("{e}");
+            std::process::exit(1);
+        }),
         telegram: None,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-/// Tools that work without network access.
-fn local_tools(
-    workspace: &Workspace,
-    config: &Config,
-    git_config: Option<&Path>,
-) -> Vec<Box<dyn crate::tools::Tool>> {
-    let guard = PathGuard::new(workspace.path());
-
-    let exec = Exec::new(workspace.path(), &config.tools.exec);
-    let exec = match git_config {
-        Some(path) => exec.with_git_config(path.to_path_buf()),
-        None => exec,
-    };
-
-    vec![
-        Box::new(exec),
-        Box::new(FileRead::new(guard.clone())),
-        Box::new(FileWrite::new(guard.clone())),
-        Box::new(FileEdit::new(guard.clone())),
-        Box::new(GlobSearch::new(workspace.path())),
-        Box::new(Grep::new(guard)),
-    ]
 }

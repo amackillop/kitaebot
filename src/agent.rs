@@ -314,7 +314,7 @@ mod tests {
     }
 
     fn mock_tools(output: &str) -> Tools {
-        Tools::new(vec![Box::new(MockTool::new(output))])
+        Tools::new(vec![Box::new(MockTool::new(output))], &[]).unwrap()
     }
 
     const SYSTEM: &str = "You are a test assistant.";
@@ -339,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn test_text_response() {
         let provider = MockProvider::new(vec![Ok(text("Hello from LLM"))]);
-        let tools = Tools::new(vec![]);
+        let tools = Tools::default();
         let mut session = Session::new();
 
         let result = run_turn(
@@ -562,7 +562,7 @@ mod tests {
     async fn test_provider_error() {
         let provider =
             MockProvider::new(vec![Err(ProviderError::Network("Mock error".to_string()))]);
-        let tools = Tools::new(vec![]);
+        let tools = Tools::default();
         let mut session = Session::new();
 
         let result = run_turn(
@@ -726,7 +726,7 @@ mod tests {
     #[tokio::test]
     async fn test_pre_cancelled_token_returns_cancelled() {
         let provider = MockProvider::new(vec![]);
-        let tools = Tools::new(vec![]);
+        let tools = Tools::default();
         let mut session = Session::new();
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -755,7 +755,7 @@ mod tests {
         let provider = MockProvider::new(vec![Err(ProviderError::Network(
             "connection refused".into(),
         ))]);
-        let tools = Tools::new(vec![]);
+        let tools = Tools::default();
 
         let result = process_message(
             &session_path,

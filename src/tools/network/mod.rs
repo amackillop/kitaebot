@@ -13,3 +13,44 @@ pub use web_search::WebSearch;
 
 // Re-export parent utilities so child modules can use `super::`.
 pub(crate) use super::{Tool, safe_env, truncate_output};
+
+use std::path::Path;
+
+use tracing::error;
+
+use crate::chat_completion::ChatCompletionsClient;
+use crate::config::Config;
+use crate::secrets::Secret;
+use crate::workspace::Workspace;
+
+/// Build the network tools. Returns boxed trait objects ready for
+/// inclusion in the tool collection.
+pub fn build(
+    workspace: &Workspace,
+    config: &Config,
+    git_config: Option<&Path>,
+    client: ChatCompletionsClient,
+    github_token: Option<Secret>,
+) -> Vec<Box<dyn Tool>> {
+    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+
+    if let Some(token) = github_token {
+        tools.push(Box::new(GitHub::new(
+            workspace.path(),
+            token,
+            git_config.map(Path::to_path_buf),
+            config.git.co_authors.clone(),
+        )));
+    }
+
+    tools.push(Box::new(
+        WebFetch::new(&config.tools.web_fetch).unwrap_or_else(|e| {
+            error!("Failed to initialize web_fetch: {e}");
+            std::process::exit(1);
+        }),
+    ));
+
+    tools.push(Box::new(WebSearch::new(client, &config.tools.web_search)));
+
+    tools
+}

@@ -85,6 +85,8 @@ pub struct AgentConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
+    /// Tool names to exclude from the agent's toolbox.
+    pub disabled: Vec<String>,
     pub exec: ExecConfig,
     pub web_fetch: WebFetchConfig,
     pub web_search: WebSearchConfig,
@@ -371,6 +373,18 @@ mod tests {
         assert_eq!(cfg.agent.max_iterations, 100);
         assert_eq!(cfg.tools.exec.timeout_secs, 60);
         assert_eq!(cfg.tools.exec.max_output_bytes, 10240);
+    }
+
+    #[test]
+    fn tools_disabled_defaults_empty() {
+        let cfg = load_toml("").unwrap();
+        assert!(cfg.tools.disabled.is_empty());
+    }
+
+    #[test]
+    fn tools_disabled_parse() {
+        let cfg = load_toml("[tools]\ndisabled = [\"web_search\", \"github\"]\n").unwrap();
+        assert_eq!(cfg.tools.disabled, vec!["web_search", "github"]);
     }
 
     #[test]

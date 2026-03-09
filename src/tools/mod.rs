@@ -11,29 +11,30 @@ mod grep;
 #[cfg(test)]
 mod mock;
 #[cfg(not(feature = "mock-network"))]
-mod network;
+pub(crate) mod network;
 
 pub mod path;
 
-pub use exec::Exec;
-pub use file_edit::FileEdit;
-pub use file_read::FileRead;
-pub use file_write::FileWrite;
-pub use glob_search::GlobSearch;
-pub use grep::Grep;
+use exec::Exec;
+use file_edit::FileEdit;
+use file_read::FileRead;
+use file_write::FileWrite;
+use glob_search::GlobSearch;
+use grep::Grep;
 
 #[cfg(test)]
 pub use mock::MockTool;
-#[cfg(not(feature = "mock-network"))]
-pub use network::{GitHub, WebFetch, WebSearch};
 
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 
-use crate::error::ToolError;
+use crate::config::Config;
+use crate::error::{ConfigError, ToolError};
 use crate::types::{ToolCall, ToolDefinition};
+use crate::workspace::Workspace;
 
 /// Environment variables forwarded to child processes.
 ///
@@ -99,11 +100,56 @@ pub trait Tool: Send + Sync {
 /// Uses `Vec` with linear scan for lookup. For small tool counts (<50),
 /// this outperforms `HashMap` due to cache locality and no hashing overhead.
 /// Tool execution involves HTTP calls to an LLM (100ms+), so lookup time is noise.
+#[derive(Default)]
 pub struct Tools(Vec<Box<dyn Tool>>);
 
 impl Tools {
-    pub fn new(tools: Vec<Box<dyn Tool>>) -> Self {
-        Self(tools)
+    /// Create a tool collection, filtering out any tools whose name
+    /// appears in `disabled`.
+    ///
+    /// Returns an error if `disabled` contains a name that doesn't
+    /// match any tool — this catches typos in the config.
+    pub fn new(tools: Vec<Box<dyn Tool>>, disabled: &[String]) -> Result<Self, ConfigError> {
+        if disabled.is_empty() {
+            return Ok(Self(tools));
+        }
+        for name in disabled {
+            if !tools.iter().any(|t| t.name() == name.as_str()) {
+                return Err(ConfigError::Invalid(format!(
+                    "tools.disabled: unknown tool \"{name}\""
+                )));
+            }
+        }
+        Ok(Self(
+            tools
+                .into_iter()
+                .filter(|t| !disabled.iter().any(|d| d == t.name()))
+                .collect(),
+        ))
+    }
+
+    /// Build the set of local (non-network) tools.
+    pub fn local(
+        workspace: &Workspace,
+        config: &Config,
+        git_config: Option<&Path>,
+    ) -> Vec<Box<dyn Tool>> {
+        let guard = path::PathGuard::new(workspace.path());
+
+        let exec = Exec::new(workspace.path(), &config.tools.exec);
+        let exec = match git_config {
+            Some(path) => exec.with_git_config(path.to_path_buf()),
+            None => exec,
+        };
+
+        vec![
+            Box::new(exec),
+            Box::new(FileRead::new(guard.clone())),
+            Box::new(FileWrite::new(guard.clone())),
+            Box::new(FileEdit::new(guard.clone())),
+            Box::new(GlobSearch::new(workspace.path())),
+            Box::new(Grep::new(guard)),
+        ]
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -130,12 +176,6 @@ impl Tools {
             .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         tool.execute(args).await
-    }
-}
-
-impl Default for Tools {
-    fn default() -> Self {
-        Self::new(vec![])
     }
 }
 
@@ -173,7 +213,7 @@ mod tests {
 
     #[test]
     fn test_definitions() {
-        let tools = Tools::new(vec![Box::new(MockTool::new("ok"))]);
+        let tools = Tools::new(vec![Box::new(MockTool::new("ok"))], &[]).unwrap();
         let defs = tools.definitions();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].function.name, "mock");
@@ -181,14 +221,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute() {
-        let tools = Tools::new(vec![Box::new(MockTool::new("executed"))]);
+        let tools = Tools::new(vec![Box::new(MockTool::new("executed"))], &[]).unwrap();
         let result = tools.execute(&mock_call("test-123")).await.unwrap();
         assert_eq!(result, "executed");
     }
 
     #[tokio::test]
     async fn test_not_found() {
-        let tools = Tools::new(vec![]);
+        let tools = Tools::default();
         let call = ToolCall::new(
             "test-123".to_string(),
             ToolFunction {
@@ -233,7 +273,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_arguments() {
-        let tools = Tools::new(vec![Box::new(MockTool::new("ok"))]);
+        let tools = Tools::new(vec![Box::new(MockTool::new("ok"))], &[]).unwrap();
         let call = ToolCall::new(
             "test-123".to_string(),
             ToolFunction {
@@ -246,5 +286,23 @@ mod tests {
             result.unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
+    }
+
+    #[test]
+    fn disabled_tools_filtered() {
+        let tools = Tools::new(vec![Box::new(MockTool::new("ok"))], &["mock".to_string()]).unwrap();
+        assert!(tools.definitions().is_empty());
+    }
+
+    #[test]
+    fn disabled_unknown_name_rejected() {
+        let result = Tools::new(
+            vec![Box::new(MockTool::new("ok"))],
+            &["nonexistent".to_string()],
+        );
+        match result {
+            Err(ConfigError::Invalid(msg)) => assert!(msg.contains("nonexistent")),
+            _ => panic!("expected ConfigError::Invalid"),
+        }
     }
 }
