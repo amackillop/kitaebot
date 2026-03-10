@@ -12,6 +12,7 @@
 #   kitaebot.logLevel   - RUST_LOG filter string (default: "kitaebot=info")
 #   kitaebot.tools      - Packages available to the exec tool via PATH
 #   kitaebot.gitConfig  - Attrset { name, email, signingKey? } for git identity via programs.git
+#   kitaebot.vm         - VM resource options: { memorySize, cores, diskSize } (all in MB except cores)
 #
 # For local development, see deploy/configuration.nix
 {
@@ -113,6 +114,27 @@ in
       );
       default = null;
       description = "Git identity configured via programs.git.";
+    };
+
+    vm = {
+      memorySize = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 4096;
+        description = "VM memory in megabytes";
+        example = 8192;
+      };
+      cores = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 4;
+        description = "Number of virtual CPU cores";
+        example = 8;
+      };
+      diskSize = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 20480;
+        description = "VM root disk size in megabytes";
+        example = 40960;
+      };
     };
   };
 
@@ -274,8 +296,7 @@ in
     networking.firewall.allowedTCPPorts = [ 22 ];
 
     virtualisation = {
-      memorySize = 1024;
-      cores = 2;
+      inherit (cfg.vm) memorySize cores diskSize;
       graphics = false;
       # Port forwarding for SSH (host 2222 -> guest 22)
       forwardPorts = [

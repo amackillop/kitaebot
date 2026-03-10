@@ -94,6 +94,7 @@ kitaebot = {
   package = kitaebot;                            # The kitaebot package (required)
   secretsDir = "/path/to/secrets";               # One file per credential
   logLevel = "kitaebot=debug";                   # RUST_LOG filter
+  vm = { memorySize = 4096; cores = 4; diskSize = 20480; };  # QEMU resources (MB)
 
   tools = with pkgs; [                           # Packages on the exec tool's PATH
     coreutils findutils gnugrep gnused
