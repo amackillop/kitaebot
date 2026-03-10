@@ -232,17 +232,25 @@ in
       };
     };
 
-    # Git identity — configured system-wide via /etc/gitconfig so all
-    # child processes (exec tool, github tool) inherit it automatically.
-    programs.git = lib.mkIf (cfg.gitConfig != null) {
+    # Git — configured system-wide via /etc/gitconfig so all child
+    # processes (exec tool, github tool) inherit it automatically.
+    # safe.directory = "*" disables the ownership check; the VM is the
+    # trust boundary, not filesystem uid matching.
+    programs.git = {
       enable = true;
       config = {
-        user.name = cfg.gitConfig.name;
-        user.email = cfg.gitConfig.email;
+        safe.directory = "*";
+      }
+      // lib.optionalAttrs (cfg.gitConfig != null) {
+        user = {
+          inherit (cfg.gitConfig) name email;
+        }
+        // lib.optionalAttrs signingEnabled {
+          signingkey = cfg.gitConfig.signingKey;
+        };
       }
       // lib.optionalAttrs signingEnabled {
         commit.gpgsign = true;
-        user.signingkey = cfg.gitConfig.signingKey;
         gpg.program = "${pkgs.gnupg}/bin/gpg";
       };
     };
