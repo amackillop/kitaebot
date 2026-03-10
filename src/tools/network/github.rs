@@ -115,6 +115,16 @@ enum Args {
         /// PR number.
         pr_number: u64,
     },
+    /// Commit staged changes with an automatic Co-authored-by trailer.
+    ///
+    /// Use `git add` via exec first, then this action to commit. Trailers
+    /// from the configured `co_authors` list are appended automatically.
+    Commit {
+        /// Repository directory relative to workspace root.
+        repo_dir: String,
+        /// Commit message (Co-authored-by trailers are appended automatically).
+        message: String,
+    },
     /// Reply to an inline review comment.
     ///
     /// Use `pr_diff_comments` first to get comment IDs, then reply
@@ -136,7 +146,6 @@ enum Args {
 pub struct GitHub {
     workspace_root: PathBuf,
     token: Secret,
-    #[allow(dead_code)] // Used by later commits (PrCreate, commit trailers)
     co_authors: Vec<String>,
 }
 
@@ -156,7 +165,7 @@ impl Tool for GitHub {
     }
 
     fn description(&self) -> &'static str {
-        "Authenticated GitHub operations (clone, push, pull requests, reviews)"
+        "Authenticated GitHub operations (clone, push, commit, pull requests, reviews)"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -187,6 +196,7 @@ impl Tool for GitHub {
                     )
                     .await
                 }
+                Args::Commit { repo_dir, message } => self.commit(&repo_dir, &message).await,
                 Args::PrCreate {
                     repo_dir,
                     title,
@@ -282,6 +292,42 @@ impl GitHub {
         }
 
         Ok(result)
+    }
+
+    ///
+    /// The token is written to a temp script in a 0700 directory and
+    /// removed when `AskPass` drops (even on early return or panic).
+    /// The token is on disk for the duration of one git command only.
+    /// Run a git command with optional `GIT_ASKPASS` token injection.
+    ///
+    /// When `authenticated`, a temporary askpass script is created and
+    /// removed after the command completes. Local operations (commit,
+    /// branch) pass `false`.
+    async fn run_git_new(
+        &self,
+        args: &[&str],
+        cwd: &Path,
+        label: &str,
+        authenticated: bool,
+    ) -> Result<String, ToolError> {
+        let mut cmd = Command::new("git");
+        cmd.args(args)
+            .current_dir(cwd)
+            .env_clear()
+            .envs(super::safe_env());
+
+        let askpass = if authenticated {
+            let ap = AskPass::create(&self.token).await?;
+            cmd.env("GIT_ASKPASS", ap.path())
+                .env("GIT_TERMINAL_PROMPT", "0");
+            Some(ap)
+        } else {
+            None
+        };
+
+        let result = exec_cmd(&mut cmd, label).await;
+        drop(askpass);
+        result
     }
 
     /// Run an authenticated `gh` CLI command with `GH_TOKEN` env injection.
@@ -408,6 +454,14 @@ impl GitHub {
 
         let label = format!("git {}", args.join(" "));
         self.run_git(&args, &cwd, &label).await
+    }
+
+    /// Commit staged changes with Co-authored-by trailers.
+    async fn commit(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
+        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let full_message = format_commit_message(message, &self.co_authors);
+        self.run_git_new(&["commit", "-m", &full_message], &cwd, "git commit", false)
+            .await
     }
 
     /// Create a pull request via `gh pr create`.
@@ -539,6 +593,71 @@ impl GitHub {
         )
         .await
     }
+}
+
+// ── Command execution ───────────────────────────────────────────────
+
+/// Execute a command with timeout, format output, and check exit code.
+///
+/// Returns `$ label\nstdout\nstderr\nExit code: N` on success,
+/// `ToolError::ExecutionFailed` on non-zero exit.
+async fn exec_cmd(cmd: &mut Command, label: &str) -> Result<String, ToolError> {
+    debug!(label, "Running command");
+
+    let output = timeout(Duration::from_secs(TIMEOUT_SECS), cmd.output())
+        .await
+        .map_err(|_| ToolError::Timeout)?
+        .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let mut result = format!("$ {label}\n");
+
+    if !stdout.is_empty() {
+        result.push_str(&super::truncate_output(&stdout, MAX_OUTPUT_BYTES));
+    }
+    if !stderr.is_empty() {
+        if !stdout.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(&super::truncate_output(&stderr, MAX_OUTPUT_BYTES));
+    }
+
+    let _ = write!(
+        result,
+        "\nExit code: {}",
+        output.status.code().unwrap_or(-1)
+    );
+
+    if !output.status.success() {
+        return Err(ToolError::ExecutionFailed(result));
+    }
+
+    Ok(result)
+}
+
+// ── Commit message formatting ───────────────────────────────────────
+
+/// Append `Co-authored-by` trailers to a commit message.
+///
+/// Returns the message unchanged when `co_authors` is empty. Otherwise
+/// appends a blank line followed by one trailer per co-author.
+fn format_commit_message(message: &str, co_authors: &[String]) -> String {
+    if co_authors.is_empty() {
+        return message.to_string();
+    }
+
+    let trailer_len: usize = co_authors.iter().map(|a| a.len() + 18).sum();
+    let mut msg = String::with_capacity(message.len() + 2 + trailer_len);
+    msg.push_str(message);
+    msg.push_str("\n\n");
+    for author in co_authors {
+        msg.push_str("Co-authored-by: ");
+        msg.push_str(author);
+        msg.push('\n');
+    }
+    msg
 }
 
 // ── GIT_ASKPASS helper ──────────────────────────────────────────────
@@ -997,7 +1116,7 @@ mod tests {
             "action": "pr_diff_reply",
             "repo_dir": "projects/myrepo",
             "pr_number": 5,
-            "comment_id": 123456,
+            "comment_id": 123_456,
             "body": "Fixed in the latest push"
         });
         let args: Args = serde_json::from_value(json).unwrap();
@@ -1005,11 +1124,59 @@ mod tests {
             args,
             Args::PrDiffReply {
                 pr_number: 5,
-                comment_id: 123456,
+                comment_id: 123_456,
                 body,
                 ..
             } if body == "Fixed in the latest push"
         ));
+    }
+
+    // ── Commit deserialization ──────────────────────────────────
+
+    #[test]
+    fn deserialize_commit_minimal() {
+        let json = serde_json::json!({
+            "action": "commit",
+            "repo_dir": "projects/myrepo",
+            "message": "Fix the thing"
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::Commit { repo_dir, message }
+                if repo_dir == "projects/myrepo" && message == "Fix the thing"
+        ));
+    }
+
+    // ── Co-author trailer formatting ────────────────────────────
+
+    #[test]
+    fn format_message_no_co_authors() {
+        let msg = format_commit_message("Fix bug", &[]);
+        assert_eq!(msg, "Fix bug");
+    }
+
+    #[test]
+    fn format_message_one_co_author() {
+        let authors = ["Alice <alice@example.com>".to_string()];
+        let msg = format_commit_message("Fix bug", &authors);
+        assert_eq!(
+            msg,
+            "Fix bug\n\nCo-authored-by: Alice <alice@example.com>\n"
+        );
+    }
+
+    #[test]
+    fn format_message_multiple_co_authors() {
+        let authors = [
+            "Alice <alice@example.com>".to_string(),
+            "Bob <bob@example.com>".to_string(),
+        ];
+        let msg = format_commit_message("Add feature", &authors);
+        assert_eq!(
+            msg,
+            "Add feature\n\nCo-authored-by: Alice <alice@example.com>\nCo-authored-by: Bob <bob@example.com>\n"
+        );
     }
 
     /// Helper to build a GitHub instance for tests.

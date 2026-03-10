@@ -336,6 +336,10 @@ const DENY_RULES: &[DenyRule] = &[
         pattern: r"\bgit\b\s+push\b",
         guidance: "use the github tool's push action",
     },
+    DenyRule {
+        pattern: r"\bgit\b\s+commit\b",
+        guidance: "use the github tool's commit action",
+    },
     // Git signing is configured via programs.git with an absolute gpg path.
     // The agent must not override it.
     DenyRule {
@@ -703,6 +707,8 @@ mod tests {
         assert_blocked("git push -f origin master");
         assert_blocked("git reset --hard origin/main");
         assert_blocked("git reset --hard HEAD~3");
+        assert_blocked("git commit -m 'fix bug'");
+        assert_blocked("git commit --amend");
     }
 
     #[test]
@@ -722,6 +728,10 @@ mod tests {
             Some("use the github tool's push action"),
         );
         assert_eq!(
+            blocked_reason("git commit -m 'fix'"),
+            Some("use the github tool's commit action"),
+        );
+        assert_eq!(
             blocked_reason("cat .config/gh/hosts.yml"),
             Some("gh CLI config is not accessible"),
         );
@@ -736,7 +746,6 @@ mod tests {
         assert_allowed("grep -r 'TODO' .");
         assert_allowed("curl https://api.example.com");
         assert_allowed("git status");
-        assert_allowed("git commit -m 'fix bug'");
         assert_allowed("git branch feature-xyz");
         assert_allowed("find / -name justfile 2>/dev/null");
     }

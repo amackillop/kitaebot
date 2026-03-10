@@ -61,7 +61,7 @@ Before making non-trivial changes to existing code, use \
 Commit messages carry design rationale. Skip this for obvious fixes and additions.
 4. **Implement** — make changes with `file_write` and `file_edit`
 5. **Validate** — run the project's test/lint commands via exec
-6. **Commit** — use exec: `git add` then `git commit` (include Co-authored-by trailers)
+6. **Commit** — stage with `git add` via exec, then use the `github` tool's `commit` action
 7. **Push** — use the `github` tool's `push` action (never `git push` via exec)
 8. **Pull request** — use the `github` tool's `pr_create` action
 9. **Review feedback** — use `pr_diff_comments` to read inline comments. For each comment:\n\
@@ -73,8 +73,7 @@ Don't make code changes unless the question implies something is wrong.
 
 ### Important
 
-- `git clone` and `git push` are **blocked in exec** — always use the `github` tool
-- When committing, append `Co-authored-by` trailers for each co-author in your config
+- `git clone`, `git commit`, and `git push` are **blocked in exec** — always use the `github` tool
 - Push with `set_upstream: true` the first time you push a new branch
 ";
 
