@@ -13,7 +13,7 @@ use tokio::time::Duration;
 use tracing::{debug, warn};
 
 use super::Tool;
-use crate::chat_completion::{ChatCompletionsClient, CompletionsApi};
+use crate::clients::chat_completion::{ChatCompletionsClient, CompletionsApi};
 use crate::config::WebSearchConfig;
 use crate::error::{ProviderError, ToolError};
 
@@ -133,7 +133,7 @@ struct RequestMessage<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat_completion::ChatResponse;
+    use crate::clients::chat_completion::ChatResponse;
 
     #[test]
     fn request_serialization() {

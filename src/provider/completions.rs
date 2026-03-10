@@ -6,7 +6,7 @@
 use serde::Serialize;
 use tracing::{debug, trace};
 
-use crate::chat_completion::{ApiToolCall, ChatResponse, CompletionsApi};
+use crate::clients::chat_completion::{ApiToolCall, ChatResponse, CompletionsApi};
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};

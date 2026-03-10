@@ -1,6 +1,6 @@
 mod activity;
 mod agent;
-mod chat_completion;
+mod clients;
 mod commands;
 mod config;
 mod context;

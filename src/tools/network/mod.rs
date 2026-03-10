@@ -16,7 +16,7 @@ pub(crate) use super::{Tool, safe_env, truncate_output};
 
 use tracing::error;
 
-use crate::chat_completion::ChatCompletionsClient;
+use crate::clients::chat_completion::ChatCompletionsClient;
 use crate::config::Config;
 use crate::secrets::Secret;
 use crate::workspace::Workspace;

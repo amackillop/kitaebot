@@ -13,7 +13,10 @@ use tracing::{debug, error};
 
 use crate::error::ProviderError;
 #[cfg(not(feature = "mock-network"))]
-use crate::secrets::Secret;
+use crate::{
+    error::SecretError,
+    secrets::{self, Secret},
+};
 
 // ---------------------------------------------------------------------------
 // Trait
@@ -50,12 +53,12 @@ pub struct ChatCompletionsClient {
 
 #[cfg(not(feature = "mock-network"))]
 impl ChatCompletionsClient {
-    pub fn new(api_key: Secret, endpoint: &str) -> Self {
-        Self {
+    pub fn new(endpoint: &str) -> Result<Self, SecretError> {
+        secrets::load_secret("provider-api-key").map(|api_key| Self {
             client: Client::new(),
             endpoint: endpoint.to_string(),
             api_key,
-        }
+        })
     }
 }
 

@@ -5,7 +5,7 @@
 
 use tracing::error;
 
-use crate::chat_completion::ChatCompletionsClient;
+use crate::clients::chat_completion::ChatCompletionsClient;
 use crate::config::Config;
 use crate::provider::CompletionsProvider;
 use crate::telegram::TelegramChannel;
@@ -28,10 +28,6 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::secrets::load_secret;
     use crate::tools::network;
 
-    let api_key = load_secret("provider-api-key").unwrap_or_else(|e| {
-        error!("Failed to load API key: {e}");
-        std::process::exit(1);
-    });
     let telegram_token = if config.telegram.enabled {
         Some(load_secret("telegram-bot-token").unwrap_or_else(|e| {
             error!("Failed to load Telegram credentials: {e}");
@@ -49,7 +45,10 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         None
     };
 
-    let client = ChatCompletionsClient::new(api_key, config.provider.api.endpoint());
+    let client = ChatCompletionsClient::new(config.provider.api.endpoint()).unwrap_or_else(|e| {
+        error!("Failed to build client: {e}");
+        std::process::exit(1);
+    });
     let provider = CompletionsProvider::new(client.clone(), &config.provider);
 
     let mut tools = Tools::local(workspace, config);
