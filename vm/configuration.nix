@@ -31,6 +31,12 @@ let
   githubEnabled = cfg.settings.github.enabled or false;
   signingEnabled = cfg.gitConfig != null && cfg.gitConfig.signingKey != null;
 
+  # Suppress direnv's noisy "loading/unloading" output from exec tool results.
+  direnvConfig = pkgs.writeText "direnv.toml" ''
+    [global]
+    log_filter = "^$"
+  '';
+
   # Interactive chat via the daemon's Unix socket.
   kchat = pkgs.writeShellScriptBin "kchat" ''
     exec ${cfg.package}/bin/kchat /run/kitaebot/chat.sock
@@ -141,6 +147,8 @@ in
         "d /var/lib/kitaebot/memory 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/projects 0750 kitaebot kitaebot -"
         "L+ /var/lib/kitaebot/config.toml - - - - ${configFile}"
+        "d /var/lib/kitaebot/.config/direnv 0750 kitaebot kitaebot -"
+        "L+ /var/lib/kitaebot/.config/direnv/direnv.toml - - - - ${direnvConfig}"
       ];
 
       # Kitaebot daemon
@@ -230,6 +238,14 @@ in
           GNUPGHOME = "/var/lib/kitaebot/.gnupg";
         };
       };
+    };
+
+    # direnv + nix-direnv — enables `direnv exec` for entering project
+    # devshells. nix-direnv caches flake evaluation to avoid re-eval on
+    # every activation.
+    programs.direnv = {
+      enable = true;
+      nix-direnv.enable = true;
     };
 
     # Git — configured system-wide via /etc/gitconfig so all child
