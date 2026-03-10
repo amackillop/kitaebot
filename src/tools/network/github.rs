@@ -238,63 +238,6 @@ impl Tool for GitHub {
 impl GitHub {
     /// Run an authenticated git command with `GIT_ASKPASS` token injection.
     ///
-    /// `args` are passed directly to `git`. `cwd` sets the working
-    /// directory. Returns the formatted output string on success,
-    /// `ToolError::ExecutionFailed` on non-zero exit.
-    ///
-    /// The token is written to a temp script in a 0700 directory and
-    /// removed when `AskPass` drops (even on early return or panic).
-    /// The token is on disk for the duration of one git command only,
-    /// readable only by the current user.
-    async fn run_git(&self, args: &[&str], cwd: &Path, label: &str) -> Result<String, ToolError> {
-        let askpass = AskPass::create(&self.token).await?;
-
-        let mut cmd = Command::new("git");
-        cmd.args(args)
-            .current_dir(cwd)
-            .env_clear()
-            .envs(super::safe_env())
-            .env("GIT_ASKPASS", askpass.path())
-            .env("GIT_TERMINAL_PROMPT", "0");
-
-        debug!(label, ?args, cwd = %cwd.display(), "Running git command");
-
-        let output = timeout(Duration::from_secs(TIMEOUT_SECS), cmd.output())
-            .await
-            .map_err(|_| ToolError::Timeout)?
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-
-        drop(askpass);
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        let mut result = format!("$ {label}\n");
-
-        if !stdout.is_empty() {
-            result.push_str(&super::truncate_output(&stdout, MAX_OUTPUT_BYTES));
-        }
-        if !stderr.is_empty() {
-            if !stdout.is_empty() {
-                result.push('\n');
-            }
-            result.push_str(&super::truncate_output(&stderr, MAX_OUTPUT_BYTES));
-        }
-
-        let _ = write!(
-            result,
-            "\nExit code: {}",
-            output.status.code().unwrap_or(-1)
-        );
-
-        if !output.status.success() {
-            return Err(ToolError::ExecutionFailed(result));
-        }
-
-        Ok(result)
-    }
-
-    ///
     /// The token is written to a temp script in a 0700 directory and
     /// removed when `AskPass` drops (even on early return or panic).
     /// The token is on disk for the duration of one git command only.
@@ -303,7 +246,7 @@ impl GitHub {
     /// When `authenticated`, a temporary askpass script is created and
     /// removed after the command completes. Local operations (commit,
     /// branch) pass `false`.
-    async fn run_git_new(
+    async fn run_git(
         &self,
         args: &[&str],
         cwd: &Path,
@@ -351,26 +294,7 @@ impl GitHub {
             .env("GH_PROMPT_DISABLED", "1")
             .env("NO_COLOR", "1");
 
-        debug!(label, ?args, cwd = %cwd.display(), "Running gh command");
-
-        let output = timeout(Duration::from_secs(TIMEOUT_SECS), cmd.output())
-            .await
-            .map_err(|_| ToolError::Timeout)?
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if !output.status.success() {
-            let mut err = format!("$ {label}\n");
-            if !stderr.is_empty() {
-                err.push_str(&super::truncate_output(&stderr, MAX_OUTPUT_BYTES));
-            }
-            let _ = write!(err, "\nExit code: {}", output.status.code().unwrap_or(-1));
-            return Err(ToolError::ExecutionFailed(err));
-        }
-
-        Ok(super::truncate_output(&stdout, MAX_OUTPUT_BYTES).into_owned())
+        exec_cmd(&mut cmd, label).await
     }
 
     /// Resolve and validate a repo directory within the workspace.
@@ -425,6 +349,7 @@ impl GitHub {
             &["clone", "--", &https_url, &repo_name],
             &projects_dir,
             &format!("git clone {https_url} projects/{repo_name}"),
+            true,
         )
         .await
     }
@@ -453,14 +378,14 @@ impl GitHub {
         }
 
         let label = format!("git {}", args.join(" "));
-        self.run_git(&args, &cwd, &label).await
+        self.run_git(&args, &cwd, &label, true).await
     }
 
     /// Commit staged changes with Co-authored-by trailers.
     async fn commit(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
         let cwd = self.resolve_repo_dir(repo_dir)?;
         let full_message = format_commit_message(message, &self.co_authors);
-        self.run_git_new(&["commit", "-m", &full_message], &cwd, "git commit", false)
+        self.run_git(&["commit", "-m", &full_message], &cwd, "git commit", false)
             .await
     }
 
