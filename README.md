@@ -94,11 +94,21 @@ kitaebot = {
   package = kitaebot;                            # The kitaebot package (required)
   secretsDir = "/path/to/secrets";               # One file per credential
   logLevel = "kitaebot=debug";                   # RUST_LOG filter
-  vm = { memorySize = 4096; cores = 4; diskSize = 20480; };  # QEMU resources (MB)
+  vm = {
+    memorySize = 4096;
+    cores = 4;
+    diskSize = 20480;
+  };  # QEMU resources (MB)
 
   tools = with pkgs; [                           # Packages on the exec tool's PATH
-    coreutils findutils gnugrep gnused
-    curl git gh which
+    coreutils
+    curl
+    findutils
+    gh
+    git
+    gnugrep
+    gnused
+    which
   ];
 
   gitConfig = {                                  # Git identity via programs.git
@@ -108,22 +118,50 @@ kitaebot = {
   };
 
   settings = {                                   # Becomes config.toml
+    agent = {
+      max_iterations = 100;
+    };
+    context = {
+      max_tokens = 200000;
+      budget_percent = 80;
+    };
+    git = {
+      co_authors = [ "Name <email>" ];
+    };
+    github = {
+      enabled = true;
+    };
+    heartbeat = {
+      interval_secs = 1800;
+    };
     provider = {
       api = "openrouter";                        # openrouter | openai | groq | together | mistral
       model = "arcee-ai/trinity-large-preview:free";
       max_tokens = 4096;
       temperature = 0.7;                         # 0.0–2.0
     };
-    agent.max_iterations = 100;
-    tools.exec = { timeout_secs = 60; max_output_bytes = 10240; };
-    tools.web_fetch = { timeout_secs = 30; max_response_bytes = 51200; };
-    tools.web_search = { model = "perplexity/sonar"; max_tokens = 1024; timeout_secs = 30; };
-    heartbeat.interval_secs = 1800;
-    telegram = { enabled = true; chat_id = 123456789; };
-    socket.path = "/run/kitaebot/chat.sock";
-    context = { max_tokens = 200000; budget_percent = 80; };
-    git.co_authors = [ "Name <email>" ];
-    github.enabled = true;
+    socket = {
+      path = "/run/kitaebot/chat.sock";
+    };
+    telegram = {
+      enabled = true;
+      chat_id = 123456789;
+    };
+    tools = {
+      exec = {
+        timeout_secs = 60;
+        max_output_bytes = 10240;
+      };
+      web_fetch = {
+        timeout_secs = 30;
+        max_response_bytes = 51200;
+      };
+      web_search = {
+        model = "perplexity/sonar";
+        max_tokens = 1024;
+        timeout_secs = 30;
+      };
+    };
   };
 };
 ```

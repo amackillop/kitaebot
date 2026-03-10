@@ -15,23 +15,30 @@ use crate::error::ConfigError;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
-    pub provider: ProviderConfig,
-    #[serde(default)]
     pub agent: AgentConfig,
-    #[serde(default)]
-    pub tools: ToolsConfig,
-    #[serde(default)]
-    pub heartbeat: HeartbeatConfig,
-    #[serde(default)]
-    pub telegram: TelegramConfig,
-    #[serde(default)]
-    pub socket: SocketConfig,
     #[serde(default)]
     pub context: ContextConfig,
     #[serde(default)]
     pub git: GitConfig,
     #[serde(default)]
     pub github: GithubConfig,
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
+    #[serde(default)]
+    pub provider: ProviderConfig,
+    #[serde(default)]
+    pub socket: SocketConfig,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
+}
+
+/// Agent loop settings.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentConfig {
+    pub max_iterations: usize,
 }
 
 /// LLM provider settings.
@@ -72,13 +79,6 @@ impl Api {
             Self::Mistral => "https://api.mistral.ai/v1/chat/completions",
         }
     }
-}
-
-/// Agent loop settings.
-#[derive(Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AgentConfig {
-    pub max_iterations: usize,
 }
 
 /// Tool-level settings.
@@ -178,6 +178,40 @@ pub struct GithubConfig {
 
 // --- Default impls ---
 
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 100,
+        }
+    }
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens: 200_000,
+            budget_percent: 80,
+        }
+    }
+}
+
+impl Default for ExecConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 60,
+            max_output_bytes: 10 * 1024,
+        }
+    }
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: 1800,
+        }
+    }
+}
+
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
@@ -189,19 +223,20 @@ impl Default for ProviderConfig {
     }
 }
 
-impl Default for AgentConfig {
+impl Default for SocketConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 100,
+            path: "/run/kitaebot/chat.sock".to_string(),
         }
     }
 }
 
-impl Default for ExecConfig {
+impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
-            timeout_secs: 60,
-            max_output_bytes: 10 * 1024,
+            enabled: false,
+            chat_id: 0,
+            poll_timeout_secs: 30,
         }
     }
 }
@@ -221,41 +256,6 @@ impl Default for WebSearchConfig {
             model: "perplexity/sonar".to_string(),
             max_tokens: 1024,
             timeout_secs: 30,
-        }
-    }
-}
-
-impl Default for HeartbeatConfig {
-    fn default() -> Self {
-        Self {
-            interval_secs: 1800,
-        }
-    }
-}
-
-impl Default for ContextConfig {
-    fn default() -> Self {
-        Self {
-            max_tokens: 200_000,
-            budget_percent: 80,
-        }
-    }
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            chat_id: 0,
-            poll_timeout_secs: 30,
-        }
-    }
-}
-
-impl Default for SocketConfig {
-    fn default() -> Self {
-        Self {
-            path: "/run/kitaebot/chat.sock".to_string(),
         }
     }
 }
@@ -283,6 +283,24 @@ impl Config {
 
     /// Validate invariants that serde alone cannot enforce.
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.agent.max_iterations == 0 {
+            return Err(ConfigError::Invalid("max_iterations must be > 0".into()));
+        }
+        if self.context.max_tokens == 0 {
+            return Err(ConfigError::Invalid(
+                "context max_tokens must be > 0".into(),
+            ));
+        }
+        if self.context.budget_percent == 0 || self.context.budget_percent > 100 {
+            return Err(ConfigError::Invalid(
+                "context budget_percent must be 1..=100".into(),
+            ));
+        }
+        if self.heartbeat.interval_secs == 0 {
+            return Err(ConfigError::Invalid(
+                "heartbeat interval_secs must be > 0".into(),
+            ));
+        }
         if self.provider.max_tokens == 0 {
             return Err(ConfigError::Invalid("max_tokens must be > 0".into()));
         }
@@ -291,8 +309,17 @@ impl Config {
                 "temperature must be between 0.0 and 2.0".into(),
             ));
         }
-        if self.agent.max_iterations == 0 {
-            return Err(ConfigError::Invalid("max_iterations must be > 0".into()));
+        if self.telegram.enabled {
+            if self.telegram.chat_id == 0 {
+                return Err(ConfigError::Invalid(
+                    "telegram chat_id must be set when enabled".into(),
+                ));
+            }
+            if self.telegram.poll_timeout_secs == 0 {
+                return Err(ConfigError::Invalid(
+                    "telegram poll_timeout_secs must be > 0".into(),
+                ));
+            }
         }
         if self.tools.exec.timeout_secs == 0 {
             return Err(ConfigError::Invalid("timeout_secs must be > 0".into()));
@@ -319,33 +346,6 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "web_search timeout_secs must be > 0".into(),
             ));
-        }
-        if self.heartbeat.interval_secs == 0 {
-            return Err(ConfigError::Invalid(
-                "heartbeat interval_secs must be > 0".into(),
-            ));
-        }
-        if self.context.max_tokens == 0 {
-            return Err(ConfigError::Invalid(
-                "context max_tokens must be > 0".into(),
-            ));
-        }
-        if self.context.budget_percent == 0 || self.context.budget_percent > 100 {
-            return Err(ConfigError::Invalid(
-                "context budget_percent must be 1..=100".into(),
-            ));
-        }
-        if self.telegram.enabled {
-            if self.telegram.chat_id == 0 {
-                return Err(ConfigError::Invalid(
-                    "telegram chat_id must be set when enabled".into(),
-                ));
-            }
-            if self.telegram.poll_timeout_secs == 0 {
-                return Err(ConfigError::Invalid(
-                    "telegram poll_timeout_secs must be > 0".into(),
-                ));
-            }
         }
         Ok(())
     }
