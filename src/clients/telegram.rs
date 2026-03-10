@@ -217,74 +217,67 @@ pub(crate) struct SendMessageBody<'a> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(dead_code)]
 pub mod mock {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
-    /// Mock client that returns pre-configured responses in sequence.
+    /// A captured `post_message` call.
+    #[derive(Clone, Debug)]
+    pub struct SentMessage {
+        pub chat_id: i64,
+        pub text: String,
+        pub parse_mode: Option<String>,
+    }
+
+    /// Mock client that returns pre-configured `post_message` results
+    /// and captures every call for later inspection.
     ///
-    /// Uses `Arc` internally — cloning shares state, so you can hand one
-    /// clone to `TelegramChannel` and keep another to inspect counters.
+    /// `poll_updates` always returns `Ok(vec![])` — poll-loop tests
+    /// belong in integration tests that drive the full daemon.
+    ///
+    /// Uses `Arc` internally so cloning shares state.
     #[derive(Clone)]
     pub struct MockTelegramClient {
-        updates: Arc<Vec<Result<Vec<Update>, TelegramError>>>,
         send_results: Arc<Vec<Result<(), TelegramError>>>,
-        poll_count: Arc<AtomicUsize>,
-        send_count: Arc<AtomicUsize>,
+        send_index: Arc<AtomicUsize>,
+        sent: Arc<std::sync::Mutex<Vec<SentMessage>>>,
     }
 
     impl MockTelegramClient {
-        pub fn new(
-            updates: Vec<Result<Vec<Update>, TelegramError>>,
-            send_results: Vec<Result<(), TelegramError>>,
-        ) -> Self {
+        pub fn new(send_results: Vec<Result<(), TelegramError>>) -> Self {
             Self {
-                updates: Arc::new(updates),
                 send_results: Arc::new(send_results),
-                poll_count: Arc::new(AtomicUsize::new(0)),
-                send_count: Arc::new(AtomicUsize::new(0)),
+                send_index: Arc::new(AtomicUsize::new(0)),
+                sent: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
 
-        pub fn poll_count(&self) -> usize {
-            self.poll_count.load(Ordering::SeqCst)
-        }
-
-        pub fn send_count(&self) -> usize {
-            self.send_count.load(Ordering::SeqCst)
+        /// Return a snapshot of all captured `post_message` calls.
+        pub fn sent_messages(&self) -> Vec<SentMessage> {
+            self.sent.lock().unwrap().clone()
         }
     }
 
     impl TelegramApi for MockTelegramClient {
         async fn poll_updates(&self, _offset: i64) -> Result<Vec<Update>, TelegramError> {
-            let index = self.poll_count.fetch_add(1, Ordering::SeqCst);
-            self.updates[index].clone()
+            Ok(vec![])
         }
 
         async fn post_message(
             &self,
-            _chat_id: i64,
-            _text: &str,
-            _parse_mode: Option<&str>,
+            chat_id: i64,
+            text: &str,
+            parse_mode: Option<&str>,
         ) -> Result<(), TelegramError> {
-            let index = self.send_count.fetch_add(1, Ordering::SeqCst);
+            let index = self.send_index.fetch_add(1, Ordering::SeqCst);
+            self.sent.lock().unwrap().push(SentMessage {
+                chat_id,
+                text: text.to_string(),
+                parse_mode: parse_mode.map(str::to_string),
+            });
             self.send_results[index].clone()
-        }
-    }
-
-    // -- Convenience constructors for tests --
-
-    /// Build an `Update` containing a text message.
-    pub fn update(id: i64, chat_id: i64, text: &str) -> Update {
-        Update {
-            update_id: id,
-            message: Some(TgMessage {
-                chat: Chat { id: chat_id },
-                text: Some(text.to_string()),
-            }),
         }
     }
 }
