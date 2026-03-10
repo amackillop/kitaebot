@@ -6,6 +6,7 @@
 use tracing::error;
 
 use crate::clients::chat_completion::ChatCompletionsClient;
+use crate::clients::telegram::TelegramClient;
 use crate::config::Config;
 use crate::provider::CompletionsProvider;
 use crate::telegram::TelegramChannel;
@@ -16,7 +17,7 @@ use crate::workspace::Workspace;
 pub struct Runtime {
     pub provider: CompletionsProvider<ChatCompletionsClient>,
     pub tools: Tools,
-    pub telegram: Option<TelegramChannel>,
+    pub telegram: Option<TelegramChannel<TelegramClient>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -54,7 +55,10 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     let mut tools = Tools::local(workspace, config);
     tools.extend(network::build(workspace, config, client, github_token));
 
-    let telegram = telegram_token.map(|t| TelegramChannel::new(t, &config.telegram));
+    let telegram = telegram_token.map(|token| {
+        let tg_client = TelegramClient::new(token, config.telegram.poll_timeout_secs);
+        TelegramChannel::new(tg_client, config.telegram.chat_id)
+    });
 
     Runtime {
         provider,

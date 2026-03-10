@@ -18,6 +18,7 @@ use tokio::time::{self, MissedTickBehavior};
 use tracing::{error, info};
 
 use crate::agent::TurnConfig;
+use crate::clients::telegram::TelegramApi;
 use crate::heartbeat;
 use crate::provider::Provider;
 use crate::socket;
@@ -25,11 +26,11 @@ use crate::telegram::{self, TelegramChannel};
 use crate::workspace::Workspace;
 
 /// Production entry point — runs until SIGINT or SIGTERM.
-pub async fn run<P: Provider>(
+pub async fn run<T: TelegramApi, P: Provider>(
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
     interval_secs: u64,
-    telegram: Option<&TelegramChannel>,
+    telegram: Option<&TelegramChannel<T>>,
     socket_path: &Path,
 ) {
     run_with_shutdown(
@@ -44,11 +45,11 @@ pub async fn run<P: Provider>(
 }
 
 /// Testable core: runs heartbeat + telegram until `shutdown` resolves.
-async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
+async fn run_with_shutdown<T: TelegramApi, P: Provider, S: Future<Output = ()>>(
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
     interval: Duration,
-    telegram: Option<&TelegramChannel>,
+    telegram: Option<&TelegramChannel<T>>,
     socket_path: &Path,
     shutdown: S,
 ) {
@@ -117,6 +118,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::telegram::TelegramClient;
     use crate::config::ContextConfig;
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
@@ -159,7 +161,7 @@ mod tests {
             &ws,
             &config,
             Duration::from_secs(3600), // large interval — only the immediate first tick matters
-            None,
+            None::<&TelegramChannel<TelegramClient>>,
             &sock_path,
             tokio::time::sleep(Duration::from_millis(50)),
         )
@@ -189,7 +191,7 @@ mod tests {
             &ws,
             &config,
             Duration::from_millis(100), // 100ms interval for fast test
-            None,
+            None::<&TelegramChannel<TelegramClient>>,
             &sock_path,
             async {
                 // Let 3 ticks fire: immediate + 2 more.
@@ -225,7 +227,7 @@ mod tests {
             &ws,
             &config,
             Duration::from_secs(3600),
-            None,
+            None::<&TelegramChannel<TelegramClient>>,
             &sock_path,
             tokio::time::sleep(Duration::from_millis(50)),
         )
