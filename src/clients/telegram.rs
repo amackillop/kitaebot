@@ -6,12 +6,13 @@
 //! for the network boundary, a real HTTP client, a `mock-network` stub,
 //! and a test mock.
 
-#[cfg(not(feature = "mock-network"))]
-use reqwest::Client;
+use std::time::Duration;
+
+use futures::TryFutureExt as _;
+use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::error::TelegramError;
-#[cfg(not(feature = "mock-network"))]
 use crate::secrets::Secret;
 
 // ---------------------------------------------------------------------------
@@ -26,75 +27,80 @@ use crate::secrets::Secret;
 /// retry/formatting code without hitting the network.
 pub trait TelegramApi: Send + Sync {
     /// Long-poll `getUpdates` for new messages.
-    async fn poll_updates(&self, offset: i64) -> Result<Vec<Update>, TelegramError>;
+    async fn poll_updates(&self, body: GetUpdatesBody) -> Result<Response, reqwest::Error>;
 
     /// Send a single message via `sendMessage`.
-    async fn post_message(
-        &self,
-        chat_id: i64,
-        text: &str,
-        parse_mode: Option<&str>,
-    ) -> Result<(), TelegramError>;
+    async fn post_message(&self, body: SendMessageBody<'_>) -> Result<Response, reqwest::Error>;
 }
 
-// ---------------------------------------------------------------------------
-// Real client
-// ---------------------------------------------------------------------------
+const BASE_URL: &str = "https://api.telegram.org/bot";
 
-/// HTTP client for the Telegram Bot API.
-#[cfg(not(feature = "mock-network"))]
-pub struct TelegramClient {
+pub struct RealTelegramApi {
+    bot_token: Secret,
     client: Client,
-    token: Secret,
-    poll_timeout: u64,
 }
 
-#[cfg(not(feature = "mock-network"))]
-impl TelegramClient {
-    pub fn new(token: Secret, poll_timeout: u64) -> Self {
-        use std::time::Duration;
-
-        let client = Client::builder()
-            .timeout(Duration::from_secs(poll_timeout + 10))
-            .build()
-            .expect("failed to build HTTP client");
+impl RealTelegramApi {
+    #[cfg_attr(feature = "mock-network", allow(dead_code))]
+    pub fn new(bot_token: Secret, timeout: Duration) -> Self {
         Self {
-            client,
-            token,
-            poll_timeout,
+            bot_token,
+            client: Client::builder()
+                .timeout(timeout)
+                .build()
+                .expect("failed to build HTTP client"),
         }
     }
 
-    fn api_url(&self, method: &str) -> String {
-        format!(
-            "https://api.telegram.org/bot{}/{}",
-            self.token.expose(),
-            method,
-        )
+    fn url(&self, method: &str) -> String {
+        format!("{BASE_URL}{}/{method}", self.bot_token.expose())
     }
 }
 
-#[cfg(not(feature = "mock-network"))]
-impl TelegramApi for TelegramClient {
-    async fn poll_updates(&self, offset: i64) -> Result<Vec<Update>, TelegramError> {
-        let body = GetUpdatesBody {
-            offset,
-            timeout: self.poll_timeout,
-        };
-        let resp: ApiResponse<Vec<Update>> = self
-            .client
-            .post(self.api_url("getUpdates"))
+impl TelegramApi for RealTelegramApi {
+    async fn poll_updates(&self, body: GetUpdatesBody) -> Result<Response, reqwest::Error> {
+        self.client
+            .post(self.url("getUpdates"))
             .json(&body)
             .send()
             .await
-            .map_err(|e| TelegramError::Network(e.to_string()))?
-            .json()
+    }
+
+    async fn post_message(&self, body: SendMessageBody<'_>) -> Result<Response, reqwest::Error> {
+        self.client
+            .post(self.url("sendMessage"))
+            .json(&body)
+            .send()
             .await
-            .map_err(|e| TelegramError::Network(e.to_string()))?;
+    }
+}
+
+/// HTTP client for the Telegram Bot API.
+pub struct TelegramClient<A> {
+    api: A,
+}
+
+impl<A: TelegramApi> TelegramClient<A> {
+    pub fn new(api: A) -> Self {
+        Self { api }
+    }
+
+    pub async fn poll_updates(
+        &self,
+        offset: i64,
+        timeout: u64,
+    ) -> Result<Vec<Update>, TelegramError> {
+        let body = GetUpdatesBody { offset, timeout };
+        let resp: ApiResponse<Vec<Update>> = self
+            .api
+            .poll_updates(body)
+            .and_then(reqwest::Response::json)
+            .map_err(|e| TelegramError::Network(e.to_string()))
+            .await?;
         resp.into_result()
     }
 
-    async fn post_message(
+    pub async fn post_message(
         &self,
         chat_id: i64,
         text: &str,
@@ -106,39 +112,12 @@ impl TelegramApi for TelegramClient {
             parse_mode,
         };
         let resp: ApiResponse<serde_json::Value> = self
-            .client
-            .post(self.api_url("sendMessage"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| TelegramError::Network(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| TelegramError::Network(e.to_string()))?;
+            .api
+            .post_message(body)
+            .and_then(reqwest::Response::json)
+            .map_err(|e| TelegramError::Network(e.to_string()))
+            .await?;
         resp.into_result().map(|_| ())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stub client (mock-network builds)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "mock-network")]
-pub struct TelegramClient;
-
-#[cfg(feature = "mock-network")]
-impl TelegramApi for TelegramClient {
-    async fn poll_updates(&self, _offset: i64) -> Result<Vec<Update>, TelegramError> {
-        Ok(vec![])
-    }
-
-    async fn post_message(
-        &self,
-        _chat_id: i64,
-        _text: &str,
-        _parse_mode: Option<&str>,
-    ) -> Result<(), TelegramError> {
-        Ok(())
     }
 }
 
@@ -150,7 +129,7 @@ impl TelegramApi for TelegramClient {
 // we don't care about, and the API grows over time.
 
 /// Wrapper returned by every Bot API method.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "mock-network", allow(dead_code))]
 pub(crate) struct ApiResponse<T> {
     ok: bool,
@@ -177,21 +156,21 @@ impl<T> ApiResponse<T> {
 }
 
 /// A single incoming update from `getUpdates`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Update {
     pub update_id: i64,
     pub message: Option<TgMessage>,
 }
 
 /// A Telegram message.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TgMessage {
     pub chat: Chat,
     pub text: Option<String>,
 }
 
 /// Identifies the conversation a message belongs to.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Chat {
     pub id: i64,
 }
@@ -213,214 +192,182 @@ pub(crate) struct SendMessageBody<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Test mock
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-pub mod mock {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::*;
-
-    /// A captured `post_message` call.
-    #[derive(Clone, Debug)]
-    pub struct SentMessage {
-        pub chat_id: i64,
-        pub text: String,
-        pub parse_mode: Option<String>,
-    }
-
-    /// Mock client that returns pre-configured `post_message` results
-    /// and captures every call for later inspection.
-    ///
-    /// `poll_updates` always returns `Ok(vec![])` — poll-loop tests
-    /// belong in integration tests that drive the full daemon.
-    ///
-    /// Uses `Arc` internally so cloning shares state.
-    #[derive(Clone)]
-    pub struct MockTelegramClient {
-        send_results: Arc<Vec<Result<(), TelegramError>>>,
-        send_index: Arc<AtomicUsize>,
-        sent: Arc<std::sync::Mutex<Vec<SentMessage>>>,
-    }
-
-    impl MockTelegramClient {
-        pub fn new(send_results: Vec<Result<(), TelegramError>>) -> Self {
-            Self {
-                send_results: Arc::new(send_results),
-                send_index: Arc::new(AtomicUsize::new(0)),
-                sent: Arc::new(std::sync::Mutex::new(Vec::new())),
-            }
-        }
-
-        /// Return a snapshot of all captured `post_message` calls.
-        pub fn sent_messages(&self) -> Vec<SentMessage> {
-            self.sent.lock().unwrap().clone()
-        }
-    }
-
-    impl TelegramApi for MockTelegramClient {
-        async fn poll_updates(&self, _offset: i64) -> Result<Vec<Update>, TelegramError> {
-            Ok(vec![])
-        }
-
-        async fn post_message(
-            &self,
-            chat_id: i64,
-            text: &str,
-            parse_mode: Option<&str>,
-        ) -> Result<(), TelegramError> {
-            let index = self.send_index.fetch_add(1, Ordering::SeqCst);
-            self.sent.lock().unwrap().push(SentMessage {
-                chat_id,
-                text: text.to_string(),
-                parse_mode: parse_mode.map(str::to_string),
-            });
-            self.send_results[index].clone()
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests (wire format)
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
     use super::*;
 
-    #[test]
-    fn deserialize_success_response() {
-        let json = r#"{
-            "ok": true,
-            "result": [{
-                "update_id": 1,
-                "message": {
-                    "message_id": 1,
-                    "chat": {"id": 123, "type": "private"},
-                    "date": 1234567890,
-                    "text": "hello"
-                }
-            }]
-        }"#;
-        let resp: ApiResponse<Vec<Update>> = serde_json::from_str(json).unwrap();
-        let updates = resp.into_result().unwrap();
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].update_id, 1);
-        let msg = updates[0].message.as_ref().unwrap();
-        assert_eq!(msg.chat.id, 123);
-        assert_eq!(msg.text.as_deref(), Some("hello"));
-    }
+    /// Stub [`TelegramApi`] that yields pre-configured HTTP responses.
+    ///
+    /// Both trait methods pop from the same queue, so tests enqueue
+    /// exactly the responses they expect in call order.
+    struct StubApi(Mutex<VecDeque<Result<Response, reqwest::Error>>>);
 
-    #[test]
-    fn deserialize_error_response() {
-        let json = r#"{"ok": false, "error_code": 401, "description": "Unauthorized"}"#;
-        let resp: ApiResponse<Vec<Update>> = serde_json::from_str(json).unwrap();
-        let err = resp.into_result().unwrap_err();
-        match err {
-            TelegramError::Api {
-                error_code,
-                description,
-            } => {
-                assert_eq!(error_code, 401);
-                assert_eq!(description, "Unauthorized");
-            }
-            other => panic!("expected Api error, got {other:?}"),
+    impl StubApi {
+        fn client(responses: Vec<Result<Response, reqwest::Error>>) -> TelegramClient<Self> {
+            TelegramClient::new(Self(Mutex::new(responses.into())))
         }
     }
 
-    #[test]
-    fn deserialize_update_without_message() {
-        let json = r#"{"ok": true, "result": [{"update_id": 42}]}"#;
-        let resp: ApiResponse<Vec<Update>> = serde_json::from_str(json).unwrap();
-        let updates = resp.into_result().unwrap();
+    impl TelegramApi for StubApi {
+        async fn poll_updates(&self, _body: GetUpdatesBody) -> Result<Response, reqwest::Error> {
+            self.0.lock().unwrap().pop_front().unwrap()
+        }
+
+        async fn post_message(
+            &self,
+            _body: SendMessageBody<'_>,
+        ) -> Result<Response, reqwest::Error> {
+            self.0.lock().unwrap().pop_front().unwrap()
+        }
+    }
+
+    fn json_response(body: &impl Serialize) -> Response {
+        let json = serde_json::to_string(body).unwrap();
+        Response::from(
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(json)
+                .unwrap(),
+        )
+    }
+
+    fn reqwest_error() -> reqwest::Error {
+        Response::from(http::Response::builder().status(500).body("").unwrap())
+            .error_for_status()
+            .unwrap_err()
+    }
+
+    fn ok_updates(updates: Vec<Update>) -> Response {
+        json_response(&ApiResponse {
+            ok: true,
+            result: Some(updates),
+            error_code: None,
+            description: None,
+        })
+    }
+
+    fn ok_send() -> Response {
+        json_response(&ApiResponse {
+            ok: true,
+            result: Some(serde_json::json!({"message_id": 1})),
+            error_code: None,
+            description: None,
+        })
+    }
+
+    fn api_error(code: i32, desc: &str) -> Response {
+        json_response(&ApiResponse::<serde_json::Value> {
+            ok: false,
+            result: None,
+            error_code: Some(code),
+            description: Some(desc.into()),
+        })
+    }
+
+    #[tokio::test]
+    async fn client_poll_updates_parses_response() {
+        let client = StubApi::client(vec![Ok(ok_updates(vec![Update {
+            update_id: 7,
+            message: Some(TgMessage {
+                chat: Chat { id: 42 },
+                text: Some("hello".into()),
+            }),
+        }]))]);
+
+        let updates = client.poll_updates(0, 30).await.unwrap();
+
         assert_eq!(updates.len(), 1);
-        assert!(updates[0].message.is_none());
-    }
-
-    #[test]
-    fn deserialize_message_without_text() {
-        let json = r#"{
-            "ok": true,
-            "result": [{
-                "update_id": 1,
-                "message": {
-                    "message_id": 1,
-                    "chat": {"id": 123, "type": "private"},
-                    "date": 1234567890
-                }
-            }]
-        }"#;
-        let resp: ApiResponse<Vec<Update>> = serde_json::from_str(json).unwrap();
-        let updates = resp.into_result().unwrap();
-        assert!(updates[0].message.as_ref().unwrap().text.is_none());
-    }
-
-    #[test]
-    fn deserialize_ignores_unknown_fields() {
-        let json = r#"{
-            "ok": true,
-            "result": [{
-                "update_id": 1,
-                "message": {
-                    "message_id": 1,
-                    "from": {"id": 456, "is_bot": false, "first_name": "Test"},
-                    "chat": {"id": 123, "type": "private", "first_name": "Test"},
-                    "date": 1234567890,
-                    "text": "hi",
-                    "entities": []
-                }
-            }]
-        }"#;
-        let resp: ApiResponse<Vec<Update>> = serde_json::from_str(json).unwrap();
-        let updates = resp.into_result().unwrap();
+        assert_eq!(updates[0].update_id, 7);
         assert_eq!(
             updates[0].message.as_ref().unwrap().text.as_deref(),
-            Some("hi")
+            Some("hello"),
         );
     }
 
-    #[test]
-    fn deserialize_empty_result() {
-        let json = r#"{"ok": true, "result": []}"#;
-        let resp: ApiResponse<Vec<Update>> = serde_json::from_str(json).unwrap();
-        let updates = resp.into_result().unwrap();
+    #[tokio::test]
+    async fn client_poll_updates_empty() {
+        let client = StubApi::client(vec![Ok(ok_updates(vec![]))]);
+
+        let updates = client.poll_updates(0, 30).await.unwrap();
+
         assert!(updates.is_empty());
     }
 
-    #[test]
-    fn send_body_serialization() {
-        let body = SendMessageBody {
-            chat_id: 123,
-            text: "hello",
-            parse_mode: None,
-        };
-        let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json["chat_id"], 123);
-        assert_eq!(json["text"], "hello");
-        assert!(json.get("parse_mode").is_none());
+    #[tokio::test]
+    async fn client_poll_updates_api_error() {
+        let client = StubApi::client(vec![Ok(api_error(401, "Unauthorized"))]);
+
+        let err = client.poll_updates(0, 30).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            TelegramError::Api {
+                error_code: 401,
+                ..
+            }
+        ));
     }
 
-    #[test]
-    fn send_body_with_parse_mode() {
-        let body = SendMessageBody {
-            chat_id: 123,
-            text: "<pre>hi</pre>",
-            parse_mode: Some("HTML"),
-        };
-        let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json["parse_mode"], "HTML");
+    #[tokio::test]
+    async fn client_poll_updates_network_error() {
+        let client = StubApi::client(vec![Err(reqwest_error())]);
+
+        let err = client.poll_updates(0, 30).await.unwrap_err();
+
+        assert!(matches!(err, TelegramError::Network(_)));
     }
 
-    #[test]
-    fn get_updates_body_serialization() {
-        let body = GetUpdatesBody {
-            offset: 42,
-            timeout: 30,
-        };
-        let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json["offset"], 42);
-        assert_eq!(json["timeout"], 30);
+    #[tokio::test]
+    async fn client_poll_updates_malformed_json() {
+        let garbage = Response::from(
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body("not json")
+                .unwrap(),
+        );
+        let client = StubApi::client(vec![Ok(garbage)]);
+
+        let err = client.poll_updates(0, 30).await.unwrap_err();
+
+        assert!(matches!(err, TelegramError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn client_post_message_success() {
+        let client = StubApi::client(vec![Ok(ok_send())]);
+
+        client.post_message(42, "hi", None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_post_message_api_error() {
+        let client = StubApi::client(vec![Ok(api_error(400, "Bad Request"))]);
+
+        let err = client.post_message(42, "hi", None).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            TelegramError::Api {
+                error_code: 400,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn client_post_message_network_error() {
+        let client = StubApi::client(vec![Err(reqwest_error())]);
+
+        let err = client.post_message(42, "hi", None).await.unwrap_err();
+
+        assert!(matches!(err, TelegramError::Network(_)));
     }
 }

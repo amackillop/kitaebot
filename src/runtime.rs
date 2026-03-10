@@ -6,10 +6,9 @@
 use tracing::error;
 
 use crate::clients::chat_completion::ChatCompletionsClient;
-use crate::clients::telegram::TelegramClient;
 use crate::config::Config;
 use crate::provider::CompletionsProvider;
-use crate::telegram::TelegramChannel;
+use crate::telegram::Telegram;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
 
@@ -17,7 +16,7 @@ use crate::workspace::Workspace;
 pub struct Runtime {
     pub provider: CompletionsProvider<ChatCompletionsClient>,
     pub tools: Tools,
-    pub telegram: Option<TelegramChannel<TelegramClient>>,
+    pub telegram: Option<Telegram>,
 }
 
 // ---------------------------------------------------------------------------
@@ -26,6 +25,9 @@ pub struct Runtime {
 
 #[cfg(not(feature = "mock-network"))]
 pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
+    use std::time::Duration;
+
+    use crate::clients::telegram::{RealTelegramApi, TelegramClient};
     use crate::secrets::load_secret;
     use crate::tools::network;
 
@@ -56,8 +58,12 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     tools.extend(network::build(workspace, config, client, github_token));
 
     let telegram = telegram_token.map(|token| {
-        let tg_client = TelegramClient::new(token, config.telegram.poll_timeout_secs);
-        TelegramChannel::new(tg_client, config.telegram.chat_id)
+        let api = RealTelegramApi::new(
+            token,
+            Duration::from_secs(config.telegram.poll_timeout_secs + 10),
+        );
+        let tg_client = TelegramClient::new(api);
+        Telegram::new(tg_client, config.telegram.chat_id)
     });
 
     Runtime {
