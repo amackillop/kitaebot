@@ -13,7 +13,7 @@ use tokio::time::Duration;
 use tracing::{debug, warn};
 
 use super::Tool;
-use crate::clients::chat_completion::{ChatCompletionsClient, CompletionsApi};
+use crate::clients::chat_completion::CompletionsClient;
 use crate::config::WebSearchConfig;
 use crate::error::{ProviderError, ToolError};
 
@@ -25,14 +25,14 @@ struct Args {
 
 /// Tool that searches the web via Perplexity on `OpenRouter`.
 pub struct WebSearch {
-    client: ChatCompletionsClient,
+    client: CompletionsClient,
     model: String,
     max_tokens: u32,
     timeout: Duration,
 }
 
 impl WebSearch {
-    pub fn new(client: ChatCompletionsClient, config: &WebSearchConfig) -> Self {
+    pub fn new(client: CompletionsClient, config: &WebSearchConfig) -> Self {
         Self {
             client,
             model: config.model.clone(),

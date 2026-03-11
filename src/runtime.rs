@@ -5,7 +5,6 @@
 
 use tracing::error;
 
-use crate::clients::chat_completion::ChatCompletionsClient;
 use crate::config::Config;
 use crate::provider::CompletionsProvider;
 use crate::telegram::Telegram;
@@ -14,7 +13,7 @@ use crate::workspace::Workspace;
 
 /// Fully-assembled application runtime returned by [`build`].
 pub struct Runtime {
-    pub provider: CompletionsProvider<ChatCompletionsClient>,
+    pub provider: CompletionsProvider,
     pub tools: Tools,
     pub telegram: Option<Telegram>,
 }
@@ -27,6 +26,7 @@ pub struct Runtime {
 pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use std::time::Duration;
 
+    use crate::clients::chat_completion::{CompletionsClient, RealCompletionsApi};
     use crate::clients::telegram::{RealTelegramApi, TelegramClient};
     use crate::secrets::load_secret;
     use crate::tools::network;
@@ -48,10 +48,11 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         None
     };
 
-    let client = ChatCompletionsClient::new(config.provider.api.endpoint()).unwrap_or_else(|e| {
+    let api = RealCompletionsApi::new(config.provider.api.endpoint()).unwrap_or_else(|e| {
         error!("Failed to build client: {e}");
         std::process::exit(1);
     });
+    let client = CompletionsClient::new(api);
     let provider = CompletionsProvider::new(client.clone(), &config.provider);
 
     let mut tools = Tools::local(workspace, config);
@@ -82,7 +83,9 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
 
 #[cfg(feature = "mock-network")]
 pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
-    let client = ChatCompletionsClient;
+    use crate::clients::chat_completion::{CompletionsClient, MockNetworkApi};
+
+    let client = CompletionsClient::new(MockNetworkApi);
     let provider = CompletionsProvider::new(client, &config.provider);
     let tools = Tools::local(workspace, config);
 

@@ -16,7 +16,7 @@ pub(crate) use super::{Tool, safe_env, truncate_output};
 
 use tracing::error;
 
-use crate::clients::chat_completion::ChatCompletionsClient;
+use crate::clients::chat_completion::CompletionsClient;
 use crate::config::Config;
 use crate::secrets::Secret;
 use crate::workspace::Workspace;
@@ -26,7 +26,7 @@ use crate::workspace::Workspace;
 pub fn build(
     workspace: &Workspace,
     config: &Config,
-    client: ChatCompletionsClient,
+    client: CompletionsClient,
     github_token: Option<Secret>,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();

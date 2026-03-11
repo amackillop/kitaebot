@@ -6,7 +6,7 @@
 use serde::Serialize;
 use tracing::{debug, trace};
 
-use crate::clients::chat_completion::{ApiToolCall, ChatResponse, CompletionsApi};
+use crate::clients::chat_completion::{ApiToolCall, ChatResponse, CompletionsClient};
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
@@ -14,19 +14,16 @@ use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 use super::Provider;
 
 /// Provider for any OpenAI-compatible chat completions endpoint.
-///
-/// Generic over the [`CompletionsClient`] so that tests can substitute a
-/// mock without bypassing response parsing.
-pub struct CompletionsProvider<C> {
-    client: C,
+pub struct CompletionsProvider {
+    client: CompletionsClient,
     model: String,
     max_tokens: u32,
     temperature: f32,
 }
 
-impl<C: CompletionsApi> CompletionsProvider<C> {
+impl CompletionsProvider {
     /// Create a new provider with the given client and configuration.
-    pub fn new(client: C, config: &ProviderConfig) -> Self {
+    pub fn new(client: CompletionsClient, config: &ProviderConfig) -> Self {
         Self {
             client,
             model: config.model.clone(),
@@ -54,7 +51,7 @@ impl<C: CompletionsApi> CompletionsProvider<C> {
     }
 }
 
-impl<C: CompletionsApi> Provider for CompletionsProvider<C> {
+impl Provider for CompletionsProvider {
     async fn chat(
         &self,
         messages: &[Message],

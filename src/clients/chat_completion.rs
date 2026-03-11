@@ -1,58 +1,58 @@
 //! OpenAI-compatible chat completions client.
 //!
-//! Thin wrapper around `reqwest` that handles authentication, the chat
-//! completions endpoint, and status-code-to-error mapping. Works with
-//! any provider that implements the `OpenAI` chat completions API
-//! (`OpenAI`, `OpenRouter`, Groq, Together, Mistral, etc.).
+//! HTTP calls go through [`CompletionsApi`], responses through
+//! [`CompletionsClient`]. Works with any OpenAI-compatible endpoint
+//! (`OpenRouter`, Groq, Together, Mistral, etc.).
 
-#[cfg(not(feature = "mock-network"))]
-use reqwest::Client;
+use reqwest::Response;
 use serde::{Deserialize, Serialize};
-#[cfg(not(feature = "mock-network"))]
 use tracing::{debug, error};
 
 use crate::error::ProviderError;
-#[cfg(not(feature = "mock-network"))]
-use crate::{
-    error::SecretError,
-    secrets::{self, Secret},
-};
 
 // ---------------------------------------------------------------------------
 // Trait
 // ---------------------------------------------------------------------------
 
-/// Abstraction over the chat completions endpoint.
+/// Abstraction over the chat completions HTTP call.
 ///
 /// Implemented by the real HTTP client, the `mock-network` stub, and the
-/// test mock. [`ChatProvider`](crate::provider::ChatProvider) is
-/// generic over this trait so that tests exercise the real
-/// response-parsing code.
+/// test mock. [`CompletionsClient`] is generic over this trait so that
+/// tests can exercise the real response-parsing code without hitting the
+/// network.
 pub trait CompletionsApi: Send + Sync {
-    async fn chat_completions<R: Serialize + Send + Sync>(
+    fn chat_completions<R: Serialize + Send + Sync>(
         &self,
         request: &R,
-    ) -> Result<ChatResponse, ProviderError>;
+    ) -> impl std::future::Future<Output = Result<Response, reqwest::Error>> + Send;
 }
 
 // ---------------------------------------------------------------------------
-// Real client
+// Real API client
 // ---------------------------------------------------------------------------
 
-/// HTTP client for any OpenAI-compatible chat completions endpoint.
+#[cfg(not(feature = "mock-network"))]
+use crate::{
+    error::SecretError,
+    secrets::{self, Secret},
+};
+#[cfg(not(feature = "mock-network"))]
+use reqwest::Client;
+
+/// Raw HTTP client for any OpenAI-compatible chat completions endpoint.
 ///
 /// Owns the `reqwest::Client`, API key, and endpoint URL. Cheap to
 /// clone (both `reqwest::Client` and `Secret` are `Arc`-backed).
 #[cfg(not(feature = "mock-network"))]
 #[derive(Clone)]
-pub struct ChatCompletionsClient {
+pub struct RealCompletionsApi {
     client: Client,
     endpoint: String,
     api_key: Secret,
 }
 
 #[cfg(not(feature = "mock-network"))]
-impl ChatCompletionsClient {
+impl RealCompletionsApi {
     pub fn new(endpoint: &str) -> Result<Self, SecretError> {
         secrets::load_secret("provider-api-key").map(|api_key| Self {
             client: Client::new(),
@@ -63,13 +63,12 @@ impl ChatCompletionsClient {
 }
 
 #[cfg(not(feature = "mock-network"))]
-impl CompletionsApi for ChatCompletionsClient {
+impl CompletionsApi for RealCompletionsApi {
     async fn chat_completions<R: Serialize + Send + Sync>(
         &self,
         request: &R,
-    ) -> Result<ChatResponse, ProviderError> {
-        let response = self
-            .client
+    ) -> Result<Response, reqwest::Error> {
+        self.client
             .post(&self.endpoint)
             .header("Authorization", format!("Bearer {}", self.api_key.expose()))
             .header("HTTP-Referer", "https://github.com/amackillop/kitaebot")
@@ -77,10 +76,71 @@ impl CompletionsApi for ChatCompletionsClient {
             .json(request)
             .send()
             .await
-            .map_err(|e| {
-                error!("Network error: {e}");
-                ProviderError::Network(e.to_string())
-            })?;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stub API client (mock-network builds)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "mock-network")]
+#[derive(Clone)]
+pub struct MockNetworkApi;
+
+#[cfg(feature = "mock-network")]
+impl CompletionsApi for MockNetworkApi {
+    async fn chat_completions<R: Serialize + Send + Sync>(
+        &self,
+        _request: &R,
+    ) -> Result<Response, reqwest::Error> {
+        let body = r#"{"choices":[{"message":{"content":"This is a stub response. Compile without mock-network for real API calls."}}]}"#;
+        Ok(Response::from(
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default API type alias
+// ---------------------------------------------------------------------------
+
+/// Concrete API implementation selected by feature flag.
+#[cfg(not(feature = "mock-network"))]
+pub type CompletionsClient = CompletionsClientImpl<RealCompletionsApi>;
+
+#[cfg(feature = "mock-network")]
+pub type CompletionsClient = CompletionsClientImpl<MockNetworkApi>;
+
+// ---------------------------------------------------------------------------
+// Generic client (response parsing + error mapping)
+// ---------------------------------------------------------------------------
+
+/// HTTP client for any OpenAI-compatible chat completions endpoint.
+///
+/// Generic over [`CompletionsApi`] so that tests can substitute a stub
+/// without bypassing response parsing.
+#[derive(Clone)]
+pub struct CompletionsClientImpl<A> {
+    api: A,
+}
+
+impl<A: CompletionsApi> CompletionsClientImpl<A> {
+    pub fn new(api: A) -> Self {
+        Self { api }
+    }
+
+    pub async fn chat_completions<R: Serialize + Send + Sync>(
+        &self,
+        request: &R,
+    ) -> Result<ChatResponse, ProviderError> {
+        let response = self.api.chat_completions(request).await.map_err(|e| {
+            error!("Network error: {e}");
+            ProviderError::Network(e.to_string())
+        })?;
 
         let status = response.status();
         debug!(%status, "Chat completions response");
@@ -108,36 +168,6 @@ impl CompletionsApi for ChatCompletionsClient {
 }
 
 // ---------------------------------------------------------------------------
-// Stub client (mock-network builds)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "mock-network")]
-#[derive(Clone)]
-pub struct ChatCompletionsClient;
-
-#[cfg(feature = "mock-network")]
-impl CompletionsApi for ChatCompletionsClient {
-    async fn chat_completions<R: Serialize + Send + Sync>(
-        &self,
-        _request: &R,
-    ) -> Result<ChatResponse, ProviderError> {
-        Ok(ChatResponse {
-            choices: vec![Choice {
-                message: AssistantMessage {
-                    content: Some(
-                        "This is a stub response. \
-                         Compile without mock-network for real API calls."
-                            .to_string(),
-                    ),
-                    tool_calls: None,
-                },
-            }],
-            citations: Vec::new(),
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Wire format types (OpenAI-compatible response)
 // ---------------------------------------------------------------------------
 
@@ -145,33 +175,32 @@ impl CompletionsApi for ChatCompletionsClient {
 ///
 /// Superset of the `OpenAI` format — includes an optional `citations` field
 /// returned by Perplexity models via `OpenRouter`.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ChatResponse {
     pub choices: Vec<Choice>,
     /// Source URLs returned by Perplexity models. Empty for other models.
     #[serde(default)]
-    #[cfg_attr(feature = "mock-network", allow(dead_code))]
     pub citations: Vec<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Choice {
     pub message: AssistantMessage,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AssistantMessage {
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ApiToolCall>>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ApiToolCall {
     pub id: String,
     pub function: ApiFunction,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ApiFunction {
     pub name: String,
     pub arguments: String,
@@ -182,50 +211,53 @@ pub struct ApiFunction {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(dead_code)]
 pub mod mock {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::collections::VecDeque;
 
     use serde::Serialize;
+    use tokio::sync::Mutex;
 
     use super::*;
 
-    /// Mock client that returns pre-configured responses in sequence.
+    /// Stub [`CompletionsApi`] that yields pre-configured HTTP responses.
     ///
-    /// Uses `Arc` internally — cloning shares state, so you can hand one
-    /// clone to `ChatProvider` and keep another to inspect
-    /// `call_count()`.
-    #[derive(Clone)]
-    pub struct MockCompletionsClient {
-        responses: Arc<Vec<Result<ChatResponse, ProviderError>>>,
-        call_count: Arc<AtomicUsize>,
-    }
+    /// Pops from a queue, so tests enqueue exactly the responses they
+    /// expect in call order.
+    pub struct StubApi(Mutex<VecDeque<Result<Response, reqwest::Error>>>);
 
-    impl MockCompletionsClient {
-        pub fn new(responses: Vec<Result<ChatResponse, ProviderError>>) -> Self {
-            Self {
-                responses: Arc::new(responses),
-                call_count: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-
-        pub fn call_count(&self) -> usize {
-            self.call_count.load(Ordering::SeqCst)
+    impl StubApi {
+        pub fn client(
+            responses: Vec<Result<Response, reqwest::Error>>,
+        ) -> CompletionsClientImpl<Self> {
+            CompletionsClientImpl::new(Self(Mutex::new(responses.into())))
         }
     }
 
-    impl CompletionsApi for MockCompletionsClient {
+    impl CompletionsApi for StubApi {
         async fn chat_completions<R: Serialize + Send + Sync>(
             &self,
             _request: &R,
-        ) -> Result<ChatResponse, ProviderError> {
-            let index = self.call_count.fetch_add(1, Ordering::SeqCst);
-            self.responses[index].clone()
+        ) -> Result<Response, reqwest::Error> {
+            self.0
+                .lock()
+                .await
+                .pop_front()
+                .expect("StubApi response queue exhausted - test called client more times than responses provided")
         }
     }
 
-    // -- Convenience constructors for tests --
+    // -- Convenience constructors --
+
+    pub fn json_response(body: &impl Serialize) -> Response {
+        let json = serde_json::to_string(body).unwrap();
+        Response::from(
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(json)
+                .unwrap(),
+        )
+    }
 
     /// A `ChatResponse` containing a single text message.
     pub fn text_response(s: &str) -> ChatResponse {
@@ -239,29 +271,122 @@ pub mod mock {
             citations: Vec::new(),
         }
     }
+}
 
-    /// A `ChatResponse` containing tool calls with the given IDs.
-    ///
-    /// Each call targets a tool named `"mock"` with arguments `"{}"`.
-    pub fn tool_calls_response(ids: &[&str]) -> ChatResponse {
-        ChatResponse {
-            choices: vec![Choice {
-                message: AssistantMessage {
-                    content: Some(String::new()),
-                    tool_calls: Some(
-                        ids.iter()
-                            .map(|id| ApiToolCall {
-                                id: id.to_string(),
-                                function: ApiFunction {
-                                    name: "mock".to_string(),
-                                    arguments: "{}".to_string(),
-                                },
-                            })
-                            .collect(),
-                    ),
-                },
-            }],
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::mock::*;
+    use super::*;
+    use crate::error::ProviderError;
+
+    #[tokio::test]
+    async fn client_chat_completions_success() {
+        let client = StubApi::client(vec![Ok(json_response(&text_response("hello")))]);
+
+        let resp = client
+            .chat_completions(&serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.choices.len(), 1);
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn client_chat_completions_empty_choices() {
+        let empty = ChatResponse {
+            choices: vec![],
             citations: Vec::new(),
-        }
+        };
+        let client = StubApi::client(vec![Ok(json_response(&empty))]);
+
+        let resp = client
+            .chat_completions(&serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(resp.choices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn client_chat_completions_unauthorized() {
+        let resp = Response::from(http::Response::builder().status(401).body("").unwrap());
+        let client = StubApi::client(vec![Ok(resp)]);
+
+        let err = client
+            .chat_completions(&serde_json::json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderError::Authentication));
+    }
+
+    #[tokio::test]
+    async fn client_chat_completions_rate_limited() {
+        let resp = Response::from(http::Response::builder().status(429).body("").unwrap());
+        let client = StubApi::client(vec![Ok(resp)]);
+
+        let err = client
+            .chat_completions(&serde_json::json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn client_chat_completions_server_error() {
+        let resp = Response::from(
+            http::Response::builder()
+                .status(503)
+                .body("Service Unavailable")
+                .unwrap(),
+        );
+        let client = StubApi::client(vec![Ok(resp)]);
+
+        let err = client
+            .chat_completions(&serde_json::json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn client_chat_completions_malformed_json() {
+        let resp = Response::from(
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body("not json")
+                .unwrap(),
+        );
+        let client = StubApi::client(vec![Ok(resp)]);
+
+        let err = client
+            .chat_completions(&serde_json::json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn client_chat_completions_network_error() {
+        let err = Response::from(http::Response::builder().status(500).body("").unwrap())
+            .error_for_status()
+            .unwrap_err();
+        let client = StubApi::client(vec![Err(err)]);
+
+        let result = client
+            .chat_completions(&serde_json::json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(result, ProviderError::Network(_)));
     }
 }

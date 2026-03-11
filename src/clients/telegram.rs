@@ -1,10 +1,6 @@
 //! Telegram Bot API client.
 //!
-//! Thin wrapper around `reqwest` that handles authentication and the
-//! `getUpdates` / `sendMessage` endpoints. Follows the same layering as
-//! [`CompletionsApi`](super::chat_completion::CompletionsApi): a trait
-//! for the network boundary, a real HTTP client, a `mock-network` stub,
-//! and a test mock.
+//! HTTP calls go through [`TelegramApi`], responses through [`TelegramClient`].
 
 use std::time::Duration;
 
