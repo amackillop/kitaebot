@@ -15,7 +15,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::activity::Activity;
 use crate::agent::TurnConfig;
-use crate::clients::telegram::{RealTelegramApi, TelegramApi, TelegramClient};
+#[cfg(feature = "mock-network")]
+use crate::clients::telegram::MockNetworkApi as MockTelegramApi;
+#[cfg(not(feature = "mock-network"))]
+use crate::clients::telegram::RealTelegramApi;
+use crate::clients::telegram::{TelegramApi, TelegramClientImpl};
 use crate::dispatch;
 use crate::error::TelegramError;
 use crate::provider::Provider;
@@ -25,7 +29,11 @@ use crate::workspace::Workspace;
 ///
 /// Internal helpers (`poll_loop`, `handle_message`) stay generic over
 /// [`TelegramApi`] so that unit tests can inject [`FakeTelegramApi`].
+#[cfg(not(feature = "mock-network"))]
 pub type Telegram = TelegramChannel<RealTelegramApi>;
+
+#[cfg(feature = "mock-network")]
+pub type Telegram = TelegramChannel<MockTelegramApi>;
 
 // --- Channel ---
 
@@ -38,13 +46,13 @@ const SEND_RETRIES: u32 = 3;
 /// configuration. The client handles raw HTTP; this struct layers retry
 /// logic, HTML escaping, and message formatting on top.
 pub struct TelegramChannel<A> {
-    client: TelegramClient<A>,
+    client: TelegramClientImpl<A>,
     chat_id: i64,
 }
 
 impl<A: TelegramApi> TelegramChannel<A> {
     #[cfg_attr(feature = "mock-network", allow(dead_code))]
-    pub fn new(client: TelegramClient<A>, chat_id: i64) -> Self {
+    pub fn new(client: TelegramClientImpl<A>, chat_id: i64) -> Self {
         Self { client, chat_id }
     }
 
@@ -377,7 +385,7 @@ mod tests {
     };
 
     fn channel(api: FakeTelegramApi) -> TelegramChannel<FakeTelegramApi> {
-        TelegramChannel::new(TelegramClient::new(api), CHAT_ID)
+        TelegramChannel::new(TelegramClientImpl::new(api), CHAT_ID)
     }
 
     fn workspace() -> (tempfile::TempDir, Workspace) {
@@ -522,7 +530,16 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message(&ch, &ws, &config, "ping", &mut verbose, &tx, &mut rx).await;
+        handle_message::<FakeTelegramApi, MockProvider>(
+            &ch,
+            &ws,
+            &config,
+            "ping",
+            &mut verbose,
+            &tx,
+            &mut rx,
+        )
+        .await;
 
         let sent = api.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -547,7 +564,16 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message(&ch, &ws, &config, "/stats", &mut verbose, &tx, &mut rx).await;
+        handle_message::<FakeTelegramApi, MockProvider>(
+            &ch,
+            &ws,
+            &config,
+            "/stats",
+            &mut verbose,
+            &tx,
+            &mut rx,
+        )
+        .await;
 
         let sent = api.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -572,12 +598,30 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message(&ch, &ws, &config, "/verbose", &mut verbose, &tx, &mut rx).await;
+        handle_message::<FakeTelegramApi, MockProvider>(
+            &ch,
+            &ws,
+            &config,
+            "/verbose",
+            &mut verbose,
+            &tx,
+            &mut rx,
+        )
+        .await;
         assert!(verbose);
         let sent = api.sent_messages();
         assert_eq!(sent[0].text, "Verbose: on");
 
-        handle_message(&ch, &ws, &config, "/verbose", &mut verbose, &tx, &mut rx).await;
+        handle_message::<FakeTelegramApi, MockProvider>(
+            &ch,
+            &ws,
+            &config,
+            "/verbose",
+            &mut verbose,
+            &tx,
+            &mut rx,
+        )
+        .await;
         assert!(!verbose);
         let sent = api.sent_messages();
         assert_eq!(sent[1].text, "Verbose: off");
@@ -602,7 +646,16 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message(&ch, &ws, &config, "/bogus", &mut verbose, &tx, &mut rx).await;
+        handle_message::<FakeTelegramApi, MockProvider>(
+            &ch,
+            &ws,
+            &config,
+            "/bogus",
+            &mut verbose,
+            &tx,
+            &mut rx,
+        )
+        .await;
 
         let sent = api.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -629,8 +682,11 @@ mod tests {
             context: &CTX,
         };
 
-        let _ =
-            tokio::time::timeout(Duration::from_millis(100), poll_loop(&ch, &ws, &config)).await;
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            poll_loop::<FakeTelegramApi, MockProvider>(&ch, &ws, &config),
+        )
+        .await;
 
         let sent = api.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -656,8 +712,11 @@ mod tests {
             context: &CTX,
         };
 
-        let _ =
-            tokio::time::timeout(Duration::from_millis(100), poll_loop(&ch, &ws, &config)).await;
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            poll_loop::<FakeTelegramApi, MockProvider>(&ch, &ws, &config),
+        )
+        .await;
 
         assert!(api.sent_messages().is_empty());
         assert_eq!(provider.call_count(), 0);

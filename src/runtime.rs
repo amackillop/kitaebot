@@ -83,11 +83,23 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
 
 #[cfg(feature = "mock-network")]
 pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
-    use crate::clients::chat_completion::{CompletionsClient, MockNetworkApi};
+    use crate::clients::chat_completion::{
+        CompletionsClient, MockNetworkApi as MockCompletionsApi,
+    };
+    use crate::clients::telegram::{MockNetworkApi as MockTelegramApi, TelegramClient};
 
-    let client = CompletionsClient::new(MockNetworkApi);
+    let client = CompletionsClient::new(MockCompletionsApi);
     let provider = CompletionsProvider::new(client, &config.provider);
     let tools = Tools::local(workspace, config);
+
+    let telegram = if config.telegram.enabled {
+        Some(Telegram::new(
+            TelegramClient::new(MockTelegramApi),
+            config.telegram.chat_id,
+        ))
+    } else {
+        None
+    };
 
     Runtime {
         provider,
@@ -95,6 +107,6 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             error!("{e}");
             std::process::exit(1);
         }),
-        telegram: None,
+        telegram,
     }
 }

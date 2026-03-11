@@ -12,6 +12,17 @@ use crate::error::TelegramError;
 use crate::secrets::Secret;
 
 // ---------------------------------------------------------------------------
+// Default client type alias
+// ---------------------------------------------------------------------------
+
+/// Concrete client implementation selected by feature flag.
+#[cfg(not(feature = "mock-network"))]
+pub type TelegramClient = TelegramClientImpl<RealTelegramApi>;
+
+#[cfg(feature = "mock-network")]
+pub type TelegramClient = TelegramClientImpl<MockNetworkApi>;
+
+// ---------------------------------------------------------------------------
 // Trait
 // ---------------------------------------------------------------------------
 
@@ -71,12 +82,53 @@ impl TelegramApi for RealTelegramApi {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stub API client (mock-network builds)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "mock-network")]
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct MockNetworkApi;
+
+#[cfg(feature = "mock-network")]
+impl TelegramApi for MockNetworkApi {
+    async fn poll_updates(&self, _body: GetUpdatesBody) -> Result<Response, reqwest::Error> {
+        let body = r#"{"ok":true,"result":[]}"#;
+        Ok(Response::from(
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        ))
+    }
+
+    async fn post_message(&self, _body: SendMessageBody<'_>) -> Result<Response, reqwest::Error> {
+        let body = r#"{"ok":true,"result":{"message_id":1}}"#;
+        Ok(Response::from(
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generic client (response parsing + error mapping)
+// ---------------------------------------------------------------------------
+
 /// HTTP client for the Telegram Bot API.
-pub struct TelegramClient<A> {
+///
+/// Generic over [`TelegramApi`] so that tests can substitute a stub
+/// without bypassing response parsing.
+pub struct TelegramClientImpl<A> {
     api: A,
 }
 
-impl<A: TelegramApi> TelegramClient<A> {
+impl<A: TelegramApi> TelegramClientImpl<A> {
     pub fn new(api: A) -> Self {
         Self { api }
     }
@@ -205,8 +257,8 @@ mod tests {
     struct StubApi(Mutex<VecDeque<Result<Response, reqwest::Error>>>);
 
     impl StubApi {
-        fn client(responses: Vec<Result<Response, reqwest::Error>>) -> TelegramClient<Self> {
-            TelegramClient::new(Self(Mutex::new(responses.into())))
+        fn client(responses: Vec<Result<Response, reqwest::Error>>) -> TelegramClientImpl<Self> {
+            TelegramClientImpl::new(Self(Mutex::new(responses.into())))
         }
     }
 

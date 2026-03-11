@@ -11,6 +11,17 @@ use tracing::{debug, error};
 use crate::error::ProviderError;
 
 // ---------------------------------------------------------------------------
+// Default API type alias
+// ---------------------------------------------------------------------------
+
+/// Concrete API implementation selected by feature flag.
+#[cfg(not(feature = "mock-network"))]
+pub type CompletionsClient = CompletionsClientImpl<RealCompletionsApi>;
+
+#[cfg(feature = "mock-network")]
+pub type CompletionsClient = CompletionsClientImpl<MockNetworkApi>;
+
+// ---------------------------------------------------------------------------
 // Trait
 // ---------------------------------------------------------------------------
 
@@ -104,18 +115,6 @@ impl CompletionsApi for MockNetworkApi {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Default API type alias
-// ---------------------------------------------------------------------------
-
-/// Concrete API implementation selected by feature flag.
-#[cfg(not(feature = "mock-network"))]
-pub type CompletionsClient = CompletionsClientImpl<RealCompletionsApi>;
-
-#[cfg(feature = "mock-network")]
-pub type CompletionsClient = CompletionsClientImpl<MockNetworkApi>;
-
-// ---------------------------------------------------------------------------
 // Generic client (response parsing + error mapping)
 // ---------------------------------------------------------------------------
 
