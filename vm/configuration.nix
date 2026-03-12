@@ -12,6 +12,7 @@
 #   kitaebot.logLevel   - RUST_LOG filter string (default: "kitaebot=info")
 #   kitaebot.tools      - Packages available to the exec tool via PATH
 #   kitaebot.gitConfig  - Attrset { name, email, signingKey? } for git identity via programs.git
+#   kitaebot.promptsDir - Directory of .md prompt files symlinked into the workspace
 #   kitaebot.vm         - VM resource options: { memorySize, cores, diskSize } (all in MB except cores)
 #
 # For local development, see deploy/configuration.nix
@@ -64,6 +65,12 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       description = "The kitaebot package";
+    };
+
+    promptsDir = lib.mkOption {
+      type = lib.types.path;
+      default = ./prompts;
+      description = "Directory containing prompt files (SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md)";
     };
 
     secretsDir = lib.mkOption {
@@ -169,6 +176,10 @@ in
         "d /var/lib/kitaebot/memory 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/projects 0750 kitaebot kitaebot -"
         "L+ /var/lib/kitaebot/config.toml - - - - ${configFile}"
+        "L+ /var/lib/kitaebot/SOUL.md - - - - ${cfg.promptsDir}/SOUL.md"
+        "L+ /var/lib/kitaebot/AGENTS.md - - - - ${cfg.promptsDir}/AGENTS.md"
+        "L+ /var/lib/kitaebot/USER.md - - - - ${cfg.promptsDir}/USER.md"
+        "L+ /var/lib/kitaebot/HEARTBEAT.md - - - - ${cfg.promptsDir}/HEARTBEAT.md"
         "d /var/lib/kitaebot/.config/direnv 0750 kitaebot kitaebot -"
         "L+ /var/lib/kitaebot/.config/direnv/direnv.toml - - - - ${direnvConfig}"
       ];
