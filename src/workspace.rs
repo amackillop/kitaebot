@@ -55,24 +55,49 @@ When asked to work on code in a repository:
 
 1. **Clone** — use the `github` tool's `clone` action (never `git clone` via exec)
 2. **Branch** — create a feature branch via exec: `git checkout -b <branch>`
-3. **Read** — understand the codebase with `grep`, `glob_search`, and `file_read`. \
-Before making non-trivial changes to existing code, use \
-`git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way. \
-Commit messages carry design rationale. Skip this for obvious fixes and additions.
+3. **Read** — understand the codebase with `grep`, `glob_search`, and `file_read`.
+4. **Context** — Before making non-trivial changes to existing code, use
+   `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way.
+    Commit messages carry design rationale. Skip this for obvious fixes and additions.
 4. **Implement** — make changes with `file_write` and `file_edit`
-5. **Validate** — run the project's test/lint commands via exec
+5. **Validate** — run the project's test/lint/check commands via exec
 6. **Commit** — stage with `git add` via exec, then use the `github` tool's `commit` action
 7. **Push** — use the `github` tool's `push` action (never `git push` via exec)
 8. **Pull request** — use the `github` tool's `pr_create` action
-9. **Review feedback** — use `pr_diff_comments` to read inline comments. For each comment:\n\
-   - **Actionable feedback** — fix it, commit, then reply inline with `pr_diff_reply` \
-stating the commit that addressed it.\n\
-   - **Disagree** — reply inline with `pr_diff_reply` explaining why you won't change it.\n\
-   - **Question** — reply inline with `pr_diff_reply` answering the question. \
-Don't make code changes unless the question implies something is wrong.
+9. **Review feedback** — use `pr_diff_comments` to read inline comments. For each comment:
+    - **Actionable feedback** — fix it, commit, then reply inline with `pr_diff_reply` stating the commit that addressed it.
+    - **Disagree** — reply inline with `pr_diff_reply` explaining why you won't change it.\n\
+    - **Question** — reply inline with `pr_diff_reply` answering the question. \
+    - Don't make code changes unless the question implies something is wrong.
+
+### Writing Good Commit messages
+Run `git diff --cached` to get the staged diff.
+The commit messaged must be focused on just the staged changes.
+Do not look at unstaged changes.
+Use context from the conversation to help explain the changes.
+
+Follow the seven rules:
+    - Separate subject from body with blank line
+    - Limit subject to 50 characters (72 hard limit)
+    - Capitalize subject line
+    - No period at end of subject
+    - Use imperative mood in subject (e.g., 'Fix bug' not 'Fixed bug' or 'Fixes bug')
+    - Wrap body at 72 characters
+    - Body explains what and why, not how
+    - The code diff explains how
+    - Provide useful context about the change for future reference.
+    - For example, if an important architectural or design decision was made for
+      some particular commit, mention the alternative and the trade-offs made.
+
+Subject test: 'If applied, this commit will [subject]' must make sense.
+
+Avoid listing bullet points that are obvious from the code diff.
+
+Consider the commit message as a work of art. It should be a masterpiece.
+Nobody should ever need to wonder why a particular change was made.
+That said, keep it concise and to the point.
 
 ### Important
-
 - `git clone`, `git commit`, and `git push` are **blocked in exec** — always use the `github` tool
 - Push with `set_upstream: true` the first time you push a new branch
 ";
