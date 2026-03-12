@@ -1514,4 +1514,210 @@ mod tests {
                 .expect("StubGitHubApi: response queue exhausted")
         }
     }
+
+    /// Successful `CmdOutput` with the given stdout.
+    fn ok_output(stdout: &str) -> Result<CmdOutput, ToolError> {
+        Ok(CmdOutput {
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    /// Failed `CmdOutput` with the given stderr.
+    fn err_output(stderr: &str) -> Result<CmdOutput, ToolError> {
+        Ok(CmdOutput {
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            exit_code: 1,
+        })
+    }
+
+    /// Build a stub client with a fake .git dir so `resolve_repo_dir` passes.
+    fn stub_with_repo(
+        responses: Vec<Result<CmdOutput, ToolError>>,
+    ) -> (GitHub<StubGitHubApi>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = "projects/r";
+        std::fs::create_dir_all(dir.path().join(repo).join(".git")).unwrap();
+        // Leak the TempDir so it lives for the test duration.
+        let path = dir.into_path();
+        (StubGitHubApi::client(responses, &path), repo.to_string())
+    }
+
+    // ── run_gh / run_gh_parse ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_gh_nonzero_exit_returns_error() {
+        let (gh, repo) = stub_with_repo(vec![err_output("not found")]);
+        let cwd = gh.resolve_repo_dir(&repo).unwrap();
+        let result = gh.run_gh(&["pr", "view"], &cwd, "gh pr view").await;
+        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn run_gh_parse_malformed_json_returns_error() {
+        let (gh, repo) = stub_with_repo(vec![ok_output("not json")]);
+        let cwd = gh.resolve_repo_dir(&repo).unwrap();
+        let result: Result<Vec<PullRequest>, _> =
+            gh.run_gh_parse(&["pr", "list"], &cwd, "test").await;
+        assert!(
+            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("failed to parse"))
+        );
+    }
+
+    #[tokio::test]
+    async fn run_gh_parse_nonzero_exit_returns_stderr() {
+        let (gh, repo) = stub_with_repo(vec![err_output("permission denied")]);
+        let cwd = gh.resolve_repo_dir(&repo).unwrap();
+        let result: Result<Vec<PullRequest>, _> =
+            gh.run_gh_parse(&["pr", "list"], &cwd, "test").await;
+        assert!(
+            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("permission denied"))
+        );
+    }
+
+    // ── pr_list ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pr_list_formats_output() {
+        let json = serde_json::to_string(&serde_json::json!([
+            {"number": 1, "title": "Fix bug", "state": "OPEN", "url": "https://github.com/o/r/pull/1"},
+            {"number": 2, "title": "Add feature", "state": "OPEN", "url": "https://github.com/o/r/pull/2"},
+        ]))
+        .unwrap();
+
+        let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
+        let result = gh.pr_list(&repo, None).await.unwrap();
+        assert!(result.contains("#1 Fix bug [OPEN]"));
+        assert!(result.contains("#2 Add feature [OPEN]"));
+        assert!(result.contains("https://github.com/o/r/pull/1"));
+    }
+
+    #[tokio::test]
+    async fn pr_list_empty_response() {
+        let (gh, repo) = stub_with_repo(vec![ok_output("[]")]);
+        let result = gh.pr_list(&repo, None).await.unwrap();
+        assert_eq!(result, "No open pull requests.");
+    }
+
+    // ── pr_reviews ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pr_reviews_formats_reviews_and_comments() {
+        let json = serde_json::to_string(&serde_json::json!({
+            "reviews": [{
+                "author": {"login": "alice"},
+                "body": "Looks good",
+                "state": "APPROVED",
+                "submittedAt": "2025-01-15T10:00:00Z"
+            }],
+            "reviewRequests": [{"login": "bob", "name": null}],
+            "comments": [{
+                "author": {"login": "carol"},
+                "body": "What about edge cases?",
+                "createdAt": "2025-01-15T11:00:00Z"
+            }]
+        }))
+        .unwrap();
+
+        let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
+        let result = gh.pr_reviews(&repo, 42).await.unwrap();
+        assert!(result.contains("Pending reviewers: bob"));
+        assert!(result.contains("@alice APPROVED"));
+        assert!(result.contains("Looks good"));
+        assert!(result.contains("@carol"));
+        assert!(result.contains("What about edge cases?"));
+    }
+
+    #[tokio::test]
+    async fn pr_reviews_empty() {
+        let json = serde_json::to_string(&serde_json::json!({
+            "reviews": [],
+            "reviewRequests": [],
+            "comments": []
+        }))
+        .unwrap();
+
+        let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
+        let result = gh.pr_reviews(&repo, 1).await.unwrap();
+        assert_eq!(result, "No reviews or comments on PR #1.");
+    }
+
+    // ── pr_diff_comments ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pr_diff_comments_formats_output() {
+        let json = serde_json::to_string(&serde_json::json!([
+            {"id": 100, "path": "src/main.rs", "line": 42, "body": "Nit: rename this", "user": {"login": "alice"}},
+            {"id": 101, "path": "src/lib.rs", "line": null, "body": "Outdated", "user": {"login": "bob"}}
+        ]))
+        .unwrap();
+
+        let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
+        let result = gh.pr_diff_comments(&repo, 5).await.unwrap();
+        assert!(result.contains("[id:100] @alice at src/main.rs:42"));
+        assert!(result.contains("Nit: rename this"));
+        // When line is null, shows path only.
+        assert!(result.contains("[id:101] @bob at src/lib.rs"));
+        assert!(result.contains("Outdated"));
+    }
+
+    #[tokio::test]
+    async fn pr_diff_comments_empty() {
+        let (gh, repo) = stub_with_repo(vec![ok_output("[]")]);
+        let result = gh.pr_diff_comments(&repo, 5).await.unwrap();
+        assert_eq!(result, "No inline comments on PR #5.");
+    }
+
+    // ── ci_status ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ci_status_formats_run_and_logs() {
+        let runs_json = serde_json::to_string(&serde_json::json!([{
+            "databaseId": 9999,
+            "displayTitle": "CI",
+            "createdAt": "2025-01-15T10:00:00Z",
+            "url": "https://github.com/o/r/actions/runs/9999",
+            "workflowName": "test"
+        }]))
+        .unwrap();
+
+        let log_output = "test-job\tStep failed: exit code 1";
+
+        let (gh, repo) = stub_with_repo(vec![ok_output(&runs_json), ok_output(log_output)]);
+        let result = gh.ci_status(&repo, Some("main")).await.unwrap();
+        assert!(result.contains("Run #9999: \"CI\" (test)"));
+        assert!(result.contains("https://github.com/o/r/actions/runs/9999"));
+        assert!(result.contains("Step failed: exit code 1"));
+    }
+
+    #[tokio::test]
+    async fn ci_status_no_failed_runs() {
+        let (gh, repo) = stub_with_repo(vec![ok_output("[]")]);
+        let result = gh.ci_status(&repo, Some("main")).await;
+        assert!(
+            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("no failed runs"))
+        );
+    }
+
+    // ── current_branch ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn current_branch_trims_output() {
+        let (gh, repo) = stub_with_repo(vec![ok_output("  feature/foo\n")]);
+        let cwd = gh.resolve_repo_dir(&repo).unwrap();
+        let branch = gh.current_branch(&cwd).await.unwrap();
+        assert_eq!(branch, "feature/foo");
+    }
+
+    #[tokio::test]
+    async fn current_branch_nonzero_exit() {
+        let (gh, repo) = stub_with_repo(vec![err_output("not a git repo")]);
+        let cwd = gh.resolve_repo_dir(&repo).unwrap();
+        let result = gh.current_branch(&cwd).await;
+        assert!(
+            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("current branch"))
+        );
+    }
 }
