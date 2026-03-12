@@ -150,6 +150,69 @@ enum Args {
     },
 }
 
+// ── GitHub response types ────────────────────────────────────────────
+
+/// A pull request from `gh pr list --json`.
+#[derive(Deserialize)]
+struct PullRequest {
+    number: u64,
+    title: String,
+    state: String,
+    url: String,
+}
+
+/// A review from `gh pr view --json reviews`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Review {
+    author: Author,
+    body: String,
+    state: String,
+    submitted_at: String,
+}
+
+/// A review request from `gh pr view --json reviewRequests`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewRequest {
+    login: Option<String>,
+    name: Option<String>,
+}
+
+/// A PR conversation comment from `gh pr view --json comments`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrComment {
+    author: Author,
+    body: String,
+    created_at: String,
+}
+
+/// Aggregate response from `gh pr view --json reviews,reviewRequests,comments`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrReviewsResponse {
+    reviews: Vec<Review>,
+    review_requests: Vec<ReviewRequest>,
+    comments: Vec<PrComment>,
+}
+
+/// An inline code review comment from the REST API.
+#[derive(Deserialize)]
+struct DiffComment {
+    id: u64,
+    path: String,
+    line: Option<u64>,
+    body: String,
+    user: Author,
+}
+
+/// Minimal user/author object (shared across response types).
+#[derive(Deserialize)]
+struct Author {
+    login: String,
+}
+
 /// A workflow run from `gh run list --json`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -306,7 +369,8 @@ impl GitHub {
     /// the `gh` CLI's intended auth mechanism. The alternative
     /// (`gh auth login`) persists the token to `~/.config/gh/hosts.yml`,
     /// which is strictly worse.
-    async fn run_gh(&self, args: &[&str], cwd: &Path, label: &str) -> Result<String, ToolError> {
+    /// Build an authenticated `gh` command with env scrubbing.
+    fn gh_cmd(&self, args: &[&str], cwd: &Path) -> Command {
         let mut cmd = Command::new("gh");
         cmd.args(args)
             .current_dir(cwd)
@@ -315,9 +379,37 @@ impl GitHub {
             .env("GH_TOKEN", self.token.expose())
             .env("GH_PROMPT_DISABLED", "1")
             .env("NO_COLOR", "1");
+        cmd
+    }
 
+    async fn run_gh(&self, args: &[&str], cwd: &Path, label: &str) -> Result<String, ToolError> {
+        let mut cmd = self.gh_cmd(args, cwd);
         let output = exec_cmd(&mut cmd, label).await?;
         format_cmd(label, &output)
+    }
+
+    /// Run `gh` with `--json <fields>` and deserialize the response.
+    ///
+    /// Appends `--json <fields>` to `args` automatically, so callers
+    /// specify only the subcommand flags.
+    async fn run_gh_json<T: serde::de::DeserializeOwned>(
+        &self,
+        args: &[&str],
+        fields: &str,
+        cwd: &Path,
+        label: &str,
+    ) -> Result<T, ToolError> {
+        let full_args: Vec<&str> = args.iter().copied().chain(["--json", fields]).collect();
+        let mut cmd = self.gh_cmd(&full_args, cwd);
+        let output = exec_cmd(&mut cmd, label).await?;
+        if output.exit_code != 0 {
+            return Err(ToolError::ExecutionFailed(format!(
+                "{label}: {}",
+                output.stderr
+            )));
+        }
+        serde_json::from_str(&output.stdout)
+            .map_err(|e| ToolError::ExecutionFailed(format!("failed to parse {label}: {e}")))
     }
 
     /// Resolve and validate a repo directory within the workspace.
@@ -356,37 +448,23 @@ impl GitHub {
         };
 
         // Find the latest failed run on the branch.
-        let list_label = format!("gh run list --branch {branch_name} --status failure");
-        let mut cmd = Command::new("gh");
-        cmd.args([
-            "run",
-            "list",
-            "--branch",
-            &branch_name,
-            "--status",
-            "failure",
-            "--limit",
-            "1",
-            "--json",
-            "databaseId,displayTitle,createdAt,url,workflowName",
-        ])
-        .current_dir(&cwd)
-        .env_clear()
-        .envs(super::safe_env())
-        .env("GH_TOKEN", self.token.expose())
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1");
-
-        let list = exec_cmd(&mut cmd, &list_label).await?;
-        if list.exit_code != 0 {
-            return Err(ToolError::ExecutionFailed(format!(
-                "{list_label}: {}",
-                list.stderr
-            )));
-        }
-
-        let runs: Vec<WorkflowRun> = serde_json::from_str(&list.stdout)
-            .map_err(|e| ToolError::ExecutionFailed(format!("failed to parse run list: {e}")))?;
+        let runs: Vec<WorkflowRun> = self
+            .run_gh_json(
+                &[
+                    "run",
+                    "list",
+                    "--branch",
+                    &branch_name,
+                    "--status",
+                    "failure",
+                    "--limit",
+                    "1",
+                ],
+                "databaseId,displayTitle,createdAt,url,workflowName",
+                &cwd,
+                &format!("gh run list --branch {branch_name} --status failure"),
+            )
+            .await?;
 
         let run = runs.first().ok_or_else(|| {
             ToolError::ExecutionFailed(format!("no failed runs on branch `{branch_name}`"))
@@ -515,19 +593,24 @@ impl GitHub {
             )));
         }
 
-        self.run_gh(
-            &[
-                "pr",
-                "list",
-                "--state",
-                state,
-                "--json",
+        let prs: Vec<PullRequest> = self
+            .run_gh_json(
+                &["pr", "list", "--state", state],
                 "number,title,state,url",
-            ],
-            &cwd,
-            &format!("gh pr list --state {state}"),
-        )
-        .await
+                &cwd,
+                &format!("gh pr list --state {state}"),
+            )
+            .await?;
+
+        if prs.is_empty() {
+            return Ok(format!("No {state} pull requests."));
+        }
+
+        Ok(prs
+            .iter()
+            .map(|pr| format!("#{} {} [{}]\n  {}", pr.number, pr.title, pr.state, pr.url))
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 
     /// Fetch reviews and comments for a pull request via `gh pr view`.
@@ -535,18 +618,55 @@ impl GitHub {
         let cwd = self.resolve_repo_dir(repo_dir)?;
         let number = pr_number.to_string();
 
-        self.run_gh(
-            &[
-                "pr",
-                "view",
-                &number,
-                "--json",
+        let resp: PrReviewsResponse = self
+            .run_gh_json(
+                &["pr", "view", &number],
                 "reviews,reviewRequests,comments",
-            ],
-            &cwd,
-            &format!("gh pr view {number} --json reviews,reviewRequests,comments"),
-        )
-        .await
+                &cwd,
+                &format!("gh pr view {number} reviews"),
+            )
+            .await?;
+
+        let mut output = String::new();
+
+        if !resp.review_requests.is_empty() {
+            output.push_str("Pending reviewers: ");
+            let names: Vec<&str> = resp
+                .review_requests
+                .iter()
+                .map(|r| {
+                    r.login
+                        .as_deref()
+                        .or(r.name.as_deref())
+                        .unwrap_or("unknown")
+                })
+                .collect();
+            output.push_str(&names.join(", "));
+            output.push_str("\n\n");
+        }
+
+        for r in &resp.reviews {
+            let _ = writeln!(
+                output,
+                "@{} {} ({})",
+                r.author.login, r.state, r.submitted_at
+            );
+            if !r.body.is_empty() {
+                let _ = writeln!(output, "{}", r.body);
+            }
+            output.push('\n');
+        }
+
+        for c in &resp.comments {
+            let _ = writeln!(output, "@{} ({})\n{}", c.author.login, c.created_at, c.body);
+            output.push('\n');
+        }
+
+        if output.is_empty() {
+            return Ok(format!("No reviews or comments on PR #{pr_number}."));
+        }
+
+        Ok(output)
     }
 
     /// Add a comment to a pull request via `gh pr comment`.
@@ -576,12 +696,33 @@ impl GitHub {
         let cwd = self.resolve_repo_dir(repo_dir)?;
         let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments");
 
-        self.run_gh(
-            &["api", &endpoint],
-            &cwd,
-            &format!("gh api ...pulls/{pr_number}/comments"),
-        )
-        .await
+        let label = format!("gh api ...pulls/{pr_number}/comments");
+        let mut cmd = self.gh_cmd(&["api", &endpoint], &cwd);
+        let output = exec_cmd(&mut cmd, &label).await?;
+        if output.exit_code != 0 {
+            return Err(ToolError::ExecutionFailed(format!(
+                "{label}: {}",
+                output.stderr
+            )));
+        }
+        let comments: Vec<DiffComment> = serde_json::from_str(&output.stdout)
+            .map_err(|e| ToolError::ExecutionFailed(format!("failed to parse {label}: {e}")))?;
+
+        if comments.is_empty() {
+            return Ok(format!("No inline comments on PR #{pr_number}."));
+        }
+
+        Ok(comments
+            .iter()
+            .map(|c| {
+                let location = c.line.map_or(c.path.clone(), |l| format!("{}:{l}", c.path));
+                format!(
+                    "[id:{}] @{} at {}\n{}",
+                    c.id, c.user.login, location, c.body
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"))
     }
 
     /// Reply to an inline review comment via the REST API.
