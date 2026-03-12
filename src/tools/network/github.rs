@@ -41,6 +41,14 @@ const TIMEOUT_SECS: u64 = 120;
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Args {
+    /// Fetch the latest failed CI run and its failure logs.
+    CiStatus {
+        /// Repository directory relative to workspace root
+        /// (e.g. `"projects/myrepo"`).
+        repo_dir: String,
+        /// Branch to check. Defaults to the currently checked-out branch.
+        branch: Option<String>,
+    },
     /// Clone a repository into the workspace.
     Clone {
         /// Repository URL (HTTPS or SSH). SSH URLs are rewritten to HTTPS
@@ -165,7 +173,7 @@ impl Tool for GitHub {
     }
 
     fn description(&self) -> &'static str {
-        "Authenticated GitHub operations (clone, push, commit, pull requests, reviews)"
+        "Authenticated GitHub operations (clone, push, commit, pull requests, reviews, CI status)"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -181,6 +189,9 @@ impl Tool for GitHub {
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
             match args {
+                Args::CiStatus { repo_dir, branch } => {
+                    self.ci_status(&repo_dir, branch.as_deref()).await
+                }
                 Args::Clone { url, name } => self.clone_repo(&url, name.as_deref()).await,
                 Args::Push {
                     repo_dir,
@@ -268,9 +279,9 @@ impl GitHub {
             None
         };
 
-        let result = exec_cmd(&mut cmd, label).await;
+        let output = exec_cmd(&mut cmd, label).await?;
         drop(askpass);
-        result
+        format_cmd(label, &output)
     }
 
     /// Run an authenticated `gh` CLI command with `GH_TOKEN` env injection.
@@ -294,7 +305,8 @@ impl GitHub {
             .env("GH_PROMPT_DISABLED", "1")
             .env("NO_COLOR", "1");
 
-        exec_cmd(&mut cmd, label).await
+        let output = exec_cmd(&mut cmd, label).await?;
+        format_cmd(label, &output)
     }
 
     /// Resolve and validate a repo directory within the workspace.
@@ -321,6 +333,81 @@ impl GitHub {
         }
 
         Ok(resolved)
+    }
+
+    /// Fetch the latest failed CI run and its failure logs.
+    async fn ci_status(&self, repo_dir: &str, branch: Option<&str>) -> Result<String, ToolError> {
+        let cwd = self.resolve_repo_dir(repo_dir)?;
+
+        let branch_name = match branch {
+            Some(b) => b.to_string(),
+            None => current_branch(&cwd).await?,
+        };
+
+        // Find the latest failed run on the branch.
+        let list_label = format!("gh run list --branch {branch_name} --status failure");
+        let mut cmd = Command::new("gh");
+        cmd.args([
+            "run",
+            "list",
+            "--branch",
+            &branch_name,
+            "--status",
+            "failure",
+            "--limit",
+            "1",
+            "--json",
+            "databaseId,displayTitle,createdAt,url,workflowName",
+        ])
+        .current_dir(&cwd)
+        .env_clear()
+        .envs(super::safe_env())
+        .env("GH_TOKEN", self.token.expose())
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("NO_COLOR", "1");
+
+        let list = exec_cmd(&mut cmd, &list_label).await?;
+        if list.exit_code != 0 {
+            return Err(ToolError::ExecutionFailed(format!(
+                "{list_label}: {}",
+                list.stderr
+            )));
+        }
+
+        let runs: Vec<serde_json::Value> = serde_json::from_str(&list.stdout)
+            .map_err(|e| ToolError::ExecutionFailed(format!("failed to parse run list: {e}")))?;
+
+        let run = runs.first().ok_or_else(|| {
+            ToolError::ExecutionFailed(format!("no failed runs on branch `{branch_name}`"))
+        })?;
+
+        let run_id = run["databaseId"]
+            .as_u64()
+            .ok_or_else(|| ToolError::ExecutionFailed("missing run ID in response".into()))?;
+
+        let title = run["displayTitle"].as_str().unwrap_or("?");
+        let workflow = run["workflowName"].as_str().unwrap_or("?");
+        let created = run["createdAt"].as_str().unwrap_or("?");
+        let url = run["url"].as_str().unwrap_or("?");
+
+        let id_str = run_id.to_string();
+        let logs = self
+            .run_gh(
+                &["run", "view", &id_str, "--log-failed"],
+                &cwd,
+                &format!("gh run view {run_id} --log-failed"),
+            )
+            .await?;
+
+        let mut output = format!(
+            "Run #{run_id}: \"{title}\" ({workflow})\n\
+             Created: {created}\n\
+             URL: {url}\n\n\
+             ---\n\n"
+        );
+        output.push_str(&logs);
+
+        Ok(output)
     }
 
     /// Clone a repository into `projects/<name>`.
@@ -522,11 +609,19 @@ impl GitHub {
 
 // ── Command execution ───────────────────────────────────────────────
 
-/// Execute a command with timeout, format output, and check exit code.
+/// Raw output from a subprocess.
+struct CmdOutput {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+}
+
+/// Run a command with timeout and collect output.
 ///
-/// Returns `$ label\nstdout\nstderr\nExit code: N` on success,
-/// `ToolError::ExecutionFailed` on non-zero exit.
-async fn exec_cmd(cmd: &mut Command, label: &str) -> Result<String, ToolError> {
+/// Returns `CmdOutput` on both success and failure — the caller
+/// decides how to present it (envelope for the LLM, raw parsing,
+/// etc.). Returns `ToolError` only for launch failures and timeouts.
+async fn exec_cmd(cmd: &mut Command, label: &str) -> Result<CmdOutput, ToolError> {
     debug!(label, "Running command");
 
     let output = timeout(Duration::from_secs(TIMEOUT_SECS), cmd.output())
@@ -534,28 +629,33 @@ async fn exec_cmd(cmd: &mut Command, label: &str) -> Result<String, ToolError> {
         .map_err(|_| ToolError::Timeout)?
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    Ok(CmdOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
+}
 
+/// Format command output as `$ label\nstdout\nstderr\nExit code: N`.
+///
+/// On non-zero exit, returns `ToolError::ExecutionFailed` with the
+/// formatted output so the LLM sees what went wrong.
+fn format_cmd(label: &str, output: &CmdOutput) -> Result<String, ToolError> {
     let mut result = format!("$ {label}\n");
 
-    if !stdout.is_empty() {
-        result.push_str(&super::truncate_output(&stdout, MAX_OUTPUT_BYTES));
+    if !output.stdout.is_empty() {
+        result.push_str(&super::truncate_output(&output.stdout, MAX_OUTPUT_BYTES));
     }
-    if !stderr.is_empty() {
-        if !stdout.is_empty() {
+    if !output.stderr.is_empty() {
+        if !output.stdout.is_empty() {
             result.push('\n');
         }
-        result.push_str(&super::truncate_output(&stderr, MAX_OUTPUT_BYTES));
+        result.push_str(&super::truncate_output(&output.stderr, MAX_OUTPUT_BYTES));
     }
 
-    let _ = write!(
-        result,
-        "\nExit code: {}",
-        output.status.code().unwrap_or(-1)
-    );
+    let _ = write!(result, "\nExit code: {}", output.exit_code);
 
-    if !output.status.success() {
+    if output.exit_code != 0 {
         return Err(ToolError::ExecutionFailed(result));
     }
 
@@ -625,6 +725,27 @@ impl AskPass {
     fn path(&self) -> &Path {
         &self.path
     }
+}
+
+// ── Branch resolution ────────────────────────────────────────────────
+
+/// Get the current branch name from a git working directory.
+async fn current_branch(cwd: &Path) -> Result<String, ToolError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("git rev-parse: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ToolError::ExecutionFailed(format!(
+            "failed to get current branch: {stderr}"
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 // ── URL handling ────────────────────────────────────────────────────
@@ -800,6 +921,43 @@ mod tests {
             "schema must include action discriminator: {schema}"
         );
     }
+
+    // ── CiStatus deserialization ──────────────────────────────────
+
+    #[test]
+    fn deserialize_ci_status_minimal() {
+        let json = serde_json::json!({
+            "action": "ci_status",
+            "repo_dir": "projects/myrepo"
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::CiStatus {
+                repo_dir,
+                branch: None,
+            } if repo_dir == "projects/myrepo"
+        ));
+    }
+
+    #[test]
+    fn deserialize_ci_status_with_branch() {
+        let json = serde_json::json!({
+            "action": "ci_status",
+            "repo_dir": "projects/myrepo",
+            "branch": "feature-xyz"
+        });
+        let args: Args = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            args,
+            Args::CiStatus {
+                branch: Some(b),
+                ..
+            } if b == "feature-xyz"
+        ));
+    }
+
+    // ── Clone deserialization ──────────────────────────────────────
 
     #[test]
     fn deserialize_clone_args() {
