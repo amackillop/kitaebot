@@ -150,6 +150,17 @@ enum Args {
     },
 }
 
+/// A workflow run from `gh run list --json`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRun {
+    database_id: u64,
+    display_title: String,
+    created_at: String,
+    url: String,
+    workflow_name: String,
+}
+
 /// Authenticated GitHub operations.
 pub struct GitHub {
     workspace_root: PathBuf,
@@ -374,36 +385,28 @@ impl GitHub {
             )));
         }
 
-        let runs: Vec<serde_json::Value> = serde_json::from_str(&list.stdout)
+        let runs: Vec<WorkflowRun> = serde_json::from_str(&list.stdout)
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to parse run list: {e}")))?;
 
         let run = runs.first().ok_or_else(|| {
             ToolError::ExecutionFailed(format!("no failed runs on branch `{branch_name}`"))
         })?;
 
-        let run_id = run["databaseId"]
-            .as_u64()
-            .ok_or_else(|| ToolError::ExecutionFailed("missing run ID in response".into()))?;
-
-        let title = run["displayTitle"].as_str().unwrap_or("?");
-        let workflow = run["workflowName"].as_str().unwrap_or("?");
-        let created = run["createdAt"].as_str().unwrap_or("?");
-        let url = run["url"].as_str().unwrap_or("?");
-
-        let id_str = run_id.to_string();
+        let id_str = run.database_id.to_string();
         let logs = self
             .run_gh(
                 &["run", "view", &id_str, "--log-failed"],
                 &cwd,
-                &format!("gh run view {run_id} --log-failed"),
+                &format!("gh run view {} --log-failed", run.database_id),
             )
             .await?;
 
         let mut output = format!(
-            "Run #{run_id}: \"{title}\" ({workflow})\n\
-             Created: {created}\n\
-             URL: {url}\n\n\
-             ---\n\n"
+            "Run #{}: \"{}\" ({})\n\
+             Created: {}\n\
+             URL: {}\n\n\
+             ---\n\n",
+            run.database_id, run.display_title, run.workflow_name, run.created_at, run.url
         );
         output.push_str(&logs);
 
