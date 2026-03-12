@@ -4,6 +4,14 @@
 //! reaches the exec tool — it is injected only into subprocesses spawned
 //! by this module via `GIT_ASKPASS` (for git) or `GH_TOKEN` (for `gh`).
 //!
+//! # Architecture
+//!
+//! [`GitHubApi`] is the raw subprocess boundary — it owns credentials
+//! and spawns `gh`/`git` processes. [`GitHub<A>`] is the business logic
+//! layer that assembles arguments, parses JSON, and formats output.
+//! Tests substitute [`StubGitHubApi`] to exercise the logic without
+//! spawning real subprocesses.
+//!
 //! # Token injection
 //!
 //! For `git clone`/`push`, a temporary helper script is written to a
@@ -225,24 +233,115 @@ struct WorkflowRun {
     workflow_name: String,
 }
 
-/// Authenticated GitHub operations.
-pub struct GitHub {
-    workspace_root: PathBuf,
+// ── Subprocess boundary trait ────────────────────────────────────────
+
+/// Raw subprocess boundary for `gh` and `git` commands.
+///
+/// Two methods because `gh` (`GH_TOKEN` env) and `git` (`GIT_ASKPASS`
+/// lifecycle) have fundamentally different auth mechanisms. Everything
+/// above this layer (arg assembly, JSON parsing, formatting) lives in
+/// [`GitHub<A>`].
+pub trait GitHubApi: Send + Sync {
+    /// Run a `gh` CLI command. The token is always injected.
+    fn exec_gh(
+        &self,
+        args: &[&str],
+        cwd: &Path,
+    ) -> impl Future<Output = Result<CmdOutput, ToolError>> + Send;
+
+    /// Run a `git` command with optional credential injection.
+    ///
+    /// Only needed for commands that talk to a remote (`clone`, `push`,
+    /// `fetch`). Local operations (`commit`, `rev-parse`) pass
+    /// `authenticated: false` and skip the `GIT_ASKPASS` lifecycle.
+    fn exec_git(
+        &self,
+        args: &[&str],
+        cwd: &Path,
+        authenticated: bool,
+    ) -> impl Future<Output = Result<CmdOutput, ToolError>> + Send;
+}
+
+// ── Real subprocess implementation ──────────────────────────────────
+
+/// Authenticated subprocess executor for `gh` and `git`.
+///
+/// Owns the token and handles credential injection. For `gh`, the
+/// token is passed via `GH_TOKEN` env. For `git`, a temporary
+/// `GIT_ASKPASS` script is created and removed after each command.
+pub struct RealGitHubApi {
     token: Secret,
+}
+
+impl RealGitHubApi {
+    pub fn new(token: Secret) -> Self {
+        Self { token }
+    }
+}
+
+impl GitHubApi for RealGitHubApi {
+    async fn exec_gh(&self, args: &[&str], cwd: &Path) -> Result<CmdOutput, ToolError> {
+        let mut cmd = Command::new("gh");
+        cmd.args(args)
+            .current_dir(cwd)
+            .env_clear()
+            .envs(super::safe_env())
+            .env("GH_TOKEN", self.token.expose())
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("NO_COLOR", "1");
+        exec_cmd(&mut cmd, &format!("gh {}", args.first().unwrap_or(&""))).await
+    }
+
+    async fn exec_git(
+        &self,
+        args: &[&str],
+        cwd: &Path,
+        authenticated: bool,
+    ) -> Result<CmdOutput, ToolError> {
+        let mut cmd = Command::new("git");
+        cmd.args(args)
+            .current_dir(cwd)
+            .env_clear()
+            .envs(super::safe_env());
+
+        let askpass = if authenticated {
+            let ap = AskPass::create(&self.token).await?;
+            cmd.env("GIT_ASKPASS", ap.path())
+                .env("GIT_TERMINAL_PROMPT", "0");
+            Some(ap)
+        } else {
+            None
+        };
+
+        let output = exec_cmd(&mut cmd, &format!("git {}", args.first().unwrap_or(&""))).await;
+        drop(askpass);
+        output
+    }
+}
+
+// ── Business logic layer ────────────────────────────────────────────
+
+/// Authenticated GitHub operations.
+///
+/// Generic over [`GitHubApi`] so tests can substitute a stub without
+/// spawning real subprocesses.
+pub struct GitHub<A> {
+    workspace_root: PathBuf,
+    api: A,
     co_authors: Vec<String>,
 }
 
-impl GitHub {
-    pub fn new(workspace_root: impl Into<PathBuf>, token: Secret, co_authors: Vec<String>) -> Self {
+impl<A: GitHubApi> GitHub<A> {
+    pub fn new(api: A, workspace_root: impl Into<PathBuf>, co_authors: Vec<String>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
-            token,
+            api,
             co_authors,
         }
     }
 }
 
-impl Tool for GitHub {
+impl<A: GitHubApi> Tool for GitHub<A> {
     fn name(&self) -> &'static str {
         "github"
     }
@@ -321,17 +420,8 @@ impl Tool for GitHub {
     }
 }
 
-impl GitHub {
-    /// Run an authenticated git command with `GIT_ASKPASS` token injection.
-    ///
-    /// The token is written to a temp script in a 0700 directory and
-    /// removed when `AskPass` drops (even on early return or panic).
-    /// The token is on disk for the duration of one git command only.
-    /// Run a git command with optional `GIT_ASKPASS` token injection.
-    ///
-    /// When `authenticated`, a temporary askpass script is created and
-    /// removed after the command completes. Local operations (commit,
-    /// branch) pass `false`.
+impl<A: GitHubApi> GitHub<A> {
+    /// Run a git command, format output as envelope for the LLM.
     async fn run_git(
         &self,
         args: &[&str],
@@ -339,53 +429,13 @@ impl GitHub {
         label: &str,
         authenticated: bool,
     ) -> Result<String, ToolError> {
-        let mut cmd = Command::new("git");
-        cmd.args(args)
-            .current_dir(cwd)
-            .env_clear()
-            .envs(super::safe_env());
-
-        let askpass = if authenticated {
-            let ap = AskPass::create(&self.token).await?;
-            cmd.env("GIT_ASKPASS", ap.path())
-                .env("GIT_TERMINAL_PROMPT", "0");
-            Some(ap)
-        } else {
-            None
-        };
-
-        let output = exec_cmd(&mut cmd, label).await?;
-        drop(askpass);
+        let output = self.api.exec_git(args, cwd, authenticated).await?;
         format_cmd(label, &output)
     }
 
-    /// Run an authenticated `gh` CLI command with `GH_TOKEN` env injection.
-    ///
-    /// `args` are passed directly to `gh`. `cwd` sets the working
-    /// directory. Returns stdout on success.
-    ///
-    /// The token lives in the child process environment for the duration
-    /// of the `gh` command (visible via `/proc/<pid>/environ` to the same
-    /// user). There is no `GH_ASKPASS` equivalent — `GH_TOKEN` env is
-    /// the `gh` CLI's intended auth mechanism. The alternative
-    /// (`gh auth login`) persists the token to `~/.config/gh/hosts.yml`,
-    /// which is strictly worse.
-    /// Build an authenticated `gh` command with env scrubbing.
-    fn gh_cmd(&self, args: &[&str], cwd: &Path) -> Command {
-        let mut cmd = Command::new("gh");
-        cmd.args(args)
-            .current_dir(cwd)
-            .env_clear()
-            .envs(super::safe_env())
-            .env("GH_TOKEN", self.token.expose())
-            .env("GH_PROMPT_DISABLED", "1")
-            .env("NO_COLOR", "1");
-        cmd
-    }
-
+    /// Run a `gh` command, format output as envelope for the LLM.
     async fn run_gh(&self, args: &[&str], cwd: &Path, label: &str) -> Result<String, ToolError> {
-        let mut cmd = self.gh_cmd(args, cwd);
-        let output = exec_cmd(&mut cmd, label).await?;
+        let output = self.api.exec_gh(args, cwd).await?;
         format_cmd(label, &output)
     }
 
@@ -421,8 +471,7 @@ impl GitHub {
         cwd: &Path,
         label: &str,
     ) -> Result<T, ToolError> {
-        let mut cmd = self.gh_cmd(args, cwd);
-        let output = exec_cmd(&mut cmd, label).await?;
+        let output = self.api.exec_gh(args, cwd).await?;
         if output.exit_code != 0 {
             return Err(ToolError::ExecutionFailed(format!(
                 "{label}: {}",
@@ -459,13 +508,28 @@ impl GitHub {
         Ok(resolved)
     }
 
+    /// Get the current branch name from a git working directory.
+    async fn current_branch(&self, cwd: &Path) -> Result<String, ToolError> {
+        let output = self
+            .api
+            .exec_git(&["rev-parse", "--abbrev-ref", "HEAD"], cwd, false)
+            .await?;
+        if output.exit_code != 0 {
+            return Err(ToolError::ExecutionFailed(format!(
+                "failed to get current branch: {}",
+                output.stderr
+            )));
+        }
+        Ok(output.stdout.trim().to_string())
+    }
+
     /// Fetch the latest failed CI run and its failure logs.
     async fn ci_status(&self, repo_dir: &str, branch: Option<&str>) -> Result<String, ToolError> {
         let cwd = self.resolve_repo_dir(repo_dir)?;
 
         let branch_name = match branch {
             Some(b) => b.to_string(),
-            None => current_branch(&cwd).await?,
+            None => self.current_branch(&cwd).await?,
         };
 
         // Find the latest failed run on the branch.
@@ -887,27 +951,6 @@ impl AskPass {
     fn path(&self) -> &Path {
         &self.path
     }
-}
-
-// ── Branch resolution ────────────────────────────────────────────────
-
-/// Get the current branch name from a git working directory.
-async fn current_branch(cwd: &Path) -> Result<String, ToolError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(cwd)
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("git rev-parse: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ToolError::ExecutionFailed(format!(
-            "failed to get current branch: {stderr}"
-        )));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 // ── URL handling ────────────────────────────────────────────────────
@@ -1425,8 +1468,50 @@ mod tests {
     }
 
     /// Helper to build a GitHub instance for tests.
-    fn make_github(workspace: &Path) -> GitHub {
-        use crate::secrets::Secret;
-        GitHub::new(workspace, Secret::test("fake-token"), vec![])
+    fn make_github(workspace: &Path) -> GitHub<StubGitHubApi> {
+        GitHub::new(StubGitHubApi::new(vec![]), workspace, vec![])
+    }
+
+    // ── Stub API ─────────────────────────────────────────────────────
+
+    /// Test stub for [`GitHubApi`] that yields pre-enqueued responses.
+    ///
+    /// Both `exec_gh` and `exec_git` pop from the same queue, so tests
+    /// enqueue responses in call order regardless of which method fires.
+    struct StubGitHubApi(
+        tokio::sync::Mutex<std::collections::VecDeque<Result<CmdOutput, ToolError>>>,
+    );
+
+    impl StubGitHubApi {
+        fn new(responses: Vec<Result<CmdOutput, ToolError>>) -> Self {
+            Self(tokio::sync::Mutex::new(responses.into()))
+        }
+
+        fn client(responses: Vec<Result<CmdOutput, ToolError>>, workspace: &Path) -> GitHub<Self> {
+            GitHub::new(Self::new(responses), workspace, vec![])
+        }
+    }
+
+    impl GitHubApi for StubGitHubApi {
+        async fn exec_gh(&self, _args: &[&str], _cwd: &Path) -> Result<CmdOutput, ToolError> {
+            self.0
+                .lock()
+                .await
+                .pop_front()
+                .expect("StubGitHubApi: response queue exhausted")
+        }
+
+        async fn exec_git(
+            &self,
+            _args: &[&str],
+            _cwd: &Path,
+            _authenticated: bool,
+        ) -> Result<CmdOutput, ToolError> {
+            self.0
+                .lock()
+                .await
+                .pop_front()
+                .expect("StubGitHubApi: response queue exhausted")
+        }
     }
 }

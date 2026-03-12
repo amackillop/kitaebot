@@ -7,7 +7,7 @@ mod github;
 mod web_fetch;
 mod web_search;
 
-pub use github::GitHub;
+pub use github::{GitHub, RealGitHubApi};
 pub use web_fetch::WebFetch;
 pub use web_search::WebSearch;
 
@@ -32,9 +32,10 @@ pub fn build(
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
     if let Some(token) = github_token {
+        let api = RealGitHubApi::new(token);
         tools.push(Box::new(GitHub::new(
+            api,
             workspace.path(),
-            token,
             config.git.co_authors.clone(),
         )));
     }
