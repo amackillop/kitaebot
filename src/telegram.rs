@@ -78,13 +78,12 @@ impl<A: TelegramApi> TelegramChannel<A> {
     async fn send_raw(&self, text: &str, parse_mode: Option<&str>) -> Result<(), TelegramError> {
         let mut attempts = 0u32;
         loop {
-            match self
+            if let Err(e) = self
                 .client
                 .post_message(self.chat_id, text, parse_mode)
                 .await
             {
-                Ok(()) => return Ok(()),
-                Err(e) if attempts < SEND_RETRIES && is_transient(&e) => {
+                if attempts < SEND_RETRIES && is_transient(&e) {
                     let delay = Duration::from_secs(u64::from(1u32 << attempts));
                     attempts += 1;
                     warn!(
@@ -92,8 +91,11 @@ impl<A: TelegramApi> TelegramChannel<A> {
                         "send_message retrying in {delay:?}: {e}"
                     );
                     tokio::time::sleep(delay).await;
+                } else {
+                    return Err(e);
                 }
-                Err(e) => return Err(e),
+            } else {
+                return Ok(());
             }
         }
     }
@@ -118,7 +120,7 @@ fn is_transient(err: &TelegramError) -> bool {
     match err {
         TelegramError::Network(_) => true,
         TelegramError::Api { error_code, .. } => *error_code >= 500 || *error_code == 429,
-        TelegramError::Session(_) => false,
+        TelegramError::Deserialize(_) | TelegramError::Session(_) => false,
     }
 }
 
@@ -257,9 +259,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use serde::Serialize;
+
     use super::*;
     use crate::agent::TurnConfig;
-    use crate::clients::telegram::{GetUpdatesBody, SendMessageBody};
+    use crate::clients::telegram::{
+        ApiResponse, Chat, GetUpdatesBody, SendMessageBody, TgMessage, Update,
+    };
     use crate::config::ContextConfig;
     use crate::provider::MockProvider;
     use crate::tools::Tools;
@@ -287,7 +293,7 @@ mod tests {
     /// the loop via a timeout.
     #[derive(Clone)]
     struct FakeTelegramApi {
-        poll_results: Arc<Mutex<VecDeque<serde_json::Value>>>,
+        poll_results: Arc<Mutex<VecDeque<Vec<Update>>>>,
         send_results: Arc<Vec<Result<(), TelegramError>>>,
         send_index: Arc<AtomicUsize>,
         sent: Arc<Mutex<Vec<SentMessage>>>,
@@ -303,7 +309,7 @@ mod tests {
             }
         }
 
-        fn with_poll_results(mut self, results: Vec<serde_json::Value>) -> Self {
+        fn with_poll_results(mut self, results: Vec<Vec<Update>>) -> Self {
             self.poll_results = Arc::new(Mutex::new(results.into()));
             self
         }
@@ -312,26 +318,33 @@ mod tests {
             self.sent.lock().unwrap().clone()
         }
 
-        fn json_response(json: &serde_json::Value) -> reqwest::Response {
+        fn json_response(body: &impl Serialize) -> reqwest::Response {
+            let json = serde_json::to_string(body).unwrap();
             reqwest::Response::from(
                 http::Response::builder()
                     .status(200)
                     .header("content-type", "application/json")
-                    .body(json.to_string())
+                    .body(json)
                     .unwrap(),
             )
         }
 
-        fn ok_response(result: &serde_json::Value) -> reqwest::Response {
-            Self::json_response(&serde_json::json!({ "ok": true, "result": result }))
+        fn ok_response(result: &impl Serialize) -> reqwest::Response {
+            Self::json_response(&ApiResponse {
+                ok: true,
+                result: Some(result),
+                error_code: None,
+                description: None,
+            })
         }
 
         fn error_response(error_code: i32, description: &str) -> reqwest::Response {
-            Self::json_response(&serde_json::json!({
-                "ok": false,
-                "error_code": error_code,
-                "description": description,
-            }))
+            Self::json_response(&ApiResponse::<serde_json::Value> {
+                ok: false,
+                result: None,
+                error_code: Some(error_code),
+                description: Some(description.into()),
+            })
         }
     }
 
@@ -359,7 +372,11 @@ mod tests {
             });
 
             match &self.send_results[index] {
-                Ok(()) => Ok(Self::ok_response(&serde_json::json!({"message_id": 1}))),
+                Ok(()) => Ok(Self::ok_response(&TgMessage {
+                    message_id: 1,
+                    chat: Chat { id: body.chat_id },
+                    text: Some(body.text.to_string()),
+                })),
                 Err(TelegramError::Api {
                     error_code,
                     description,
@@ -369,6 +386,9 @@ mod tests {
                         http::Response::builder().status(500).body("").unwrap(),
                     );
                     Err(resp.error_for_status().unwrap_err())
+                }
+                Err(TelegramError::Deserialize(msg)) => {
+                    panic!("Unexpected Deserialize error in test stub: {msg}")
                 }
                 Err(TelegramError::Session(msg)) => Ok(Self::error_response(0, msg)),
             }
@@ -668,10 +688,14 @@ mod tests {
     async fn poll_loop_dispatches_valid_message() {
         tokio::time::pause();
         let (_dir, ws) = workspace();
-        let api = FakeTelegramApi::new(vec![Ok(())]).with_poll_results(vec![serde_json::json!([{
-            "update_id": 1,
-            "message": { "chat": {"id": CHAT_ID}, "text": "hello" }
-        }])]);
+        let api = FakeTelegramApi::new(vec![Ok(())]).with_poll_results(vec![vec![Update {
+            update_id: 1,
+            message: Some(TgMessage {
+                message_id: 1,
+                chat: Chat { id: CHAT_ID },
+                text: Some("hello".into()),
+            }),
+        }]]);
         let ch = channel(api.clone());
         let provider = MockProvider::new(vec![Ok(AgentResponse::Text("reply".into()))]);
         let tools = Tools::default();
@@ -697,11 +721,28 @@ mod tests {
     async fn poll_loop_filters_irrelevant_updates() {
         tokio::time::pause();
         let (_dir, ws) = workspace();
-        let api = FakeTelegramApi::new(vec![]).with_poll_results(vec![serde_json::json!([
-            {"update_id": 1},
-            {"update_id": 2, "message": {"chat": {"id": 999}, "text": "wrong chat"}},
-            {"update_id": 3, "message": {"chat": {"id": CHAT_ID}}}
-        ])]);
+        let api = FakeTelegramApi::new(vec![]).with_poll_results(vec![vec![
+            Update {
+                update_id: 1,
+                message: None,
+            },
+            Update {
+                update_id: 2,
+                message: Some(TgMessage {
+                    message_id: 2,
+                    chat: Chat { id: 999 },
+                    text: Some("wrong chat".into()),
+                }),
+            },
+            Update {
+                update_id: 3,
+                message: Some(TgMessage {
+                    message_id: 3,
+                    chat: Chat { id: CHAT_ID },
+                    text: None,
+                }),
+            },
+        ]]);
         let ch = channel(api.clone());
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();

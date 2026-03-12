@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use futures::TryFutureExt as _;
 use reqwest::{Client, Response};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::TelegramError;
@@ -139,13 +140,9 @@ impl<A: TelegramApi> TelegramClientImpl<A> {
         timeout: u64,
     ) -> Result<Vec<Update>, TelegramError> {
         let body = GetUpdatesBody { offset, timeout };
-        let resp: ApiResponse<Vec<Update>> = self
-            .api
-            .poll_updates(body)
-            .and_then(reqwest::Response::json)
-            .map_err(|e| TelegramError::Network(e.to_string()))
-            .await?;
-        resp.into_result()
+        let resp = self.api.poll_updates(body);
+
+        process_response(resp).await
     }
 
     pub async fn post_message(
@@ -153,19 +150,38 @@ impl<A: TelegramApi> TelegramClientImpl<A> {
         chat_id: i64,
         text: &str,
         parse_mode: Option<&str>,
-    ) -> Result<(), TelegramError> {
+    ) -> Result<TgMessage, TelegramError> {
         let body = SendMessageBody {
             chat_id,
             text,
             parse_mode,
         };
-        let resp: ApiResponse<serde_json::Value> = self
-            .api
-            .post_message(body)
-            .and_then(reqwest::Response::json)
-            .map_err(|e| TelegramError::Network(e.to_string()))
-            .await?;
-        resp.into_result().map(|_| ())
+        let resp = self.api.post_message(body);
+
+        process_response(resp).await
+    }
+}
+
+async fn process_response<T: DeserializeOwned>(
+    res: impl Future<Output = Result<Response, reqwest::Error>>,
+) -> Result<T, TelegramError> {
+    let api_response: ApiResponse<T> = res
+        .map_err(|e| TelegramError::Network(e.to_string()))
+        .await?
+        .json()
+        .await
+        .map_err(|e| TelegramError::Deserialize(e.to_string()))?;
+
+    if api_response.ok {
+        api_response.result.ok_or_else(|| TelegramError::Api {
+            error_code: 0,
+            description: "ok=true but missing result".into(),
+        })
+    } else {
+        Err(TelegramError::Api {
+            error_code: api_response.error_code.unwrap_or(0),
+            description: api_response.description.unwrap_or_default(),
+        })
     }
 }
 
@@ -180,27 +196,10 @@ impl<A: TelegramApi> TelegramClientImpl<A> {
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "mock-network", allow(dead_code))]
 pub(crate) struct ApiResponse<T> {
-    ok: bool,
-    result: Option<T>,
-    error_code: Option<i32>,
-    description: Option<String>,
-}
-
-#[cfg_attr(feature = "mock-network", allow(dead_code))]
-impl<T> ApiResponse<T> {
-    pub(crate) fn into_result(self) -> Result<T, TelegramError> {
-        if self.ok {
-            self.result.ok_or_else(|| TelegramError::Api {
-                error_code: 0,
-                description: "ok=true but missing result".into(),
-            })
-        } else {
-            Err(TelegramError::Api {
-                error_code: self.error_code.unwrap_or(0),
-                description: self.description.unwrap_or_default(),
-            })
-        }
-    }
+    pub(crate) ok: bool,
+    pub(crate) result: Option<T>,
+    pub(crate) error_code: Option<i32>,
+    pub(crate) description: Option<String>,
 }
 
 /// A single incoming update from `getUpdates`.
@@ -213,6 +212,7 @@ pub struct Update {
 /// A Telegram message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TgMessage {
+    pub message_id: i64,
     pub chat: Chat,
     pub text: Option<String>,
 }
@@ -304,7 +304,11 @@ mod tests {
     fn ok_send() -> Response {
         json_response(&ApiResponse {
             ok: true,
-            result: Some(serde_json::json!({"message_id": 1})),
+            result: Some(TgMessage {
+                message_id: 1,
+                chat: Chat { id: 42 },
+                text: None,
+            }),
             error_code: None,
             description: None,
         })
@@ -324,6 +328,7 @@ mod tests {
         let client = StubApi::client(vec![Ok(ok_updates(vec![Update {
             update_id: 7,
             message: Some(TgMessage {
+                message_id: 1,
                 chat: Chat { id: 42 },
                 text: Some("hello".into()),
             }),
@@ -385,7 +390,7 @@ mod tests {
 
         let err = client.poll_updates(0, 30).await.unwrap_err();
 
-        assert!(matches!(err, TelegramError::Network(_)));
+        assert!(matches!(err, TelegramError::Deserialize(_)));
     }
 
     #[tokio::test]

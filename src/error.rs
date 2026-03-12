@@ -161,6 +161,10 @@ pub enum TelegramError {
         description: String,
     },
 
+    /// Failed to deserialize a Telegram API response body.
+    #[error("Deserialize error: {0}")]
+    Deserialize(String),
+
     /// HTTP request failed (timeout, DNS, connection reset, etc.).
     #[error("Network error: {0}")]
     Network(String),
