@@ -1589,9 +1589,14 @@ mod tests {
 
         let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
         let result = gh.pr_list(&repo, None).await.unwrap();
-        assert!(result.contains("#1 Fix bug [OPEN]"));
-        assert!(result.contains("#2 Add feature [OPEN]"));
-        assert!(result.contains("https://github.com/o/r/pull/1"));
+        assert_eq!(
+            result,
+            "\
+#1 Fix bug [OPEN]
+  https://github.com/o/r/pull/1
+#2 Add feature [OPEN]
+  https://github.com/o/r/pull/2"
+        );
     }
 
     #[tokio::test]
@@ -1623,11 +1628,19 @@ mod tests {
 
         let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
         let result = gh.pr_reviews(&repo, 42).await.unwrap();
-        assert!(result.contains("Pending reviewers: bob"));
-        assert!(result.contains("@alice APPROVED"));
-        assert!(result.contains("Looks good"));
-        assert!(result.contains("@carol"));
-        assert!(result.contains("What about edge cases?"));
+        assert_eq!(
+            result,
+            "\
+Pending reviewers: bob
+
+@alice APPROVED (2025-01-15T10:00:00Z)
+Looks good
+
+@carol (2025-01-15T11:00:00Z)
+What about edge cases?
+
+"
+        );
     }
 
     #[tokio::test]
@@ -1656,11 +1669,15 @@ mod tests {
 
         let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
         let result = gh.pr_diff_comments(&repo, 5).await.unwrap();
-        assert!(result.contains("[id:100] @alice at src/main.rs:42"));
-        assert!(result.contains("Nit: rename this"));
-        // When line is null, shows path only.
-        assert!(result.contains("[id:101] @bob at src/lib.rs"));
-        assert!(result.contains("Outdated"));
+        assert_eq!(
+            result,
+            "\
+[id:100] @alice at src/main.rs:42
+Nit: rename this
+
+[id:101] @bob at src/lib.rs
+Outdated"
+        );
     }
 
     #[tokio::test]
@@ -1683,13 +1700,23 @@ mod tests {
         }]))
         .unwrap();
 
-        let log_output = "test-job\tStep failed: exit code 1";
+        let log_output = "test-job  Step failed";
 
         let (gh, repo) = stub_with_repo(vec![ok_output(&runs_json), ok_output(log_output)]);
         let result = gh.ci_status(&repo, Some("main")).await.unwrap();
-        assert!(result.contains("Run #9999: \"CI\" (test)"));
-        assert!(result.contains("https://github.com/o/r/actions/runs/9999"));
-        assert!(result.contains("Step failed: exit code 1"));
+        assert_eq!(
+            result,
+            "\
+Run #9999: \"CI\" (test)
+Created: 2025-01-15T10:00:00Z
+URL: https://github.com/o/r/actions/runs/9999
+
+---
+
+$ gh run view 9999 --log-failed
+test-job  Step failed
+Exit code: 0"
+        );
     }
 
     #[tokio::test]
