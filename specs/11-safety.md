@@ -22,23 +22,23 @@ On success, returns the output wrapped in tags. On failure, returns `LeakDetecte
 
 ## Leak Detection
 
-Scan tool output for known secret patterns before sending to the LLM. Match against fixed prefixes and literal strings — no regex engine needed.
+Scan tool output for known secret patterns before sending to the LLM. Each pattern is a regex requiring enough structure beyond the bare prefix to avoid false positives when the agent reads its own source code.
 
 ### Patterns
 
 | Pattern | Matches |
 |---------|---------|
-| `sk-` | OpenAI API keys |
-| `sk-ant-` | Anthropic API keys |
-| `ghp_` | GitHub personal access tokens |
-| `gho_` | GitHub OAuth tokens |
-| `ghs_` | GitHub server tokens |
-| `AKIA` | AWS access key IDs |
-| `-----BEGIN` | Private key headers (RSA, EC, etc.) |
-| `postgres://` | PostgreSQL connection strings |
-| `mysql://` | MySQL connection strings |
-| `mongodb://` | MongoDB connection strings |
-| `redis://` | Redis connection strings |
+| `sk-ant-[a-zA-Z0-9_-]{20,}` | Anthropic API keys |
+| `sk-[a-zA-Z0-9_-]{20,}` | OpenAI API keys |
+| `ghp_[a-zA-Z0-9]{30,}` | GitHub personal access tokens |
+| `gho_[a-zA-Z0-9]{30,}` | GitHub OAuth tokens |
+| `ghs_[a-zA-Z0-9]{30,}` | GitHub server tokens |
+| `AKIA[0-9A-Z]{16}` | AWS access key IDs |
+| `-----BEGIN [A-Z ]+PRIVATE KEY-----` | Private key headers (RSA, EC, etc.) |
+| `postgres://\S+:\S+@` | PostgreSQL connection strings (with credentials) |
+| `mysql://\S+:\S+@` | MySQL connection strings (with credentials) |
+| `mongodb(\+srv)?://\S+:\S+@` | MongoDB connection strings (with credentials) |
+| `redis://\S+:\S+@` | Redis connection strings (with credentials) |
 
 ### Behavior
 
@@ -48,7 +48,7 @@ Scan tool output for known secret patterns before sending to the LLM. Match agai
 
 ### Scanning Strategy
 
-Simple substring/prefix matching. Iterate patterns, check `output.contains(pattern)`. Short-circuit on first match.
+Compiled `RegexSet` (same approach as the exec deny list). All patterns are compiled once via `LazyLock` and matched in a single pass. Returns the first matching pattern name.
 
 ## Output Wrapping
 

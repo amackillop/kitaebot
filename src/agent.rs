@@ -604,7 +604,7 @@ mod tests {
             Ok(mock_tool_calls(&["call-leak"])),
             Ok(text("Handled")),
         ]);
-        let tools = mock_tools("Here is your key: sk-1234567890abcdef");
+        let tools = mock_tools("Here is your key: sk-proj-abc123def456ghi789jkl012");
         let mut session = Session::new();
 
         let result = run_turn(
@@ -628,7 +628,7 @@ mod tests {
         if let Message::Tool { content, .. } = tool_msg {
             assert!(content.contains("Tool output blocked"));
             assert!(content.contains("Do not retry"));
-            assert!(!content.contains("sk-1234567890abcdef"));
+            assert!(!content.contains("sk-proj-abc123def456ghi789jkl012"));
         }
     }
 
