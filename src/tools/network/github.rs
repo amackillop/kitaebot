@@ -289,7 +289,7 @@ impl GitHubApi for RealGitHubApi {
             .env("GH_TOKEN", self.token.expose())
             .env("GH_PROMPT_DISABLED", "1")
             .env("NO_COLOR", "1");
-        exec_cmd(&mut cmd, &format!("gh {}", args.first().unwrap_or(&""))).await
+        exec_cmd(&mut cmd, format!("gh {}", args.join(" "))).await
     }
 
     async fn exec_git(
@@ -313,7 +313,7 @@ impl GitHubApi for RealGitHubApi {
             None
         };
 
-        let output = exec_cmd(&mut cmd, &format!("git {}", args.first().unwrap_or(&""))).await;
+        let output = exec_cmd(&mut cmd, format!("git {}", args.join(" "))).await;
         drop(askpass);
         output
     }
@@ -426,17 +426,14 @@ impl<A: GitHubApi> GitHub<A> {
         &self,
         args: &[&str],
         cwd: &Path,
-        label: &str,
         authenticated: bool,
     ) -> Result<String, ToolError> {
-        let output = self.api.exec_git(args, cwd, authenticated).await?;
-        format_cmd(label, &output)
+        self.api.exec_git(args, cwd, authenticated).await?.format()
     }
 
     /// Run a `gh` command, format output as envelope for the LLM.
-    async fn run_gh(&self, args: &[&str], cwd: &Path, label: &str) -> Result<String, ToolError> {
-        let output = self.api.exec_gh(args, cwd).await?;
-        format_cmd(label, &output)
+    async fn run_gh(&self, args: &[&str], cwd: &Path) -> Result<String, ToolError> {
+        self.api.exec_gh(args, cwd).await?.format()
     }
 
     /// Run `gh` with `--json <fields>` and deserialize the response.
@@ -448,10 +445,9 @@ impl<A: GitHubApi> GitHub<A> {
         args: &[&str],
         fields: &str,
         cwd: &Path,
-        label: &str,
     ) -> Result<T, ToolError> {
         let full_args: Vec<&str> = args.iter().copied().chain(["--json", fields]).collect();
-        self.run_gh_parse(&full_args, cwd, label).await
+        self.run_gh_parse(&full_args, cwd).await
     }
 
     /// Run `gh api` and deserialize the JSON response.
@@ -459,9 +455,8 @@ impl<A: GitHubApi> GitHub<A> {
         &self,
         endpoint: &str,
         cwd: &Path,
-        label: &str,
     ) -> Result<T, ToolError> {
-        self.run_gh_parse(&["api", endpoint], cwd, label).await
+        self.run_gh_parse(&["api", endpoint], cwd).await
     }
 
     /// Run `gh`, check exit code, and deserialize stdout as JSON.
@@ -469,17 +464,16 @@ impl<A: GitHubApi> GitHub<A> {
         &self,
         args: &[&str],
         cwd: &Path,
-        label: &str,
     ) -> Result<T, ToolError> {
         let output = self.api.exec_gh(args, cwd).await?;
         if output.exit_code != 0 {
             return Err(ToolError::ExecutionFailed(format!(
-                "{label}: {}",
-                output.stderr
+                "{}: {}",
+                output.command, output.stderr
             )));
         }
         serde_json::from_str(&output.stdout)
-            .map_err(|e| ToolError::ExecutionFailed(format!("failed to parse {label}: {e}")))
+            .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", output.command)))
     }
 
     /// Resolve and validate a repo directory within the workspace.
@@ -547,7 +541,6 @@ impl<A: GitHubApi> GitHub<A> {
                 ],
                 "databaseId,displayTitle,createdAt,url,workflowName",
                 &cwd,
-                &format!("gh run list --branch {branch_name} --status failure"),
             )
             .await?;
 
@@ -557,11 +550,7 @@ impl<A: GitHubApi> GitHub<A> {
 
         let id_str = run.database_id.to_string();
         let logs = self
-            .run_gh(
-                &["run", "view", &id_str, "--log-failed"],
-                &cwd,
-                &format!("gh run view {} --log-failed", run.database_id),
-            )
+            .run_gh(&["run", "view", &id_str, "--log-failed"], &cwd)
             .await?;
 
         let mut output = format!(
@@ -601,7 +590,6 @@ impl<A: GitHubApi> GitHub<A> {
         self.run_git(
             &["clone", "--", &https_url, &repo_name],
             &projects_dir,
-            &format!("git clone {https_url} projects/{repo_name}"),
             true,
         )
         .await
@@ -630,15 +618,14 @@ impl<A: GitHubApi> GitHub<A> {
             args.push(b);
         }
 
-        let label = format!("git {}", args.join(" "));
-        self.run_git(&args, &cwd, &label, true).await
+        self.run_git(&args, &cwd, true).await
     }
 
     /// Commit staged changes with Co-authored-by trailers.
     async fn commit(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
         let cwd = self.resolve_repo_dir(repo_dir)?;
         let full_message = format_commit_message(message, &self.co_authors);
-        self.run_git(&["commit", "-m", &full_message], &cwd, "git commit", false)
+        self.run_git(&["commit", "-m", &full_message], &cwd, false)
             .await
     }
 
@@ -662,7 +649,7 @@ impl<A: GitHubApi> GitHub<A> {
             args.push("--draft");
         }
 
-        self.run_gh(&args, &cwd, "gh pr create").await
+        self.run_gh(&args, &cwd).await
     }
 
     /// List pull requests via `gh pr list`.
@@ -683,7 +670,6 @@ impl<A: GitHubApi> GitHub<A> {
                 &["pr", "list", "--state", state],
                 "number,title,state,url",
                 &cwd,
-                &format!("gh pr list --state {state}"),
             )
             .await?;
 
@@ -708,7 +694,6 @@ impl<A: GitHubApi> GitHub<A> {
                 &["pr", "view", &number],
                 "reviews,reviewRequests,comments",
                 &cwd,
-                &format!("gh pr view {number} reviews"),
             )
             .await?;
 
@@ -764,12 +749,8 @@ impl<A: GitHubApi> GitHub<A> {
         let cwd = self.resolve_repo_dir(repo_dir)?;
         let number = pr_number.to_string();
 
-        self.run_gh(
-            &["pr", "comment", &number, "--body", body],
-            &cwd,
-            &format!("gh pr comment {number}"),
-        )
-        .await
+        self.run_gh(&["pr", "comment", &number, "--body", body], &cwd)
+            .await
     }
 
     /// Fetch inline review comments (line-level) via the REST API.
@@ -781,13 +762,7 @@ impl<A: GitHubApi> GitHub<A> {
         let cwd = self.resolve_repo_dir(repo_dir)?;
         let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments");
 
-        let comments: Vec<DiffComment> = self
-            .run_gh_api(
-                &endpoint,
-                &cwd,
-                &format!("gh api ...pulls/{pr_number}/comments"),
-            )
-            .await?;
+        let comments: Vec<DiffComment> = self.run_gh_api(&endpoint, &cwd).await?;
 
         if comments.is_empty() {
             return Ok(format!("No inline comments on PR #{pr_number}."));
@@ -823,12 +798,8 @@ impl<A: GitHubApi> GitHub<A> {
             format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments/{comment_id}/replies");
         let body_field = format!("body={body}");
 
-        self.run_gh(
-            &["api", &endpoint, "-f", &body_field],
-            &cwd,
-            &format!("gh api ...comments/{comment_id}/replies"),
-        )
-        .await
+        self.run_gh(&["api", &endpoint, "-f", &body_field], &cwd)
+            .await
     }
 }
 
@@ -837,9 +808,38 @@ impl<A: GitHubApi> GitHub<A> {
 /// Raw output from a subprocess.
 #[derive(Debug)]
 pub struct CmdOutput {
+    pub command: String,
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+}
+
+impl CmdOutput {
+    /// Format as `$ command\nstdout\nstderr\nExit code: N`.
+    ///
+    /// On non-zero exit, returns `ToolError::ExecutionFailed` with the
+    /// formatted output so the LLM sees what went wrong.
+    pub fn format(&self) -> Result<String, ToolError> {
+        let mut result = format!("$ {}\n", self.command);
+
+        if !self.stdout.is_empty() {
+            result.push_str(&super::truncate_output(&self.stdout, MAX_OUTPUT_BYTES));
+        }
+        if !self.stderr.is_empty() {
+            if !self.stdout.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&super::truncate_output(&self.stderr, MAX_OUTPUT_BYTES));
+        }
+
+        let _ = write!(result, "\nExit code: {}", self.exit_code);
+
+        if self.exit_code != 0 {
+            return Err(ToolError::ExecutionFailed(result));
+        }
+
+        Ok(result)
+    }
 }
 
 /// Run a command with timeout and collect output.
@@ -847,8 +847,8 @@ pub struct CmdOutput {
 /// Returns `CmdOutput` on both success and failure — the caller
 /// decides how to present it (envelope for the LLM, raw parsing,
 /// etc.). Returns `ToolError` only for launch failures and timeouts.
-async fn exec_cmd(cmd: &mut Command, label: &str) -> Result<CmdOutput, ToolError> {
-    debug!(label, "Running command");
+async fn exec_cmd(cmd: &mut Command, command: String) -> Result<CmdOutput, ToolError> {
+    debug!(%command, "Running command");
 
     let output = timeout(Duration::from_secs(TIMEOUT_SECS), cmd.output())
         .await
@@ -856,36 +856,11 @@ async fn exec_cmd(cmd: &mut Command, label: &str) -> Result<CmdOutput, ToolError
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
     Ok(CmdOutput {
+        command,
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         exit_code: output.status.code().unwrap_or(-1),
     })
-}
-
-/// Format command output as `$ label\nstdout\nstderr\nExit code: N`.
-///
-/// On non-zero exit, returns `ToolError::ExecutionFailed` with the
-/// formatted output so the LLM sees what went wrong.
-fn format_cmd(label: &str, output: &CmdOutput) -> Result<String, ToolError> {
-    let mut result = format!("$ {label}\n");
-
-    if !output.stdout.is_empty() {
-        result.push_str(&super::truncate_output(&output.stdout, MAX_OUTPUT_BYTES));
-    }
-    if !output.stderr.is_empty() {
-        if !output.stdout.is_empty() {
-            result.push('\n');
-        }
-        result.push_str(&super::truncate_output(&output.stderr, MAX_OUTPUT_BYTES));
-    }
-
-    let _ = write!(result, "\nExit code: {}", output.exit_code);
-
-    if output.exit_code != 0 {
-        return Err(ToolError::ExecutionFailed(result));
-    }
-
-    Ok(result)
 }
 
 // ── Commit message formatting ───────────────────────────────────────
@@ -1518,6 +1493,7 @@ mod tests {
     /// Successful `CmdOutput` with the given stdout.
     fn ok_output(stdout: &str) -> Result<CmdOutput, ToolError> {
         Ok(CmdOutput {
+            command: "stub".to_string(),
             stdout: stdout.to_string(),
             stderr: String::new(),
             exit_code: 0,
@@ -1527,6 +1503,7 @@ mod tests {
     /// Failed `CmdOutput` with the given stderr.
     fn err_output(stderr: &str) -> Result<CmdOutput, ToolError> {
         Ok(CmdOutput {
+            command: "stub".to_string(),
             stdout: String::new(),
             stderr: stderr.to_string(),
             exit_code: 1,
@@ -1551,7 +1528,7 @@ mod tests {
     async fn run_gh_nonzero_exit_returns_error() {
         let (gh, repo) = stub_with_repo(vec![err_output("not found")]);
         let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let result = gh.run_gh(&["pr", "view"], &cwd, "gh pr view").await;
+        let result = gh.run_gh(&["pr", "view"], &cwd).await;
         assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
     }
 
@@ -1559,19 +1536,15 @@ mod tests {
     async fn run_gh_parse_malformed_json_returns_error() {
         let (gh, repo) = stub_with_repo(vec![ok_output("not json")]);
         let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let result: Result<Vec<PullRequest>, _> =
-            gh.run_gh_parse(&["pr", "list"], &cwd, "test").await;
-        assert!(
-            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("failed to parse"))
-        );
+        let result: Result<Vec<PullRequest>, _> = gh.run_gh_parse(&["pr", "list"], &cwd).await;
+        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
     }
 
     #[tokio::test]
     async fn run_gh_parse_nonzero_exit_returns_stderr() {
         let (gh, repo) = stub_with_repo(vec![err_output("permission denied")]);
         let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let result: Result<Vec<PullRequest>, _> =
-            gh.run_gh_parse(&["pr", "list"], &cwd, "test").await;
+        let result: Result<Vec<PullRequest>, _> = gh.run_gh_parse(&["pr", "list"], &cwd).await;
         assert!(
             matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("permission denied"))
         );
@@ -1713,7 +1686,7 @@ URL: https://github.com/o/r/actions/runs/9999
 
 ---
 
-$ gh run view 9999 --log-failed
+$ stub
 test-job  Step failed
 Exit code: 0"
         );
