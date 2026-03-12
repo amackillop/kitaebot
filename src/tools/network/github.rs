@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tracing::debug;
@@ -392,7 +393,7 @@ impl GitHub {
     ///
     /// Appends `--json <fields>` to `args` automatically, so callers
     /// specify only the subcommand flags.
-    async fn run_gh_json<T: serde::de::DeserializeOwned>(
+    async fn run_gh_json<T: DeserializeOwned>(
         &self,
         args: &[&str],
         fields: &str,
@@ -400,7 +401,27 @@ impl GitHub {
         label: &str,
     ) -> Result<T, ToolError> {
         let full_args: Vec<&str> = args.iter().copied().chain(["--json", fields]).collect();
-        let mut cmd = self.gh_cmd(&full_args, cwd);
+        self.run_gh_parse(&full_args, cwd, label).await
+    }
+
+    /// Run `gh api` and deserialize the JSON response.
+    async fn run_gh_api<T: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        cwd: &Path,
+        label: &str,
+    ) -> Result<T, ToolError> {
+        self.run_gh_parse(&["api", endpoint], cwd, label).await
+    }
+
+    /// Run `gh`, check exit code, and deserialize stdout as JSON.
+    async fn run_gh_parse<T: DeserializeOwned>(
+        &self,
+        args: &[&str],
+        cwd: &Path,
+        label: &str,
+    ) -> Result<T, ToolError> {
+        let mut cmd = self.gh_cmd(args, cwd);
         let output = exec_cmd(&mut cmd, label).await?;
         if output.exit_code != 0 {
             return Err(ToolError::ExecutionFailed(format!(
@@ -696,17 +717,13 @@ impl GitHub {
         let cwd = self.resolve_repo_dir(repo_dir)?;
         let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments");
 
-        let label = format!("gh api ...pulls/{pr_number}/comments");
-        let mut cmd = self.gh_cmd(&["api", &endpoint], &cwd);
-        let output = exec_cmd(&mut cmd, &label).await?;
-        if output.exit_code != 0 {
-            return Err(ToolError::ExecutionFailed(format!(
-                "{label}: {}",
-                output.stderr
-            )));
-        }
-        let comments: Vec<DiffComment> = serde_json::from_str(&output.stdout)
-            .map_err(|e| ToolError::ExecutionFailed(format!("failed to parse {label}: {e}")))?;
+        let comments: Vec<DiffComment> = self
+            .run_gh_api(
+                &endpoint,
+                &cwd,
+                &format!("gh api ...pulls/{pr_number}/comments"),
+            )
+            .await?;
 
         if comments.is_empty() {
             return Ok(format!("No inline comments on PR #{pr_number}."));
@@ -754,10 +771,11 @@ impl GitHub {
 // ── Command execution ───────────────────────────────────────────────
 
 /// Raw output from a subprocess.
-struct CmdOutput {
-    stdout: String,
-    stderr: String,
-    exit_code: i32,
+#[derive(Debug)]
+pub struct CmdOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
 }
 
 /// Run a command with timeout and collect output.
