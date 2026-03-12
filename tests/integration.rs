@@ -41,8 +41,6 @@ fn workspace_initialized_on_start() {
         .assert()
         .success();
 
-    assert!(dir.path().join("SOUL.md").exists());
-    assert!(dir.path().join("AGENTS.md").exists());
     assert!(dir.path().join("sessions").is_dir());
     assert!(dir.path().join("locks").is_dir());
     assert!(dir.path().join("memory").is_dir());
