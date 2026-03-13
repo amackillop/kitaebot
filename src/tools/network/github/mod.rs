@@ -24,17 +24,17 @@ mod api;
 mod ci_status;
 mod client;
 mod commit;
+mod git_clone;
 #[cfg(test)]
 mod test_helpers;
 mod types;
 mod url;
 
-use url::{extract_repo_name, to_https_url, validate_name};
-
 pub use api::{GitHubApi, RealGitHubApi};
 pub use ci_status::CiStatus;
 pub use client::GitHubClient;
 pub use commit::Commit;
+pub use git_clone::GitClone;
 use types::{DiffComment, PrReviewsResponse, PullRequest};
 
 use std::fmt::Write;
@@ -56,15 +56,6 @@ use crate::error::ToolError;
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Args {
-    /// Clone a repository into the workspace.
-    Clone {
-        /// Repository URL (HTTPS or SSH). SSH URLs are rewritten to HTTPS
-        /// automatically.
-        url: String,
-        /// Target directory name inside `projects/`. Defaults to the
-        /// repository name derived from the URL.
-        name: Option<String>,
-    },
     /// Push commits to a remote.
     Push {
         /// Repository directory relative to workspace root
@@ -185,7 +176,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
             match args {
-                Args::Clone { url, name } => self.clone_repo(&url, name.as_deref()).await,
                 Args::Push {
                     repo_dir,
                     remote,
@@ -239,37 +229,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
 }
 
 impl<A: GitHubApi> GitHub<A> {
-    /// Clone a repository into `projects/<name>`.
-    async fn clone_repo(&self, url: &str, name: Option<&str>) -> Result<String, ToolError> {
-        let https_url = to_https_url(url)?;
-        let repo_name = match name {
-            Some(n) => validate_name(n)?.to_string(),
-            None => extract_repo_name(&https_url)?,
-        };
-
-        let projects_dir = self.client.workspace_root.join("projects");
-        let target = projects_dir.join(&repo_name);
-
-        if target.exists() {
-            return Err(ToolError::ExecutionFailed(format!(
-                "projects/{repo_name} already exists"
-            )));
-        }
-
-        // Ensure projects/ exists.
-        tokio::fs::create_dir_all(&projects_dir)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("mkdir projects/: {e}")))?;
-
-        self.client
-            .run_git(
-                &["clone", "--", &https_url, &repo_name],
-                &projects_dir,
-                true,
-            )
-            .await
-    }
-
     /// Push commits to a remote.
     async fn push(
         &self,
@@ -489,31 +448,6 @@ mod tests {
             schema.to_string().contains("action"),
             "schema must include action discriminator: {schema}"
         );
-    }
-
-    // ── Clone deserialization ──────────────────────────────────────
-
-    #[test]
-    fn deserialize_clone_args() {
-        let json = serde_json::json!({
-            "action": "clone",
-            "url": "https://github.com/owner/repo.git"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(
-            matches!(args, Args::Clone { url, name } if url.contains("owner/repo") && name.is_none())
-        );
-    }
-
-    #[test]
-    fn deserialize_clone_with_name() {
-        let json = serde_json::json!({
-            "action": "clone",
-            "url": "https://github.com/owner/repo.git",
-            "name": "custom"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(args, Args::Clone { name: Some(n), .. } if n == "custom"));
     }
 
     // ── Push deserialization ────────────────────────────────────────
