@@ -28,6 +28,7 @@ mod git_clone;
 mod pr_comment;
 mod pr_create;
 mod pr_diff_comments;
+mod pr_diff_reply;
 #[cfg(test)]
 mod test_helpers;
 mod types;
@@ -41,6 +42,7 @@ pub use git_clone::GitClone;
 pub use pr_comment::PrComment;
 pub use pr_create::PrCreate;
 pub use pr_diff_comments::PrDiffComments;
+pub use pr_diff_reply::PrDiffReply;
 use types::{PrReviewsResponse, PullRequest};
 
 use std::fmt::Write;
@@ -92,21 +94,6 @@ enum Args {
         repo_dir: String,
         /// PR number.
         pr_number: u64,
-    },
-    /// Reply to an inline review comment.
-    ///
-    /// Use `pr_diff_comments` first to get comment IDs, then reply
-    /// to a specific one. This creates a threaded reply on the same
-    /// line/file, not a top-level PR comment.
-    PrDiffReply {
-        /// Repository directory relative to workspace root.
-        repo_dir: String,
-        /// PR number.
-        pr_number: u64,
-        /// ID of the review comment to reply to (from `pr_diff_comments`).
-        comment_id: u64,
-        /// Reply body (Markdown).
-        body: String,
     },
 }
 
@@ -167,15 +154,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
                     repo_dir,
                     pr_number,
                 } => self.pr_reviews(&repo_dir, pr_number).await,
-                Args::PrDiffReply {
-                    repo_dir,
-                    pr_number,
-                    comment_id,
-                    body,
-                } => {
-                    self.pr_diff_reply(&repo_dir, pr_number, comment_id, &body)
-                        .await
-                }
             }
         })
     }
@@ -296,28 +274,6 @@ impl<A: GitHubApi> GitHub<A> {
 
         Ok(output)
     }
-
-    /// Reply to an inline review comment via the REST API.
-    ///
-    /// Creates a threaded reply on the same file/line as the original
-    /// comment. The `comment_id` comes from the `id` field in the
-    /// `pr_diff_comments` response.
-    async fn pr_diff_reply(
-        &self,
-        repo_dir: &str,
-        pr_number: u64,
-        comment_id: u64,
-        body: &str,
-    ) -> Result<String, ToolError> {
-        let cwd = self.client.resolve_repo_dir(repo_dir)?;
-        let endpoint =
-            format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments/{comment_id}/replies");
-        let body_field = format!("body={body}");
-
-        self.client
-            .run_gh(&["api", &endpoint, "-f", &body_field], &cwd)
-            .await
-    }
 }
 
 #[cfg(test)]
@@ -428,29 +384,6 @@ mod tests {
         });
         let args: Args = serde_json::from_value(json).unwrap();
         assert!(matches!(args, Args::PrReviews { pr_number: 42, .. }));
-    }
-
-    // ── PrDiffReply deserialization ────────────────────────────
-
-    #[test]
-    fn deserialize_pr_diff_reply() {
-        let json = serde_json::json!({
-            "action": "pr_diff_reply",
-            "repo_dir": "projects/myrepo",
-            "pr_number": 5,
-            "comment_id": 123_456,
-            "body": "Fixed in the latest push"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::PrDiffReply {
-                pr_number: 5,
-                comment_id: 123_456,
-                body,
-                ..
-            } if body == "Fixed in the latest push"
-        ));
     }
 
     // ── pr_list ──────────────────────────────────────────────────────
