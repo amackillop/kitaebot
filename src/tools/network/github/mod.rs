@@ -21,6 +21,7 @@
 //! command only.
 
 mod api;
+mod ci_status;
 mod client;
 #[cfg(test)]
 mod test_helpers;
@@ -30,11 +31,12 @@ mod url;
 use url::{extract_repo_name, format_commit_message, to_https_url, validate_name};
 
 pub use api::{GitHubApi, RealGitHubApi};
+pub use ci_status::CiStatus;
 pub use client::GitHubClient;
-use types::{DiffComment, PrReviewsResponse, PullRequest, WorkflowRun};
+use types::{DiffComment, PrReviewsResponse, PullRequest};
 
 use std::fmt::Write;
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -52,14 +54,6 @@ use crate::error::ToolError;
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Args {
-    /// Fetch the latest failed CI run and its failure logs.
-    CiStatus {
-        /// Repository directory relative to workspace root
-        /// (e.g. `"projects/myrepo"`).
-        repo_dir: String,
-        /// Branch to check. Defaults to the currently checked-out branch.
-        branch: Option<String>,
-    },
     /// Clone a repository into the workspace.
     Clone {
         /// Repository URL (HTTPS or SSH). SSH URLs are rewritten to HTTPS
@@ -168,14 +162,12 @@ enum Args {
 /// Delegates to [`GitHubClient`] for subprocess plumbing and wraps it
 /// with the [`Tool`] trait. Will be replaced by per-action tools.
 pub struct GitHub<A> {
-    client: GitHubClient<A>,
+    client: Arc<GitHubClient<A>>,
 }
 
 impl<A: GitHubApi> GitHub<A> {
-    pub fn new(api: A, workspace_root: impl Into<PathBuf>, co_authors: Vec<String>) -> Self {
-        Self {
-            client: GitHubClient::new(api, workspace_root, co_authors),
-        }
+    pub fn new(client: Arc<GitHubClient<A>>) -> Self {
+        Self { client }
     }
 }
 
@@ -201,9 +193,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
             match args {
-                Args::CiStatus { repo_dir, branch } => {
-                    self.ci_status(&repo_dir, branch.as_deref()).await
-                }
                 Args::Clone { url, name } => self.clone_repo(&url, name.as_deref()).await,
                 Args::Push {
                     repo_dir,
@@ -259,56 +248,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
 }
 
 impl<A: GitHubApi> GitHub<A> {
-    /// Fetch the latest failed CI run and its failure logs.
-    async fn ci_status(&self, repo_dir: &str, branch: Option<&str>) -> Result<String, ToolError> {
-        let cwd = self.client.resolve_repo_dir(repo_dir)?;
-
-        let branch_name = match branch {
-            Some(b) => b.to_string(),
-            None => self.client.current_branch(&cwd).await?,
-        };
-
-        // Find the latest failed run on the branch.
-        let runs: Vec<WorkflowRun> = self
-            .client
-            .run_gh_json(
-                &[
-                    "run",
-                    "list",
-                    "--branch",
-                    &branch_name,
-                    "--status",
-                    "failure",
-                    "--limit",
-                    "1",
-                ],
-                "databaseId,displayTitle,createdAt,url,workflowName",
-                &cwd,
-            )
-            .await?;
-
-        let run = runs.first().ok_or_else(|| {
-            ToolError::ExecutionFailed(format!("no failed runs on branch `{branch_name}`"))
-        })?;
-
-        let id_str = run.database_id.to_string();
-        let logs = self
-            .client
-            .run_gh(&["run", "view", &id_str, "--log-failed"], &cwd)
-            .await?;
-
-        let mut output = format!(
-            "Run #{}: \"{}\" ({})\n\
-             Created: {}\n\
-             URL: {}\n\n\
-             ---\n\n",
-            run.database_id, run.display_title, run.workflow_name, run.created_at, run.url
-        );
-        output.push_str(&logs);
-
-        Ok(output)
-    }
-
     /// Clone a repository into `projects/<name>`.
     async fn clone_repo(&self, url: &str, name: Option<&str>) -> Result<String, ToolError> {
         let https_url = to_https_url(url)?;
@@ -568,41 +507,6 @@ mod tests {
             schema.to_string().contains("action"),
             "schema must include action discriminator: {schema}"
         );
-    }
-
-    // ── CiStatus deserialization ──────────────────────────────────
-
-    #[test]
-    fn deserialize_ci_status_minimal() {
-        let json = serde_json::json!({
-            "action": "ci_status",
-            "repo_dir": "projects/myrepo"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::CiStatus {
-                repo_dir,
-                branch: None,
-            } if repo_dir == "projects/myrepo"
-        ));
-    }
-
-    #[test]
-    fn deserialize_ci_status_with_branch() {
-        let json = serde_json::json!({
-            "action": "ci_status",
-            "repo_dir": "projects/myrepo",
-            "branch": "feature-xyz"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::CiStatus {
-                branch: Some(b),
-                ..
-            } if b == "feature-xyz"
-        ));
     }
 
     // ── Clone deserialization ──────────────────────────────────────
@@ -945,46 +849,5 @@ Outdated"
         let (gh, repo) = stub_with_repo(vec![ok_output("[]")]);
         let result = gh.pr_diff_comments(&repo, 5).await.unwrap();
         assert_eq!(result, "No inline comments on PR #5.");
-    }
-
-    // ── ci_status ────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn ci_status_formats_run_and_logs() {
-        let runs_json = serde_json::to_string(&serde_json::json!([{
-            "databaseId": 9999,
-            "displayTitle": "CI",
-            "createdAt": "2025-01-15T10:00:00Z",
-            "url": "https://github.com/o/r/actions/runs/9999",
-            "workflowName": "test"
-        }]))
-        .unwrap();
-
-        let log_output = "test-job  Step failed";
-
-        let (gh, repo) = stub_with_repo(vec![ok_output(&runs_json), ok_output(log_output)]);
-        let result = gh.ci_status(&repo, Some("main")).await.unwrap();
-        assert_eq!(
-            result,
-            "\
-Run #9999: \"CI\" (test)
-Created: 2025-01-15T10:00:00Z
-URL: https://github.com/o/r/actions/runs/9999
-
----
-
-$ stub
-test-job  Step failed
-Exit code: 0"
-        );
-    }
-
-    #[tokio::test]
-    async fn ci_status_no_failed_runs() {
-        let (gh, repo) = stub_with_repo(vec![ok_output("[]")]);
-        let result = gh.ci_status(&repo, Some("main")).await;
-        assert!(
-            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("no failed runs"))
-        );
     }
 }

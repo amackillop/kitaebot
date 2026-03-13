@@ -68,15 +68,8 @@ pub fn err_output(stderr: &str) -> Result<CmdOutput, ToolError> {
 pub fn stub_with_repo(
     responses: Vec<Result<CmdOutput, ToolError>>,
 ) -> (GitHub<StubGitHubApi>, String) {
-    let dir = tempfile::tempdir().unwrap();
-    let repo = "projects/r";
-    std::fs::create_dir_all(dir.path().join(repo).join(".git")).unwrap();
-    // Leak the TempDir so it lives for the test duration.
-    let path = dir.into_path();
-    (
-        GitHub::new(StubGitHubApi::new(responses), &path, vec![]),
-        repo.to_string(),
-    )
+    let (client, repo) = stub_arc_with_repo(responses);
+    (GitHub::new(client), repo)
 }
 
 /// Build a stub GitHubClient with a fake `.git` dir so `resolve_repo_dir` passes.
@@ -91,4 +84,14 @@ pub fn stub_client_with_repo(
         GitHubClient::new(StubGitHubApi::new(responses), &path, vec![]),
         repo.to_string(),
     )
+}
+
+/// Build a stub `Arc<GitHubClient>` with a fake `.git` dir.
+///
+/// Used by individual tool tests that hold `Arc<GitHubClient<A>>`.
+pub fn stub_arc_with_repo(
+    responses: Vec<Result<CmdOutput, ToolError>>,
+) -> (std::sync::Arc<GitHubClient<StubGitHubApi>>, String) {
+    let (client, repo) = stub_client_with_repo(responses);
+    (std::sync::Arc::new(client), repo)
 }

@@ -7,12 +7,14 @@ mod github;
 mod web_fetch;
 mod web_search;
 
-pub use github::{GitHub, RealGitHubApi};
+pub use github::{GitHub, GitHubClient, RealGitHubApi};
 pub use web_fetch::WebFetch;
 pub use web_search::WebSearch;
 
 // Re-export parent utilities so child modules can use `super::`.
 pub(crate) use super::{Tool, truncate_output};
+
+use std::sync::Arc;
 
 use tracing::error;
 
@@ -33,11 +35,13 @@ pub fn build(
 
     if let Some(token) = github_token {
         let api = RealGitHubApi::new(token);
-        tools.push(Box::new(GitHub::new(
+        let gh = Arc::new(GitHubClient::new(
             api,
             workspace.path(),
             config.git.co_authors.clone(),
-        )));
+        ));
+        tools.push(Box::new(GitHub::new(Arc::clone(&gh))));
+        tools.push(Box::new(github::CiStatus(gh)));
     }
 
     tools.push(Box::new(
