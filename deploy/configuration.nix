@@ -10,6 +10,9 @@
 #
 # Update the sharedDirectories source path to match your checkout.
 { pkgs, ... }:
+let
+  lightpanda = pkgs.callPackage ../nix/lightpanda.nix { };
+in
 {
   kitaebot = {
     dev = false;
@@ -27,6 +30,7 @@
       git
       gh
       which
+      lightpanda
     ];
     gitConfig = {
       name = "kitaebot";

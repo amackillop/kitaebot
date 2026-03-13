@@ -12,7 +12,8 @@ check-nix:
     statix check flake.nix
     statix check vm/
     statix check deploy/
-    deadnix flake.nix vm/ deploy/
+    statix check nix/
+    deadnix flake.nix vm/ deploy/ nix/
 
 # Build the project
 build:

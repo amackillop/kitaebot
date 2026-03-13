@@ -74,6 +74,8 @@
           );
         };
 
+        packages.lightpanda = pkgs.callPackage ./nix/lightpanda.nix { };
+
         packages.default = craneLib.buildPackage (
           commonArgs
           // {
