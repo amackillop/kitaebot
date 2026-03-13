@@ -40,9 +40,6 @@ mod test_helpers;
 mod types;
 mod url;
 
-// Re-export parent utility so tool files can `use super::Tool`.
-pub(crate) use super::Tool;
-
 pub use ci_status::CiStatus;
 pub use client::GitHubClient;
 pub use commit::Commit;
@@ -54,3 +51,83 @@ pub use pr_diff_reply::PrDiffReply;
 pub use pr_list::PrList;
 pub use pr_reviews::PrReviews;
 pub use push::Push;
+
+use std::path::{Path, PathBuf};
+
+use crate::error::ToolError;
+
+// Re-export parent utility so tool files can `use super::Tool`.
+pub(crate) use super::Tool;
+
+/// Resolve and validate a repo directory within the workspace.
+///
+/// Rejects path traversal (`..`), absolute paths, paths that escape
+/// the workspace root, and directories without a `.git` subdirectory.
+pub(super) fn resolve_repo_dir(
+    workspace_root: &Path,
+    repo_dir: &str,
+) -> Result<PathBuf, ToolError> {
+    if repo_dir.contains("..") {
+        return Err(ToolError::Blocked(
+            "repo_dir: path traversal detected".into(),
+        ));
+    }
+    if Path::new(repo_dir).is_absolute() {
+        return Err(ToolError::Blocked(
+            "repo_dir: absolute paths not allowed".into(),
+        ));
+    }
+
+    let resolved = workspace_root.join(repo_dir);
+    if !resolved.starts_with(workspace_root) {
+        return Err(ToolError::Blocked("repo_dir: escapes workspace".into()));
+    }
+    if !resolved.join(".git").is_dir() {
+        return Err(ToolError::InvalidArguments(format!(
+            "{repo_dir} is not a git repository"
+        )));
+    }
+
+    Ok(resolved)
+}
+
+#[cfg(test)]
+mod resolve_repo_dir_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_traversal() {
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            resolve_repo_dir(workspace.path(), "../escape"),
+            Err(ToolError::Blocked(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_absolute() {
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            resolve_repo_dir(workspace.path(), "/etc"),
+            Err(ToolError::Blocked(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_repo() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("projects/notrepo")).unwrap();
+        assert!(matches!(
+            resolve_repo_dir(workspace.path(), "projects/notrepo"),
+            Err(ToolError::InvalidArguments(_))
+        ));
+    }
+
+    #[test]
+    fn accepts_valid_repo() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("projects/myrepo/.git")).unwrap();
+        let resolved = resolve_repo_dir(workspace.path(), "projects/myrepo").unwrap();
+        assert!(resolved.ends_with("projects/myrepo"));
+    }
+}

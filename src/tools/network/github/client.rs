@@ -45,28 +45,7 @@ impl<R: CliRunner> GitHubClient<R> {
 
     /// Resolve and validate a repo directory within the workspace.
     pub fn resolve_repo_dir(&self, repo_dir: &str) -> Result<PathBuf, ToolError> {
-        if repo_dir.contains("..") {
-            return Err(ToolError::Blocked(
-                "repo_dir: path traversal detected".into(),
-            ));
-        }
-        if Path::new(repo_dir).is_absolute() {
-            return Err(ToolError::Blocked(
-                "repo_dir: absolute paths not allowed".into(),
-            ));
-        }
-
-        let resolved = self.workspace_root.join(repo_dir);
-        if !resolved.starts_with(&self.workspace_root) {
-            return Err(ToolError::Blocked("repo_dir: escapes workspace".into()));
-        }
-        if !resolved.join(".git").is_dir() {
-            return Err(ToolError::InvalidArguments(format!(
-                "{repo_dir} is not a git repository"
-            )));
-        }
-
-        Ok(resolved)
+        super::resolve_repo_dir(&self.workspace_root, repo_dir)
     }
 
     /// Get the current branch name from a git working directory.
@@ -219,49 +198,8 @@ impl AskPass {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{StubCliRunner, err_output, ok_output, stub_client_with_repo};
-    use super::*;
+    use super::super::test_helpers::{err_output, ok_output, stub_client_with_repo};
     use crate::error::ToolError;
-
-    // ── Repo dir validation ─────────────────────────────────────────
-
-    #[test]
-    fn resolve_repo_dir_rejects_traversal() {
-        let client = make_client(tempfile::tempdir().unwrap().path());
-        assert!(matches!(
-            client.resolve_repo_dir("../escape"),
-            Err(ToolError::Blocked(_))
-        ));
-    }
-
-    #[test]
-    fn resolve_repo_dir_rejects_absolute() {
-        let client = make_client(tempfile::tempdir().unwrap().path());
-        assert!(matches!(
-            client.resolve_repo_dir("/etc"),
-            Err(ToolError::Blocked(_))
-        ));
-    }
-
-    #[test]
-    fn resolve_repo_dir_rejects_non_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("projects/notrepo")).unwrap();
-        let client = make_client(dir.path());
-        assert!(matches!(
-            client.resolve_repo_dir("projects/notrepo"),
-            Err(ToolError::InvalidArguments(_))
-        ));
-    }
-
-    #[test]
-    fn resolve_repo_dir_accepts_valid_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("projects/myrepo/.git")).unwrap();
-        let client = make_client(dir.path());
-        let resolved = client.resolve_repo_dir("projects/myrepo").unwrap();
-        assert!(resolved.ends_with("projects/myrepo"));
-    }
 
     // ── run_gh / run_gh_parse ────────────────────────────────────────
 
@@ -311,14 +249,5 @@ mod tests {
         assert!(
             matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("current branch"))
         );
-    }
-
-    fn make_client(workspace: &std::path::Path) -> GitHubClient<StubCliRunner> {
-        GitHubClient::new(
-            StubCliRunner::new(vec![]),
-            Secret::test("fake"),
-            workspace,
-            vec![],
-        )
     }
 }
