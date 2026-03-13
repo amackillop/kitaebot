@@ -282,7 +282,7 @@ in
     };
 
     # Git — configured system-wide via /etc/gitconfig so all child
-    # processes (exec tool, github tool) inherit it automatically.
+    # processes (exec tool, github tools) inherit it automatically.
     # safe.directory = "*" disables the ownership check; the VM is the
     # trust boundary, not filesystem uid matching.
     programs.git = {

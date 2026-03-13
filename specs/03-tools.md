@@ -67,7 +67,7 @@ Commands are checked against deny patterns before execution:
 - `> /dev/` — device writes
 - `shutdown`, `reboot` — system power
 - Fork bomb pattern
-- `git clone`, `git push` — must use GitHub tool
+- `git clone`, `git push`, `git commit` — must use dedicated GitHub tools (`github_clone`, `github_push`, `github_commit`)
 - `git reset --hard` — destructive git operations
 - `gpg --export-secret`, `.gnupg/` — GPG keyring access
 - `gpgsign=false` — cannot override commit signing config
@@ -290,6 +290,52 @@ Direct HTTP POST (not via `Provider` trait — avoids circular dependency). Owns
 | Model | `perplexity/sonar` | `tools.web_search.model` |
 | Max tokens | 1024 | `tools.web_search.max_tokens` |
 | Timeout | 30 seconds | `tools.web_search.timeout_secs` |
+
+### GitHub Tools — Authenticated Git & PR Operations
+
+Ten standalone tools for git and GitHub CLI operations. Each tool holds
+`Arc<GitHubClient<A>>` and owns only its business logic. The client
+provides plumbing (`run_gh`, `run_git`, `resolve_repo_dir`,
+`current_branch`).
+
+Gated behind `github.enabled` in config. When disabled (or no token),
+none of the tools are registered.
+
+#### Token Injection
+
+The GitHub PAT never enters environment variables or the context window.
+For `gh` commands it is passed as `GH_TOKEN`. For `git clone`/`push`, a
+temporary `GIT_ASKPASS` helper script is written, used for one
+subprocess, then deleted.
+
+#### Architecture
+
+`GitHubApi` is the subprocess boundary trait. `RealGitHubApi` spawns
+real processes; `StubGitHubApi` yields pre-enqueued responses for tests.
+`GitHubClient<A>` carries workspace root, co-authors, and the API
+handle. Individual tools are zero-config structs wrapping
+`Arc<GitHubClient<A>>`.
+
+#### Tools
+
+| Tool | Description |
+|------|-------------|
+| `github_ci_status` | Check CI status for a git ref |
+| `github_clone` | Clone a repository into the workspace |
+| `github_commit` | Stage and commit changes with co-author trailers |
+| `github_push` | Push commits to a remote |
+| `github_pr_create` | Create a pull request |
+| `github_pr_list` | List pull requests (open/closed/all) |
+| `github_pr_reviews` | Fetch reviews for a pull request |
+| `github_pr_comment` | Post a comment on a pull request |
+| `github_pr_diff_comments` | Fetch inline diff comments on a PR |
+| `github_pr_diff_reply` | Reply to an inline diff comment |
+
+All tools take `repo_dir` (relative to workspace root) and validate it
+via `GitHubClient::resolve_repo_dir` — rejects traversal, absolute
+paths, and directories without `.git`.
+
+---
 
 ## Error Handling
 

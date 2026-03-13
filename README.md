@@ -39,7 +39,16 @@ Typed tools replace a generic shell. The LLM declares intent via parameters inst
 | `grep` | Search file contents (Ripgrep backend) |
 | `web_fetch` | HTTP GET (timeout, response size limit) |
 | `web_search` | LLM-powered web search (Perplexity) |
-| `github` | Clone, commit, push, create PRs, list PRs, fetch reviews, post comments |
+| `github_clone` | Clone a repository |
+| `github_commit` | Commit staged changes |
+| `github_push` | Push commits to a remote |
+| `github_pr_create` | Create a pull request |
+| `github_pr_list` | List pull requests |
+| `github_pr_reviews` | Fetch PR reviews |
+| `github_pr_comment` | Post a PR comment |
+| `github_pr_diff_comments` | Fetch PR diff comments |
+| `github_pr_diff_reply` | Reply to a PR diff comment |
+| `github_ci_status` | Check CI status for a ref |
 
 All tool outputs pass through `safety::check_tool_output` and execute inside the Landlock sandbox.
 
