@@ -327,18 +327,18 @@ const DENY_RULES: &[DenyRule] = &[
         pattern: r"\bat\b\s",
         guidance: BLOCKED,
     },
-    // Git operations that must go through their dedicated GitHub tools
+    // Git operations that must go through their dedicated tools
     DenyRule {
         pattern: r"\bgit\b\s+clone\b",
-        guidance: "use the github_clone tool",
+        guidance: "use the git_clone tool",
     },
     DenyRule {
         pattern: r"\bgit\b\s+push\b",
-        guidance: "use the github_push tool",
+        guidance: "use the git_push tool",
     },
     DenyRule {
         pattern: r"\bgit\b\s+commit\b",
-        guidance: "use the github_commit tool",
+        guidance: "use the git_commit tool",
     },
     // Git signing is configured via programs.git with an absolute gpg path.
     // The agent must not override it.
@@ -721,15 +721,15 @@ mod tests {
     fn test_guidance_for_git_ops() {
         assert_eq!(
             blocked_reason("git clone https://github.com/o/r"),
-            Some("use the github_clone tool"),
+            Some("use the git_clone tool"),
         );
         assert_eq!(
             blocked_reason("git push origin main"),
-            Some("use the github_push tool"),
+            Some("use the git_push tool"),
         );
         assert_eq!(
             blocked_reason("git commit -m 'fix'"),
-            Some("use the github_commit tool"),
+            Some("use the git_commit tool"),
         );
         assert_eq!(
             blocked_reason("cat .config/gh/hosts.yml"),

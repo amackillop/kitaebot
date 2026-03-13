@@ -1,4 +1,4 @@
-//! `github_commit` tool — commit staged changes with co-author trailers.
+//! `git_commit` tool — commit staged changes with co-author trailers.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::client::GitHubClient;
+use super::git_cli::GitCli;
 use crate::error::ToolError;
 use crate::tools::cli_runner::CliRunner;
 
@@ -20,11 +20,11 @@ struct Args {
     message: String,
 }
 
-pub struct Commit<R>(pub Arc<GitHubClient<R>>);
+pub struct Commit<R>(pub Arc<GitCli<R>>);
 
 impl<R: CliRunner> Tool for Commit<R> {
     fn name(&self) -> &'static str {
-        "github_commit"
+        "git_commit"
     }
 
     fn description(&self) -> &'static str {
@@ -50,7 +50,7 @@ impl<R: CliRunner> Tool for Commit<R> {
 impl<R: CliRunner> Commit<R> {
     async fn run(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
-        let full_message = format_commit_message(message, &self.0.co_authors);
+        let full_message = format_commit_message(message, self.0.co_authors());
         self.0
             .run_git(&["commit", "-m", &full_message], &cwd, false)
             .await

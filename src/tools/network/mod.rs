@@ -7,7 +7,7 @@ mod github;
 mod web_fetch;
 mod web_search;
 
-pub use github::GitHubClient;
+pub use github::{GitCli, GitHubClient};
 pub use web_fetch::WebFetch;
 pub use web_search::WebSearch;
 
@@ -35,22 +35,30 @@ pub fn build(
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
     if let Some(token) = github_token {
+        let git = Arc::new(GitCli::new(
+            RealCliRunner,
+            token.clone(),
+            workspace.path(),
+            config.git.co_authors.clone(),
+        ));
         let gh = Arc::new(GitHubClient::new(
             RealCliRunner,
             token,
             workspace.path(),
             config.git.co_authors.clone(),
         ));
+
+        tools.push(Box::new(github::Commit(Arc::clone(&git))));
+        tools.push(Box::new(github::GitClone(Arc::clone(&git))));
+        tools.push(Box::new(github::Push(Arc::clone(&git))));
+
         tools.push(Box::new(github::CiStatus(Arc::clone(&gh))));
-        tools.push(Box::new(github::Commit(Arc::clone(&gh))));
-        tools.push(Box::new(github::GitClone(Arc::clone(&gh))));
         tools.push(Box::new(github::PrComment(Arc::clone(&gh))));
         tools.push(Box::new(github::PrCreate(Arc::clone(&gh))));
         tools.push(Box::new(github::PrDiffComments(Arc::clone(&gh))));
         tools.push(Box::new(github::PrDiffReply(Arc::clone(&gh))));
         tools.push(Box::new(github::PrList(Arc::clone(&gh))));
-        tools.push(Box::new(github::PrReviews(Arc::clone(&gh))));
-        tools.push(Box::new(github::Push(gh)));
+        tools.push(Box::new(github::PrReviews(gh)));
     }
 
     tools.push(Box::new(

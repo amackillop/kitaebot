@@ -1,4 +1,4 @@
-//! `github_push` tool — push commits to a remote.
+//! `git_push` tool — push commits to a remote.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::client::GitHubClient;
+use super::git_cli::GitCli;
 use crate::error::ToolError;
 use crate::tools::cli_runner::CliRunner;
 
@@ -26,11 +26,11 @@ struct Args {
     set_upstream: bool,
 }
 
-pub struct Push<R>(pub Arc<GitHubClient<R>>);
+pub struct Push<R>(pub Arc<GitCli<R>>);
 
 impl<R: CliRunner> Tool for Push<R> {
     fn name(&self) -> &'static str {
-        "github_push"
+        "git_push"
     }
 
     fn description(&self) -> &'static str {

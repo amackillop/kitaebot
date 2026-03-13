@@ -1,4 +1,4 @@
-//! `github_clone` tool — clone a repository into the workspace.
+//! `git_clone` tool — clone a repository into the workspace.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::client::GitHubClient;
+use super::git_cli::GitCli;
 use super::url::{extract_repo_name, to_https_url, validate_name};
 use crate::error::ToolError;
 use crate::tools::cli_runner::CliRunner;
@@ -23,11 +23,11 @@ struct Args {
     name: Option<String>,
 }
 
-pub struct GitClone<R>(pub Arc<GitHubClient<R>>);
+pub struct GitClone<R>(pub Arc<GitCli<R>>);
 
 impl<R: CliRunner> Tool for GitClone<R> {
     fn name(&self) -> &'static str {
-        "github_clone"
+        "git_clone"
     }
 
     fn description(&self) -> &'static str {
@@ -58,7 +58,7 @@ impl<R: CliRunner> GitClone<R> {
             None => extract_repo_name(&https_url)?,
         };
 
-        let projects_dir = self.0.workspace_root.join("projects");
+        let projects_dir = self.0.workspace_root().join("projects");
         let target = projects_dir.join(&repo_name);
 
         if target.exists() {

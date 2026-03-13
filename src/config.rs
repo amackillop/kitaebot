@@ -382,8 +382,8 @@ mod tests {
 
     #[test]
     fn tools_disabled_parse() {
-        let cfg = load_toml("[tools]\ndisabled = [\"web_search\", \"github_push\"]\n").unwrap();
-        assert_eq!(cfg.tools.disabled, vec!["web_search", "github_push"]);
+        let cfg = load_toml("[tools]\ndisabled = [\"web_search\", \"git_push\"]\n").unwrap();
+        assert_eq!(cfg.tools.disabled, vec!["web_search", "git_push"]);
     }
 
     #[test]
