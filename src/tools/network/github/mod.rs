@@ -29,6 +29,7 @@ mod pr_comment;
 mod pr_create;
 mod pr_diff_comments;
 mod pr_diff_reply;
+mod pr_list;
 #[cfg(test)]
 mod test_helpers;
 mod types;
@@ -43,7 +44,8 @@ pub use pr_comment::PrComment;
 pub use pr_create::PrCreate;
 pub use pr_diff_comments::PrDiffComments;
 pub use pr_diff_reply::PrDiffReply;
-use types::{PrReviewsResponse, PullRequest};
+pub use pr_list::PrList;
+use types::PrReviewsResponse;
 
 use std::fmt::Write;
 use std::sync::Arc;
@@ -76,13 +78,6 @@ enum Args {
         /// Set upstream tracking (`--set-upstream`).
         #[serde(default)]
         set_upstream: bool,
-    },
-    /// List pull requests.
-    PrList {
-        /// Repository directory relative to workspace root.
-        repo_dir: String,
-        /// Filter by state: `"open"` (default), `"closed"`, `"merged"`, `"all"`.
-        state: Option<String>,
     },
     /// Fetch top-level review verdicts and PR conversation comments.
     ///
@@ -149,7 +144,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
                     )
                     .await
                 }
-                Args::PrList { repo_dir, state } => self.pr_list(&repo_dir, state.as_deref()).await,
                 Args::PrReviews {
                     repo_dir,
                     pr_number,
@@ -184,39 +178,6 @@ impl<A: GitHubApi> GitHub<A> {
         }
 
         self.client.run_git(&args, &cwd, true).await
-    }
-
-    /// List pull requests via `gh pr list`.
-    async fn pr_list(&self, repo_dir: &str, state: Option<&str>) -> Result<String, ToolError> {
-        let cwd = self.client.resolve_repo_dir(repo_dir)?;
-
-        let state = state.unwrap_or("open");
-        let valid_states = ["open", "closed", "merged", "all"];
-        if !valid_states.contains(&state) {
-            return Err(ToolError::InvalidArguments(format!(
-                "invalid state: {state} (expected one of: {})",
-                valid_states.join(", ")
-            )));
-        }
-
-        let prs: Vec<PullRequest> = self
-            .client
-            .run_gh_json(
-                &["pr", "list", "--state", state],
-                "number,title,state,url",
-                &cwd,
-            )
-            .await?;
-
-        if prs.is_empty() {
-            return Ok(format!("No {state} pull requests."));
-        }
-
-        Ok(prs
-            .iter()
-            .map(|pr| format!("#{} {} [{}]\n  {}", pr.number, pr.title, pr.state, pr.url))
-            .collect::<Vec<_>>()
-            .join("\n"))
     }
 
     /// Fetch reviews and comments for a pull request via `gh pr view`.
@@ -334,45 +295,6 @@ mod tests {
         ));
     }
 
-    // ── PrList deserialization ───────────────────────────────────
-
-    #[test]
-    fn deserialize_pr_list_minimal() {
-        let json = serde_json::json!({
-            "action": "pr_list",
-            "repo_dir": "projects/myrepo"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::PrList { repo_dir, state: None } if repo_dir == "projects/myrepo"
-        ));
-    }
-
-    #[test]
-    fn deserialize_pr_list_with_state() {
-        let json = serde_json::json!({
-            "action": "pr_list",
-            "repo_dir": "projects/myrepo",
-            "state": "closed"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::PrList { state: Some(s), .. } if s == "closed"
-        ));
-    }
-
-    #[test]
-    fn pr_list_rejects_invalid_state() {
-        let (gh, repo) = stub_with_repo(vec![]);
-
-        let result = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(gh.pr_list(&repo, Some("bogus")));
-        assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
-    }
-
     // ── PrReviews deserialization ───────────────────────────────
 
     #[test]
@@ -384,35 +306,6 @@ mod tests {
         });
         let args: Args = serde_json::from_value(json).unwrap();
         assert!(matches!(args, Args::PrReviews { pr_number: 42, .. }));
-    }
-
-    // ── pr_list ──────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn pr_list_formats_output() {
-        let json = serde_json::to_string(&serde_json::json!([
-            {"number": 1, "title": "Fix bug", "state": "OPEN", "url": "https://github.com/o/r/pull/1"},
-            {"number": 2, "title": "Add feature", "state": "OPEN", "url": "https://github.com/o/r/pull/2"},
-        ]))
-        .unwrap();
-
-        let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
-        let result = gh.pr_list(&repo, None).await.unwrap();
-        assert_eq!(
-            result,
-            "\
-#1 Fix bug [OPEN]
-  https://github.com/o/r/pull/1
-#2 Add feature [OPEN]
-  https://github.com/o/r/pull/2"
-        );
-    }
-
-    #[tokio::test]
-    async fn pr_list_empty_response() {
-        let (gh, repo) = stub_with_repo(vec![ok_output("[]")]);
-        let result = gh.pr_list(&repo, None).await.unwrap();
-        assert_eq!(result, "No open pull requests.");
     }
 
     // ── pr_reviews ───────────────────────────────────────────────────
