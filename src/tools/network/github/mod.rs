@@ -21,20 +21,21 @@
 //! command only.
 
 mod api;
+mod client;
 mod types;
 mod url;
 
 use url::{extract_repo_name, format_commit_message, to_https_url, validate_name};
 
 pub use api::{GitHubApi, RealGitHubApi};
+pub use client::GitHubClient;
 use types::{DiffComment, PrReviewsResponse, PullRequest, WorkflowRun};
 
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -160,22 +161,18 @@ enum Args {
 
 // ── Business logic layer ────────────────────────────────────────────
 
-/// Authenticated GitHub operations.
+/// Authenticated GitHub operations (temporary monolithic tool).
 ///
-/// Generic over [`GitHubApi`] so tests can substitute a stub without
-/// spawning real subprocesses.
+/// Delegates to [`GitHubClient`] for subprocess plumbing and wraps it
+/// with the [`Tool`] trait. Will be replaced by per-action tools.
 pub struct GitHub<A> {
-    workspace_root: PathBuf,
-    api: A,
-    co_authors: Vec<String>,
+    client: GitHubClient<A>,
 }
 
 impl<A: GitHubApi> GitHub<A> {
     pub fn new(api: A, workspace_root: impl Into<PathBuf>, co_authors: Vec<String>) -> Self {
         Self {
-            workspace_root: workspace_root.into(),
-            api,
-            co_authors,
+            client: GitHubClient::new(api, workspace_root, co_authors),
         }
     }
 }
@@ -260,113 +257,18 @@ impl<A: GitHubApi> Tool for GitHub<A> {
 }
 
 impl<A: GitHubApi> GitHub<A> {
-    /// Run a git command, format output as envelope for the LLM.
-    async fn run_git(
-        &self,
-        args: &[&str],
-        cwd: &Path,
-        authenticated: bool,
-    ) -> Result<String, ToolError> {
-        self.api.exec_git(args, cwd, authenticated).await?.format()
-    }
-
-    /// Run a `gh` command, format output as envelope for the LLM.
-    async fn run_gh(&self, args: &[&str], cwd: &Path) -> Result<String, ToolError> {
-        self.api.exec_gh(args, cwd).await?.format()
-    }
-
-    /// Run `gh` with `--json <fields>` and deserialize the response.
-    ///
-    /// Appends `--json <fields>` to `args` automatically, so callers
-    /// specify only the subcommand flags.
-    async fn run_gh_json<T: DeserializeOwned>(
-        &self,
-        args: &[&str],
-        fields: &str,
-        cwd: &Path,
-    ) -> Result<T, ToolError> {
-        let full_args: Vec<&str> = args.iter().copied().chain(["--json", fields]).collect();
-        self.run_gh_parse(&full_args, cwd).await
-    }
-
-    /// Run `gh api` and deserialize the JSON response.
-    async fn run_gh_api<T: DeserializeOwned>(
-        &self,
-        endpoint: &str,
-        cwd: &Path,
-    ) -> Result<T, ToolError> {
-        self.run_gh_parse(&["api", endpoint], cwd).await
-    }
-
-    /// Run `gh`, check exit code, and deserialize stdout as JSON.
-    async fn run_gh_parse<T: DeserializeOwned>(
-        &self,
-        args: &[&str],
-        cwd: &Path,
-    ) -> Result<T, ToolError> {
-        let output = self.api.exec_gh(args, cwd).await?;
-        if output.exit_code != 0 {
-            return Err(ToolError::ExecutionFailed(format!(
-                "{}: {}",
-                output.command, output.stderr
-            )));
-        }
-        serde_json::from_str(&output.stdout)
-            .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", output.command)))
-    }
-
-    /// Resolve and validate a repo directory within the workspace.
-    fn resolve_repo_dir(&self, repo_dir: &str) -> Result<PathBuf, ToolError> {
-        if repo_dir.contains("..") {
-            return Err(ToolError::Blocked(
-                "repo_dir: path traversal detected".into(),
-            ));
-        }
-        if Path::new(repo_dir).is_absolute() {
-            return Err(ToolError::Blocked(
-                "repo_dir: absolute paths not allowed".into(),
-            ));
-        }
-
-        let resolved = self.workspace_root.join(repo_dir);
-        if !resolved.starts_with(&self.workspace_root) {
-            return Err(ToolError::Blocked("repo_dir: escapes workspace".into()));
-        }
-        if !resolved.join(".git").is_dir() {
-            return Err(ToolError::InvalidArguments(format!(
-                "{repo_dir} is not a git repository"
-            )));
-        }
-
-        Ok(resolved)
-    }
-
-    /// Get the current branch name from a git working directory.
-    async fn current_branch(&self, cwd: &Path) -> Result<String, ToolError> {
-        let output = self
-            .api
-            .exec_git(&["rev-parse", "--abbrev-ref", "HEAD"], cwd, false)
-            .await?;
-        if output.exit_code != 0 {
-            return Err(ToolError::ExecutionFailed(format!(
-                "failed to get current branch: {}",
-                output.stderr
-            )));
-        }
-        Ok(output.stdout.trim().to_string())
-    }
-
     /// Fetch the latest failed CI run and its failure logs.
     async fn ci_status(&self, repo_dir: &str, branch: Option<&str>) -> Result<String, ToolError> {
-        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let cwd = self.client.resolve_repo_dir(repo_dir)?;
 
         let branch_name = match branch {
             Some(b) => b.to_string(),
-            None => self.current_branch(&cwd).await?,
+            None => self.client.current_branch(&cwd).await?,
         };
 
         // Find the latest failed run on the branch.
         let runs: Vec<WorkflowRun> = self
+            .client
             .run_gh_json(
                 &[
                     "run",
@@ -389,6 +291,7 @@ impl<A: GitHubApi> GitHub<A> {
 
         let id_str = run.database_id.to_string();
         let logs = self
+            .client
             .run_gh(&["run", "view", &id_str, "--log-failed"], &cwd)
             .await?;
 
@@ -412,7 +315,7 @@ impl<A: GitHubApi> GitHub<A> {
             None => extract_repo_name(&https_url)?,
         };
 
-        let projects_dir = self.workspace_root.join("projects");
+        let projects_dir = self.client.workspace_root.join("projects");
         let target = projects_dir.join(&repo_name);
 
         if target.exists() {
@@ -426,12 +329,13 @@ impl<A: GitHubApi> GitHub<A> {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("mkdir projects/: {e}")))?;
 
-        self.run_git(
-            &["clone", "--", &https_url, &repo_name],
-            &projects_dir,
-            true,
-        )
-        .await
+        self.client
+            .run_git(
+                &["clone", "--", &https_url, &repo_name],
+                &projects_dir,
+                true,
+            )
+            .await
     }
 
     /// Push commits to a remote.
@@ -442,7 +346,7 @@ impl<A: GitHubApi> GitHub<A> {
         branch: Option<&str>,
         set_upstream: bool,
     ) -> Result<String, ToolError> {
-        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let cwd = self.client.resolve_repo_dir(repo_dir)?;
 
         let remote = remote.unwrap_or("origin");
         let mut args = vec!["push"];
@@ -457,14 +361,15 @@ impl<A: GitHubApi> GitHub<A> {
             args.push(b);
         }
 
-        self.run_git(&args, &cwd, true).await
+        self.client.run_git(&args, &cwd, true).await
     }
 
     /// Commit staged changes with Co-authored-by trailers.
     async fn commit(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
-        let cwd = self.resolve_repo_dir(repo_dir)?;
-        let full_message = format_commit_message(message, &self.co_authors);
-        self.run_git(&["commit", "-m", &full_message], &cwd, false)
+        let cwd = self.client.resolve_repo_dir(repo_dir)?;
+        let full_message = format_commit_message(message, &self.client.co_authors);
+        self.client
+            .run_git(&["commit", "-m", &full_message], &cwd, false)
             .await
     }
 
@@ -477,7 +382,7 @@ impl<A: GitHubApi> GitHub<A> {
         base: Option<&str>,
         draft: bool,
     ) -> Result<String, ToolError> {
-        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let cwd = self.client.resolve_repo_dir(repo_dir)?;
 
         let mut args = vec!["pr", "create", "--title", title, "--body", body];
 
@@ -488,12 +393,12 @@ impl<A: GitHubApi> GitHub<A> {
             args.push("--draft");
         }
 
-        self.run_gh(&args, &cwd).await
+        self.client.run_gh(&args, &cwd).await
     }
 
     /// List pull requests via `gh pr list`.
     async fn pr_list(&self, repo_dir: &str, state: Option<&str>) -> Result<String, ToolError> {
-        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let cwd = self.client.resolve_repo_dir(repo_dir)?;
 
         let state = state.unwrap_or("open");
         let valid_states = ["open", "closed", "merged", "all"];
@@ -505,6 +410,7 @@ impl<A: GitHubApi> GitHub<A> {
         }
 
         let prs: Vec<PullRequest> = self
+            .client
             .run_gh_json(
                 &["pr", "list", "--state", state],
                 "number,title,state,url",
@@ -525,10 +431,11 @@ impl<A: GitHubApi> GitHub<A> {
 
     /// Fetch reviews and comments for a pull request via `gh pr view`.
     async fn pr_reviews(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
-        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let cwd = self.client.resolve_repo_dir(repo_dir)?;
         let number = pr_number.to_string();
 
         let resp: PrReviewsResponse = self
+            .client
             .run_gh_json(
                 &["pr", "view", &number],
                 "reviews,reviewRequests,comments",
@@ -585,10 +492,11 @@ impl<A: GitHubApi> GitHub<A> {
         pr_number: u64,
         body: &str,
     ) -> Result<String, ToolError> {
-        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let cwd = self.client.resolve_repo_dir(repo_dir)?;
         let number = pr_number.to_string();
 
-        self.run_gh(&["pr", "comment", &number, "--body", body], &cwd)
+        self.client
+            .run_gh(&["pr", "comment", &number, "--body", body], &cwd)
             .await
     }
 
@@ -598,10 +506,10 @@ impl<A: GitHubApi> GitHub<A> {
     /// separate REST endpoint. `gh api` resolves `{owner}` and `{repo}`
     /// from the git remote when run inside a repository directory.
     async fn pr_diff_comments(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
-        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let cwd = self.client.resolve_repo_dir(repo_dir)?;
         let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments");
 
-        let comments: Vec<DiffComment> = self.run_gh_api(&endpoint, &cwd).await?;
+        let comments: Vec<DiffComment> = self.client.run_gh_api(&endpoint, &cwd).await?;
 
         if comments.is_empty() {
             return Ok(format!("No inline comments on PR #{pr_number}."));
@@ -632,12 +540,13 @@ impl<A: GitHubApi> GitHub<A> {
         comment_id: u64,
         body: &str,
     ) -> Result<String, ToolError> {
-        let cwd = self.resolve_repo_dir(repo_dir)?;
+        let cwd = self.client.resolve_repo_dir(repo_dir)?;
         let endpoint =
             format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments/{comment_id}/replies");
         let body_field = format!("body={body}");
 
-        self.run_gh(&["api", &endpoint, "-f", &body_field], &cwd)
+        self.client
+            .run_gh(&["api", &endpoint, "-f", &body_field], &cwd)
             .await
     }
 }
@@ -760,46 +669,6 @@ mod tests {
         ));
     }
 
-    // ── Repo dir validation ─────────────────────────────────────────
-
-    #[test]
-    fn resolve_repo_dir_rejects_traversal() {
-        let gh = make_github(tempfile::tempdir().unwrap().path());
-        assert!(matches!(
-            gh.resolve_repo_dir("../escape"),
-            Err(ToolError::Blocked(_))
-        ));
-    }
-
-    #[test]
-    fn resolve_repo_dir_rejects_absolute() {
-        let gh = make_github(tempfile::tempdir().unwrap().path());
-        assert!(matches!(
-            gh.resolve_repo_dir("/etc"),
-            Err(ToolError::Blocked(_))
-        ));
-    }
-
-    #[test]
-    fn resolve_repo_dir_rejects_non_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("projects/notrepo")).unwrap();
-        let gh = make_github(dir.path());
-        assert!(matches!(
-            gh.resolve_repo_dir("projects/notrepo"),
-            Err(ToolError::InvalidArguments(_))
-        ));
-    }
-
-    #[test]
-    fn resolve_repo_dir_accepts_valid_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("projects/myrepo/.git")).unwrap();
-        let gh = make_github(dir.path());
-        let resolved = gh.resolve_repo_dir("projects/myrepo").unwrap();
-        assert!(resolved.ends_with("projects/myrepo"));
-    }
-
     // ── PrCreate deserialization ──────────────────────────────────
 
     #[test]
@@ -875,13 +744,11 @@ mod tests {
 
     #[test]
     fn pr_list_rejects_invalid_state() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("projects/r/.git")).unwrap();
-        let gh = make_github(dir.path());
+        let (gh, repo) = stub_with_repo(vec![]);
 
         let result = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(gh.pr_list("projects/r", Some("bogus")));
+            .block_on(gh.pr_list(&repo, Some("bogus")));
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
     }
 
@@ -968,11 +835,6 @@ mod tests {
         ));
     }
 
-    /// Helper to build a GitHub instance for tests.
-    fn make_github(workspace: &Path) -> GitHub<StubGitHubApi> {
-        GitHub::new(StubGitHubApi::new(vec![]), workspace, vec![])
-    }
-
     // ── Stub API ─────────────────────────────────────────────────────
 
     /// Test stub for [`GitHubApi`] that yields pre-enqueued responses.
@@ -1046,34 +908,6 @@ mod tests {
         // Leak the TempDir so it lives for the test duration.
         let path = dir.into_path();
         (StubGitHubApi::client(responses, &path), repo.to_string())
-    }
-
-    // ── run_gh / run_gh_parse ────────────────────────────────────────
-
-    #[tokio::test]
-    async fn run_gh_nonzero_exit_returns_error() {
-        let (gh, repo) = stub_with_repo(vec![err_output("not found")]);
-        let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let result = gh.run_gh(&["pr", "view"], &cwd).await;
-        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
-    }
-
-    #[tokio::test]
-    async fn run_gh_parse_malformed_json_returns_error() {
-        let (gh, repo) = stub_with_repo(vec![ok_output("not json")]);
-        let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let result: Result<Vec<PullRequest>, _> = gh.run_gh_parse(&["pr", "list"], &cwd).await;
-        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
-    }
-
-    #[tokio::test]
-    async fn run_gh_parse_nonzero_exit_returns_stderr() {
-        let (gh, repo) = stub_with_repo(vec![err_output("permission denied")]);
-        let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let result: Result<Vec<PullRequest>, _> = gh.run_gh_parse(&["pr", "list"], &cwd).await;
-        assert!(
-            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("permission denied"))
-        );
     }
 
     // ── pr_list ──────────────────────────────────────────────────────
@@ -1224,26 +1058,6 @@ Exit code: 0"
         let result = gh.ci_status(&repo, Some("main")).await;
         assert!(
             matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("no failed runs"))
-        );
-    }
-
-    // ── current_branch ───────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn current_branch_trims_output() {
-        let (gh, repo) = stub_with_repo(vec![ok_output("  feature/foo\n")]);
-        let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let branch = gh.current_branch(&cwd).await.unwrap();
-        assert_eq!(branch, "feature/foo");
-    }
-
-    #[tokio::test]
-    async fn current_branch_nonzero_exit() {
-        let (gh, repo) = stub_with_repo(vec![err_output("not a git repo")]);
-        let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let result = gh.current_branch(&cwd).await;
-        assert!(
-            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("current branch"))
         );
     }
 }
