@@ -21,8 +21,10 @@
 //! command only.
 
 mod api;
+mod types;
 
 pub use api::{GitHubApi, RealGitHubApi};
+use types::{DiffComment, PrReviewsResponse, PullRequest, WorkflowRun};
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -151,80 +153,6 @@ enum Args {
         /// Reply body (Markdown).
         body: String,
     },
-}
-
-// ── GitHub response types ────────────────────────────────────────────
-
-/// A pull request from `gh pr list --json`.
-#[derive(Deserialize)]
-struct PullRequest {
-    number: u64,
-    title: String,
-    state: String,
-    url: String,
-}
-
-/// A review from `gh pr view --json reviews`.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Review {
-    author: Author,
-    body: String,
-    state: String,
-    submitted_at: String,
-}
-
-/// A review request from `gh pr view --json reviewRequests`.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReviewRequest {
-    login: Option<String>,
-    name: Option<String>,
-}
-
-/// A PR conversation comment from `gh pr view --json comments`.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PrComment {
-    author: Author,
-    body: String,
-    created_at: String,
-}
-
-/// Aggregate response from `gh pr view --json reviews,reviewRequests,comments`.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PrReviewsResponse {
-    reviews: Vec<Review>,
-    review_requests: Vec<ReviewRequest>,
-    comments: Vec<PrComment>,
-}
-
-/// An inline code review comment from the REST API.
-#[derive(Deserialize)]
-struct DiffComment {
-    id: u64,
-    path: String,
-    line: Option<u64>,
-    body: String,
-    user: Author,
-}
-
-/// Minimal user/author object (shared across response types).
-#[derive(Deserialize)]
-struct Author {
-    login: String,
-}
-
-/// A workflow run from `gh run list --json`.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WorkflowRun {
-    database_id: u64,
-    display_title: String,
-    created_at: String,
-    url: String,
-    workflow_name: String,
 }
 
 // ── Business logic layer ────────────────────────────────────────────
