@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use super::client::GitHubClient;
+use super::git_cli::GitCli;
 use crate::error::ToolError;
 use crate::secrets::Secret;
 use crate::tools::cli_runner::{CliRunner, CmdOutput};
@@ -85,4 +86,31 @@ pub fn stub_arc_with_repo(
 ) -> (std::sync::Arc<GitHubClient<StubCliRunner>>, String) {
     let (client, repo) = stub_client_with_repo(responses);
     (std::sync::Arc::new(client), repo)
+}
+
+/// Build a stub `GitCli` with a fake `.git` dir.
+pub fn stub_git_cli_with_repo(
+    responses: Vec<Result<CmdOutput, ToolError>>,
+) -> (GitCli<StubCliRunner>, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = "projects/r";
+    std::fs::create_dir_all(dir.path().join(repo).join(".git")).unwrap();
+    let path = dir.into_path();
+    (
+        GitCli::new(
+            StubCliRunner::new(responses),
+            Secret::test("fake"),
+            &path,
+            vec![],
+        ),
+        repo.to_string(),
+    )
+}
+
+/// Build a stub `Arc<GitCli>` with a fake `.git` dir.
+pub fn stub_git_arc_with_repo(
+    responses: Vec<Result<CmdOutput, ToolError>>,
+) -> (std::sync::Arc<GitCli<StubCliRunner>>, String) {
+    let (cli, repo) = stub_git_cli_with_repo(responses);
+    (std::sync::Arc::new(cli), repo)
 }

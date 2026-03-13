@@ -27,6 +27,7 @@
 mod ci_status;
 mod client;
 mod commit;
+mod git_cli;
 mod git_clone;
 mod pr_comment;
 mod pr_create;
@@ -43,6 +44,7 @@ mod url;
 pub use ci_status::CiStatus;
 pub use client::GitHubClient;
 pub use commit::Commit;
+pub use git_cli::GitCli;
 pub use git_clone::GitClone;
 pub use pr_comment::PrComment;
 pub use pr_create::PrCreate;
