@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::client::GitHubClient;
+use super::gh_cli::GhCli;
 use crate::error::ToolError;
 use crate::tools::cli_runner::CliRunner;
 
@@ -29,7 +29,7 @@ struct Args {
     body: String,
 }
 
-pub struct PrDiffReply<R>(pub Arc<GitHubClient<R>>);
+pub struct PrDiffReply<R>(pub Arc<GhCli<R>>);
 
 impl<R: CliRunner> Tool for PrDiffReply<R> {
     fn name(&self) -> &'static str {

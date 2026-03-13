@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::client::GitHubClient;
+use super::gh_cli::GhCli;
 use super::types::PrReviewsResponse;
 use crate::error::ToolError;
 use crate::tools::cli_runner::CliRunner;
@@ -27,7 +27,7 @@ struct Args {
     pr_number: u64,
 }
 
-pub struct PrReviews<R>(pub Arc<GitHubClient<R>>);
+pub struct PrReviews<R>(pub Arc<GhCli<R>>);
 
 impl<R: CliRunner> Tool for PrReviews<R> {
     fn name(&self) -> &'static str {
@@ -113,7 +113,7 @@ impl<R: CliRunner> PrReviews<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{ok_output, stub_arc_with_repo};
+    use super::super::test_helpers::{ok_output, stub_gh_arc_with_repo};
     use super::*;
 
     #[test]
@@ -144,7 +144,7 @@ mod tests {
         }))
         .unwrap();
 
-        let (client, repo) = stub_arc_with_repo(vec![ok_output(&json)]);
+        let (client, repo) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
         let tool = PrReviews(client);
         let result = tool.run(&repo, 42).await.unwrap();
         assert_eq!(
@@ -171,7 +171,7 @@ What about edge cases?
         }))
         .unwrap();
 
-        let (client, repo) = stub_arc_with_repo(vec![ok_output(&json)]);
+        let (client, repo) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
         let tool = PrReviews(client);
         let result = tool.run(&repo, 1).await.unwrap();
         assert_eq!(result, "No reviews or comments on PR #1.");

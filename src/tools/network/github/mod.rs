@@ -6,12 +6,11 @@
 //!
 //! # Architecture
 //!
-//! [`crate::tools::cli_runner::CliRunner`] is the raw subprocess boundary
-//! — a single `exec` method that spawns any binary with an explicit env.
-//! [`client::GitHubClient`] carries the shared context (runner, token,
-//! workspace root, co-authors) and provides plumbing methods (`run_gh`,
-//! `run_git`, etc.). Each tool file holds an `Arc<GitHubClient<R>>` and
-//! owns only its business logic.
+//! [`crate::tools::cli_runner::CliRunner`] is the raw subprocess boundary.
+//! [`git_cli::GitCli`] wraps the `git` binary (clone, push, commit).
+//! [`gh_cli::GhCli`] wraps the `gh` CLI (PRs, CI, API calls).
+//! Each tool file holds an `Arc` of the appropriate CLI struct and owns
+//! only its business logic.
 //!
 //! Tests substitute `StubCliRunner` to exercise the logic without
 //! spawning real subprocesses.
@@ -25,8 +24,8 @@
 //! command only.
 
 mod ci_status;
-mod client;
 mod commit;
+mod gh_cli;
 mod git_cli;
 mod git_clone;
 mod pr_comment;
@@ -42,8 +41,8 @@ mod types;
 mod url;
 
 pub use ci_status::CiStatus;
-pub use client::GitHubClient;
 pub use commit::Commit;
+pub use gh_cli::GhCli;
 pub use git_cli::GitCli;
 pub use git_clone::GitClone;
 pub use pr_comment::PrComment;

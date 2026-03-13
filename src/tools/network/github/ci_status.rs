@@ -8,7 +8,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::client::GitHubClient;
+use super::gh_cli::GhCli;
+use super::git_cli::GitCli;
 use super::types::WorkflowRun;
 use crate::error::ToolError;
 use crate::tools::cli_runner::CliRunner;
@@ -22,7 +23,10 @@ struct Args {
     branch: Option<String>,
 }
 
-pub struct CiStatus<R>(pub Arc<GitHubClient<R>>);
+pub struct CiStatus<R> {
+    pub git: Arc<GitCli<R>>,
+    pub gh: Arc<GhCli<R>>,
+}
 
 impl<R: CliRunner> Tool for CiStatus<R> {
     fn name(&self) -> &'static str {
@@ -51,15 +55,15 @@ impl<R: CliRunner> Tool for CiStatus<R> {
 
 impl<R: CliRunner> CiStatus<R> {
     async fn run(&self, repo_dir: &str, branch: Option<&str>) -> Result<String, ToolError> {
-        let cwd = self.0.resolve_repo_dir(repo_dir)?;
+        let cwd = self.gh.resolve_repo_dir(repo_dir)?;
 
         let branch_name = match branch {
             Some(b) => b.to_string(),
-            None => self.0.current_branch(&cwd).await?,
+            None => self.git.current_branch(&cwd).await?,
         };
 
         let runs: Vec<WorkflowRun> = self
-            .0
+            .gh
             .run_gh_json(
                 &[
                     "run",
@@ -82,7 +86,7 @@ impl<R: CliRunner> CiStatus<R> {
 
         let id_str = run.database_id.to_string();
         let logs = self
-            .0
+            .gh
             .run_gh(&["run", "view", &id_str, "--log-failed"], &cwd)
             .await?;
 
@@ -101,7 +105,7 @@ impl<R: CliRunner> CiStatus<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{ok_output, stub_arc_with_repo};
+    use super::super::test_helpers::{ok_output, stub_gh_arc_with_repo, stub_git_arc_with_repo};
     use super::CiStatus;
     use crate::error::ToolError;
 
@@ -138,8 +142,10 @@ mod tests {
 
         let log_output = "test-job  Step failed";
 
-        let (client, repo) = stub_arc_with_repo(vec![ok_output(&runs_json), ok_output(log_output)]);
-        let tool = CiStatus(client);
+        // Branch explicitly provided, so git stub is unused.
+        let (git, _) = stub_git_arc_with_repo(vec![]);
+        let (gh, repo) = stub_gh_arc_with_repo(vec![ok_output(&runs_json), ok_output(log_output)]);
+        let tool = CiStatus { git, gh };
         let result = tool.run(&repo, Some("main")).await.unwrap();
         assert_eq!(
             result,
@@ -158,8 +164,9 @@ Exit code: 0"
 
     #[tokio::test]
     async fn no_failed_runs() {
-        let (client, repo) = stub_arc_with_repo(vec![ok_output("[]")]);
-        let tool = CiStatus(client);
+        let (git, _) = stub_git_arc_with_repo(vec![]);
+        let (gh, repo) = stub_gh_arc_with_repo(vec![ok_output("[]")]);
+        let tool = CiStatus { git, gh };
         let result = tool.run(&repo, Some("main")).await;
         assert!(
             matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("no failed runs"))

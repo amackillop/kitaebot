@@ -7,7 +7,7 @@ mod github;
 mod web_fetch;
 mod web_search;
 
-pub use github::{GitCli, GitHubClient};
+pub use github::{GhCli, GitCli};
 pub use web_fetch::WebFetch;
 pub use web_search::WebSearch;
 
@@ -41,18 +41,16 @@ pub fn build(
             workspace.path(),
             config.git.co_authors.clone(),
         ));
-        let gh = Arc::new(GitHubClient::new(
-            RealCliRunner,
-            token,
-            workspace.path(),
-            config.git.co_authors.clone(),
-        ));
+        let gh = Arc::new(GhCli::new(RealCliRunner, token, workspace.path()));
 
         tools.push(Box::new(github::Commit(Arc::clone(&git))));
         tools.push(Box::new(github::GitClone(Arc::clone(&git))));
         tools.push(Box::new(github::Push(Arc::clone(&git))));
 
-        tools.push(Box::new(github::CiStatus(Arc::clone(&gh))));
+        tools.push(Box::new(github::CiStatus {
+            git,
+            gh: Arc::clone(&gh),
+        }));
         tools.push(Box::new(github::PrComment(Arc::clone(&gh))));
         tools.push(Box::new(github::PrCreate(Arc::clone(&gh))));
         tools.push(Box::new(github::PrDiffComments(Arc::clone(&gh))));

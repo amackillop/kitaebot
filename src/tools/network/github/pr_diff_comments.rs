@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::client::GitHubClient;
+use super::gh_cli::GhCli;
 use super::types::DiffComment;
 use crate::error::ToolError;
 use crate::tools::cli_runner::CliRunner;
@@ -21,7 +21,7 @@ struct Args {
     pr_number: u64,
 }
 
-pub struct PrDiffComments<R>(pub Arc<GitHubClient<R>>);
+pub struct PrDiffComments<R>(pub Arc<GhCli<R>>);
 
 impl<R: CliRunner> Tool for PrDiffComments<R> {
     fn name(&self) -> &'static str {
@@ -75,7 +75,7 @@ impl<R: CliRunner> PrDiffComments<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{ok_output, stub_arc_with_repo};
+    use super::super::test_helpers::{ok_output, stub_gh_arc_with_repo};
     use super::*;
 
     #[test]
@@ -96,7 +96,7 @@ mod tests {
         ]))
         .unwrap();
 
-        let (client, repo) = stub_arc_with_repo(vec![ok_output(&json)]);
+        let (client, repo) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
         let tool = PrDiffComments(client);
         let result = tool.run(&repo, 5).await.unwrap();
         assert_eq!(
@@ -112,7 +112,7 @@ Outdated"
 
     #[tokio::test]
     async fn empty() {
-        let (client, repo) = stub_arc_with_repo(vec![ok_output("[]")]);
+        let (client, repo) = stub_gh_arc_with_repo(vec![ok_output("[]")]);
         let tool = PrDiffComments(client);
         let result = tool.run(&repo, 5).await.unwrap();
         assert_eq!(result, "No inline comments on PR #5.");
