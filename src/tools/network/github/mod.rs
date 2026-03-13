@@ -30,6 +30,7 @@ mod pr_create;
 mod pr_diff_comments;
 mod pr_diff_reply;
 mod pr_list;
+mod pr_reviews;
 #[cfg(test)]
 mod test_helpers;
 mod types;
@@ -45,9 +46,8 @@ pub use pr_create::PrCreate;
 pub use pr_diff_comments::PrDiffComments;
 pub use pr_diff_reply::PrDiffReply;
 pub use pr_list::PrList;
-use types::PrReviewsResponse;
+pub use pr_reviews::PrReviews;
 
-use std::fmt::Write;
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -78,17 +78,6 @@ enum Args {
         /// Set upstream tracking (`--set-upstream`).
         #[serde(default)]
         set_upstream: bool,
-    },
-    /// Fetch top-level review verdicts and PR conversation comments.
-    ///
-    /// Returns review approvals/rejections and top-level PR comments only.
-    /// Does NOT return inline code comments on specific lines — use
-    /// `pr_diff_comments` for those.
-    PrReviews {
-        /// Repository directory relative to workspace root.
-        repo_dir: String,
-        /// PR number.
-        pr_number: u64,
     },
 }
 
@@ -144,10 +133,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
                     )
                     .await
                 }
-                Args::PrReviews {
-                    repo_dir,
-                    pr_number,
-                } => self.pr_reviews(&repo_dir, pr_number).await,
             }
         })
     }
@@ -178,62 +163,6 @@ impl<A: GitHubApi> GitHub<A> {
         }
 
         self.client.run_git(&args, &cwd, true).await
-    }
-
-    /// Fetch reviews and comments for a pull request via `gh pr view`.
-    async fn pr_reviews(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
-        let cwd = self.client.resolve_repo_dir(repo_dir)?;
-        let number = pr_number.to_string();
-
-        let resp: PrReviewsResponse = self
-            .client
-            .run_gh_json(
-                &["pr", "view", &number],
-                "reviews,reviewRequests,comments",
-                &cwd,
-            )
-            .await?;
-
-        let mut output = String::new();
-
-        if !resp.review_requests.is_empty() {
-            output.push_str("Pending reviewers: ");
-            let names: Vec<&str> = resp
-                .review_requests
-                .iter()
-                .map(|r| {
-                    r.login
-                        .as_deref()
-                        .or(r.name.as_deref())
-                        .unwrap_or("unknown")
-                })
-                .collect();
-            output.push_str(&names.join(", "));
-            output.push_str("\n\n");
-        }
-
-        for r in &resp.reviews {
-            let _ = writeln!(
-                output,
-                "@{} {} ({})",
-                r.author.login, r.state, r.submitted_at
-            );
-            if !r.body.is_empty() {
-                let _ = writeln!(output, "{}", r.body);
-            }
-            output.push('\n');
-        }
-
-        for c in &resp.comments {
-            let _ = writeln!(output, "@{} ({})\n{}", c.author.login, c.created_at, c.body);
-            output.push('\n');
-        }
-
-        if output.is_empty() {
-            return Ok(format!("No reviews or comments on PR #{pr_number}."));
-        }
-
-        Ok(output)
     }
 }
 
@@ -293,69 +222,5 @@ mod tests {
                 ..
             } if r == "upstream" && b == "feature"
         ));
-    }
-
-    // ── PrReviews deserialization ───────────────────────────────
-
-    #[test]
-    fn deserialize_pr_reviews() {
-        let json = serde_json::json!({
-            "action": "pr_reviews",
-            "repo_dir": "projects/myrepo",
-            "pr_number": 42
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(args, Args::PrReviews { pr_number: 42, .. }));
-    }
-
-    // ── pr_reviews ───────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn pr_reviews_formats_reviews_and_comments() {
-        let json = serde_json::to_string(&serde_json::json!({
-            "reviews": [{
-                "author": {"login": "alice"},
-                "body": "Looks good",
-                "state": "APPROVED",
-                "submittedAt": "2025-01-15T10:00:00Z"
-            }],
-            "reviewRequests": [{"login": "bob", "name": null}],
-            "comments": [{
-                "author": {"login": "carol"},
-                "body": "What about edge cases?",
-                "createdAt": "2025-01-15T11:00:00Z"
-            }]
-        }))
-        .unwrap();
-
-        let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
-        let result = gh.pr_reviews(&repo, 42).await.unwrap();
-        assert_eq!(
-            result,
-            "\
-Pending reviewers: bob
-
-@alice APPROVED (2025-01-15T10:00:00Z)
-Looks good
-
-@carol (2025-01-15T11:00:00Z)
-What about edge cases?
-
-"
-        );
-    }
-
-    #[tokio::test]
-    async fn pr_reviews_empty() {
-        let json = serde_json::to_string(&serde_json::json!({
-            "reviews": [],
-            "reviewRequests": [],
-            "comments": []
-        }))
-        .unwrap();
-
-        let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
-        let result = gh.pr_reviews(&repo, 1).await.unwrap();
-        assert_eq!(result, "No reviews or comments on PR #1.");
     }
 }

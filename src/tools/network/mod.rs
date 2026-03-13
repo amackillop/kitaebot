@@ -48,7 +48,8 @@ pub fn build(
         tools.push(Box::new(github::PrCreate(Arc::clone(&gh))));
         tools.push(Box::new(github::PrDiffComments(Arc::clone(&gh))));
         tools.push(Box::new(github::PrDiffReply(Arc::clone(&gh))));
-        tools.push(Box::new(github::PrList(gh)));
+        tools.push(Box::new(github::PrList(Arc::clone(&gh))));
+        tools.push(Box::new(github::PrReviews(gh)));
     }
 
     tools.push(Box::new(
