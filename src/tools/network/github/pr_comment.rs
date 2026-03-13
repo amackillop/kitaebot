@@ -8,9 +8,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::api::GitHubApi;
 use super::client::GitHubClient;
 use crate::error::ToolError;
+use crate::tools::cli_runner::CliRunner;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -22,9 +22,9 @@ struct Args {
     body: String,
 }
 
-pub struct PrComment<A>(pub Arc<GitHubClient<A>>);
+pub struct PrComment<R>(pub Arc<GitHubClient<R>>);
 
-impl<A: GitHubApi> Tool for PrComment<A> {
+impl<R: CliRunner> Tool for PrComment<R> {
     fn name(&self) -> &'static str {
         "github_pr_comment"
     }
@@ -49,7 +49,7 @@ impl<A: GitHubApi> Tool for PrComment<A> {
     }
 }
 
-impl<A: GitHubApi> PrComment<A> {
+impl<R: CliRunner> PrComment<R> {
     async fn run(&self, repo_dir: &str, pr_number: u64, body: &str) -> Result<String, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
         let number = pr_number.to_string();

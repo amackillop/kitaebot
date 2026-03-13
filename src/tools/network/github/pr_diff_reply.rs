@@ -8,9 +8,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::api::GitHubApi;
 use super::client::GitHubClient;
 use crate::error::ToolError;
+use crate::tools::cli_runner::CliRunner;
 
 /// Reply to an inline review comment.
 ///
@@ -29,9 +29,9 @@ struct Args {
     body: String,
 }
 
-pub struct PrDiffReply<A>(pub Arc<GitHubClient<A>>);
+pub struct PrDiffReply<R>(pub Arc<GitHubClient<R>>);
 
-impl<A: GitHubApi> Tool for PrDiffReply<A> {
+impl<R: CliRunner> Tool for PrDiffReply<R> {
     fn name(&self) -> &'static str {
         "github_pr_diff_reply"
     }
@@ -57,7 +57,7 @@ impl<A: GitHubApi> Tool for PrDiffReply<A> {
     }
 }
 
-impl<A: GitHubApi> PrDiffReply<A> {
+impl<R: CliRunner> PrDiffReply<R> {
     async fn run(
         &self,
         repo_dir: &str,

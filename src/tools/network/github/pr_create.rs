@@ -8,9 +8,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::api::GitHubApi;
 use super::client::GitHubClient;
 use crate::error::ToolError;
+use crate::tools::cli_runner::CliRunner;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -27,9 +27,9 @@ struct Args {
     draft: bool,
 }
 
-pub struct PrCreate<A>(pub Arc<GitHubClient<A>>);
+pub struct PrCreate<R>(pub Arc<GitHubClient<R>>);
 
-impl<A: GitHubApi> Tool for PrCreate<A> {
+impl<R: CliRunner> Tool for PrCreate<R> {
     fn name(&self) -> &'static str {
         "github_pr_create"
     }
@@ -61,7 +61,7 @@ impl<A: GitHubApi> Tool for PrCreate<A> {
     }
 }
 
-impl<A: GitHubApi> PrCreate<A> {
+impl<R: CliRunner> PrCreate<R> {
     async fn run(
         &self,
         repo_dir: &str,

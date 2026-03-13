@@ -6,13 +6,14 @@
 //!
 //! # Architecture
 //!
-//! [`api::GitHubApi`] is the raw subprocess boundary — it owns credentials
-//! and spawns `gh`/`git` processes. [`client::GitHubClient`] carries the
-//! shared context (API handle, workspace root, co-authors) and provides
-//! plumbing methods (`run_gh`, `run_git`, etc.). Each tool file holds an
-//! `Arc<GitHubClient<A>>` and owns only its business logic.
+//! [`crate::tools::cli_runner::CliRunner`] is the raw subprocess boundary
+//! — a single `exec` method that spawns any binary with an explicit env.
+//! [`client::GitHubClient`] carries the shared context (runner, token,
+//! workspace root, co-authors) and provides plumbing methods (`run_gh`,
+//! `run_git`, etc.). Each tool file holds an `Arc<GitHubClient<R>>` and
+//! owns only its business logic.
 //!
-//! Tests substitute `StubGitHubApi` to exercise the logic without
+//! Tests substitute `StubCliRunner` to exercise the logic without
 //! spawning real subprocesses.
 //!
 //! # Token injection
@@ -23,7 +24,6 @@
 //! invoked by git. The token is on disk for the duration of one git
 //! command only.
 
-mod api;
 mod ci_status;
 mod client;
 mod commit;
@@ -43,7 +43,6 @@ mod url;
 // Re-export parent utility so tool files can `use super::Tool`.
 pub(crate) use super::Tool;
 
-pub use api::RealGitHubApi;
 pub use ci_status::CiStatus;
 pub use client::GitHubClient;
 pub use commit::Commit;

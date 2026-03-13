@@ -8,10 +8,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::api::GitHubApi;
 use super::client::GitHubClient;
 use super::types::PullRequest;
 use crate::error::ToolError;
+use crate::tools::cli_runner::CliRunner;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -21,9 +21,9 @@ struct Args {
     state: Option<String>,
 }
 
-pub struct PrList<A>(pub Arc<GitHubClient<A>>);
+pub struct PrList<R>(pub Arc<GitHubClient<R>>);
 
-impl<A: GitHubApi> Tool for PrList<A> {
+impl<R: CliRunner> Tool for PrList<R> {
     fn name(&self) -> &'static str {
         "github_pr_list"
     }
@@ -48,7 +48,7 @@ impl<A: GitHubApi> Tool for PrList<A> {
     }
 }
 
-impl<A: GitHubApi> PrList<A> {
+impl<R: CliRunner> PrList<R> {
     async fn run(&self, repo_dir: &str, state: Option<&str>) -> Result<String, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
 

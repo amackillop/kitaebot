@@ -1,31 +1,43 @@
 //! Shared client context for GitHub tools.
 //!
-//! [`GitHubClient`] wraps a [`GitHubApi`] impl and carries workspace
-//! root + co-author config. It provides the plumbing methods that all
-//! tool modules use: subprocess execution, JSON parsing, repo dir
-//! validation, and branch detection.
+//! [`GitHubClient`] wraps a [`CliRunner`] impl, owns the GitHub token,
+//! and carries workspace root + co-author config. It provides the
+//! plumbing methods that all tool modules use: subprocess execution,
+//! JSON parsing, repo dir validation, and branch detection.
+//!
+//! Auth is handled here — `run_gh` injects `GH_TOKEN`, `run_git` with
+//! `authenticated: true` creates a temporary `GIT_ASKPASS` script.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 
-use super::api::GitHubApi;
 use crate::error::ToolError;
+use crate::secrets::Secret;
+use crate::tools::cli_runner::{CliRunner, CmdOutput};
 
 /// Shared context for all GitHub tools.
 ///
-/// Generic over [`GitHubApi`] so tests can substitute a stub without
+/// Generic over [`CliRunner`] so tests can substitute a stub without
 /// spawning real subprocesses.
-pub struct GitHubClient<A> {
-    pub(super) api: A,
+pub struct GitHubClient<R> {
+    pub(super) runner: R,
+    pub(super) token: Secret,
     pub(super) workspace_root: PathBuf,
     pub(super) co_authors: Vec<String>,
 }
 
-impl<A: GitHubApi> GitHubClient<A> {
-    pub fn new(api: A, workspace_root: impl Into<PathBuf>, co_authors: Vec<String>) -> Self {
+impl<R: CliRunner> GitHubClient<R> {
+    pub fn new(
+        runner: R,
+        token: Secret,
+        workspace_root: impl Into<PathBuf>,
+        co_authors: Vec<String>,
+    ) -> Self {
         Self {
-            api,
+            runner,
+            token,
             workspace_root: workspace_root.into(),
             co_authors,
         }
@@ -60,8 +72,7 @@ impl<A: GitHubApi> GitHubClient<A> {
     /// Get the current branch name from a git working directory.
     pub async fn current_branch(&self, cwd: &Path) -> Result<String, ToolError> {
         let output = self
-            .api
-            .exec_git(&["rev-parse", "--abbrev-ref", "HEAD"], cwd, false)
+            .run_git_raw(&["rev-parse", "--abbrev-ref", "HEAD"], cwd, false)
             .await?;
         if output.exit_code != 0 {
             return Err(ToolError::ExecutionFailed(format!(
@@ -79,18 +90,15 @@ impl<A: GitHubApi> GitHubClient<A> {
         cwd: &Path,
         authenticated: bool,
     ) -> Result<String, ToolError> {
-        self.api.exec_git(args, cwd, authenticated).await?.format()
+        self.run_git_raw(args, cwd, authenticated).await?.format()
     }
 
     /// Run a `gh` command, format output as envelope for the LLM.
     pub async fn run_gh(&self, args: &[&str], cwd: &Path) -> Result<String, ToolError> {
-        self.api.exec_gh(args, cwd).await?.format()
+        self.run_gh_raw(args, cwd).await?.format()
     }
 
     /// Run `gh` with `--json <fields>` and deserialize the response.
-    ///
-    /// Appends `--json <fields>` to `args` automatically, so callers
-    /// specify only the subcommand flags.
     pub async fn run_gh_json<T: DeserializeOwned>(
         &self,
         args: &[&str],
@@ -116,7 +124,7 @@ impl<A: GitHubApi> GitHubClient<A> {
         args: &[&str],
         cwd: &Path,
     ) -> Result<T, ToolError> {
-        let output = self.api.exec_gh(args, cwd).await?;
+        let output = self.run_gh_raw(args, cwd).await?;
         if output.exit_code != 0 {
             return Err(ToolError::ExecutionFailed(format!(
                 "{}: {}",
@@ -126,11 +134,92 @@ impl<A: GitHubApi> GitHubClient<A> {
         serde_json::from_str(&output.stdout)
             .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", output.command)))
     }
+
+    // ── Private helpers ─────────────────────────────────────────────
+
+    /// Run `gh` with token + prompt-disabled env.
+    async fn run_gh_raw(&self, args: &[&str], cwd: &Path) -> Result<CmdOutput, ToolError> {
+        let env: Vec<(OsString, OsString)> = crate::tools::safe_env()
+            .chain([
+                ("GH_TOKEN".into(), self.token.expose().into()),
+                ("GH_PROMPT_DISABLED".into(), "1".into()),
+                ("NO_COLOR".into(), "1".into()),
+            ])
+            .collect();
+        self.runner.exec("gh", args, cwd, &env).await
+    }
+
+    /// Run `git` with optional credential injection.
+    async fn run_git_raw(
+        &self,
+        args: &[&str],
+        cwd: &Path,
+        authenticated: bool,
+    ) -> Result<CmdOutput, ToolError> {
+        let askpass = if authenticated {
+            Some(AskPass::create(&self.token).await?)
+        } else {
+            None
+        };
+
+        let mut env: Vec<(OsString, OsString)> = crate::tools::safe_env().collect();
+
+        if let Some(ref ap) = askpass {
+            env.push(("GIT_ASKPASS".into(), ap.path().as_os_str().to_owned()));
+            env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+        }
+
+        let output = self.runner.exec("git", args, cwd, &env).await;
+        drop(askpass);
+        output
+    }
+}
+
+// ── GIT_ASKPASS helper ──────────────────────────────────────────────
+
+/// A temporary `GIT_ASKPASS` script that prints the token.
+///
+/// The script lives in a private temp directory (mode 0700). The
+/// directory is owned by a `TempDir` and removed on drop, so cleanup
+/// happens even if the git command fails or the future is cancelled.
+struct AskPass {
+    /// Path to the executable script inside `_dir`.
+    path: PathBuf,
+    /// Owns the temp directory. Removed on drop.
+    _dir: tempfile::TempDir,
+}
+
+impl AskPass {
+    async fn create(token: &Secret) -> Result<Self, ToolError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::Builder::new()
+            .prefix("kitaebot-askpass-")
+            .tempdir()
+            .map_err(|e| ToolError::ExecutionFailed(format!("tmpdir: {e}")))?;
+
+        let path = dir.path().join("askpass");
+        let script = format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", token.expose());
+
+        tokio::fs::write(&path, &script)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("write askpass: {e}")))?;
+
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("chmod askpass: {e}")))?;
+
+        Ok(Self { path, _dir: dir })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{StubGitHubApi, err_output, ok_output, stub_client_with_repo};
+    use super::super::test_helpers::{StubCliRunner, err_output, ok_output, stub_client_with_repo};
     use super::*;
     use crate::error::ToolError;
 
@@ -224,7 +313,12 @@ mod tests {
         );
     }
 
-    fn make_client(workspace: &std::path::Path) -> GitHubClient<StubGitHubApi> {
-        GitHubClient::new(StubGitHubApi::new(vec![]), workspace, vec![])
+    fn make_client(workspace: &std::path::Path) -> GitHubClient<StubCliRunner> {
+        GitHubClient::new(
+            StubCliRunner::new(vec![]),
+            Secret::test("fake"),
+            workspace,
+            vec![],
+        )
     }
 }

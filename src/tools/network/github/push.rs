@@ -8,9 +8,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::api::GitHubApi;
 use super::client::GitHubClient;
 use crate::error::ToolError;
+use crate::tools::cli_runner::CliRunner;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -26,9 +26,9 @@ struct Args {
     set_upstream: bool,
 }
 
-pub struct Push<A>(pub Arc<GitHubClient<A>>);
+pub struct Push<R>(pub Arc<GitHubClient<R>>);
 
-impl<A: GitHubApi> Tool for Push<A> {
+impl<R: CliRunner> Tool for Push<R> {
     fn name(&self) -> &'static str {
         "github_push"
     }
@@ -59,7 +59,7 @@ impl<A: GitHubApi> Tool for Push<A> {
     }
 }
 
-impl<A: GitHubApi> Push<A> {
+impl<R: CliRunner> Push<R> {
     async fn run(
         &self,
         repo_dir: &str,

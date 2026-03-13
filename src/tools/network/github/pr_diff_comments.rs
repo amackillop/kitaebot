@@ -8,10 +8,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::api::GitHubApi;
 use super::client::GitHubClient;
 use super::types::DiffComment;
 use crate::error::ToolError;
+use crate::tools::cli_runner::CliRunner;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -21,9 +21,9 @@ struct Args {
     pr_number: u64,
 }
 
-pub struct PrDiffComments<A>(pub Arc<GitHubClient<A>>);
+pub struct PrDiffComments<R>(pub Arc<GitHubClient<R>>);
 
-impl<A: GitHubApi> Tool for PrDiffComments<A> {
+impl<R: CliRunner> Tool for PrDiffComments<R> {
     fn name(&self) -> &'static str {
         "github_pr_diff_comments"
     }
@@ -48,7 +48,7 @@ impl<A: GitHubApi> Tool for PrDiffComments<A> {
     }
 }
 
-impl<A: GitHubApi> PrDiffComments<A> {
+impl<R: CliRunner> PrDiffComments<R> {
     async fn run(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
         let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments");

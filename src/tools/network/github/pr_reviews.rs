@@ -9,10 +9,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::api::GitHubApi;
 use super::client::GitHubClient;
 use super::types::PrReviewsResponse;
 use crate::error::ToolError;
+use crate::tools::cli_runner::CliRunner;
 
 /// Fetch top-level review verdicts and PR conversation comments.
 ///
@@ -27,9 +27,9 @@ struct Args {
     pr_number: u64,
 }
 
-pub struct PrReviews<A>(pub Arc<GitHubClient<A>>);
+pub struct PrReviews<R>(pub Arc<GitHubClient<R>>);
 
-impl<A: GitHubApi> Tool for PrReviews<A> {
+impl<R: CliRunner> Tool for PrReviews<R> {
     fn name(&self) -> &'static str {
         "github_pr_reviews"
     }
@@ -54,7 +54,7 @@ impl<A: GitHubApi> Tool for PrReviews<A> {
     }
 }
 
-impl<A: GitHubApi> PrReviews<A> {
+impl<R: CliRunner> PrReviews<R> {
     async fn run(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
         let number = pr_number.to_string();

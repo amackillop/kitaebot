@@ -2,6 +2,8 @@
 //!
 //! Tools are functions the agent can call (exec, `read_file`, `web_search`, etc.).
 
+#[cfg(not(feature = "mock-network"))]
+pub(crate) mod cli_runner;
 mod exec;
 mod file_edit;
 mod file_read;

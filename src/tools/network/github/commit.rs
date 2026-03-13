@@ -8,9 +8,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::api::GitHubApi;
 use super::client::GitHubClient;
 use crate::error::ToolError;
+use crate::tools::cli_runner::CliRunner;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -20,9 +20,9 @@ struct Args {
     message: String,
 }
 
-pub struct Commit<A>(pub Arc<GitHubClient<A>>);
+pub struct Commit<R>(pub Arc<GitHubClient<R>>);
 
-impl<A: GitHubApi> Tool for Commit<A> {
+impl<R: CliRunner> Tool for Commit<R> {
     fn name(&self) -> &'static str {
         "github_commit"
     }
@@ -47,7 +47,7 @@ impl<A: GitHubApi> Tool for Commit<A> {
     }
 }
 
-impl<A: GitHubApi> Commit<A> {
+impl<R: CliRunner> Commit<R> {
     async fn run(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
         let full_message = format_commit_message(message, &self.0.co_authors);

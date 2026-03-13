@@ -8,10 +8,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::api::GitHubApi;
 use super::client::GitHubClient;
 use super::types::WorkflowRun;
 use crate::error::ToolError;
+use crate::tools::cli_runner::CliRunner;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -22,9 +22,9 @@ struct Args {
     branch: Option<String>,
 }
 
-pub struct CiStatus<A>(pub Arc<GitHubClient<A>>);
+pub struct CiStatus<R>(pub Arc<GitHubClient<R>>);
 
-impl<A: GitHubApi> Tool for CiStatus<A> {
+impl<R: CliRunner> Tool for CiStatus<R> {
     fn name(&self) -> &'static str {
         "github_ci_status"
     }
@@ -49,7 +49,7 @@ impl<A: GitHubApi> Tool for CiStatus<A> {
     }
 }
 
-impl<A: GitHubApi> CiStatus<A> {
+impl<R: CliRunner> CiStatus<R> {
     async fn run(&self, repo_dir: &str, branch: Option<&str>) -> Result<String, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
 

@@ -7,7 +7,7 @@ mod github;
 mod web_fetch;
 mod web_search;
 
-pub use github::{GitHubClient, RealGitHubApi};
+pub use github::GitHubClient;
 pub use web_fetch::WebFetch;
 pub use web_search::WebSearch;
 
@@ -21,6 +21,7 @@ use tracing::error;
 use crate::clients::chat_completion::CompletionsClient;
 use crate::config::Config;
 use crate::secrets::Secret;
+use crate::tools::cli_runner::RealCliRunner;
 use crate::workspace::Workspace;
 
 /// Build the network tools. Returns boxed trait objects ready for
@@ -34,9 +35,9 @@ pub fn build(
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
     if let Some(token) = github_token {
-        let api = RealGitHubApi::new(token);
         let gh = Arc::new(GitHubClient::new(
-            api,
+            RealCliRunner,
+            token,
             workspace.path(),
             config.git.co_authors.clone(),
         ));

@@ -8,10 +8,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::Tool;
-use super::api::GitHubApi;
 use super::client::GitHubClient;
 use super::url::{extract_repo_name, to_https_url, validate_name};
 use crate::error::ToolError;
+use crate::tools::cli_runner::CliRunner;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -23,9 +23,9 @@ struct Args {
     name: Option<String>,
 }
 
-pub struct GitClone<A>(pub Arc<GitHubClient<A>>);
+pub struct GitClone<R>(pub Arc<GitHubClient<R>>);
 
-impl<A: GitHubApi> Tool for GitClone<A> {
+impl<R: CliRunner> Tool for GitClone<R> {
     fn name(&self) -> &'static str {
         "github_clone"
     }
@@ -50,7 +50,7 @@ impl<A: GitHubApi> Tool for GitClone<A> {
     }
 }
 
-impl<A: GitHubApi> GitClone<A> {
+impl<R: CliRunner> GitClone<R> {
     async fn run(&self, url: &str, name: Option<&str>) -> Result<String, ToolError> {
         let https_url = to_https_url(url)?;
         let repo_name = match name {

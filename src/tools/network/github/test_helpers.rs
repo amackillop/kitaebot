@@ -1,45 +1,40 @@
 //! Shared test infrastructure for GitHub tool tests.
 
+use std::ffi::OsString;
 use std::path::Path;
 
-use super::api::{CmdOutput, GitHubApi};
 use super::client::GitHubClient;
 use crate::error::ToolError;
+use crate::secrets::Secret;
+use crate::tools::cli_runner::{CliRunner, CmdOutput};
 
-/// Test stub for [`GitHubApi`] that yields pre-enqueued responses.
+/// Test stub for [`CliRunner`] that yields pre-enqueued responses.
 ///
-/// Both `exec_gh` and `exec_git` pop from the same queue, so tests
-/// enqueue responses in call order regardless of which method fires.
-pub struct StubGitHubApi(
+/// Every `exec` call pops from the same queue, so tests enqueue
+/// responses in call order regardless of which binary is invoked.
+pub struct StubCliRunner(
     tokio::sync::Mutex<std::collections::VecDeque<Result<CmdOutput, ToolError>>>,
 );
 
-impl StubGitHubApi {
+impl StubCliRunner {
     pub fn new(responses: Vec<Result<CmdOutput, ToolError>>) -> Self {
         Self(tokio::sync::Mutex::new(responses.into()))
     }
 }
 
-impl GitHubApi for StubGitHubApi {
-    async fn exec_gh(&self, _args: &[&str], _cwd: &Path) -> Result<CmdOutput, ToolError> {
-        self.0
-            .lock()
-            .await
-            .pop_front()
-            .expect("StubGitHubApi: response queue exhausted")
-    }
-
-    async fn exec_git(
+impl CliRunner for StubCliRunner {
+    async fn exec(
         &self,
+        _binary: &str,
         _args: &[&str],
         _cwd: &Path,
-        _authenticated: bool,
+        _env: &[(OsString, OsString)],
     ) -> Result<CmdOutput, ToolError> {
         self.0
             .lock()
             .await
             .pop_front()
-            .expect("StubGitHubApi: response queue exhausted")
+            .expect("StubCliRunner: response queue exhausted")
     }
 }
 
@@ -66,23 +61,28 @@ pub fn err_output(stderr: &str) -> Result<CmdOutput, ToolError> {
 /// Build a stub GitHubClient with a fake `.git` dir so `resolve_repo_dir` passes.
 pub fn stub_client_with_repo(
     responses: Vec<Result<CmdOutput, ToolError>>,
-) -> (GitHubClient<StubGitHubApi>, String) {
+) -> (GitHubClient<StubCliRunner>, String) {
     let dir = tempfile::tempdir().unwrap();
     let repo = "projects/r";
     std::fs::create_dir_all(dir.path().join(repo).join(".git")).unwrap();
     let path = dir.into_path();
     (
-        GitHubClient::new(StubGitHubApi::new(responses), &path, vec![]),
+        GitHubClient::new(
+            StubCliRunner::new(responses),
+            Secret::test("fake"),
+            &path,
+            vec![],
+        ),
         repo.to_string(),
     )
 }
 
 /// Build a stub `Arc<GitHubClient>` with a fake `.git` dir.
 ///
-/// Used by individual tool tests that hold `Arc<GitHubClient<A>>`.
+/// Used by individual tool tests that hold `Arc<GitHubClient<R>>`.
 pub fn stub_arc_with_repo(
     responses: Vec<Result<CmdOutput, ToolError>>,
-) -> (std::sync::Arc<GitHubClient<StubGitHubApi>>, String) {
+) -> (std::sync::Arc<GitHubClient<StubCliRunner>>, String) {
     let (client, repo) = stub_client_with_repo(responses);
     (std::sync::Arc::new(client), repo)
 }
