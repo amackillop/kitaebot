@@ -25,6 +25,7 @@ mod ci_status;
 mod client;
 mod commit;
 mod git_clone;
+mod pr_comment;
 #[cfg(test)]
 mod test_helpers;
 mod types;
@@ -35,6 +36,7 @@ pub use ci_status::CiStatus;
 pub use client::GitHubClient;
 pub use commit::Commit;
 pub use git_clone::GitClone;
+pub use pr_comment::PrComment;
 use types::{DiffComment, PrReviewsResponse, PullRequest};
 
 use std::fmt::Write;
@@ -100,15 +102,6 @@ enum Args {
         repo_dir: String,
         /// PR number.
         pr_number: u64,
-    },
-    /// Add a comment to a pull request.
-    PrComment {
-        /// Repository directory relative to workspace root.
-        repo_dir: String,
-        /// PR number.
-        pr_number: u64,
-        /// Comment body (Markdown).
-        body: String,
     },
     /// Fetch inline code review comments on specific lines in the diff.
     ///
@@ -205,11 +198,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
                     repo_dir,
                     pr_number,
                 } => self.pr_reviews(&repo_dir, pr_number).await,
-                Args::PrComment {
-                    repo_dir,
-                    pr_number,
-                    body,
-                } => self.pr_comment(&repo_dir, pr_number, &body).await,
                 Args::PrDiffComments {
                     repo_dir,
                     pr_number,
@@ -365,21 +353,6 @@ impl<A: GitHubApi> GitHub<A> {
         }
 
         Ok(output)
-    }
-
-    /// Add a comment to a pull request via `gh pr comment`.
-    async fn pr_comment(
-        &self,
-        repo_dir: &str,
-        pr_number: u64,
-        body: &str,
-    ) -> Result<String, ToolError> {
-        let cwd = self.client.resolve_repo_dir(repo_dir)?;
-        let number = pr_number.to_string();
-
-        self.client
-            .run_gh(&["pr", "comment", &number, "--body", body], &cwd)
-            .await
     }
 
     /// Fetch inline review comments (line-level) via the REST API.
@@ -585,23 +558,6 @@ mod tests {
         });
         let args: Args = serde_json::from_value(json).unwrap();
         assert!(matches!(args, Args::PrReviews { pr_number: 42, .. }));
-    }
-
-    // ── PrComment deserialization ───────────────────────────────
-
-    #[test]
-    fn deserialize_pr_comment() {
-        let json = serde_json::json!({
-            "action": "pr_comment",
-            "repo_dir": "projects/myrepo",
-            "pr_number": 7,
-            "body": "LGTM"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::PrComment { pr_number: 7, body, .. } if body == "LGTM"
-        ));
     }
 
     // ── PrDiffComments deserialization ────────────────────────────
