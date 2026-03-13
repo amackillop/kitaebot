@@ -27,6 +27,7 @@ mod commit;
 mod git_clone;
 mod pr_comment;
 mod pr_create;
+mod pr_diff_comments;
 #[cfg(test)]
 mod test_helpers;
 mod types;
@@ -39,7 +40,8 @@ pub use commit::Commit;
 pub use git_clone::GitClone;
 pub use pr_comment::PrComment;
 pub use pr_create::PrCreate;
-use types::{DiffComment, PrReviewsResponse, PullRequest};
+pub use pr_diff_comments::PrDiffComments;
+use types::{PrReviewsResponse, PullRequest};
 
 use std::fmt::Write;
 use std::sync::Arc;
@@ -86,17 +88,6 @@ enum Args {
     /// Does NOT return inline code comments on specific lines — use
     /// `pr_diff_comments` for those.
     PrReviews {
-        /// Repository directory relative to workspace root.
-        repo_dir: String,
-        /// PR number.
-        pr_number: u64,
-    },
-    /// Fetch inline code review comments on specific lines in the diff.
-    ///
-    /// This is the action to use when looking for code review feedback.
-    /// Returns comments attached to specific file/line locations — the
-    /// most actionable review feedback. `pr_reviews` does NOT include these.
-    PrDiffComments {
         /// Repository directory relative to workspace root.
         repo_dir: String,
         /// PR number.
@@ -176,10 +167,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
                     repo_dir,
                     pr_number,
                 } => self.pr_reviews(&repo_dir, pr_number).await,
-                Args::PrDiffComments {
-                    repo_dir,
-                    pr_number,
-                } => self.pr_diff_comments(&repo_dir, pr_number).await,
                 Args::PrDiffReply {
                     repo_dir,
                     pr_number,
@@ -308,34 +295,6 @@ impl<A: GitHubApi> GitHub<A> {
         }
 
         Ok(output)
-    }
-
-    /// Fetch inline review comments (line-level) via the REST API.
-    ///
-    /// `gh pr view --json` has no field for these — they live at a
-    /// separate REST endpoint. `gh api` resolves `{owner}` and `{repo}`
-    /// from the git remote when run inside a repository directory.
-    async fn pr_diff_comments(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
-        let cwd = self.client.resolve_repo_dir(repo_dir)?;
-        let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments");
-
-        let comments: Vec<DiffComment> = self.client.run_gh_api(&endpoint, &cwd).await?;
-
-        if comments.is_empty() {
-            return Ok(format!("No inline comments on PR #{pr_number}."));
-        }
-
-        Ok(comments
-            .iter()
-            .map(|c| {
-                let location = c.line.map_or(c.path.clone(), |l| format!("{}:{l}", c.path));
-                format!(
-                    "[id:{}] @{} at {}\n{}",
-                    c.id, c.user.login, location, c.body
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n"))
     }
 
     /// Reply to an inline review comment via the REST API.
@@ -471,19 +430,6 @@ mod tests {
         assert!(matches!(args, Args::PrReviews { pr_number: 42, .. }));
     }
 
-    // ── PrDiffComments deserialization ────────────────────────────
-
-    #[test]
-    fn deserialize_pr_diff_comments() {
-        let json = serde_json::json!({
-            "action": "pr_diff_comments",
-            "repo_dir": "projects/myrepo",
-            "pr_number": 99
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(args, Args::PrDiffComments { pr_number: 99, .. }));
-    }
-
     // ── PrDiffReply deserialization ────────────────────────────
 
     #[test]
@@ -585,35 +531,5 @@ What about edge cases?
         let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
         let result = gh.pr_reviews(&repo, 1).await.unwrap();
         assert_eq!(result, "No reviews or comments on PR #1.");
-    }
-
-    // ── pr_diff_comments ─────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn pr_diff_comments_formats_output() {
-        let json = serde_json::to_string(&serde_json::json!([
-            {"id": 100, "path": "src/main.rs", "line": 42, "body": "Nit: rename this", "user": {"login": "alice"}},
-            {"id": 101, "path": "src/lib.rs", "line": null, "body": "Outdated", "user": {"login": "bob"}}
-        ]))
-        .unwrap();
-
-        let (gh, repo) = stub_with_repo(vec![ok_output(&json)]);
-        let result = gh.pr_diff_comments(&repo, 5).await.unwrap();
-        assert_eq!(
-            result,
-            "\
-[id:100] @alice at src/main.rs:42
-Nit: rename this
-
-[id:101] @bob at src/lib.rs
-Outdated"
-        );
-    }
-
-    #[tokio::test]
-    async fn pr_diff_comments_empty() {
-        let (gh, repo) = stub_with_repo(vec![ok_output("[]")]);
-        let result = gh.pr_diff_comments(&repo, 5).await.unwrap();
-        assert_eq!(result, "No inline comments on PR #5.");
     }
 }
