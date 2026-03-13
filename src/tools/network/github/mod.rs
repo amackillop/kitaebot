@@ -7,8 +7,11 @@
 //! # Architecture
 //!
 //! [`api::GitHubApi`] is the raw subprocess boundary — it owns credentials
-//! and spawns `gh`/`git` processes. [`GitHub<A>`] is the business logic
-//! layer that assembles arguments, parses JSON, and formats output.
+//! and spawns `gh`/`git` processes. [`client::GitHubClient`] carries the
+//! shared context (API handle, workspace root, co-authors) and provides
+//! plumbing methods (`run_gh`, `run_git`, etc.). Each tool file holds an
+//! `Arc<GitHubClient<A>>` and owns only its business logic.
+//!
 //! Tests substitute `StubGitHubApi` to exercise the logic without
 //! spawning real subprocesses.
 //!
@@ -31,12 +34,16 @@ mod pr_diff_comments;
 mod pr_diff_reply;
 mod pr_list;
 mod pr_reviews;
+mod push;
 #[cfg(test)]
 mod test_helpers;
 mod types;
 mod url;
 
-pub use api::{GitHubApi, RealGitHubApi};
+// Re-export parent utility so tool files can `use super::Tool`.
+pub(crate) use super::Tool;
+
+pub use api::RealGitHubApi;
 pub use ci_status::CiStatus;
 pub use client::GitHubClient;
 pub use commit::Commit;
@@ -47,180 +54,4 @@ pub use pr_diff_comments::PrDiffComments;
 pub use pr_diff_reply::PrDiffReply;
 pub use pr_list::PrList;
 pub use pr_reviews::PrReviews;
-
-use std::sync::Arc;
-
-use schemars::JsonSchema;
-use serde::Deserialize;
-
-use std::future::Future;
-use std::pin::Pin;
-
-use super::Tool;
-use crate::error::ToolError;
-
-/// Arguments for the GitHub tool.
-///
-/// Each variant maps to one git/gh subcommand. Tagged with `action`
-/// so the LLM produces `{"action": "clone", "url": "..."}`.
-#[derive(Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "snake_case")]
-enum Args {
-    /// Push commits to a remote.
-    Push {
-        /// Repository directory relative to workspace root
-        /// (e.g. `"projects/myrepo"`).
-        repo_dir: String,
-        /// Remote name. Defaults to `"origin"`.
-        remote: Option<String>,
-        /// Branch to push. Defaults to the current branch.
-        branch: Option<String>,
-        /// Set upstream tracking (`--set-upstream`).
-        #[serde(default)]
-        set_upstream: bool,
-    },
-}
-
-// ── Business logic layer ────────────────────────────────────────────
-
-/// Authenticated GitHub operations (temporary monolithic tool).
-///
-/// Delegates to [`GitHubClient`] for subprocess plumbing and wraps it
-/// with the [`Tool`] trait. Will be replaced by per-action tools.
-pub struct GitHub<A> {
-    client: Arc<GitHubClient<A>>,
-}
-
-impl<A: GitHubApi> GitHub<A> {
-    pub fn new(client: Arc<GitHubClient<A>>) -> Self {
-        Self { client }
-    }
-}
-
-impl<A: GitHubApi> Tool for GitHub<A> {
-    fn name(&self) -> &'static str {
-        "github"
-    }
-
-    fn description(&self) -> &'static str {
-        "Authenticated GitHub operations (clone, push, commit, pull requests, reviews, CI status)"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
-    }
-
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
-        Box::pin(async move {
-            let args: Args = serde_json::from_value(args)
-                .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-
-            match args {
-                Args::Push {
-                    repo_dir,
-                    remote,
-                    branch,
-                    set_upstream,
-                } => {
-                    self.push(
-                        &repo_dir,
-                        remote.as_deref(),
-                        branch.as_deref(),
-                        set_upstream,
-                    )
-                    .await
-                }
-            }
-        })
-    }
-}
-
-impl<A: GitHubApi> GitHub<A> {
-    /// Push commits to a remote.
-    async fn push(
-        &self,
-        repo_dir: &str,
-        remote: Option<&str>,
-        branch: Option<&str>,
-        set_upstream: bool,
-    ) -> Result<String, ToolError> {
-        let cwd = self.client.resolve_repo_dir(repo_dir)?;
-
-        let remote = remote.unwrap_or("origin");
-        let mut args = vec!["push"];
-
-        if set_upstream {
-            args.push("--set-upstream");
-        }
-
-        args.push(remote);
-
-        if let Some(b) = branch {
-            args.push(b);
-        }
-
-        self.client.run_git(&args, &cwd, true).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::test_helpers::{ok_output, stub_with_repo};
-    use super::*;
-
-    // ── Schema ──────────────────────────────────────────────────────
-
-    #[test]
-    fn schema_requires_action() {
-        let schema = serde_json::to_value(schemars::schema_for!(Args)).unwrap();
-        // Tagged enum — should have oneOf or use discriminator
-        assert!(
-            schema.to_string().contains("action"),
-            "schema must include action discriminator: {schema}"
-        );
-    }
-
-    // ── Push deserialization ────────────────────────────────────────
-
-    #[test]
-    fn deserialize_push_minimal() {
-        let json = serde_json::json!({
-            "action": "push",
-            "repo_dir": "projects/myrepo"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::Push {
-                repo_dir,
-                remote: None,
-                branch: None,
-                set_upstream: false,
-            } if repo_dir == "projects/myrepo"
-        ));
-    }
-
-    #[test]
-    fn deserialize_push_full() {
-        let json = serde_json::json!({
-            "action": "push",
-            "repo_dir": "projects/myrepo",
-            "remote": "upstream",
-            "branch": "feature",
-            "set_upstream": true
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::Push {
-                remote: Some(r),
-                branch: Some(b),
-                set_upstream: true,
-                ..
-            } if r == "upstream" && b == "feature"
-        ));
-    }
-}
+pub use push::Push;

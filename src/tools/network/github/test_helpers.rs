@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use super::GitHub;
 use super::api::{CmdOutput, GitHubApi};
 use super::client::GitHubClient;
 use crate::error::ToolError;
@@ -62,14 +61,6 @@ pub fn err_output(stderr: &str) -> Result<CmdOutput, ToolError> {
         stderr: stderr.to_string(),
         exit_code: 1,
     })
-}
-
-/// Build a stub GitHub tool with a fake `.git` dir so `resolve_repo_dir` passes.
-pub fn stub_with_repo(
-    responses: Vec<Result<CmdOutput, ToolError>>,
-) -> (GitHub<StubGitHubApi>, String) {
-    let (client, repo) = stub_arc_with_repo(responses);
-    (GitHub::new(client), repo)
 }
 
 /// Build a stub GitHubClient with a fake `.git` dir so `resolve_repo_dir` passes.
