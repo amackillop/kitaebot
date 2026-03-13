@@ -12,7 +12,7 @@
 //! - Device writes (`> /dev/`)
 //! - System power (`shutdown`, `reboot`)
 //! - Fork bombs
-//! - Authenticated git operations (`git clone`, `git push`) — must use the GitHub tool
+//! - Authenticated git operations (`git clone`, `git push`) — must use the dedicated GitHub tools
 //! - `gh` CLI config reads (token may persist to disk)
 //!
 //! Path traversal (`../`) is also blocked to confine execution to the workspace.
@@ -327,18 +327,18 @@ const DENY_RULES: &[DenyRule] = &[
         pattern: r"\bat\b\s",
         guidance: BLOCKED,
     },
-    // Git operations that must go through the GitHub tool
+    // Git operations that must go through their dedicated GitHub tools
     DenyRule {
         pattern: r"\bgit\b\s+clone\b",
-        guidance: "use the github tool's clone action",
+        guidance: "use the github_clone tool",
     },
     DenyRule {
         pattern: r"\bgit\b\s+push\b",
-        guidance: "use the github tool's push action",
+        guidance: "use the github_push tool",
     },
     DenyRule {
         pattern: r"\bgit\b\s+commit\b",
-        guidance: "use the github tool's commit action",
+        guidance: "use the github_commit tool",
     },
     // Git signing is configured via programs.git with an absolute gpg path.
     // The agent must not override it.
@@ -721,15 +721,15 @@ mod tests {
     fn test_guidance_for_git_ops() {
         assert_eq!(
             blocked_reason("git clone https://github.com/o/r"),
-            Some("use the github tool's clone action"),
+            Some("use the github_clone tool"),
         );
         assert_eq!(
             blocked_reason("git push origin main"),
-            Some("use the github tool's push action"),
+            Some("use the github_push tool"),
         );
         assert_eq!(
             blocked_reason("git commit -m 'fix'"),
-            Some("use the github tool's commit action"),
+            Some("use the github_commit tool"),
         );
         assert_eq!(
             blocked_reason("cat .config/gh/hosts.yml"),
