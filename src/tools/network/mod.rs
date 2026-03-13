@@ -44,7 +44,8 @@ pub fn build(
         tools.push(Box::new(github::CiStatus(Arc::clone(&gh))));
         tools.push(Box::new(github::Commit(Arc::clone(&gh))));
         tools.push(Box::new(github::GitClone(Arc::clone(&gh))));
-        tools.push(Box::new(github::PrComment(gh)));
+        tools.push(Box::new(github::PrComment(Arc::clone(&gh))));
+        tools.push(Box::new(github::PrCreate(gh)));
     }
 
     tools.push(Box::new(

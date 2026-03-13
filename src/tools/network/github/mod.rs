@@ -26,6 +26,7 @@ mod client;
 mod commit;
 mod git_clone;
 mod pr_comment;
+mod pr_create;
 #[cfg(test)]
 mod test_helpers;
 mod types;
@@ -37,6 +38,7 @@ pub use client::GitHubClient;
 pub use commit::Commit;
 pub use git_clone::GitClone;
 pub use pr_comment::PrComment;
+pub use pr_create::PrCreate;
 use types::{DiffComment, PrReviewsResponse, PullRequest};
 
 use std::fmt::Write;
@@ -70,20 +72,6 @@ enum Args {
         /// Set upstream tracking (`--set-upstream`).
         #[serde(default)]
         set_upstream: bool,
-    },
-    /// Create a pull request.
-    PrCreate {
-        /// Repository directory relative to workspace root.
-        repo_dir: String,
-        /// PR title.
-        title: String,
-        /// PR body / description.
-        body: String,
-        /// Base branch to merge into. Defaults to the repo's default branch.
-        base: Option<String>,
-        /// Create as draft PR.
-        #[serde(default)]
-        draft: bool,
     },
     /// List pull requests.
     PrList {
@@ -183,16 +171,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
                     )
                     .await
                 }
-                Args::PrCreate {
-                    repo_dir,
-                    title,
-                    body,
-                    base,
-                    draft,
-                } => {
-                    self.pr_create(&repo_dir, &title, &body, base.as_deref(), draft)
-                        .await
-                }
                 Args::PrList { repo_dir, state } => self.pr_list(&repo_dir, state.as_deref()).await,
                 Args::PrReviews {
                     repo_dir,
@@ -241,29 +219,6 @@ impl<A: GitHubApi> GitHub<A> {
         }
 
         self.client.run_git(&args, &cwd, true).await
-    }
-
-    /// Create a pull request via `gh pr create`.
-    async fn pr_create(
-        &self,
-        repo_dir: &str,
-        title: &str,
-        body: &str,
-        base: Option<&str>,
-        draft: bool,
-    ) -> Result<String, ToolError> {
-        let cwd = self.client.resolve_repo_dir(repo_dir)?;
-
-        let mut args = vec!["pr", "create", "--title", title, "--body", body];
-
-        if let Some(b) = base {
-            args.extend(["--base", b]);
-        }
-        if draft {
-            args.push("--draft");
-        }
-
-        self.client.run_gh(&args, &cwd).await
     }
 
     /// List pull requests via `gh pr list`.
@@ -461,50 +416,6 @@ mod tests {
                 set_upstream: true,
                 ..
             } if r == "upstream" && b == "feature"
-        ));
-    }
-
-    // ── PrCreate deserialization ──────────────────────────────────
-
-    #[test]
-    fn deserialize_pr_create_minimal() {
-        let json = serde_json::json!({
-            "action": "pr_create",
-            "repo_dir": "projects/myrepo",
-            "title": "Fix bug",
-            "body": "Fixes the thing"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::PrCreate {
-                title,
-                body,
-                base: None,
-                draft: false,
-                ..
-            } if title == "Fix bug" && body == "Fixes the thing"
-        ));
-    }
-
-    #[test]
-    fn deserialize_pr_create_full() {
-        let json = serde_json::json!({
-            "action": "pr_create",
-            "repo_dir": "projects/myrepo",
-            "title": "Feature",
-            "body": "Add feature",
-            "base": "develop",
-            "draft": true
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::PrCreate {
-                base: Some(b),
-                draft: true,
-                ..
-            } if b == "develop"
         ));
     }
 
