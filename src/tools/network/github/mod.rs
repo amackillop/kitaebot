@@ -23,16 +23,18 @@
 mod api;
 mod ci_status;
 mod client;
+mod commit;
 #[cfg(test)]
 mod test_helpers;
 mod types;
 mod url;
 
-use url::{extract_repo_name, format_commit_message, to_https_url, validate_name};
+use url::{extract_repo_name, to_https_url, validate_name};
 
 pub use api::{GitHubApi, RealGitHubApi};
 pub use ci_status::CiStatus;
 pub use client::GitHubClient;
+pub use commit::Commit;
 use types::{DiffComment, PrReviewsResponse, PullRequest};
 
 use std::fmt::Write;
@@ -128,16 +130,6 @@ enum Args {
         /// PR number.
         pr_number: u64,
     },
-    /// Commit staged changes with an automatic Co-authored-by trailer.
-    ///
-    /// Use `git add` via exec first, then this action to commit. Trailers
-    /// from the configured `co_authors` list are appended automatically.
-    Commit {
-        /// Repository directory relative to workspace root.
-        repo_dir: String,
-        /// Commit message (Co-authored-by trailers are appended automatically).
-        message: String,
-    },
     /// Reply to an inline review comment.
     ///
     /// Use `pr_diff_comments` first to get comment IDs, then reply
@@ -208,7 +200,6 @@ impl<A: GitHubApi> Tool for GitHub<A> {
                     )
                     .await
                 }
-                Args::Commit { repo_dir, message } => self.commit(&repo_dir, &message).await,
                 Args::PrCreate {
                     repo_dir,
                     title,
@@ -303,15 +294,6 @@ impl<A: GitHubApi> GitHub<A> {
         }
 
         self.client.run_git(&args, &cwd, true).await
-    }
-
-    /// Commit staged changes with Co-authored-by trailers.
-    async fn commit(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
-        let cwd = self.client.resolve_repo_dir(repo_dir)?;
-        let full_message = format_commit_message(message, &self.client.co_authors);
-        self.client
-            .run_git(&["commit", "-m", &full_message], &cwd, false)
-            .await
     }
 
     /// Create a pull request via `gh pr create`.
@@ -721,23 +703,6 @@ mod tests {
                 body,
                 ..
             } if body == "Fixed in the latest push"
-        ));
-    }
-
-    // ── Commit deserialization ──────────────────────────────────
-
-    #[test]
-    fn deserialize_commit_minimal() {
-        let json = serde_json::json!({
-            "action": "commit",
-            "repo_dir": "projects/myrepo",
-            "message": "Fix the thing"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            args,
-            Args::Commit { repo_dir, message }
-                if repo_dir == "projects/myrepo" && message == "Fix the thing"
         ));
     }
 

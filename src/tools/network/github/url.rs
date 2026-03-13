@@ -1,4 +1,4 @@
-//! URL handling and pure helper functions for GitHub tools.
+//! URL handling for GitHub tools.
 
 use crate::error::ToolError;
 
@@ -65,27 +65,6 @@ pub(super) fn validate_name(name: &str) -> Result<&str, ToolError> {
         )));
     }
     Ok(name)
-}
-
-/// Append `Co-authored-by` trailers to a commit message.
-///
-/// Returns the message unchanged when `co_authors` is empty. Otherwise
-/// appends a blank line followed by one trailer per co-author.
-pub(super) fn format_commit_message(message: &str, co_authors: &[String]) -> String {
-    if co_authors.is_empty() {
-        return message.to_string();
-    }
-
-    let trailer_len: usize = co_authors.iter().map(|a| a.len() + 18).sum();
-    let mut msg = String::with_capacity(message.len() + 2 + trailer_len);
-    msg.push_str(message);
-    msg.push_str("\n\n");
-    for author in co_authors {
-        msg.push_str("Co-authored-by: ");
-        msg.push_str(author);
-        msg.push('\n');
-    }
-    msg
 }
 
 #[cfg(test)]
@@ -181,36 +160,5 @@ mod tests {
     #[test]
     fn reject_empty() {
         assert!(validate_name("").is_err());
-    }
-
-    // ── Co-author trailer formatting ────────────────────────────
-
-    #[test]
-    fn format_message_no_co_authors() {
-        let msg = format_commit_message("Fix bug", &[]);
-        assert_eq!(msg, "Fix bug");
-    }
-
-    #[test]
-    fn format_message_one_co_author() {
-        let authors = ["Alice <alice@example.com>".to_string()];
-        let msg = format_commit_message("Fix bug", &authors);
-        assert_eq!(
-            msg,
-            "Fix bug\n\nCo-authored-by: Alice <alice@example.com>\n"
-        );
-    }
-
-    #[test]
-    fn format_message_multiple_co_authors() {
-        let authors = [
-            "Alice <alice@example.com>".to_string(),
-            "Bob <bob@example.com>".to_string(),
-        ];
-        let msg = format_commit_message("Add feature", &authors);
-        assert_eq!(
-            msg,
-            "Add feature\n\nCo-authored-by: Alice <alice@example.com>\nCo-authored-by: Bob <bob@example.com>\n"
-        );
     }
 }
