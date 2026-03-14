@@ -11,6 +11,7 @@ use tracing::error;
 use crate::agent::TurnConfig;
 use crate::context;
 use crate::dispatch::Reply;
+use crate::heartbeat;
 use crate::provider::Provider;
 use crate::session::Session;
 use crate::stats;
@@ -23,6 +24,8 @@ pub enum SlashCommand {
     Compact,
     /// Display token usage.
     Context,
+    /// Trigger a one-shot heartbeat cycle.
+    Heartbeat,
     /// Clear session and start fresh.
     New,
     /// Show session tool usage statistics.
@@ -40,6 +43,7 @@ impl FromStr for SlashCommand {
         match input {
             "/compact" => Ok(Self::Compact),
             "/context" => Ok(Self::Context),
+            "/heartbeat" => Ok(Self::Heartbeat),
             "/new" => Ok(Self::New),
             "/stats" => Ok(Self::Stats),
             _ => Err(UnknownCommand),
@@ -110,6 +114,13 @@ pub async fn execute<P: Provider>(
                 config.context.max_tokens,
             )))
         }
+        SlashCommand::Heartbeat => match heartbeat::run(workspace, config).await {
+            Ok(heartbeat::Outcome::Executed(response)) => Ok(Reply::text(response)),
+            Ok(heartbeat::Outcome::Skipped(reason)) => {
+                Ok(Reply::text(format!("Skipped: {reason}")))
+            }
+            Err(e) => Err(format!("Heartbeat failed: {e}")),
+        },
         SlashCommand::New => {
             session.clear();
             if let Err(e) = session.save(session_path) {
@@ -127,9 +138,10 @@ mod tests {
 
     #[test]
     fn parse_known_commands() {
-        assert_eq!("/new".parse(), Ok(SlashCommand::New));
-        assert_eq!("/context".parse(), Ok(SlashCommand::Context));
         assert_eq!("/compact".parse(), Ok(SlashCommand::Compact));
+        assert_eq!("/context".parse(), Ok(SlashCommand::Context));
+        assert_eq!("/heartbeat".parse(), Ok(SlashCommand::Heartbeat));
+        assert_eq!("/new".parse(), Ok(SlashCommand::New));
         assert_eq!("/stats".parse(), Ok(SlashCommand::Stats));
     }
 
