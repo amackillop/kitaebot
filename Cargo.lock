@@ -866,7 +866,6 @@ dependencies = [
  "futures",
  "glob",
  "grep",
- "http",
  "ignore",
  "landlock",
  "predicates",
