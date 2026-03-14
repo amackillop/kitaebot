@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -27,7 +26,7 @@ struct Args {
     draft: bool,
 }
 
-pub struct PrCreate<R>(pub Arc<GhCli<R>>);
+pub struct PrCreate<R>(pub GhCli<R>);
 
 impl<R: CliRunner> Tool for PrCreate<R> {
     fn name(&self) -> &'static str {
@@ -88,12 +87,12 @@ impl<R: CliRunner> PrCreate<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::{ok_output, stub_gh_arc_with_repo};
+    use crate::tools::github::test_helpers::{ok_output, stub_gh_cli_with_repo};
 
     #[tokio::test]
     async fn creates_pr_with_minimal_args() {
         let (gh, repo, calls) =
-            stub_gh_arc_with_repo(vec![ok_output("https://github.com/o/r/pull/42")]);
+            stub_gh_cli_with_repo(vec![ok_output("https://github.com/o/r/pull/42")]);
         let tool = PrCreate(gh);
         let _ = tool
             .run(&repo, "Fix bug", "Fixes the thing", None, false)
@@ -119,7 +118,7 @@ mod tests {
 
     #[tokio::test]
     async fn draft_with_base_appends_flags() {
-        let (gh, repo, calls) = stub_gh_arc_with_repo(vec![ok_output("ok")]);
+        let (gh, repo, calls) = stub_gh_cli_with_repo(vec![ok_output("ok")]);
         let tool = PrCreate(gh);
         let _ = tool
             .run(&repo, "Feature", "Add feature", Some("develop"), true)

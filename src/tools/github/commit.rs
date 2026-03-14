@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -20,7 +19,7 @@ struct Args {
     message: String,
 }
 
-pub struct Commit<R>(pub Arc<GitCli<R>>);
+pub struct Commit<R>(pub GitCli<R>);
 
 impl<R: CliRunner> Tool for Commit<R> {
     fn name(&self) -> &'static str {
@@ -81,7 +80,7 @@ fn format_commit_message(message: &str, co_authors: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::{ok_output, stub_git_arc_with_repo};
+    use crate::tools::github::test_helpers::{ok_output, stub_git_cli_with_repo};
 
     #[test]
     fn format_message_no_co_authors() {
@@ -115,7 +114,7 @@ mod tests {
     #[tokio::test]
     async fn calls_git_commit_unauthenticated() {
         let (git, repo, calls) =
-            stub_git_arc_with_repo(vec![ok_output("[master abc1234] Fix bug")]);
+            stub_git_cli_with_repo(vec![ok_output("[master abc1234] Fix bug")]);
         let tool = Commit(git);
         let _ = tool.run(&repo, "Fix bug").await.unwrap();
 

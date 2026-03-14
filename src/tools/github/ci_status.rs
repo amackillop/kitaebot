@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -24,8 +23,8 @@ struct Args {
 }
 
 pub struct CiStatus<R> {
-    pub git: Arc<GitCli<R>>,
-    pub gh: Arc<GhCli<R>>,
+    pub git: GitCli<R>,
+    pub gh: GhCli<R>,
 }
 
 impl<R: CliRunner> Tool for CiStatus<R> {
@@ -105,7 +104,7 @@ impl<R: CliRunner> CiStatus<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{ok_output, stub_gh_arc_with_repo, stub_git_arc_with_repo};
+    use super::super::test_helpers::{ok_output, stub_gh_cli_with_repo, stub_git_cli_with_repo};
     use super::CiStatus;
     use crate::error::ToolError;
 
@@ -123,9 +122,9 @@ mod tests {
         let log_output = "test-job  Step failed";
 
         // Branch explicitly provided, so git stub is unused.
-        let (git, _, git_calls) = stub_git_arc_with_repo(vec![]);
+        let (git, _, git_calls) = stub_git_cli_with_repo(vec![]);
         let (gh, repo, _) =
-            stub_gh_arc_with_repo(vec![ok_output(&runs_json), ok_output(log_output)]);
+            stub_gh_cli_with_repo(vec![ok_output(&runs_json), ok_output(log_output)]);
         let tool = CiStatus { git, gh };
         let result = tool.run(&repo, Some("main")).await.unwrap();
         assert_eq!(
@@ -148,8 +147,8 @@ Exit code: 0"
 
     #[tokio::test]
     async fn no_failed_runs() {
-        let (git, _, _) = stub_git_arc_with_repo(vec![]);
-        let (gh, repo, _) = stub_gh_arc_with_repo(vec![ok_output("[]")]);
+        let (git, _, _) = stub_git_cli_with_repo(vec![]);
+        let (gh, repo, _) = stub_gh_cli_with_repo(vec![ok_output("[]")]);
         let tool = CiStatus { git, gh };
         let result = tool.run(&repo, Some("main")).await;
         assert!(
@@ -168,9 +167,9 @@ Exit code: 0"
         }]))
         .unwrap();
 
-        let (git, _, git_calls) = stub_git_arc_with_repo(vec![ok_output("feat/xyz\n")]);
+        let (git, _, git_calls) = stub_git_cli_with_repo(vec![ok_output("feat/xyz\n")]);
         let (gh, repo, gh_calls) =
-            stub_gh_arc_with_repo(vec![ok_output(&runs_json), ok_output("FAIL")]);
+            stub_gh_cli_with_repo(vec![ok_output(&runs_json), ok_output("FAIL")]);
         let tool = CiStatus { git, gh };
         let result = tool.run(&repo, None).await.unwrap();
         assert!(result.contains("Run #100"));

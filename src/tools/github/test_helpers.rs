@@ -135,14 +135,6 @@ pub fn stub_git_cli_with_repo(
     )
 }
 
-/// Build a stub `Arc<GitCli>` with a fake `.git` dir.
-pub fn stub_git_arc_with_repo(
-    responses: Vec<Result<CmdOutput, ToolError>>,
-) -> (Arc<GitCli<StubCliRunner>>, String, Calls) {
-    let (cli, repo, calls) = stub_git_cli_with_repo(responses);
-    (Arc::new(cli), repo, calls)
-}
-
 /// Build a stub `GhCli` with a fake `.git` dir.
 #[allow(deprecated)] // tempfile::TempDir::into_path
 pub fn stub_gh_cli_with_repo(
@@ -158,12 +150,4 @@ pub fn stub_gh_cli_with_repo(
         repo.to_string(),
         calls,
     )
-}
-
-/// Build a stub `Arc<GhCli>` with a fake `.git` dir.
-pub fn stub_gh_arc_with_repo(
-    responses: Vec<Result<CmdOutput, ToolError>>,
-) -> (Arc<GhCli<StubCliRunner>>, String, Calls) {
-    let (cli, repo, calls) = stub_gh_cli_with_repo(responses);
-    (Arc::new(cli), repo, calls)
 }

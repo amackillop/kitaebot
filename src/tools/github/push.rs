@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -26,7 +25,7 @@ struct Args {
     set_upstream: bool,
 }
 
-pub struct Push<R>(pub Arc<GitCli<R>>);
+pub struct Push<R>(pub GitCli<R>);
 
 impl<R: CliRunner> Tool for Push<R> {
     fn name(&self) -> &'static str {
@@ -89,11 +88,11 @@ impl<R: CliRunner> Push<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::{ok_output, stub_git_arc_with_repo};
+    use crate::tools::github::test_helpers::{ok_output, stub_git_cli_with_repo};
 
     #[tokio::test]
     async fn defaults_to_origin_authenticated() {
-        let (git, repo, calls) = stub_git_arc_with_repo(vec![ok_output("Everything up-to-date")]);
+        let (git, repo, calls) = stub_git_cli_with_repo(vec![ok_output("Everything up-to-date")]);
         let tool = Push(git);
         let _ = tool.run(&repo, None, None, false).await.unwrap();
 
@@ -106,7 +105,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_options_build_correct_args() {
-        let (git, repo, calls) = stub_git_arc_with_repo(vec![ok_output("ok")]);
+        let (git, repo, calls) = stub_git_cli_with_repo(vec![ok_output("ok")]);
         let tool = Push(git);
         let _ = tool
             .run(&repo, Some("upstream"), Some("feat"), true)

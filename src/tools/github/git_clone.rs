@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -23,7 +22,7 @@ struct Args {
     name: Option<String>,
 }
 
-pub struct GitClone<R>(pub Arc<GitCli<R>>);
+pub struct GitClone<R>(pub GitCli<R>);
 
 impl<R: CliRunner> Tool for GitClone<R> {
     fn name(&self) -> &'static str {
@@ -85,11 +84,11 @@ impl<R: CliRunner> GitClone<R> {
 mod tests {
     use super::*;
     use crate::error::ToolError;
-    use crate::tools::github::test_helpers::{ok_output, stub_git_arc_with_repo};
+    use crate::tools::github::test_helpers::{ok_output, stub_git_cli_with_repo};
 
     #[tokio::test]
     async fn clones_with_derived_name_authenticated() {
-        let (git, _, calls) = stub_git_arc_with_repo(vec![ok_output("Cloning into 'repo'...")]);
+        let (git, _, calls) = stub_git_cli_with_repo(vec![ok_output("Cloning into 'repo'...")]);
         let tool = GitClone(git);
         let _ = tool
             .run("https://github.com/owner/repo.git", None)
@@ -108,7 +107,7 @@ mod tests {
 
     #[tokio::test]
     async fn uses_custom_name() {
-        let (git, _, calls) = stub_git_arc_with_repo(vec![ok_output("ok")]);
+        let (git, _, calls) = stub_git_cli_with_repo(vec![ok_output("ok")]);
         let tool = GitClone(git);
         let _ = tool
             .run("https://github.com/owner/repo.git", Some("custom"))
@@ -121,7 +120,7 @@ mod tests {
 
     #[tokio::test]
     async fn rewrites_ssh_to_https() {
-        let (git, _, calls) = stub_git_arc_with_repo(vec![ok_output("ok")]);
+        let (git, _, calls) = stub_git_cli_with_repo(vec![ok_output("ok")]);
         let tool = GitClone(git);
         let _ = tool
             .run("git@github.com:owner/repo.git", None)
@@ -134,7 +133,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_already_existing_target() {
-        let (git, _, _) = stub_git_arc_with_repo(vec![]);
+        let (git, _, _) = stub_git_cli_with_repo(vec![]);
         // The stub already creates projects/r — clone into "r" to hit the exists check.
         let tool = GitClone(git);
         let result = tool.run("https://github.com/owner/r.git", None).await;
@@ -145,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_traversal_in_name() {
-        let (git, _, _) = stub_git_arc_with_repo(vec![]);
+        let (git, _, _) = stub_git_cli_with_repo(vec![]);
         let tool = GitClone(git);
         let result = tool
             .run("https://github.com/owner/repo.git", Some("../escape"))

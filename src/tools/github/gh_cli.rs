@@ -17,6 +17,7 @@ use crate::tools::cli_runner::{CliRunner, CmdOutput};
 ///
 /// Generic over [`CliRunner`] so tests can substitute a stub without
 /// spawning real subprocesses.
+#[derive(Clone)]
 pub struct GhCli<R> {
     pub(super) runner: R,
     pub(super) token: Secret,

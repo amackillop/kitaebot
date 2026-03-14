@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -22,7 +21,7 @@ struct Args {
     body: String,
 }
 
-pub struct PrComment<R>(pub Arc<GhCli<R>>);
+pub struct PrComment<R>(pub GhCli<R>);
 
 impl<R: CliRunner> Tool for PrComment<R> {
     fn name(&self) -> &'static str {
@@ -62,11 +61,11 @@ impl<R: CliRunner> PrComment<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::{ok_output, stub_gh_arc_with_repo};
+    use crate::tools::github::test_helpers::{ok_output, stub_gh_cli_with_repo};
 
     #[tokio::test]
     async fn posts_comment_to_pr() {
-        let (gh, repo, calls) = stub_gh_arc_with_repo(vec![ok_output("ok")]);
+        let (gh, repo, calls) = stub_gh_cli_with_repo(vec![ok_output("ok")]);
         let tool = PrComment(gh);
         let _ = tool.run(&repo, 7, "LGTM").await.unwrap();
 

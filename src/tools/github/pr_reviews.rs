@@ -3,7 +3,6 @@
 use std::fmt::Write;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -27,7 +26,7 @@ struct Args {
     pr_number: u64,
 }
 
-pub struct PrReviews<R>(pub Arc<GhCli<R>>);
+pub struct PrReviews<R>(pub GhCli<R>);
 
 impl<R: CliRunner> Tool for PrReviews<R> {
     fn name(&self) -> &'static str {
@@ -113,7 +112,7 @@ impl<R: CliRunner> PrReviews<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{ok_output, stub_gh_arc_with_repo};
+    use super::super::test_helpers::{ok_output, stub_gh_cli_with_repo};
     use super::*;
 
     #[tokio::test]
@@ -134,7 +133,7 @@ mod tests {
         }))
         .unwrap();
 
-        let (client, repo, calls) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
+        let (client, repo, calls) = stub_gh_cli_with_repo(vec![ok_output(&json)]);
         let tool = PrReviews(client);
         let result = tool.run(&repo, 42).await.unwrap();
         assert_eq!(
@@ -165,7 +164,7 @@ What about edge cases?
         }))
         .unwrap();
 
-        let (client, repo, _) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
+        let (client, repo, _) = stub_gh_cli_with_repo(vec![ok_output(&json)]);
         let tool = PrReviews(client);
         let result = tool.run(&repo, 1).await.unwrap();
         assert_eq!(result, "No reviews or comments on PR #1.");

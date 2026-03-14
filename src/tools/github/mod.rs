@@ -9,7 +9,7 @@
 //! [`crate::tools::cli_runner::CliRunner`] is the raw subprocess boundary.
 //! [`git_cli::GitCli`] wraps the `git` binary (clone, push, commit).
 //! [`gh_cli::GhCli`] wraps the `gh` CLI (PRs, CI, API calls).
-//! Each tool file holds an `Arc` of the appropriate CLI struct and owns
+//! Each tool owns a clone of the appropriate CLI struct and holds
 //! only its business logic.
 //!
 //! Tests substitute `StubCliRunner` to exercise the logic without
@@ -54,7 +54,6 @@ pub use pr_reviews::PrReviews;
 pub use push::Push;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use crate::config::Config;
 use crate::error::ToolError;
@@ -107,27 +106,27 @@ pub(crate) fn build(
         return Vec::new();
     };
 
-    let git = Arc::new(GitCli::new(
+    let git = GitCli::new(
         RealCliRunner,
         token.clone(),
         workspace.path(),
         config.git.co_authors.clone(),
-    ));
-    let gh = Arc::new(GhCli::new(RealCliRunner, token, workspace.path()));
+    );
+    let gh = GhCli::new(RealCliRunner, token, workspace.path());
 
     vec![
-        Box::new(Commit(Arc::clone(&git))),
-        Box::new(GitClone(Arc::clone(&git))),
-        Box::new(Push(Arc::clone(&git))),
+        Box::new(Commit(git.clone())),
+        Box::new(GitClone(git.clone())),
+        Box::new(Push(git.clone())),
         Box::new(CiStatus {
             git,
-            gh: Arc::clone(&gh),
+            gh: gh.clone(),
         }),
-        Box::new(PrComment(Arc::clone(&gh))),
-        Box::new(PrCreate(Arc::clone(&gh))),
-        Box::new(PrDiffComments(Arc::clone(&gh))),
-        Box::new(PrDiffReply(Arc::clone(&gh))),
-        Box::new(PrList(Arc::clone(&gh))),
+        Box::new(PrComment(gh.clone())),
+        Box::new(PrCreate(gh.clone())),
+        Box::new(PrDiffComments(gh.clone())),
+        Box::new(PrDiffReply(gh.clone())),
+        Box::new(PrList(gh.clone())),
         Box::new(PrReviews(gh)),
     ]
 }

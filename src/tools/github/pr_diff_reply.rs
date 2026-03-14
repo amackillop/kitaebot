@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -29,7 +28,7 @@ struct Args {
     body: String,
 }
 
-pub struct PrDiffReply<R>(pub Arc<GhCli<R>>);
+pub struct PrDiffReply<R>(pub GhCli<R>);
 
 impl<R: CliRunner> Tool for PrDiffReply<R> {
     fn name(&self) -> &'static str {
@@ -79,11 +78,11 @@ impl<R: CliRunner> PrDiffReply<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::{ok_output, stub_gh_arc_with_repo};
+    use crate::tools::github::test_helpers::{ok_output, stub_gh_cli_with_repo};
 
     #[tokio::test]
     async fn replies_to_correct_endpoint() {
-        let (gh, repo, calls) = stub_gh_arc_with_repo(vec![ok_output("{}")]);
+        let (gh, repo, calls) = stub_gh_cli_with_repo(vec![ok_output("{}")]);
         let tool = PrDiffReply(gh);
         let _ = tool
             .run(&repo, 5, 123_456, "Fixed in the latest push")

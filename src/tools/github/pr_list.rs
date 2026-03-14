@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -21,7 +20,7 @@ struct Args {
     state: Option<String>,
 }
 
-pub struct PrList<R>(pub Arc<GhCli<R>>);
+pub struct PrList<R>(pub GhCli<R>);
 
 impl<R: CliRunner> Tool for PrList<R> {
     fn name(&self) -> &'static str {
@@ -84,12 +83,12 @@ impl<R: CliRunner> PrList<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{ok_output, stub_gh_arc_with_repo};
+    use super::super::test_helpers::{ok_output, stub_gh_cli_with_repo};
     use super::*;
 
     #[test]
     fn rejects_invalid_state() {
-        let (client, repo, _) = stub_gh_arc_with_repo(vec![]);
+        let (client, repo, _) = stub_gh_cli_with_repo(vec![]);
         let tool = PrList(client);
         let result = tokio::runtime::Runtime::new()
             .unwrap()
@@ -105,7 +104,7 @@ mod tests {
         ]))
         .unwrap();
 
-        let (client, repo, calls) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
+        let (client, repo, calls) = stub_gh_cli_with_repo(vec![ok_output(&json)]);
         let tool = PrList(client);
         let result = tool.run(&repo, None).await.unwrap();
         assert_eq!(
@@ -125,7 +124,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_response() {
-        let (client, repo, _) = stub_gh_arc_with_repo(vec![ok_output("[]")]);
+        let (client, repo, _) = stub_gh_cli_with_repo(vec![ok_output("[]")]);
         let tool = PrList(client);
         let result = tool.run(&repo, None).await.unwrap();
         assert_eq!(result, "No open pull requests.");
