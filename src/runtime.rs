@@ -26,7 +26,7 @@ pub struct Runtime {
 pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use std::time::Duration;
 
-    use crate::clients::chat_completion::{CompletionsClient, RealCompletionsApi};
+    use crate::clients::chat_completion::CompletionsClient;
     use crate::clients::telegram::{RealTelegramApi, TelegramClient};
     use crate::secrets::load_secret;
     use crate::tools::{github, network};
@@ -48,11 +48,13 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         None
     };
 
-    let api = RealCompletionsApi::new(config.provider.api.endpoint()).unwrap_or_else(|e| {
-        error!("Failed to build client: {e}");
+    let provider_api_key = load_secret("provider-api-key").unwrap_or_else(|e| {
+        error!("Failed to load Provider credentials: {e}");
         std::process::exit(1);
     });
-    let client = CompletionsClient::new(api);
+
+    let client =
+        CompletionsClient::new(config.provider.api.endpoint().to_string(), provider_api_key);
     let provider = CompletionsProvider::new(client.clone(), &config.provider);
 
     let mut tools = Tools::local(workspace, config);
@@ -84,14 +86,15 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
 
 #[cfg(feature = "mock-network")]
 pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
-    use crate::clients::chat_completion::{
-        CompletionsClient, MockNetworkApi as MockCompletionsApi,
-    };
+    use crate::clients::chat_completion::CompletionsClient;
     use crate::clients::telegram::{MockNetworkApi as MockTelegramApi, TelegramClient};
-    use crate::secrets::load_secret;
+    use crate::secrets::{Secret, load_secret};
     use crate::tools::github;
 
-    let client = CompletionsClient::new(MockCompletionsApi);
+    let client = CompletionsClient::new(
+        config.provider.api.endpoint().to_string(),
+        Secret::placeholder(),
+    );
     let provider = CompletionsProvider::new(client, &config.provider);
 
     let github_token = if config.github.enabled {

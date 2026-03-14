@@ -28,6 +28,12 @@ impl Secret {
     pub fn test(value: &str) -> Self {
         Self(value.to_string())
     }
+
+    /// Dummy secret for `mock-network` builds where credentials aren't needed.
+    #[cfg(feature = "mock-network")]
+    pub fn placeholder() -> Self {
+        Self(String::new())
+    }
 }
 
 impl std::fmt::Debug for Secret {

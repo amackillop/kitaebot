@@ -1,167 +1,145 @@
 //! OpenAI-compatible chat completions client.
 //!
-//! HTTP calls go through [`CompletionsApi`], responses through
-//! [`CompletionsClient`]. Works with any OpenAI-compatible endpoint
-//! (`OpenRouter`, Groq, Together, Mistral, etc.).
+//! Pure response parsing lives in [`interpret_response`]. The IO layer is a
+//! stored closure inside [`CompletionsClient`] — swap it for tests or
+//! `mock-network` builds without traits or generics.
 
-use reqwest::Response;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error};
 
+use super::RawResponse;
 use crate::error::ProviderError;
+use crate::secrets::Secret;
 
 // ---------------------------------------------------------------------------
-// Default API type alias
+// Closure type alias
 // ---------------------------------------------------------------------------
 
-/// Concrete API implementation selected by feature flag.
-#[cfg(not(feature = "mock-network"))]
-pub type CompletionsClient = CompletionsClientImpl<RealCompletionsApi>;
-
-#[cfg(feature = "mock-network")]
-pub type CompletionsClient = CompletionsClientImpl<MockNetworkApi>;
+type PostResult = Result<RawResponse, ProviderError>;
+type PostFuture = Pin<Box<dyn Future<Output = PostResult> + Send>>;
+type PostFn = Arc<dyn Fn(Vec<u8>) -> PostFuture + Send + Sync>;
 
 // ---------------------------------------------------------------------------
-// Trait
-// ---------------------------------------------------------------------------
-
-/// Abstraction over the chat completions HTTP call.
-///
-/// Implemented by the real HTTP client, the `mock-network` stub, and the
-/// test mock. [`CompletionsClient`] is generic over this trait so that
-/// tests can exercise the real response-parsing code without hitting the
-/// network.
-pub trait CompletionsApi: Send + Sync {
-    fn chat_completions<R: Serialize + Send + Sync>(
-        &self,
-        request: &R,
-    ) -> impl std::future::Future<Output = Result<Response, reqwest::Error>> + Send;
-}
-
-// ---------------------------------------------------------------------------
-// Real API client
-// ---------------------------------------------------------------------------
-
-#[cfg(not(feature = "mock-network"))]
-use crate::{
-    error::SecretError,
-    secrets::{self, Secret},
-};
-#[cfg(not(feature = "mock-network"))]
-use reqwest::Client;
-
-/// Raw HTTP client for any OpenAI-compatible chat completions endpoint.
-///
-/// Owns the `reqwest::Client`, API key, and endpoint URL. Cheap to
-/// clone (both `reqwest::Client` and `Secret` are `Arc`-backed).
-#[cfg(not(feature = "mock-network"))]
-#[derive(Clone)]
-pub struct RealCompletionsApi {
-    client: Client,
-    endpoint: String,
-    api_key: Secret,
-}
-
-#[cfg(not(feature = "mock-network"))]
-impl RealCompletionsApi {
-    pub fn new(endpoint: &str) -> Result<Self, SecretError> {
-        secrets::load_secret("provider-api-key").map(|api_key| Self {
-            client: Client::new(),
-            endpoint: endpoint.to_string(),
-            api_key,
-        })
-    }
-}
-
-#[cfg(not(feature = "mock-network"))]
-impl CompletionsApi for RealCompletionsApi {
-    async fn chat_completions<R: Serialize + Send + Sync>(
-        &self,
-        request: &R,
-    ) -> Result<Response, reqwest::Error> {
-        self.client
-            .post(&self.endpoint)
-            .header("Authorization", format!("Bearer {}", self.api_key.expose()))
-            .header("HTTP-Referer", "https://github.com/amackillop/kitaebot")
-            .header("X-Title", "kitaebot")
-            .json(request)
-            .send()
-            .await
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stub API client (mock-network builds)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "mock-network")]
-#[derive(Clone)]
-pub struct MockNetworkApi;
-
-#[cfg(feature = "mock-network")]
-impl CompletionsApi for MockNetworkApi {
-    async fn chat_completions<R: Serialize + Send + Sync>(
-        &self,
-        _request: &R,
-    ) -> Result<Response, reqwest::Error> {
-        let body = r#"{"choices":[{"message":{"content":"This is a stub response. Compile without mock-network for real API calls."}}]}"#;
-        Ok(Response::from(
-            http::Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body(body)
-                .unwrap(),
-        ))
-    }
-}
-
-// Generic client (response parsing + error mapping)
+// Client
 // ---------------------------------------------------------------------------
 
 /// HTTP client for any OpenAI-compatible chat completions endpoint.
 ///
-/// Generic over [`CompletionsApi`] so that tests can substitute a stub
-/// without bypassing response parsing.
+/// Concrete struct — no generics. The IO strategy is a closure injected at
+/// construction time. `Clone` is free (`Arc`).
 #[derive(Clone)]
-pub struct CompletionsClientImpl<A> {
-    api: A,
+pub struct CompletionsClient {
+    post: PostFn,
 }
 
-impl<A: CompletionsApi> CompletionsClientImpl<A> {
-    pub fn new(api: A) -> Self {
-        Self { api }
+impl CompletionsClient {
+    pub fn new(endpoint: String, api_key: Secret) -> Self {
+        #[cfg(not(feature = "mock-network"))]
+        {
+            let client = reqwest::Client::new();
+            Self {
+                post: Arc::new(move |body| {
+                    let client = client.clone();
+                    let endpoint = endpoint.clone();
+                    let api_key = api_key.clone();
+                    Box::pin(async move {
+                        let resp = client
+                            .post(&endpoint)
+                            .header("Authorization", format!("Bearer {}", api_key.expose()))
+                            .header("HTTP-Referer", "https://github.com/amackillop/kitaebot")
+                            .header("X-Title", "kitaebot")
+                            .header("Content-Type", "application/json")
+                            .body(body)
+                            .send()
+                            .await
+                            .map_err(|e| {
+                                error!("Network error: {e}");
+                                ProviderError::Network(e.to_string())
+                            })?;
+                        let status = resp.status().as_u16();
+                        let bytes = resp.bytes().await.map_err(|e| {
+                            error!("Failed to read response body: {e}");
+                            ProviderError::Network(e.to_string())
+                        })?;
+                        Ok(RawResponse {
+                            status,
+                            body: bytes.to_vec(),
+                        })
+                    })
+                }),
+            }
+        }
+        #[cfg(feature = "mock-network")]
+        {
+            let _ = (endpoint, api_key);
+            let body = br#"{"choices":[{"message":{"content":"This is a stub response. Compile without mock-network for real API calls."}}]}"#;
+            Self {
+                post: Arc::new(move |_| {
+                    Box::pin(async move {
+                        Ok(RawResponse {
+                            status: 200,
+                            body: body.to_vec(),
+                        })
+                    })
+                }),
+            }
+        }
     }
 
-    pub async fn chat_completions<R: Serialize + Send + Sync>(
+    /// Test constructor — inject an arbitrary closure.
+    #[cfg(test)]
+    pub fn from_fn<F, Fut>(f: F) -> Self
+    where
+        F: Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = PostResult> + Send + 'static,
+    {
+        Self {
+            post: Arc::new(move |body| Box::pin(f(body))),
+        }
+    }
+
+    /// Send a chat completions request and parse the response.
+    pub async fn chat_completions<R: Serialize>(
         &self,
         request: &R,
     ) -> Result<ChatResponse, ProviderError> {
-        let response = self.api.chat_completions(request).await.map_err(|e| {
-            error!("Network error: {e}");
-            ProviderError::Network(e.to_string())
-        })?;
+        let body =
+            serde_json::to_vec(request).map_err(|e| ProviderError::Network(e.to_string()))?;
+        let raw = (self.post)(body).await?;
+        interpret_response(&raw)
+    }
+}
 
-        let status = response.status();
-        debug!(%status, "Chat completions response");
+// ---------------------------------------------------------------------------
+// Pure core
+// ---------------------------------------------------------------------------
 
-        match status {
-            s if s.is_success() => response
-                .json()
-                .await
-                .map_err(|e| ProviderError::InvalidResponse(e.to_string())),
-            reqwest::StatusCode::UNAUTHORIZED => {
-                error!("Authentication failed");
-                Err(ProviderError::Authentication)
-            }
-            reqwest::StatusCode::TOO_MANY_REQUESTS => {
-                error!("Rate limited");
-                Err(ProviderError::RateLimited)
-            }
-            s => {
-                let body = response.text().await.unwrap_or_default();
-                error!(%s, "Provider error: {body}");
-                Err(ProviderError::Network(format!("{s}: {body}")))
-            }
+/// Parse a raw HTTP response into a [`ChatResponse`].
+///
+/// Pure function — no IO, no async. All status-code routing and JSON
+/// deserialization lives here so tests can call it synchronously.
+pub fn interpret_response(raw: &RawResponse) -> Result<ChatResponse, ProviderError> {
+    debug!(status = raw.status, "Chat completions response");
+
+    match raw.status {
+        200..=299 => serde_json::from_slice(&raw.body)
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string())),
+        401 => {
+            error!("Authentication failed");
+            Err(ProviderError::Authentication)
+        }
+        429 => {
+            error!("Rate limited");
+            Err(ProviderError::RateLimited)
+        }
+        s => {
+            let body = String::from_utf8_lossy(&raw.body);
+            error!(status = s, "Provider error: {body}");
+            Err(ProviderError::Network(format!("{s}: {body}")))
         }
     }
 }
@@ -206,61 +184,23 @@ pub struct ApiFunction {
 }
 
 // ---------------------------------------------------------------------------
-// Test mock
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-pub mod mock {
-    use std::collections::VecDeque;
-
-    use serde::Serialize;
-    use tokio::sync::Mutex;
-
+mod tests {
     use super::*;
+    use crate::error::ProviderError;
 
-    /// Stub [`CompletionsApi`] that yields pre-configured HTTP responses.
-    ///
-    /// Pops from a queue, so tests enqueue exactly the responses they
-    /// expect in call order.
-    pub struct StubApi(Mutex<VecDeque<Result<Response, reqwest::Error>>>);
-
-    impl StubApi {
-        pub fn client(
-            responses: Vec<Result<Response, reqwest::Error>>,
-        ) -> CompletionsClientImpl<Self> {
-            CompletionsClientImpl::new(Self(Mutex::new(responses.into())))
+    fn raw(status: u16, body: &str) -> RawResponse {
+        RawResponse {
+            status,
+            body: body.as_bytes().to_vec(),
         }
     }
 
-    impl CompletionsApi for StubApi {
-        async fn chat_completions<R: Serialize + Send + Sync>(
-            &self,
-            _request: &R,
-        ) -> Result<Response, reqwest::Error> {
-            self.0
-                .lock()
-                .await
-                .pop_front()
-                .expect("StubApi response queue exhausted - test called client more times than responses provided")
-        }
-    }
-
-    // -- Convenience constructors --
-
-    pub fn json_response(body: &impl Serialize) -> Response {
-        let json = serde_json::to_string(body).unwrap();
-        Response::from(
-            http::Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body(json)
-                .unwrap(),
-        )
-    }
-
-    /// A `ChatResponse` containing a single text message.
-    pub fn text_response(s: &str) -> ChatResponse {
-        ChatResponse {
+    fn text_json(s: &str) -> String {
+        serde_json::to_string(&ChatResponse {
             choices: vec![Choice {
                 message: AssistantMessage {
                     content: Some(s.to_string()),
@@ -268,124 +208,74 @@ pub mod mock {
                 },
             }],
             citations: Vec::new(),
-        }
+        })
+        .unwrap()
     }
-}
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::mock::*;
-    use super::*;
-    use crate::error::ProviderError;
-
-    #[tokio::test]
-    async fn client_chat_completions_success() {
-        let client = StubApi::client(vec![Ok(json_response(&text_response("hello")))]);
-
-        let resp = client
-            .chat_completions(&serde_json::json!({}))
-            .await
-            .unwrap();
-
+    #[test]
+    fn interpret_success() {
+        let resp = interpret_response(&raw(200, &text_json("hello"))).unwrap();
         assert_eq!(resp.choices.len(), 1);
         assert_eq!(resp.choices[0].message.content.as_deref(), Some("hello"));
     }
 
+    #[test]
+    fn interpret_empty_choices() {
+        let body = r#"{"choices":[]}"#;
+        let resp = interpret_response(&raw(200, body)).unwrap();
+        assert!(resp.choices.is_empty());
+    }
+
+    #[test]
+    fn interpret_unauthorized() {
+        let err = interpret_response(&raw(401, "")).unwrap_err();
+        assert!(matches!(err, ProviderError::Authentication));
+    }
+
+    #[test]
+    fn interpret_rate_limited() {
+        let err = interpret_response(&raw(429, "")).unwrap_err();
+        assert!(matches!(err, ProviderError::RateLimited));
+    }
+
+    #[test]
+    fn interpret_server_error() {
+        let err = interpret_response(&raw(503, "Service Unavailable")).unwrap_err();
+        assert!(matches!(err, ProviderError::Network(_)));
+    }
+
+    #[test]
+    fn interpret_malformed_json() {
+        let err = interpret_response(&raw(200, "not json")).unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
     #[tokio::test]
-    async fn client_chat_completions_empty_choices() {
-        let empty = ChatResponse {
-            choices: vec![],
-            citations: Vec::new(),
-        };
-        let client = StubApi::client(vec![Ok(json_response(&empty))]);
+    async fn client_roundtrip_via_from_fn() {
+        let client = CompletionsClient::from_fn(|_body| async {
+            Ok(RawResponse {
+                status: 200,
+                body: br#"{"choices":[{"message":{"content":"hi"}}]}"#.to_vec(),
+            })
+        });
 
         let resp = client
             .chat_completions(&serde_json::json!({}))
             .await
             .unwrap();
-
-        assert!(resp.choices.is_empty());
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("hi"));
     }
 
     #[tokio::test]
-    async fn client_chat_completions_unauthorized() {
-        let resp = Response::from(http::Response::builder().status(401).body("").unwrap());
-        let client = StubApi::client(vec![Ok(resp)]);
+    async fn client_propagates_closure_error() {
+        let client = CompletionsClient::from_fn(|_body| async {
+            Err(ProviderError::Network("boom".into()))
+        });
 
         let err = client
             .chat_completions(&serde_json::json!({}))
             .await
             .unwrap_err();
-
-        assert!(matches!(err, ProviderError::Authentication));
-    }
-
-    #[tokio::test]
-    async fn client_chat_completions_rate_limited() {
-        let resp = Response::from(http::Response::builder().status(429).body("").unwrap());
-        let client = StubApi::client(vec![Ok(resp)]);
-
-        let err = client
-            .chat_completions(&serde_json::json!({}))
-            .await
-            .unwrap_err();
-
-        assert!(matches!(err, ProviderError::RateLimited));
-    }
-
-    #[tokio::test]
-    async fn client_chat_completions_server_error() {
-        let resp = Response::from(
-            http::Response::builder()
-                .status(503)
-                .body("Service Unavailable")
-                .unwrap(),
-        );
-        let client = StubApi::client(vec![Ok(resp)]);
-
-        let err = client
-            .chat_completions(&serde_json::json!({}))
-            .await
-            .unwrap_err();
-
         assert!(matches!(err, ProviderError::Network(_)));
-    }
-
-    #[tokio::test]
-    async fn client_chat_completions_malformed_json() {
-        let resp = Response::from(
-            http::Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body("not json")
-                .unwrap(),
-        );
-        let client = StubApi::client(vec![Ok(resp)]);
-
-        let err = client
-            .chat_completions(&serde_json::json!({}))
-            .await
-            .unwrap_err();
-
-        assert!(matches!(err, ProviderError::InvalidResponse(_)));
-    }
-
-    #[tokio::test]
-    async fn client_chat_completions_network_error() {
-        let err = Response::from(http::Response::builder().status(500).body("").unwrap())
-            .error_for_status()
-            .unwrap_err();
-        let client = StubApi::client(vec![Err(err)]);
-
-        let result = client
-            .chat_completions(&serde_json::json!({}))
-            .await
-            .unwrap_err();
-
-        assert!(matches!(result, ProviderError::Network(_)));
     }
 }
