@@ -54,8 +54,13 @@ pub use pr_reviews::PrReviews;
 pub use push::Push;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::config::Config;
 use crate::error::ToolError;
+use crate::secrets::Secret;
+use crate::tools::cli_runner::RealCliRunner;
+use crate::workspace::Workspace;
 
 // Re-export parent utility so tool files can `use super::Tool`.
 pub(crate) use super::Tool;
@@ -90,6 +95,41 @@ pub(super) fn resolve_repo_dir(
     }
 
     Ok(resolved)
+}
+
+/// Build the GitHub tools. Returns an empty vec when no token is provided.
+pub(crate) fn build(
+    token: Option<Secret>,
+    workspace: &Workspace,
+    config: &Config,
+) -> Vec<Box<dyn Tool>> {
+    let Some(token) = token else {
+        return Vec::new();
+    };
+
+    let git = Arc::new(GitCli::new(
+        RealCliRunner,
+        token.clone(),
+        workspace.path(),
+        config.git.co_authors.clone(),
+    ));
+    let gh = Arc::new(GhCli::new(RealCliRunner, token, workspace.path()));
+
+    vec![
+        Box::new(Commit(Arc::clone(&git))),
+        Box::new(GitClone(Arc::clone(&git))),
+        Box::new(Push(Arc::clone(&git))),
+        Box::new(CiStatus {
+            git,
+            gh: Arc::clone(&gh),
+        }),
+        Box::new(PrComment(Arc::clone(&gh))),
+        Box::new(PrCreate(Arc::clone(&gh))),
+        Box::new(PrDiffComments(Arc::clone(&gh))),
+        Box::new(PrDiffReply(Arc::clone(&gh))),
+        Box::new(PrList(Arc::clone(&gh))),
+        Box::new(PrReviews(gh)),
+    ]
 }
 
 #[cfg(test)]

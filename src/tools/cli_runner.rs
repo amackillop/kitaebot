@@ -46,6 +46,7 @@ pub(crate) trait CliRunner: Send + Sync {
 
 /// Production subprocess executor. Spawns the process with
 /// `env_clear().envs(env)`.
+#[derive(Clone, Copy)]
 pub(crate) struct RealCliRunner;
 
 impl CliRunner for RealCliRunner {

@@ -85,7 +85,7 @@ impl<R: CliRunner> GitClone<R> {
 mod tests {
     use super::*;
     use crate::error::ToolError;
-    use crate::tools::network::github::test_helpers::{ok_output, stub_git_arc_with_repo};
+    use crate::tools::github::test_helpers::{ok_output, stub_git_arc_with_repo};
 
     #[tokio::test]
     async fn clones_with_derived_name_authenticated() {

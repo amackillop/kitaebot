@@ -88,7 +88,7 @@ impl<R: CliRunner> PrCreate<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::network::github::test_helpers::{ok_output, stub_gh_arc_with_repo};
+    use crate::tools::github::test_helpers::{ok_output, stub_gh_arc_with_repo};
 
     #[tokio::test]
     async fn creates_pr_with_minimal_args() {

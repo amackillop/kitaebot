@@ -29,7 +29,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::chat_completion::{CompletionsClient, RealCompletionsApi};
     use crate::clients::telegram::{RealTelegramApi, TelegramClient};
     use crate::secrets::load_secret;
-    use crate::tools::network;
+    use crate::tools::{github, network};
 
     let telegram_token = if config.telegram.enabled {
         Some(load_secret("telegram-bot-token").unwrap_or_else(|e| {
@@ -56,7 +56,8 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     let provider = CompletionsProvider::new(client.clone(), &config.provider);
 
     let mut tools = Tools::local(workspace, config);
-    tools.extend(network::build(workspace, config, client, github_token));
+    tools.extend(github::build(github_token, workspace, config));
+    tools.extend(network::build(config, client));
 
     let telegram = telegram_token.map(|token| {
         let api = RealTelegramApi::new(
@@ -87,10 +88,20 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         CompletionsClient, MockNetworkApi as MockCompletionsApi,
     };
     use crate::clients::telegram::{MockNetworkApi as MockTelegramApi, TelegramClient};
+    use crate::secrets::load_secret;
+    use crate::tools::github;
 
     let client = CompletionsClient::new(MockCompletionsApi);
     let provider = CompletionsProvider::new(client, &config.provider);
-    let tools = Tools::local(workspace, config);
+
+    let github_token = if config.github.enabled {
+        load_secret("github-token").ok()
+    } else {
+        None
+    };
+
+    let mut tools = Tools::local(workspace, config);
+    tools.extend(github::build(github_token, workspace, config));
 
     let telegram = if config.telegram.enabled {
         Some(Telegram::new(

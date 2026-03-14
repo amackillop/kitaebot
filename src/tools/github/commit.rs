@@ -81,7 +81,7 @@ fn format_commit_message(message: &str, co_authors: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::network::github::test_helpers::{ok_output, stub_git_arc_with_repo};
+    use crate::tools::github::test_helpers::{ok_output, stub_git_arc_with_repo};
 
     #[test]
     fn format_message_no_co_authors() {

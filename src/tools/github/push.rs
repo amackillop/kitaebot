@@ -89,7 +89,7 @@ impl<R: CliRunner> Push<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::network::github::test_helpers::{ok_output, stub_git_arc_with_repo};
+    use crate::tools::github::test_helpers::{ok_output, stub_git_arc_with_repo};
 
     #[tokio::test]
     async fn defaults_to_origin_authenticated() {
