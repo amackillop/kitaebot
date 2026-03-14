@@ -1,137 +1,106 @@
 //! Telegram Bot API client.
 //!
-//! HTTP calls go through [`TelegramApi`], responses through [`TelegramClient`].
+//! Pure response parsing lives in [`interpret_response`]. The IO layer is a
+//! stored closure inside [`TelegramClient`] — swap it for tests or
+//! `mock-network` builds without traits or generics.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
-use futures::TryFutureExt as _;
-use reqwest::{Client, Response};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use super::RawResponse;
 use crate::error::TelegramError;
 use crate::secrets::Secret;
 
 // ---------------------------------------------------------------------------
-// Default client type alias
+// Closure type alias
 // ---------------------------------------------------------------------------
 
-/// Concrete client implementation selected by feature flag.
-#[cfg(not(feature = "mock-network"))]
-pub type TelegramClient = TelegramClientImpl<RealTelegramApi>;
-
-#[cfg(feature = "mock-network")]
-pub type TelegramClient = TelegramClientImpl<MockNetworkApi>;
+type PostResult = Result<RawResponse, TelegramError>;
+type PostFuture = Pin<Box<dyn Future<Output = PostResult> + Send>>;
+type PostFn = Arc<dyn Fn(String, Vec<u8>) -> PostFuture + Send + Sync>;
 
 // ---------------------------------------------------------------------------
-// Trait
-// ---------------------------------------------------------------------------
-
-/// Abstraction over the Telegram Bot API HTTP calls.
-///
-/// Implemented by the real HTTP client, the `mock-network` stub, and the
-/// test mock. [`TelegramChannel`](crate::telegram::TelegramChannel) is
-/// generic over this trait so that tests can exercise the real
-/// retry/formatting code without hitting the network.
-pub trait TelegramApi: Send + Sync {
-    /// Long-poll `getUpdates` for new messages.
-    async fn poll_updates(&self, body: GetUpdatesBody) -> Result<Response, reqwest::Error>;
-
-    /// Send a single message via `sendMessage`.
-    async fn post_message(&self, body: SendMessageBody<'_>) -> Result<Response, reqwest::Error>;
-}
-
-const BASE_URL: &str = "https://api.telegram.org/bot";
-
-pub struct RealTelegramApi {
-    bot_token: Secret,
-    client: Client,
-}
-
-impl RealTelegramApi {
-    #[cfg_attr(feature = "mock-network", allow(dead_code))]
-    pub fn new(bot_token: Secret, timeout: Duration) -> Self {
-        Self {
-            bot_token,
-            client: Client::builder()
-                .timeout(timeout)
-                .build()
-                .expect("failed to build HTTP client"),
-        }
-    }
-
-    fn url(&self, method: &str) -> String {
-        format!("{BASE_URL}{}/{method}", self.bot_token.expose())
-    }
-}
-
-impl TelegramApi for RealTelegramApi {
-    async fn poll_updates(&self, body: GetUpdatesBody) -> Result<Response, reqwest::Error> {
-        self.client
-            .post(self.url("getUpdates"))
-            .json(&body)
-            .send()
-            .await
-    }
-
-    async fn post_message(&self, body: SendMessageBody<'_>) -> Result<Response, reqwest::Error> {
-        self.client
-            .post(self.url("sendMessage"))
-            .json(&body)
-            .send()
-            .await
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stub API client (mock-network builds)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "mock-network")]
-#[derive(Clone)]
-#[allow(dead_code)]
-pub struct MockNetworkApi;
-
-#[cfg(feature = "mock-network")]
-impl TelegramApi for MockNetworkApi {
-    async fn poll_updates(&self, _body: GetUpdatesBody) -> Result<Response, reqwest::Error> {
-        let body = r#"{"ok":true,"result":[]}"#;
-        Ok(Response::from(
-            http::Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body(body)
-                .unwrap(),
-        ))
-    }
-
-    async fn post_message(&self, _body: SendMessageBody<'_>) -> Result<Response, reqwest::Error> {
-        let body = r#"{"ok":true,"result":{"message_id":1}}"#;
-        Ok(Response::from(
-            http::Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body(body)
-                .unwrap(),
-        ))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Generic client (response parsing + error mapping)
+// Client
 // ---------------------------------------------------------------------------
 
 /// HTTP client for the Telegram Bot API.
 ///
-/// Generic over [`TelegramApi`] so that tests can substitute a stub
-/// without bypassing response parsing.
-pub struct TelegramClientImpl<A> {
-    api: A,
+/// Concrete struct — no generics. The IO strategy is a closure injected at
+/// construction time. `Clone` is free (`Arc`).
+#[derive(Clone)]
+pub struct TelegramClient {
+    post: PostFn,
 }
 
-impl<A: TelegramApi> TelegramClientImpl<A> {
-    pub fn new(api: A) -> Self {
-        Self { api }
+impl TelegramClient {
+    pub fn new(bot_token: Secret, timeout: Duration) -> Self {
+        #[cfg(not(feature = "mock-network"))]
+        {
+            const BASE_URL: &str = "https://api.telegram.org/bot";
+            let client = reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .expect("failed to build HTTP client");
+            Self {
+                post: Arc::new(move |method, body| {
+                    let client = client.clone();
+                    let url = format!("{BASE_URL}{}/{method}", bot_token.expose());
+                    Box::pin(async move {
+                        let resp = client
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .body(body)
+                            .send()
+                            .await
+                            .map_err(|e| TelegramError::Network(e.to_string()))?;
+                        let status = resp.status().as_u16();
+                        let bytes = resp
+                            .bytes()
+                            .await
+                            .map_err(|e| TelegramError::Network(e.to_string()))?;
+                        Ok(RawResponse {
+                            status,
+                            body: bytes.to_vec(),
+                        })
+                    })
+                }),
+            }
+        }
+        #[cfg(feature = "mock-network")]
+        {
+            let _ = (bot_token, timeout);
+            Self {
+                post: Arc::new(|method, _body| {
+                    Box::pin(async move {
+                        let body = match method.as_str() {
+                            "getUpdates" => br#"{"ok":true,"result":[]}"#.as_slice(),
+                            _ => br#"{"ok":true,"result":{"message_id":1,"chat":{"id":0},"text":null}}"#.as_slice(),
+                        };
+                        Ok(RawResponse {
+                            status: 200,
+                            body: body.to_vec(),
+                        })
+                    })
+                }),
+            }
+        }
+    }
+
+    /// Test constructor — inject an arbitrary closure.
+    #[cfg(test)]
+    pub fn from_fn<F, Fut>(f: F) -> Self
+    where
+        F: Fn(String, Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = PostResult> + Send + 'static,
+    {
+        Self {
+            post: Arc::new(move |method, body| Box::pin(f(method, body))),
+        }
     }
 
     pub async fn poll_updates(
@@ -140,9 +109,10 @@ impl<A: TelegramApi> TelegramClientImpl<A> {
         timeout: u64,
     ) -> Result<Vec<Update>, TelegramError> {
         let body = GetUpdatesBody { offset, timeout };
-        let resp = self.api.poll_updates(body);
-
-        process_response(resp).await
+        let raw_body =
+            serde_json::to_vec(&body).map_err(|e| TelegramError::Network(e.to_string()))?;
+        let raw = (self.post)("getUpdates".into(), raw_body).await?;
+        interpret_response(&raw)
     }
 
     pub async fn post_message(
@@ -156,21 +126,24 @@ impl<A: TelegramApi> TelegramClientImpl<A> {
             text,
             parse_mode,
         };
-        let resp = self.api.post_message(body);
-
-        process_response(resp).await
+        let raw_body =
+            serde_json::to_vec(&body).map_err(|e| TelegramError::Network(e.to_string()))?;
+        let raw = (self.post)("sendMessage".into(), raw_body).await?;
+        interpret_response(&raw)
     }
 }
 
-async fn process_response<T: DeserializeOwned>(
-    res: impl Future<Output = Result<Response, reqwest::Error>>,
-) -> Result<T, TelegramError> {
-    let api_response: ApiResponse<T> = res
-        .map_err(|e| TelegramError::Network(e.to_string()))
-        .await?
-        .json()
-        .await
-        .map_err(|e| TelegramError::Deserialize(e.to_string()))?;
+// ---------------------------------------------------------------------------
+// Pure core
+// ---------------------------------------------------------------------------
+
+/// Parse a raw HTTP response into a Telegram API result.
+///
+/// Pure function — no IO, no async. Deserializes the `ApiResponse<T>`
+/// envelope and unwraps it into a domain result.
+pub fn interpret_response<T: DeserializeOwned>(raw: &RawResponse) -> Result<T, TelegramError> {
+    let api_response: ApiResponse<T> =
+        serde_json::from_slice(&raw.body).map_err(|e| TelegramError::Deserialize(e.to_string()))?;
 
     if api_response.ok {
         api_response.result.ok_or_else(|| TelegramError::Api {
@@ -194,7 +167,6 @@ async fn process_response<T: DeserializeOwned>(
 
 /// Wrapper returned by every Bot API method.
 #[derive(Debug, Deserialize, Serialize)]
-#[cfg_attr(feature = "mock-network", allow(dead_code))]
 pub(crate) struct ApiResponse<T> {
     pub(crate) ok: bool,
     pub(crate) result: Option<T>,
@@ -223,15 +195,13 @@ pub struct Chat {
     pub id: i64,
 }
 
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "mock-network", allow(dead_code))]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct GetUpdatesBody {
     pub(crate) offset: i64,
     pub(crate) timeout: u64,
 }
 
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "mock-network", allow(dead_code))]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct SendMessageBody<'a> {
     pub(crate) chat_id: i64,
     pub(crate) text: &'a str,
@@ -245,64 +215,27 @@ pub(crate) struct SendMessageBody<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
-
     use super::*;
 
-    /// Stub [`TelegramApi`] that yields pre-configured HTTP responses.
-    ///
-    /// Both trait methods pop from the same queue, so tests enqueue
-    /// exactly the responses they expect in call order.
-    struct StubApi(Mutex<VecDeque<Result<Response, reqwest::Error>>>);
-
-    impl StubApi {
-        fn client(responses: Vec<Result<Response, reqwest::Error>>) -> TelegramClientImpl<Self> {
-            TelegramClientImpl::new(Self(Mutex::new(responses.into())))
+    fn raw(body: &str) -> RawResponse {
+        RawResponse {
+            status: 200,
+            body: body.as_bytes().to_vec(),
         }
     }
 
-    impl TelegramApi for StubApi {
-        async fn poll_updates(&self, _body: GetUpdatesBody) -> Result<Response, reqwest::Error> {
-            self.0.lock().unwrap().pop_front().unwrap()
-        }
-
-        async fn post_message(
-            &self,
-            _body: SendMessageBody<'_>,
-        ) -> Result<Response, reqwest::Error> {
-            self.0.lock().unwrap().pop_front().unwrap()
-        }
-    }
-
-    fn json_response(body: &impl Serialize) -> Response {
-        let json = serde_json::to_string(body).unwrap();
-        Response::from(
-            http::Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body(json)
-                .unwrap(),
-        )
-    }
-
-    fn reqwest_error() -> reqwest::Error {
-        Response::from(http::Response::builder().status(500).body("").unwrap())
-            .error_for_status()
-            .unwrap_err()
-    }
-
-    fn ok_updates(updates: Vec<Update>) -> Response {
-        json_response(&ApiResponse {
+    fn ok_updates_json(updates: &[Update]) -> String {
+        serde_json::to_string(&ApiResponse {
             ok: true,
             result: Some(updates),
             error_code: None,
             description: None,
         })
+        .unwrap()
     }
 
-    fn ok_send() -> Response {
-        json_response(&ApiResponse {
+    fn ok_send_json() -> String {
+        serde_json::to_string(&ApiResponse {
             ok: true,
             result: Some(TgMessage {
                 message_id: 1,
@@ -312,30 +245,32 @@ mod tests {
             error_code: None,
             description: None,
         })
+        .unwrap()
     }
 
-    fn api_error(code: i32, desc: &str) -> Response {
-        json_response(&ApiResponse::<serde_json::Value> {
+    fn api_error_json(code: i32, desc: &str) -> String {
+        serde_json::to_string(&ApiResponse::<serde_json::Value> {
             ok: false,
             result: None,
             error_code: Some(code),
             description: Some(desc.into()),
         })
+        .unwrap()
     }
 
-    #[tokio::test]
-    async fn client_poll_updates_parses_response() {
-        let client = StubApi::client(vec![Ok(ok_updates(vec![Update {
+    // -- interpret_response tests --
+
+    #[test]
+    fn interpret_poll_updates_success() {
+        let json = ok_updates_json(&[Update {
             update_id: 7,
             message: Some(TgMessage {
                 message_id: 1,
                 chat: Chat { id: 42 },
                 text: Some("hello".into()),
             }),
-        }]))]);
-
-        let updates = client.poll_updates(0, 30).await.unwrap();
-
+        }]);
+        let updates: Vec<Update> = interpret_response(&raw(&json)).unwrap();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].update_id, 7);
         assert_eq!(
@@ -344,21 +279,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn client_poll_updates_empty() {
-        let client = StubApi::client(vec![Ok(ok_updates(vec![]))]);
-
-        let updates = client.poll_updates(0, 30).await.unwrap();
-
+    #[test]
+    fn interpret_poll_updates_empty() {
+        let json = ok_updates_json(&[]);
+        let updates: Vec<Update> = interpret_response(&raw(&json)).unwrap();
         assert!(updates.is_empty());
     }
 
-    #[tokio::test]
-    async fn client_poll_updates_api_error() {
-        let client = StubApi::client(vec![Ok(api_error(401, "Unauthorized"))]);
-
-        let err = client.poll_updates(0, 30).await.unwrap_err();
-
+    #[test]
+    fn interpret_api_error() {
+        let json = api_error_json(401, "Unauthorized");
+        let err = interpret_response::<Vec<Update>>(&raw(&json)).unwrap_err();
         assert!(matches!(
             err,
             TelegramError::Api {
@@ -368,44 +299,23 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn client_poll_updates_network_error() {
-        let client = StubApi::client(vec![Err(reqwest_error())]);
-
-        let err = client.poll_updates(0, 30).await.unwrap_err();
-
-        assert!(matches!(err, TelegramError::Network(_)));
-    }
-
-    #[tokio::test]
-    async fn client_poll_updates_malformed_json() {
-        let garbage = Response::from(
-            http::Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body("not json")
-                .unwrap(),
-        );
-        let client = StubApi::client(vec![Ok(garbage)]);
-
-        let err = client.poll_updates(0, 30).await.unwrap_err();
-
+    #[test]
+    fn interpret_malformed_json() {
+        let err = interpret_response::<Vec<Update>>(&raw("not json")).unwrap_err();
         assert!(matches!(err, TelegramError::Deserialize(_)));
     }
 
-    #[tokio::test]
-    async fn client_post_message_success() {
-        let client = StubApi::client(vec![Ok(ok_send())]);
-
-        client.post_message(42, "hi", None).await.unwrap();
+    #[test]
+    fn interpret_post_message_success() {
+        let json = ok_send_json();
+        let msg: TgMessage = interpret_response(&raw(&json)).unwrap();
+        assert_eq!(msg.message_id, 1);
     }
 
-    #[tokio::test]
-    async fn client_post_message_api_error() {
-        let client = StubApi::client(vec![Ok(api_error(400, "Bad Request"))]);
-
-        let err = client.post_message(42, "hi", None).await.unwrap_err();
-
+    #[test]
+    fn interpret_post_message_api_error() {
+        let json = api_error_json(400, "Bad Request");
+        let err = interpret_response::<TgMessage>(&raw(&json)).unwrap_err();
         assert!(matches!(
             err,
             TelegramError::Api {
@@ -415,12 +325,35 @@ mod tests {
         ));
     }
 
+    // -- Client integration tests via from_fn --
+
     #[tokio::test]
-    async fn client_post_message_network_error() {
-        let client = StubApi::client(vec![Err(reqwest_error())]);
+    async fn client_poll_updates_roundtrip() {
+        let json = ok_updates_json(&[Update {
+            update_id: 1,
+            message: None,
+        }]);
+        let client = TelegramClient::from_fn(move |_method, _body| {
+            let json = json.clone();
+            async move {
+                Ok(RawResponse {
+                    status: 200,
+                    body: json.into_bytes(),
+                })
+            }
+        });
 
-        let err = client.post_message(42, "hi", None).await.unwrap_err();
+        let updates = client.poll_updates(0, 30).await.unwrap();
+        assert_eq!(updates.len(), 1);
+    }
 
+    #[tokio::test]
+    async fn client_propagates_closure_error() {
+        let client = TelegramClient::from_fn(|_method, _body| async {
+            Err(TelegramError::Network("boom".into()))
+        });
+
+        let err = client.poll_updates(0, 30).await.unwrap_err();
         assert!(matches!(err, TelegramError::Network(_)));
     }
 }

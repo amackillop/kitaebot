@@ -7,7 +7,7 @@ use tracing::error;
 
 use crate::config::Config;
 use crate::provider::CompletionsProvider;
-use crate::telegram::Telegram;
+use crate::telegram::TelegramChannel;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
 
@@ -15,7 +15,7 @@ use crate::workspace::Workspace;
 pub struct Runtime {
     pub provider: CompletionsProvider,
     pub tools: Tools,
-    pub telegram: Option<Telegram>,
+    pub telegram: Option<TelegramChannel>,
 }
 
 // ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use std::time::Duration;
 
     use crate::clients::chat_completion::CompletionsClient;
-    use crate::clients::telegram::{RealTelegramApi, TelegramClient};
+    use crate::clients::telegram::TelegramClient;
     use crate::secrets::load_secret;
     use crate::tools::{github, network};
 
@@ -62,12 +62,11 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     tools.extend(network::build(config, client));
 
     let telegram = telegram_token.map(|token| {
-        let api = RealTelegramApi::new(
+        let tg_client = TelegramClient::new(
             token,
             Duration::from_secs(config.telegram.poll_timeout_secs + 10),
         );
-        let tg_client = TelegramClient::new(api);
-        Telegram::new(tg_client, config.telegram.chat_id)
+        TelegramChannel::new(tg_client, config.telegram.chat_id)
     });
 
     Runtime {
@@ -86,8 +85,10 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
 
 #[cfg(feature = "mock-network")]
 pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
+    use std::time::Duration;
+
     use crate::clients::chat_completion::CompletionsClient;
-    use crate::clients::telegram::{MockNetworkApi as MockTelegramApi, TelegramClient};
+    use crate::clients::telegram::TelegramClient;
     use crate::secrets::{Secret, load_secret};
     use crate::tools::github;
 
@@ -107,8 +108,11 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     tools.extend(github::build(github_token, workspace, config));
 
     let telegram = if config.telegram.enabled {
-        Some(Telegram::new(
-            TelegramClient::new(MockTelegramApi),
+        Some(TelegramChannel::new(
+            TelegramClient::new(
+                Secret::placeholder(),
+                Duration::from_secs(config.telegram.poll_timeout_secs + 10),
+            ),
             config.telegram.chat_id,
         ))
     } else {

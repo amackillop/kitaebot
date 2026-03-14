@@ -3,9 +3,6 @@
 //! Long-polls `getUpdates` for incoming messages, runs them through the
 //! agent, and sends responses back via `sendMessage`. Designed to run as
 //! an async loop alongside the heartbeat in the daemon's `tokio::select!`.
-//!
-//! Generic over [`TelegramApi`] so tests can substitute a mock api
-//! without hitting the network.
 
 use std::time::Duration;
 
@@ -15,25 +12,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::activity::Activity;
 use crate::agent::TurnConfig;
-#[cfg(feature = "mock-network")]
-use crate::clients::telegram::MockNetworkApi as MockTelegramApi;
-#[cfg(not(feature = "mock-network"))]
-use crate::clients::telegram::RealTelegramApi;
-use crate::clients::telegram::{TelegramApi, TelegramClientImpl};
+use crate::clients::telegram::TelegramClient;
 use crate::dispatch;
 use crate::error::TelegramError;
 use crate::provider::Provider;
 use crate::workspace::Workspace;
-
-/// Concrete Telegram channel used by production code and the `mock-network` stub.
-///
-/// Internal helpers (`poll_loop`, `handle_message`) stay generic over
-/// [`TelegramApi`] so that unit tests can inject [`FakeTelegramApi`].
-#[cfg(not(feature = "mock-network"))]
-pub type Telegram = TelegramChannel<RealTelegramApi>;
-
-#[cfg(feature = "mock-network")]
-pub type Telegram = TelegramChannel<MockTelegramApi>;
 
 // --- Channel ---
 
@@ -42,17 +25,16 @@ const SEND_RETRIES: u32 = 3;
 
 /// Telegram Bot API channel.
 ///
-/// Wraps a client implementing [`TelegramApi`] and the chat routing
-/// configuration. The client handles raw HTTP; this struct layers retry
-/// logic, HTML escaping, and message formatting on top.
-pub struct TelegramChannel<A> {
-    client: TelegramClientImpl<A>,
+/// Wraps a [`TelegramClient`] and the chat routing configuration.
+/// The client handles raw HTTP; this struct layers retry logic,
+/// HTML escaping, and message formatting on top.
+pub struct TelegramChannel {
+    client: TelegramClient,
     chat_id: i64,
 }
 
-impl<A: TelegramApi> TelegramChannel<A> {
-    #[cfg_attr(feature = "mock-network", allow(dead_code))]
-    pub fn new(client: TelegramClientImpl<A>, chat_id: i64) -> Self {
+impl TelegramChannel {
+    pub fn new(client: TelegramClient, chat_id: i64) -> Self {
         Self { client, chat_id }
     }
 
@@ -131,8 +113,8 @@ fn is_transient(err: &TelegramError) -> bool {
 /// This future never resolves normally — it loops forever, yielding at
 /// each `getUpdates` call. The parent `tokio::select!` drops it on
 /// shutdown.
-pub async fn poll_loop<T: TelegramApi, P: Provider>(
-    channel: &TelegramChannel<T>,
+pub async fn poll_loop<P: Provider>(
+    channel: &TelegramChannel,
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
 ) -> ! {
@@ -192,8 +174,8 @@ pub async fn poll_loop<T: TelegramApi, P: Provider>(
 }
 
 /// Process a single authorized text message.
-async fn handle_message<T: TelegramApi, P: Provider>(
-    channel: &TelegramChannel<T>,
+async fn handle_message<P: Provider>(
+    channel: &TelegramChannel,
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
     text: &str,
@@ -259,22 +241,19 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use serde::Serialize;
-
     use super::*;
     use crate::agent::TurnConfig;
-    use crate::clients::telegram::{
-        ApiResponse, Chat, GetUpdatesBody, SendMessageBody, TgMessage, Update,
-    };
+    use crate::clients::RawResponse;
+    use crate::clients::telegram::{ApiResponse, Chat, TelegramClient, TgMessage, Update};
     use crate::config::ContextConfig;
     use crate::provider::MockProvider;
     use crate::tools::Tools;
     use crate::types::Response as AgentResponse;
     use crate::workspace::Workspace;
 
-    // -- Fake TelegramApi for channel tests --
+    // -- Fake Telegram state for channel tests --
 
-    /// A captured `post_message` call.
+    /// A captured `sendMessage` call.
     #[derive(Clone, Debug)]
     struct SentMessage {
         chat_id: i64,
@@ -282,35 +261,33 @@ mod tests {
         parse_mode: Option<String>,
     }
 
-    /// Fake Telegram API that captures outgoing messages and returns
+    /// Fake Telegram state that captures outgoing messages and returns
     /// pre-configured results.
     ///
-    /// Uses `Arc` internally so cloning shares state — clone before
-    /// moving into the channel, then inspect the original.
+    /// Used via `TelegramClient::from_fn()` closing over an `Arc<Self>`.
     ///
-    /// `poll_updates` pops from the poll queue; when empty it returns
+    /// `getUpdates` pops from the poll queue; when empty it returns
     /// a permanently pending future so `tokio::select!` can cancel
     /// the loop via a timeout.
-    #[derive(Clone)]
-    struct FakeTelegramApi {
-        poll_results: Arc<Mutex<VecDeque<Vec<Update>>>>,
-        send_results: Arc<Vec<Result<(), TelegramError>>>,
-        send_index: Arc<AtomicUsize>,
-        sent: Arc<Mutex<Vec<SentMessage>>>,
+    struct FakeTelegram {
+        poll_results: Mutex<VecDeque<Vec<Update>>>,
+        send_results: Vec<Result<(), TelegramError>>,
+        send_index: AtomicUsize,
+        sent: Mutex<Vec<SentMessage>>,
     }
 
-    impl FakeTelegramApi {
-        fn new(send_results: Vec<Result<(), TelegramError>>) -> Self {
-            Self {
-                poll_results: Arc::new(Mutex::new(VecDeque::new())),
-                send_results: Arc::new(send_results),
-                send_index: Arc::new(AtomicUsize::new(0)),
-                sent: Arc::new(Mutex::new(Vec::new())),
-            }
+    impl FakeTelegram {
+        fn new(send_results: Vec<Result<(), TelegramError>>) -> Arc<Self> {
+            Arc::new(Self {
+                poll_results: Mutex::new(VecDeque::new()),
+                send_results,
+                send_index: AtomicUsize::new(0),
+                sent: Mutex::new(Vec::new()),
+            })
         }
 
-        fn with_poll_results(mut self, results: Vec<Vec<Update>>) -> Self {
-            self.poll_results = Arc::new(Mutex::new(results.into()));
+        fn with_poll_results(self: Arc<Self>, results: Vec<Vec<Update>>) -> Arc<Self> {
+            *self.poll_results.lock().unwrap() = results.into();
             self
         }
 
@@ -318,81 +295,87 @@ mod tests {
             self.sent.lock().unwrap().clone()
         }
 
-        fn json_response(body: &impl Serialize) -> reqwest::Response {
-            let json = serde_json::to_string(body).unwrap();
-            reqwest::Response::from(
-                http::Response::builder()
-                    .status(200)
-                    .header("content-type", "application/json")
-                    .body(json)
-                    .unwrap(),
-            )
-        }
-
-        fn ok_response(result: &impl Serialize) -> reqwest::Response {
-            Self::json_response(&ApiResponse {
+        fn ok_json(result: &impl serde::Serialize) -> Vec<u8> {
+            serde_json::to_vec(&ApiResponse {
                 ok: true,
                 result: Some(result),
                 error_code: None,
                 description: None,
             })
+            .unwrap()
         }
 
-        fn error_response(error_code: i32, description: &str) -> reqwest::Response {
-            Self::json_response(&ApiResponse::<serde_json::Value> {
+        fn error_json(error_code: i32, description: &str) -> Vec<u8> {
+            serde_json::to_vec(&ApiResponse::<serde_json::Value> {
                 ok: false,
                 result: None,
                 error_code: Some(error_code),
                 description: Some(description.into()),
             })
+            .unwrap()
         }
     }
 
-    impl TelegramApi for FakeTelegramApi {
-        async fn poll_updates(
-            &self,
-            _body: GetUpdatesBody,
-        ) -> Result<reqwest::Response, reqwest::Error> {
-            let next = self.poll_results.lock().unwrap().pop_front();
-            match next {
-                Some(updates) => Ok(Self::ok_response(&updates)),
-                None => std::future::pending().await,
-            }
-        }
+    fn fake_client(state: &Arc<FakeTelegram>) -> TelegramClient {
+        let state = Arc::clone(state);
+        TelegramClient::from_fn(move |method, body| {
+            let state = Arc::clone(&state);
+            async move {
+                match method.as_str() {
+                    "getUpdates" => {
+                        let next = state.poll_results.lock().unwrap().pop_front();
+                        match next {
+                            Some(updates) => Ok(RawResponse {
+                                status: 200,
+                                body: FakeTelegram::ok_json(&updates),
+                            }),
+                            None => std::future::pending().await,
+                        }
+                    }
+                    "sendMessage" => {
+                        let msg: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let chat_id = msg["chat_id"].as_i64().unwrap();
+                        let text = msg["text"].as_str().unwrap().to_string();
+                        let parse_mode = msg["parse_mode"].as_str().map(str::to_string);
+                        let index = state.send_index.fetch_add(1, Ordering::SeqCst);
+                        state.sent.lock().unwrap().push(SentMessage {
+                            chat_id,
+                            text: text.clone(),
+                            parse_mode,
+                        });
 
-        async fn post_message(
-            &self,
-            body: SendMessageBody<'_>,
-        ) -> Result<reqwest::Response, reqwest::Error> {
-            let index = self.send_index.fetch_add(1, Ordering::SeqCst);
-            self.sent.lock().unwrap().push(SentMessage {
-                chat_id: body.chat_id,
-                text: body.text.to_string(),
-                parse_mode: body.parse_mode.map(str::to_string),
-            });
-
-            match &self.send_results[index] {
-                Ok(()) => Ok(Self::ok_response(&TgMessage {
-                    message_id: 1,
-                    chat: Chat { id: body.chat_id },
-                    text: Some(body.text.to_string()),
-                })),
-                Err(TelegramError::Api {
-                    error_code,
-                    description,
-                }) => Ok(Self::error_response(*error_code, description)),
-                Err(TelegramError::Network(_)) => {
-                    let resp = reqwest::Response::from(
-                        http::Response::builder().status(500).body("").unwrap(),
-                    );
-                    Err(resp.error_for_status().unwrap_err())
+                        match &state.send_results[index] {
+                            Ok(()) => Ok(RawResponse {
+                                status: 200,
+                                body: FakeTelegram::ok_json(&TgMessage {
+                                    message_id: 1,
+                                    chat: Chat { id: chat_id },
+                                    text: Some(text),
+                                }),
+                            }),
+                            Err(TelegramError::Api {
+                                error_code,
+                                description,
+                            }) => Ok(RawResponse {
+                                status: 200,
+                                body: FakeTelegram::error_json(*error_code, description),
+                            }),
+                            Err(TelegramError::Network(msg)) => {
+                                Err(TelegramError::Network(msg.clone()))
+                            }
+                            Err(TelegramError::Deserialize(msg)) => {
+                                panic!("Unexpected Deserialize error in test stub: {msg}")
+                            }
+                            Err(TelegramError::Session(msg)) => Ok(RawResponse {
+                                status: 200,
+                                body: FakeTelegram::error_json(0, msg),
+                            }),
+                        }
+                    }
+                    other => panic!("Unexpected Telegram method: {other}"),
                 }
-                Err(TelegramError::Deserialize(msg)) => {
-                    panic!("Unexpected Deserialize error in test stub: {msg}")
-                }
-                Err(TelegramError::Session(msg)) => Ok(Self::error_response(0, msg)),
             }
-        }
+        })
     }
 
     // -- Helpers --
@@ -404,8 +387,8 @@ mod tests {
         budget_percent: 80,
     };
 
-    fn channel(api: FakeTelegramApi) -> TelegramChannel<FakeTelegramApi> {
-        TelegramChannel::new(TelegramClientImpl::new(api), CHAT_ID)
+    fn channel(state: &Arc<FakeTelegram>) -> TelegramChannel {
+        TelegramChannel::new(fake_client(state), CHAT_ID)
     }
 
     fn workspace() -> (tempfile::TempDir, Workspace) {
@@ -447,12 +430,12 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_succeeds_on_first_try() {
-        let api = FakeTelegramApi::new(vec![Ok(())]);
-        let ch = channel(api.clone());
+        let state = FakeTelegram::new(vec![Ok(())]);
+        let ch = channel(&state);
 
         ch.send_message("hello").await.unwrap();
 
-        let sent = api.sent_messages();
+        let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].chat_id, CHAT_ID);
         assert_eq!(sent[0].text, "hello");
@@ -463,7 +446,7 @@ mod tests {
     async fn send_raw_retries_on_transient_then_succeeds() {
         tokio::time::pause();
 
-        let api = FakeTelegramApi::new(vec![
+        let state = FakeTelegram::new(vec![
             Err(TelegramError::Network("timeout".into())),
             Err(TelegramError::Api {
                 error_code: 429,
@@ -471,24 +454,24 @@ mod tests {
             }),
             Ok(()),
         ]);
-        let ch = channel(api.clone());
+        let ch = channel(&state);
 
         ch.send_message("retry me").await.unwrap();
 
-        assert_eq!(api.sent_messages().len(), 3);
+        assert_eq!(state.sent_messages().len(), 3);
     }
 
     #[tokio::test]
     async fn send_raw_does_not_retry_non_transient_error() {
-        let api = FakeTelegramApi::new(vec![Err(TelegramError::Api {
+        let state = FakeTelegram::new(vec![Err(TelegramError::Api {
             error_code: 400,
             description: "Bad Request".into(),
         })]);
-        let ch = channel(api.clone());
+        let ch = channel(&state);
 
         let err = ch.send_message("bad").await.unwrap_err();
 
-        assert_eq!(api.sent_messages().len(), 1);
+        assert_eq!(state.sent_messages().len(), 1);
         assert!(matches!(
             err,
             TelegramError::Api {
@@ -504,29 +487,29 @@ mod tests {
 
         // SEND_RETRIES (3) transient failures, then one more — the 4th
         // attempt never happens because we've exhausted all retries.
-        let api = FakeTelegramApi::new(vec![
+        let state = FakeTelegram::new(vec![
             Err(TelegramError::Network("1".into())),
             Err(TelegramError::Network("2".into())),
             Err(TelegramError::Network("3".into())),
             Err(TelegramError::Network("4".into())),
         ]);
-        let ch = channel(api.clone());
+        let ch = channel(&state);
 
         let err = ch.send_message("doomed").await.unwrap_err();
 
         // 1 initial + 3 retries = 4 attempts total
-        assert_eq!(api.sent_messages().len(), 4);
+        assert_eq!(state.sent_messages().len(), 4);
         assert!(matches!(err, TelegramError::Network(_)));
     }
 
     #[tokio::test]
     async fn send_preformatted_escapes_html() {
-        let api = FakeTelegramApi::new(vec![Ok(())]);
-        let ch = channel(api.clone());
+        let state = FakeTelegram::new(vec![Ok(())]);
+        let ch = channel(&state);
 
         ch.send_preformatted("a < b & c > d").await.unwrap();
 
-        let sent = api.sent_messages();
+        let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].text, "<pre>a &lt; b &amp; c &gt; d</pre>");
         assert_eq!(sent[0].parse_mode.as_deref(), Some("HTML"));
@@ -537,8 +520,8 @@ mod tests {
     #[tokio::test]
     async fn handle_message_dispatches_and_sends_reply() {
         let (_dir, ws) = workspace();
-        let api = FakeTelegramApi::new(vec![Ok(())]);
-        let ch = channel(api.clone());
+        let state = FakeTelegram::new(vec![Ok(())]);
+        let ch = channel(&state);
         let provider = MockProvider::new(vec![Ok(AgentResponse::Text("pong".into()))]);
         let tools = Tools::default();
         let config = TurnConfig {
@@ -550,18 +533,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message::<FakeTelegramApi, MockProvider>(
-            &ch,
-            &ws,
-            &config,
-            "ping",
-            &mut verbose,
-            &tx,
-            &mut rx,
-        )
-        .await;
+        handle_message::<MockProvider>(&ch, &ws, &config, "ping", &mut verbose, &tx, &mut rx).await;
 
-        let sent = api.sent_messages();
+        let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].text, "pong");
         assert!(sent[0].parse_mode.is_none());
@@ -570,9 +544,8 @@ mod tests {
     #[tokio::test]
     async fn handle_message_sends_preformatted_for_preformatted_reply() {
         let (_dir, ws) = workspace();
-        // /stats produces a preformatted reply.
-        let api = FakeTelegramApi::new(vec![Ok(())]);
-        let ch = channel(api.clone());
+        let state = FakeTelegram::new(vec![Ok(())]);
+        let ch = channel(&state);
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
         let config = TurnConfig {
@@ -584,18 +557,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message::<FakeTelegramApi, MockProvider>(
-            &ch,
-            &ws,
-            &config,
-            "/stats",
-            &mut verbose,
-            &tx,
-            &mut rx,
-        )
-        .await;
+        handle_message::<MockProvider>(&ch, &ws, &config, "/stats", &mut verbose, &tx, &mut rx)
+            .await;
 
-        let sent = api.sent_messages();
+        let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
         // /stats returns preformatted, so it's HTML-escaped and wrapped in <pre>
         assert_eq!(sent[0].parse_mode.as_deref(), Some("HTML"));
@@ -605,8 +570,8 @@ mod tests {
     #[tokio::test]
     async fn handle_message_verbose_toggle() {
         let (_dir, ws) = workspace();
-        let api = FakeTelegramApi::new(vec![Ok(()), Ok(())]);
-        let ch = channel(api.clone());
+        let state = FakeTelegram::new(vec![Ok(()), Ok(())]);
+        let ch = channel(&state);
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
         let config = TurnConfig {
@@ -618,32 +583,16 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message::<FakeTelegramApi, MockProvider>(
-            &ch,
-            &ws,
-            &config,
-            "/verbose",
-            &mut verbose,
-            &tx,
-            &mut rx,
-        )
-        .await;
+        handle_message::<MockProvider>(&ch, &ws, &config, "/verbose", &mut verbose, &tx, &mut rx)
+            .await;
         assert!(verbose);
-        let sent = api.sent_messages();
+        let sent = state.sent_messages();
         assert_eq!(sent[0].text, "Verbose: on");
 
-        handle_message::<FakeTelegramApi, MockProvider>(
-            &ch,
-            &ws,
-            &config,
-            "/verbose",
-            &mut verbose,
-            &tx,
-            &mut rx,
-        )
-        .await;
+        handle_message::<MockProvider>(&ch, &ws, &config, "/verbose", &mut verbose, &tx, &mut rx)
+            .await;
         assert!(!verbose);
-        let sent = api.sent_messages();
+        let sent = state.sent_messages();
         assert_eq!(sent[1].text, "Verbose: off");
 
         // Provider was never called — /verbose is intercepted before dispatch.
@@ -653,8 +602,8 @@ mod tests {
     #[tokio::test]
     async fn handle_message_unknown_command_sends_error() {
         let (_dir, ws) = workspace();
-        let api = FakeTelegramApi::new(vec![Ok(())]);
-        let ch = channel(api.clone());
+        let state = FakeTelegram::new(vec![Ok(())]);
+        let ch = channel(&state);
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
         let config = TurnConfig {
@@ -666,18 +615,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message::<FakeTelegramApi, MockProvider>(
-            &ch,
-            &ws,
-            &config,
-            "/bogus",
-            &mut verbose,
-            &tx,
-            &mut rx,
-        )
-        .await;
+        handle_message::<MockProvider>(&ch, &ws, &config, "/bogus", &mut verbose, &tx, &mut rx)
+            .await;
 
-        let sent = api.sent_messages();
+        let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
         assert!(sent[0].text.contains("Unknown command"));
     }
@@ -688,7 +629,7 @@ mod tests {
     async fn poll_loop_dispatches_valid_message() {
         tokio::time::pause();
         let (_dir, ws) = workspace();
-        let api = FakeTelegramApi::new(vec![Ok(())]).with_poll_results(vec![vec![Update {
+        let state = FakeTelegram::new(vec![Ok(())]).with_poll_results(vec![vec![Update {
             update_id: 1,
             message: Some(TgMessage {
                 message_id: 1,
@@ -696,7 +637,7 @@ mod tests {
                 text: Some("hello".into()),
             }),
         }]]);
-        let ch = channel(api.clone());
+        let ch = channel(&state);
         let provider = MockProvider::new(vec![Ok(AgentResponse::Text("reply".into()))]);
         let tools = Tools::default();
         let config = TurnConfig {
@@ -708,11 +649,11 @@ mod tests {
 
         let _ = tokio::time::timeout(
             Duration::from_millis(100),
-            poll_loop::<FakeTelegramApi, MockProvider>(&ch, &ws, &config),
+            poll_loop::<MockProvider>(&ch, &ws, &config),
         )
         .await;
 
-        let sent = api.sent_messages();
+        let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].text, "reply");
     }
@@ -721,7 +662,7 @@ mod tests {
     async fn poll_loop_filters_irrelevant_updates() {
         tokio::time::pause();
         let (_dir, ws) = workspace();
-        let api = FakeTelegramApi::new(vec![]).with_poll_results(vec![vec![
+        let state = FakeTelegram::new(vec![]).with_poll_results(vec![vec![
             Update {
                 update_id: 1,
                 message: None,
@@ -743,7 +684,7 @@ mod tests {
                 }),
             },
         ]]);
-        let ch = channel(api.clone());
+        let ch = channel(&state);
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
         let config = TurnConfig {
@@ -755,11 +696,11 @@ mod tests {
 
         let _ = tokio::time::timeout(
             Duration::from_millis(100),
-            poll_loop::<FakeTelegramApi, MockProvider>(&ch, &ws, &config),
+            poll_loop::<MockProvider>(&ch, &ws, &config),
         )
         .await;
 
-        assert!(api.sent_messages().is_empty());
+        assert!(state.sent_messages().is_empty());
         assert_eq!(provider.call_count(), 0);
     }
 }

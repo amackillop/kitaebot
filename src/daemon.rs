@@ -21,7 +21,7 @@ use crate::agent::TurnConfig;
 use crate::heartbeat;
 use crate::provider::Provider;
 use crate::socket;
-use crate::telegram::{self, Telegram};
+use crate::telegram::{self, TelegramChannel};
 use crate::workspace::Workspace;
 
 /// Production entry point — runs until SIGINT or SIGTERM.
@@ -29,7 +29,7 @@ pub async fn run<P: Provider>(
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
     interval_secs: u64,
-    telegram: Option<&Telegram>,
+    telegram: Option<&TelegramChannel>,
     socket_path: &Path,
 ) {
     run_with_shutdown(
@@ -48,7 +48,7 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
     workspace: &Workspace,
     config: &TurnConfig<'_, P>,
     interval: Duration,
-    telegram: Option<&Telegram>,
+    telegram: Option<&TelegramChannel>,
     socket_path: &Path,
     shutdown: S,
 ) {
