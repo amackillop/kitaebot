@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::ToolError;
 use crate::secrets::Secret;
-use crate::tools::cli_runner::{CliRunner, CmdOutput};
+use crate::tools::cli_runner::{CliRunner, CmdOutput, SubprocessCall};
 
 /// Shared context for git tools.
 ///
@@ -52,6 +52,22 @@ impl<R: CliRunner> GitCli<R> {
     /// Co-author trailers appended to commit messages.
     pub fn co_authors(&self) -> &[String] {
         &self.co_authors
+    }
+
+    /// Build a [`SubprocessCall`] for `git` without executing it.
+    ///
+    /// The returned call does **not** include `GIT_ASKPASS` — that is
+    /// an effect created at execution time by [`Self::run_git`].
+    #[allow(dead_code)] // consumers added in a follow-up commit
+    #[allow(clippy::unused_self)] // method for API consistency with prepare_gh
+    pub fn prepare_git(&self, args: &[&str], cwd: &Path) -> SubprocessCall {
+        let env: Vec<(OsString, OsString)> = crate::tools::safe_env().collect();
+        SubprocessCall {
+            binary: "git",
+            args: args.iter().map(ToString::to_string).collect(),
+            cwd: cwd.to_path_buf(),
+            env,
+        }
     }
 
     /// Get the current branch name from a git working directory.

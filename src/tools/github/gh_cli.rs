@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::ToolError;
 use crate::secrets::Secret;
-use crate::tools::cli_runner::{CliRunner, CmdOutput};
+use crate::tools::cli_runner::{CliRunner, CmdOutput, SubprocessCall};
 
 /// Shared context for `gh` CLI tools.
 ///
@@ -36,6 +36,24 @@ impl<R: CliRunner> GhCli<R> {
     /// Resolve and validate a repo directory within the workspace.
     pub fn resolve_repo_dir(&self, repo_dir: &str) -> Result<PathBuf, ToolError> {
         super::resolve_repo_dir(&self.workspace_root, repo_dir)
+    }
+
+    /// Build a [`SubprocessCall`] for `gh` without executing it.
+    #[allow(dead_code)] // consumers added in a follow-up commit
+    pub fn prepare_gh(&self, args: &[&str], cwd: &Path) -> SubprocessCall {
+        let env: Vec<(OsString, OsString)> = crate::tools::safe_env()
+            .chain([
+                ("GH_TOKEN".into(), self.token.expose().into()),
+                ("GH_PROMPT_DISABLED".into(), "1".into()),
+                ("NO_COLOR".into(), "1".into()),
+            ])
+            .collect();
+        SubprocessCall {
+            binary: "gh",
+            args: args.iter().map(ToString::to_string).collect(),
+            cwd: cwd.to_path_buf(),
+            env,
+        }
     }
 
     /// Run a `gh` command, format output as envelope for the LLM.
