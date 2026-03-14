@@ -11,7 +11,7 @@
 use std::ffi::OsString;
 use std::fmt::Write;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
@@ -109,6 +109,42 @@ impl CmdOutput {
 
         Ok(result)
     }
+}
+
+// ── Reified subprocess call ─────────────────────────────────────────
+
+/// A description of a subprocess invocation — what to run, not the
+/// act of running it. Callers build this value with pure logic;
+/// [`exec`] performs the side effect.
+#[allow(dead_code)] // consumers added in a follow-up commit
+#[derive(Debug, Clone)]
+pub struct SubprocessCall {
+    pub binary: &'static str,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: Vec<(OsString, OsString)>,
+}
+
+impl SubprocessCall {
+    /// Check whether an environment variable is set.
+    #[cfg(test)]
+    #[allow(dead_code)] // consumers added in a follow-up commit
+    pub fn has_env(&self, key: &str) -> bool {
+        self.env.iter().any(|(k, _)| k == key)
+    }
+}
+
+/// Execute a [`SubprocessCall`] by spawning a subprocess.
+#[allow(dead_code)] // consumers added in a follow-up commit
+pub async fn exec(call: &SubprocessCall) -> Result<CmdOutput, ToolError> {
+    let args_ref: Vec<&str> = call.args.iter().map(String::as_str).collect();
+    let mut cmd = Command::new(call.binary);
+    cmd.args(&args_ref)
+        .current_dir(&call.cwd)
+        .env_clear()
+        .envs(call.env.iter().map(|(k, v)| (k, v)));
+    let label = format!("{} {}", call.binary, args_ref.join(" "));
+    exec_cmd(&mut cmd, label).await
 }
 
 // ── Command execution ───────────────────────────────────────────────
