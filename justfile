@@ -43,9 +43,9 @@ fix:
 
 SSH_OPTS := "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
-# Build the VM
+# Build the VM (uses Determinate Nix binary cache)
 vm-build:
-    nix build ./deploy
+    nix build ./deploy --option extra-substituters https://install.determinate.systems --option extra-trusted-public-keys cache.flakehub.com-3:hJuILl5sVK4iKm86JzgdXW12Y2Hwd5G07qKtHTOcDCM=
 
 # Build and start the VM if not already running, wait for SSH (--rebuild: restart VM, --fresh: wipe state)
 vm-run *flags: vm-build
