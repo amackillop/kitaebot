@@ -79,16 +79,7 @@ pub async fn dispatch<P: Provider>(
     cancel: &CancellationToken,
 ) -> Result<Reply, String> {
     match Input::parse(input).map_err(|_| format!("Unknown command: {input}"))? {
-        Input::Command(cmd) => {
-            commands::execute(
-                cmd,
-                session_path,
-                workspace,
-                config.provider,
-                config.context,
-            )
-            .await
-        }
+        Input::Command(cmd) => commands::execute(cmd, session_path, workspace, config).await,
         Input::Message(text) => {
             agent::process_message(session_path, workspace, text, config, activity_tx, cancel)
                 .await

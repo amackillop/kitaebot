@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use tracing::error;
 
-use crate::config::ContextConfig;
+use crate::agent::TurnConfig;
 use crate::context;
 use crate::dispatch::Reply;
 use crate::provider::Provider;
@@ -69,8 +69,7 @@ pub async fn execute<P: Provider>(
     cmd: SlashCommand,
     session_path: &Path,
     workspace: &Workspace,
-    provider: &P,
-    ctx: &ContextConfig,
+    config: &TurnConfig<'_, P>,
 ) -> Result<Reply, String> {
     let mut session =
         Session::load(session_path).map_err(|e| format!("Session load error: {e}"))?;
@@ -79,7 +78,7 @@ pub async fn execute<P: Provider>(
         SlashCommand::Compact => {
             let system_prompt = workspace.system_prompt();
             let before = context::session_tokens(&session, system_prompt.len());
-            match context::force_compact(&mut session, provider).await {
+            match context::force_compact(&mut session, config.provider).await {
                 Ok(true) => {
                     let after = context::session_tokens(&session, system_prompt.len());
                     if let Err(e) = session.save(session_path) {
@@ -96,7 +95,7 @@ pub async fn execute<P: Provider>(
         SlashCommand::Context => {
             let system_prompt = workspace.system_prompt();
             let tokens = context::session_tokens(&session, system_prompt.len());
-            let budget = context::budget(ctx);
+            let budget = context::budget(config.context);
             let pct = if budget > 0 {
                 (tokens / budget) * 100
             } else {
@@ -107,8 +106,8 @@ pub async fn execute<P: Provider>(
                  Messages: {}\n\
                  Budget: {}% of {}",
                 session.len(),
-                ctx.budget_percent,
-                ctx.max_tokens,
+                config.context.budget_percent,
+                config.context.max_tokens,
             )))
         }
         SlashCommand::New => {
