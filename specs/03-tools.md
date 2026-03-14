@@ -67,7 +67,7 @@ Commands are checked against deny patterns before execution:
 - `> /dev/` — device writes
 - `shutdown`, `reboot` — system power
 - Fork bomb pattern
-- `git clone`, `git push`, `git commit` — must use dedicated GitHub tools (`github_clone`, `github_push`, `github_commit`)
+- `git clone`, `git push`, `git commit` — must use dedicated tools (`git_clone`, `git_push`, `git_commit`)
 - `git reset --hard` — destructive git operations
 - `gpg --export-secret`, `.gnupg/` — GPG keyring access
 - `gpgsign=false` — cannot override commit signing config
@@ -293,10 +293,10 @@ Direct HTTP POST (not via `Provider` trait — avoids circular dependency). Owns
 
 ### GitHub Tools — Authenticated Git & PR Operations
 
-Ten standalone tools for git and GitHub CLI operations. Each tool holds
-`Arc<GitHubClient<A>>` and owns only its business logic. The client
-provides plumbing (`run_gh`, `run_git`, `resolve_repo_dir`,
-`current_branch`).
+Ten standalone tools split across two CLI wrappers. `GitCli<R>` wraps
+the `git` binary (clone, push, commit). `GhCli<R>` wraps the `gh` CLI
+(PRs, CI, API calls). Each tool holds an `Arc` of the appropriate
+wrapper and owns only its business logic.
 
 Gated behind `github.enabled` in config. When disabled (or no token),
 none of the tools are registered.
@@ -310,20 +310,20 @@ subprocess, then deleted.
 
 #### Architecture
 
-`GitHubApi` is the subprocess boundary trait. `RealGitHubApi` spawns
-real processes; `StubGitHubApi` yields pre-enqueued responses for tests.
-`GitHubClient<A>` carries workspace root, co-authors, and the API
-handle. Individual tools are zero-config structs wrapping
-`Arc<GitHubClient<A>>`.
+`CliRunner` is the subprocess boundary trait. `RealCliRunner` spawns
+real processes; `StubCliRunner` yields pre-enqueued responses for tests.
+`GitCli<R>` carries the token, workspace root, and co-authors for git
+operations. `GhCli<R>` carries the token and workspace root for gh
+operations. Individual tools are zero-config structs wrapping an `Arc`.
 
 #### Tools
 
 | Tool | Description |
 |------|-------------|
 | `github_ci_status` | Check CI status for a git ref |
-| `github_clone` | Clone a repository into the workspace |
-| `github_commit` | Stage and commit changes with co-author trailers |
-| `github_push` | Push commits to a remote |
+| `git_clone` | Clone a repository into the workspace |
+| `git_commit` | Commit staged changes with co-author trailers |
+| `git_push` | Push commits to a remote |
 | `github_pr_create` | Create a pull request |
 | `github_pr_list` | List pull requests (open/closed/all) |
 | `github_pr_reviews` | Fetch reviews for a pull request |
@@ -332,8 +332,8 @@ handle. Individual tools are zero-config structs wrapping
 | `github_pr_diff_reply` | Reply to an inline diff comment |
 
 All tools take `repo_dir` (relative to workspace root) and validate it
-via `GitHubClient::resolve_repo_dir` — rejects traversal, absolute
-paths, and directories without `.git`.
+via `resolve_repo_dir` — rejects traversal, absolute paths, and
+directories without `.git`.
 
 ---
 
