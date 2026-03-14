@@ -61,17 +61,19 @@ impl<R: CliRunner> PrComment<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::*;
+    use crate::tools::network::github::test_helpers::{ok_output, stub_gh_arc_with_repo};
 
-    #[test]
-    fn deserialize() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo",
-            "pr_number": 7,
-            "body": "LGTM"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.pr_number, 7);
-        assert_eq!(args.body, "LGTM");
+    #[tokio::test]
+    async fn posts_comment_to_pr() {
+        let (gh, repo, calls) = stub_gh_arc_with_repo(vec![ok_output("ok")]);
+        let tool = PrComment(gh);
+        let _ = tool.run(&repo, 7, "LGTM").await.unwrap();
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].binary, "gh");
+        assert_eq!(recorded[0].args, ["pr", "comment", "7", "--body", "LGTM"]);
+        assert!(recorded[0].has_env("GH_TOKEN"));
     }
 }

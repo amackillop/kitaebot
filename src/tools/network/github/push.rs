@@ -88,31 +88,35 @@ impl<R: CliRunner> Push<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::*;
+    use crate::tools::network::github::test_helpers::{ok_output, stub_git_arc_with_repo};
 
-    #[test]
-    fn deserialize_minimal() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.repo_dir, "projects/myrepo");
-        assert!(args.remote.is_none());
-        assert!(args.branch.is_none());
-        assert!(!args.set_upstream);
+    #[tokio::test]
+    async fn defaults_to_origin_authenticated() {
+        let (git, repo, calls) = stub_git_arc_with_repo(vec![ok_output("Everything up-to-date")]);
+        let tool = Push(git);
+        let _ = tool.run(&repo, None, None, false).await.unwrap();
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].binary, "git");
+        assert_eq!(recorded[0].args, ["push", "origin"]);
+        assert!(recorded[0].has_env("GIT_ASKPASS"));
     }
 
-    #[test]
-    fn deserialize_full() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo",
-            "remote": "upstream",
-            "branch": "feature",
-            "set_upstream": true
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.remote.as_deref(), Some("upstream"));
-        assert_eq!(args.branch.as_deref(), Some("feature"));
-        assert!(args.set_upstream);
+    #[tokio::test]
+    async fn all_options_build_correct_args() {
+        let (git, repo, calls) = stub_git_arc_with_repo(vec![ok_output("ok")]);
+        let tool = Push(git);
+        let _ = tool
+            .run(&repo, Some("upstream"), Some("feat"), true)
+            .await
+            .unwrap();
+
+        let recorded = calls.take().await;
+        assert_eq!(
+            recorded[0].args,
+            ["push", "--set-upstream", "upstream", "feat"]
+        );
     }
 }

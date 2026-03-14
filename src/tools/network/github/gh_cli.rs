@@ -101,7 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_gh_nonzero_exit_returns_error() {
-        let (cli, repo) = stub_gh_cli_with_repo(vec![err_output("not found")]);
+        let (cli, repo, _) = stub_gh_cli_with_repo(vec![err_output("not found")]);
         let cwd = cli.resolve_repo_dir(&repo).unwrap();
         let result = cli.run_gh(&["pr", "view"], &cwd).await;
         assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
@@ -109,7 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_gh_parse_malformed_json_returns_error() {
-        let (cli, repo) = stub_gh_cli_with_repo(vec![ok_output("not json")]);
+        let (cli, repo, _) = stub_gh_cli_with_repo(vec![ok_output("not json")]);
         let cwd = cli.resolve_repo_dir(&repo).unwrap();
         let result: Result<Vec<serde_json::Value>, _> =
             cli.run_gh_parse(&["pr", "list"], &cwd).await;
@@ -118,7 +118,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_gh_parse_nonzero_exit_returns_stderr() {
-        let (cli, repo) = stub_gh_cli_with_repo(vec![err_output("permission denied")]);
+        let (cli, repo, _) = stub_gh_cli_with_repo(vec![err_output("permission denied")]);
         let cwd = cli.resolve_repo_dir(&repo).unwrap();
         let result: Result<Vec<serde_json::Value>, _> =
             cli.run_gh_parse(&["pr", "list"], &cwd).await;

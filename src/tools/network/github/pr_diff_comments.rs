@@ -78,16 +78,6 @@ mod tests {
     use super::super::test_helpers::{ok_output, stub_gh_arc_with_repo};
     use super::*;
 
-    #[test]
-    fn deserialize() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo",
-            "pr_number": 99
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.pr_number, 99);
-    }
-
     #[tokio::test]
     async fn formats_output() {
         let json = serde_json::to_string(&serde_json::json!([
@@ -96,7 +86,7 @@ mod tests {
         ]))
         .unwrap();
 
-        let (client, repo) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
+        let (client, repo, calls) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
         let tool = PrDiffComments(client);
         let result = tool.run(&repo, 5).await.unwrap();
         assert_eq!(
@@ -108,11 +98,16 @@ Nit: rename this
 [id:101] @bob at src/lib.rs
 Outdated"
         );
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded[0].binary, "gh");
+        assert!(recorded[0].args.contains(&"api".to_string()));
+        assert!(recorded[0].args[1].contains("pulls/5/comments"));
     }
 
     #[tokio::test]
     async fn empty() {
-        let (client, repo) = stub_gh_arc_with_repo(vec![ok_output("[]")]);
+        let (client, repo, _) = stub_gh_arc_with_repo(vec![ok_output("[]")]);
         let tool = PrDiffComments(client);
         let result = tool.run(&repo, 5).await.unwrap();
         assert_eq!(result, "No inline comments on PR #5.");

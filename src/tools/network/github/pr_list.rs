@@ -88,28 +88,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deserialize_minimal() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.repo_dir, "projects/myrepo");
-        assert!(args.state.is_none());
-    }
-
-    #[test]
-    fn deserialize_with_state() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo",
-            "state": "closed"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.state.as_deref(), Some("closed"));
-    }
-
-    #[test]
     fn rejects_invalid_state() {
-        let (client, repo) = stub_gh_arc_with_repo(vec![]);
+        let (client, repo, _) = stub_gh_arc_with_repo(vec![]);
         let tool = PrList(client);
         let result = tokio::runtime::Runtime::new()
             .unwrap()
@@ -125,7 +105,7 @@ mod tests {
         ]))
         .unwrap();
 
-        let (client, repo) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
+        let (client, repo, calls) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
         let tool = PrList(client);
         let result = tool.run(&repo, None).await.unwrap();
         assert_eq!(
@@ -136,11 +116,16 @@ mod tests {
 #2 Add feature [OPEN]
   https://github.com/o/r/pull/2"
         );
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded[0].binary, "gh");
+        assert!(recorded[0].args.contains(&"--state".to_string()));
+        assert!(recorded[0].args.contains(&"open".to_string()));
     }
 
     #[tokio::test]
     async fn empty_response() {
-        let (client, repo) = stub_gh_arc_with_repo(vec![ok_output("[]")]);
+        let (client, repo, _) = stub_gh_arc_with_repo(vec![ok_output("[]")]);
         let tool = PrList(client);
         let result = tool.run(&repo, None).await.unwrap();
         assert_eq!(result, "No open pull requests.");

@@ -81,17 +81,7 @@ fn format_commit_message(message: &str, co_authors: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn deserialize() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo",
-            "message": "Fix the thing"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.repo_dir, "projects/myrepo");
-        assert_eq!(args.message, "Fix the thing");
-    }
+    use crate::tools::network::github::test_helpers::{ok_output, stub_git_arc_with_repo};
 
     #[test]
     fn format_message_no_co_authors() {
@@ -120,5 +110,19 @@ mod tests {
             msg,
             "Add feature\n\nCo-authored-by: Alice <alice@example.com>\nCo-authored-by: Bob <bob@example.com>\n"
         );
+    }
+
+    #[tokio::test]
+    async fn calls_git_commit_unauthenticated() {
+        let (git, repo, calls) =
+            stub_git_arc_with_repo(vec![ok_output("[master abc1234] Fix bug")]);
+        let tool = Commit(git);
+        let _ = tool.run(&repo, "Fix bug").await.unwrap();
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].binary, "git");
+        assert_eq!(recorded[0].args, ["commit", "-m", "Fix bug"]);
+        assert!(!recorded[0].has_env("GIT_ASKPASS"));
     }
 }

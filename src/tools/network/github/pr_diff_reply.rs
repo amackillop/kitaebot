@@ -78,19 +78,27 @@ impl<R: CliRunner> PrDiffReply<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::*;
+    use crate::tools::network::github::test_helpers::{ok_output, stub_gh_arc_with_repo};
 
-    #[test]
-    fn deserialize() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo",
-            "pr_number": 5,
-            "comment_id": 123_456,
-            "body": "Fixed in the latest push"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.pr_number, 5);
-        assert_eq!(args.comment_id, 123_456);
-        assert_eq!(args.body, "Fixed in the latest push");
+    #[tokio::test]
+    async fn replies_to_correct_endpoint() {
+        let (gh, repo, calls) = stub_gh_arc_with_repo(vec![ok_output("{}")]);
+        let tool = PrDiffReply(gh);
+        let _ = tool
+            .run(&repo, 5, 123_456, "Fixed in the latest push")
+            .await
+            .unwrap();
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].binary, "gh");
+        assert_eq!(recorded[0].args[0], "api");
+        assert_eq!(
+            recorded[0].args[1],
+            "repos/{owner}/{repo}/pulls/5/comments/123456/replies"
+        );
+        assert_eq!(recorded[0].args[2], "-f");
+        assert_eq!(recorded[0].args[3], "body=Fixed in the latest push");
     }
 }

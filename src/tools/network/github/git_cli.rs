@@ -154,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn current_branch_trims_output() {
-        let (cli, repo) = stub_git_cli_with_repo(vec![ok_output("  feature/foo\n")]);
+        let (cli, repo, _) = stub_git_cli_with_repo(vec![ok_output("  feature/foo\n")]);
         let cwd = cli.resolve_repo_dir(&repo).unwrap();
         let branch = cli.current_branch(&cwd).await.unwrap();
         assert_eq!(branch, "feature/foo");
@@ -162,7 +162,7 @@ mod tests {
 
     #[tokio::test]
     async fn current_branch_nonzero_exit() {
-        let (cli, repo) = stub_git_cli_with_repo(vec![err_output("not a git repo")]);
+        let (cli, repo, _) = stub_git_cli_with_repo(vec![err_output("not a git repo")]);
         let cwd = cli.resolve_repo_dir(&repo).unwrap();
         let result = cli.current_branch(&cwd).await;
         assert!(

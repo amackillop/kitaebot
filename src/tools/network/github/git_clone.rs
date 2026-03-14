@@ -83,25 +83,73 @@ impl<R: CliRunner> GitClone<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::*;
+    use crate::error::ToolError;
+    use crate::tools::network::github::test_helpers::{ok_output, stub_git_arc_with_repo};
 
-    #[test]
-    fn deserialize_minimal() {
-        let json = serde_json::json!({
-            "url": "https://github.com/owner/repo.git"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert!(args.url.contains("owner/repo"));
-        assert!(args.name.is_none());
+    #[tokio::test]
+    async fn clones_with_derived_name_authenticated() {
+        let (git, _, calls) = stub_git_arc_with_repo(vec![ok_output("Cloning into 'repo'...")]);
+        let tool = GitClone(git);
+        let _ = tool
+            .run("https://github.com/owner/repo.git", None)
+            .await
+            .unwrap();
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].binary, "git");
+        assert_eq!(
+            recorded[0].args,
+            ["clone", "--", "https://github.com/owner/repo.git", "repo"]
+        );
+        assert!(recorded[0].has_env("GIT_ASKPASS"));
     }
 
-    #[test]
-    fn deserialize_with_name() {
-        let json = serde_json::json!({
-            "url": "https://github.com/owner/repo.git",
-            "name": "custom"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.name.as_deref(), Some("custom"));
+    #[tokio::test]
+    async fn uses_custom_name() {
+        let (git, _, calls) = stub_git_arc_with_repo(vec![ok_output("ok")]);
+        let tool = GitClone(git);
+        let _ = tool
+            .run("https://github.com/owner/repo.git", Some("custom"))
+            .await
+            .unwrap();
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded[0].args[3], "custom");
+    }
+
+    #[tokio::test]
+    async fn rewrites_ssh_to_https() {
+        let (git, _, calls) = stub_git_arc_with_repo(vec![ok_output("ok")]);
+        let tool = GitClone(git);
+        let _ = tool
+            .run("git@github.com:owner/repo.git", None)
+            .await
+            .unwrap();
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded[0].args[2], "https://github.com/owner/repo.git");
+    }
+
+    #[tokio::test]
+    async fn rejects_already_existing_target() {
+        let (git, _, _) = stub_git_arc_with_repo(vec![]);
+        // The stub already creates projects/r — clone into "r" to hit the exists check.
+        let tool = GitClone(git);
+        let result = tool.run("https://github.com/owner/r.git", None).await;
+        assert!(
+            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("already exists"))
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_traversal_in_name() {
+        let (git, _, _) = stub_git_arc_with_repo(vec![]);
+        let tool = GitClone(git);
+        let result = tool
+            .run("https://github.com/owner/repo.git", Some("../escape"))
+            .await;
+        assert!(result.is_err());
     }
 }

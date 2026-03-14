@@ -109,26 +109,6 @@ mod tests {
     use super::CiStatus;
     use crate::error::ToolError;
 
-    #[test]
-    fn deserialize_minimal() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo"
-        });
-        let args: super::Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.repo_dir, "projects/myrepo");
-        assert!(args.branch.is_none());
-    }
-
-    #[test]
-    fn deserialize_with_branch() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo",
-            "branch": "feature-xyz"
-        });
-        let args: super::Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.branch.as_deref(), Some("feature-xyz"));
-    }
-
     #[tokio::test]
     async fn formats_run_and_logs() {
         let runs_json = serde_json::to_string(&serde_json::json!([{
@@ -143,8 +123,9 @@ mod tests {
         let log_output = "test-job  Step failed";
 
         // Branch explicitly provided, so git stub is unused.
-        let (git, _) = stub_git_arc_with_repo(vec![]);
-        let (gh, repo) = stub_gh_arc_with_repo(vec![ok_output(&runs_json), ok_output(log_output)]);
+        let (git, _, git_calls) = stub_git_arc_with_repo(vec![]);
+        let (gh, repo, _) =
+            stub_gh_arc_with_repo(vec![ok_output(&runs_json), ok_output(log_output)]);
         let tool = CiStatus { git, gh };
         let result = tool.run(&repo, Some("main")).await.unwrap();
         assert_eq!(
@@ -160,16 +141,49 @@ $ stub
 test-job  Step failed
 Exit code: 0"
         );
+
+        // Explicit branch — git should not be called.
+        assert!(git_calls.take().await.is_empty());
     }
 
     #[tokio::test]
     async fn no_failed_runs() {
-        let (git, _) = stub_git_arc_with_repo(vec![]);
-        let (gh, repo) = stub_gh_arc_with_repo(vec![ok_output("[]")]);
+        let (git, _, _) = stub_git_arc_with_repo(vec![]);
+        let (gh, repo, _) = stub_gh_arc_with_repo(vec![ok_output("[]")]);
         let tool = CiStatus { git, gh };
         let result = tool.run(&repo, Some("main")).await;
         assert!(
             matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("no failed runs"))
         );
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_current_branch() {
+        let runs_json = serde_json::to_string(&serde_json::json!([{
+            "databaseId": 100,
+            "displayTitle": "CI",
+            "createdAt": "2025-01-15T10:00:00Z",
+            "url": "https://github.com/o/r/actions/runs/100",
+            "workflowName": "build"
+        }]))
+        .unwrap();
+
+        let (git, _, git_calls) = stub_git_arc_with_repo(vec![ok_output("feat/xyz\n")]);
+        let (gh, repo, gh_calls) =
+            stub_gh_arc_with_repo(vec![ok_output(&runs_json), ok_output("FAIL")]);
+        let tool = CiStatus { git, gh };
+        let result = tool.run(&repo, None).await.unwrap();
+        assert!(result.contains("Run #100"));
+
+        // Should have called git rev-parse to get branch name.
+        let git_recorded = git_calls.take().await;
+        assert_eq!(git_recorded.len(), 1);
+        assert_eq!(git_recorded[0].binary, "git");
+        assert!(git_recorded[0].args.contains(&"rev-parse".to_string()));
+
+        // gh should have used the resolved branch.
+        let gh_recorded = gh_calls.take().await;
+        assert_eq!(gh_recorded.len(), 2);
+        assert!(gh_recorded[0].args.contains(&"feat/xyz".to_string()));
     }
 }

@@ -116,16 +116,6 @@ mod tests {
     use super::super::test_helpers::{ok_output, stub_gh_arc_with_repo};
     use super::*;
 
-    #[test]
-    fn deserialize() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo",
-            "pr_number": 42
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.pr_number, 42);
-    }
-
     #[tokio::test]
     async fn formats_reviews_and_comments() {
         let json = serde_json::to_string(&serde_json::json!({
@@ -144,7 +134,7 @@ mod tests {
         }))
         .unwrap();
 
-        let (client, repo) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
+        let (client, repo, calls) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
         let tool = PrReviews(client);
         let result = tool.run(&repo, 42).await.unwrap();
         assert_eq!(
@@ -160,6 +150,10 @@ What about edge cases?
 
 "
         );
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded[0].binary, "gh");
+        assert!(recorded[0].args.contains(&"42".to_string()));
     }
 
     #[tokio::test]
@@ -171,7 +165,7 @@ What about edge cases?
         }))
         .unwrap();
 
-        let (client, repo) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
+        let (client, repo, _) = stub_gh_arc_with_repo(vec![ok_output(&json)]);
         let tool = PrReviews(client);
         let result = tool.run(&repo, 1).await.unwrap();
         assert_eq!(result, "No reviews or comments on PR #1.");

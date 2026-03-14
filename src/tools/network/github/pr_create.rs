@@ -87,33 +87,59 @@ impl<R: CliRunner> PrCreate<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::*;
+    use crate::tools::network::github::test_helpers::{ok_output, stub_gh_arc_with_repo};
 
-    #[test]
-    fn deserialize_minimal() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo",
-            "title": "Fix bug",
-            "body": "Fixes the thing"
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.title, "Fix bug");
-        assert_eq!(args.body, "Fixes the thing");
-        assert!(args.base.is_none());
-        assert!(!args.draft);
+    #[tokio::test]
+    async fn creates_pr_with_minimal_args() {
+        let (gh, repo, calls) =
+            stub_gh_arc_with_repo(vec![ok_output("https://github.com/o/r/pull/42")]);
+        let tool = PrCreate(gh);
+        let _ = tool
+            .run(&repo, "Fix bug", "Fixes the thing", None, false)
+            .await
+            .unwrap();
+
+        let recorded = calls.take().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].binary, "gh");
+        assert_eq!(
+            recorded[0].args,
+            [
+                "pr",
+                "create",
+                "--title",
+                "Fix bug",
+                "--body",
+                "Fixes the thing"
+            ]
+        );
+        assert!(recorded[0].has_env("GH_TOKEN"));
     }
 
-    #[test]
-    fn deserialize_full() {
-        let json = serde_json::json!({
-            "repo_dir": "projects/myrepo",
-            "title": "Feature",
-            "body": "Add feature",
-            "base": "develop",
-            "draft": true
-        });
-        let args: Args = serde_json::from_value(json).unwrap();
-        assert_eq!(args.base.as_deref(), Some("develop"));
-        assert!(args.draft);
+    #[tokio::test]
+    async fn draft_with_base_appends_flags() {
+        let (gh, repo, calls) = stub_gh_arc_with_repo(vec![ok_output("ok")]);
+        let tool = PrCreate(gh);
+        let _ = tool
+            .run(&repo, "Feature", "Add feature", Some("develop"), true)
+            .await
+            .unwrap();
+
+        let recorded = calls.take().await;
+        assert_eq!(
+            recorded[0].args,
+            [
+                "pr",
+                "create",
+                "--title",
+                "Feature",
+                "--body",
+                "Add feature",
+                "--base",
+                "develop",
+                "--draft"
+            ]
+        );
     }
 }
