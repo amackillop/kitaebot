@@ -31,6 +31,7 @@ in
       gh
       which
       lightpanda
+      nix
     ];
     gitConfig = {
       name = "kitaebot";

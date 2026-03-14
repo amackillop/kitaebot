@@ -356,6 +356,54 @@ const DENY_RULES: &[DenyRule] = &[
         pattern: r"\bcat\b.*\.config/gh/",
         guidance: "gh CLI config is not accessible",
     },
+    // ── Nix ──────────────────────────────────────────────────────────
+    // Remote flake references — catch-all across all subcommands.
+    // The agent must add dependencies as flake inputs, not fetch ad-hoc.
+    DenyRule {
+        pattern: r"\bnix\b.*\b(github|gitlab|sourcehut):",
+        guidance: "remote flakes not permitted — add as a flake input",
+    },
+    DenyRule {
+        pattern: r"\bnix\b.*https?://",
+        guidance: "remote flakes not permitted — add as a flake input",
+    },
+    DenyRule {
+        pattern: r"\bnix\b.*git\+",
+        guidance: "remote flakes not permitted — add as a flake input",
+    },
+    // System rebuild
+    DenyRule {
+        pattern: r"\bnixos-rebuild\b",
+        guidance: "system rebuild not permitted",
+    },
+    // Persistent profile mutation
+    DenyRule {
+        pattern: r"\bnix-env\b",
+        guidance: "use nix develop or nix-shell for ephemeral environments",
+    },
+    DenyRule {
+        pattern: r"\bnix\s+profile\b",
+        guidance: "use nix develop or nix-shell for ephemeral environments",
+    },
+    // Destructive store operations
+    DenyRule {
+        pattern: r"\bnix\s+store\s+(delete|gc|optimise)\b",
+        guidance: "store management not permitted",
+    },
+    DenyRule {
+        pattern: r"\bnix-collect-garbage\b",
+        guidance: "store management not permitted",
+    },
+    // Channel management
+    DenyRule {
+        pattern: r"\bnix-channel\b",
+        guidance: "channel management not permitted",
+    },
+    // Exfiltration via store copy
+    DenyRule {
+        pattern: r"\bnix\s+copy\b.*--to",
+        guidance: "copying to remote stores not permitted",
+    },
 ];
 
 /// Compiled deny list. `RegexSet` for fast matching, indexed into
@@ -875,5 +923,79 @@ mod tests {
         let args = serde_json::json!({"command": "pwd", "working_dir": "../escape"});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::Blocked(_))));
+    }
+
+    // ── Nix deny rules ──────────────────────────────────────────────
+
+    #[test]
+    fn test_deny_nix_system_ops() {
+        assert_blocked("nixos-rebuild switch");
+        assert_blocked("nixos-rebuild build");
+    }
+
+    #[test]
+    fn test_deny_nix_profile_mutation() {
+        assert_blocked("nix-env -i hello");
+        assert_blocked("nix-env --install hello");
+        assert_blocked("nix-env -e hello");
+        assert_blocked("nix-env --query");
+        assert_blocked("nix profile install nixpkgs#hello");
+        assert_blocked("nix profile remove hello");
+        assert_blocked("nix profile list");
+    }
+
+    #[test]
+    fn test_deny_nix_store_destructive() {
+        assert_blocked("nix store delete /nix/store/...");
+        assert_blocked("nix store gc");
+        assert_blocked("nix store optimise");
+        assert_blocked("nix-collect-garbage");
+        assert_blocked("nix-collect-garbage -d");
+    }
+
+    #[test]
+    fn test_deny_nix_channels() {
+        assert_blocked("nix-channel --add https://...");
+        assert_blocked("nix-channel --update");
+        assert_blocked("nix-channel --remove nixpkgs");
+    }
+
+    #[test]
+    fn test_deny_nix_remote_flakes() {
+        // All subcommands blocked for remote refs
+        assert_blocked("nix run github:owner/repo");
+        assert_blocked("nix build github:owner/repo");
+        assert_blocked("nix develop github:owner/repo");
+        assert_blocked("nix shell github:owner/repo");
+        assert_blocked("nix flake show github:owner/repo");
+        assert_blocked("nix run gitlab:owner/repo");
+        assert_blocked("nix build sourcehut:owner/repo");
+        assert_blocked("nix run https://example.com/flake");
+        assert_blocked("nix build https://example.com/flake.tar.gz");
+        assert_blocked("nix develop git+https://example.com/repo");
+        assert_blocked("nix build git+ssh://example.com/repo");
+    }
+
+    #[test]
+    fn test_deny_nix_remote_copy() {
+        assert_blocked("nix copy --to ssh://remote /nix/store/...");
+    }
+
+    #[test]
+    fn test_allow_nix_local_ops() {
+        assert_allowed("nix flake check");
+        assert_allowed("nix flake show");
+        assert_allowed("nix flake update");
+        assert_allowed("nix flake lock --update-input nixpkgs");
+        assert_allowed("nix build .#package");
+        assert_allowed("nix build");
+        assert_allowed("nix develop -c cargo test");
+        assert_allowed("nix develop");
+        assert_allowed("nix-shell -p hello");
+        assert_allowed("nix run .#script");
+        assert_allowed("nix store ping");
+        assert_allowed("nix eval --json .#attr");
+        assert_allowed("nix log .#package");
+        assert_allowed("nix flake metadata");
     }
 }
