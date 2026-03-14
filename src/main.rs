@@ -24,8 +24,6 @@ mod workspace;
 
 use agent::TurnConfig;
 use config::Config;
-use heartbeat::Outcome;
-use provider::Provider;
 use tracing::{error, info, warn};
 use workspace::Workspace;
 
@@ -69,9 +67,6 @@ async fn main() {
     };
 
     match std::env::args().nth(1).as_deref() {
-        Some("heartbeat") => {
-            run_heartbeat(&workspace, &turn_config).await;
-        }
         Some("run") => {
             info!(
                 interval_secs = config.heartbeat.interval_secs,
@@ -95,23 +90,7 @@ async fn main() {
             eprintln!("Usage: kitaebot <command>");
             eprintln!();
             eprintln!("Commands:");
-            eprintln!("  heartbeat  One-shot heartbeat cycle");
-            eprintln!("  run        Start daemon (heartbeat + channels)");
-            std::process::exit(1);
-        }
-    }
-}
-
-async fn run_heartbeat<P: Provider>(workspace: &Workspace, config: &TurnConfig<'_, P>) {
-    match heartbeat::run(workspace, config).await {
-        Ok(Outcome::Executed(response)) => {
-            info!("Heartbeat complete: {response}");
-        }
-        Ok(Outcome::Skipped(reason)) => {
-            info!("Heartbeat skipped: {reason}");
-        }
-        Err(e) => {
-            error!("Heartbeat failed: {e}");
+            eprintln!("  run  Start daemon (heartbeat + channels)");
             std::process::exit(1);
         }
     }
