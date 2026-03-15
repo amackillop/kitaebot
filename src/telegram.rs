@@ -11,11 +11,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::activity::Activity;
-use crate::agent::TurnConfig;
 use crate::clients::telegram::TelegramClient;
+use crate::config::ContextConfig;
 use crate::dispatch;
 use crate::error::TelegramError;
 use crate::provider::Provider;
+use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 // --- Channel ---
@@ -116,7 +117,10 @@ fn is_transient(err: &TelegramError) -> bool {
 pub async fn poll_loop<P: Provider>(
     channel: &TelegramChannel,
     workspace: &Workspace,
-    config: &TurnConfig<'_, P>,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: ContextConfig,
 ) -> ! {
     info!(chat_id = channel.chat_id(), "Telegram poller starting");
     let mut offset: i64 = 0;
@@ -162,7 +166,10 @@ pub async fn poll_loop<P: Provider>(
             handle_message(
                 channel,
                 workspace,
-                config,
+                provider,
+                tools,
+                max_iterations,
+                ctx,
                 &text,
                 &mut verbose,
                 &tx,
@@ -174,10 +181,14 @@ pub async fn poll_loop<P: Provider>(
 }
 
 /// Process a single authorized text message.
+#[allow(clippy::too_many_arguments)]
 async fn handle_message<P: Provider>(
     channel: &TelegramChannel,
     workspace: &Workspace,
-    config: &TurnConfig<'_, P>,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: ContextConfig,
     text: &str,
     verbose: &mut bool,
     tx: &mpsc::Sender<Activity>,
@@ -199,8 +210,17 @@ async fn handle_message<P: Provider>(
 
     let cancel = CancellationToken::new();
     let result = {
-        let dispatch_fut =
-            dispatch::dispatch(trimmed, &session_path, workspace, config, Some(tx), &cancel);
+        let dispatch_fut = dispatch::dispatch(
+            trimmed,
+            &session_path,
+            workspace,
+            provider,
+            tools,
+            max_iterations,
+            ctx,
+            Some(tx),
+            &cancel,
+        );
         tokio::pin!(dispatch_fut);
 
         loop {
@@ -242,7 +262,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::agent::TurnConfig;
     use crate::clients::RawResponse;
     use crate::clients::telegram::{ApiResponse, Chat, TelegramClient, TgMessage, Update};
     use crate::config::ContextConfig;
@@ -524,16 +543,22 @@ mod tests {
         let ch = channel(&state);
         let provider = MockProvider::new(vec![Ok(AgentResponse::Text("pong".into()))]);
         let tools = Tools::default();
-        let config = TurnConfig {
-            provider: &provider,
-            tools: &tools,
-            max_iterations: 1,
-            context: &CTX,
-        };
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message::<MockProvider>(&ch, &ws, &config, "ping", &mut verbose, &tx, &mut rx).await;
+        handle_message::<MockProvider>(
+            &ch,
+            &ws,
+            &provider,
+            &tools,
+            1,
+            CTX,
+            "ping",
+            &mut verbose,
+            &tx,
+            &mut rx,
+        )
+        .await;
 
         let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -548,17 +573,22 @@ mod tests {
         let ch = channel(&state);
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
-        let config = TurnConfig {
-            provider: &provider,
-            tools: &tools,
-            max_iterations: 1,
-            context: &CTX,
-        };
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message::<MockProvider>(&ch, &ws, &config, "/stats", &mut verbose, &tx, &mut rx)
-            .await;
+        handle_message::<MockProvider>(
+            &ch,
+            &ws,
+            &provider,
+            &tools,
+            1,
+            CTX,
+            "/stats",
+            &mut verbose,
+            &tx,
+            &mut rx,
+        )
+        .await;
 
         let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -574,23 +604,39 @@ mod tests {
         let ch = channel(&state);
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
-        let config = TurnConfig {
-            provider: &provider,
-            tools: &tools,
-            max_iterations: 1,
-            context: &CTX,
-        };
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message::<MockProvider>(&ch, &ws, &config, "/verbose", &mut verbose, &tx, &mut rx)
-            .await;
+        handle_message::<MockProvider>(
+            &ch,
+            &ws,
+            &provider,
+            &tools,
+            1,
+            CTX,
+            "/verbose",
+            &mut verbose,
+            &tx,
+            &mut rx,
+        )
+        .await;
         assert!(verbose);
         let sent = state.sent_messages();
         assert_eq!(sent[0].text, "Verbose: on");
 
-        handle_message::<MockProvider>(&ch, &ws, &config, "/verbose", &mut verbose, &tx, &mut rx)
-            .await;
+        handle_message::<MockProvider>(
+            &ch,
+            &ws,
+            &provider,
+            &tools,
+            1,
+            CTX,
+            "/verbose",
+            &mut verbose,
+            &tx,
+            &mut rx,
+        )
+        .await;
         assert!(!verbose);
         let sent = state.sent_messages();
         assert_eq!(sent[1].text, "Verbose: off");
@@ -606,17 +652,22 @@ mod tests {
         let ch = channel(&state);
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
-        let config = TurnConfig {
-            provider: &provider,
-            tools: &tools,
-            max_iterations: 1,
-            context: &CTX,
-        };
         let (tx, mut rx) = mpsc::channel(64);
         let mut verbose = false;
 
-        handle_message::<MockProvider>(&ch, &ws, &config, "/bogus", &mut verbose, &tx, &mut rx)
-            .await;
+        handle_message::<MockProvider>(
+            &ch,
+            &ws,
+            &provider,
+            &tools,
+            1,
+            CTX,
+            "/bogus",
+            &mut verbose,
+            &tx,
+            &mut rx,
+        )
+        .await;
 
         let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -640,16 +691,10 @@ mod tests {
         let ch = channel(&state);
         let provider = MockProvider::new(vec![Ok(AgentResponse::Text("reply".into()))]);
         let tools = Tools::default();
-        let config = TurnConfig {
-            provider: &provider,
-            tools: &tools,
-            max_iterations: 1,
-            context: &CTX,
-        };
 
         let _ = tokio::time::timeout(
             Duration::from_millis(100),
-            poll_loop::<MockProvider>(&ch, &ws, &config),
+            poll_loop::<MockProvider>(&ch, &ws, &provider, &tools, 1, CTX),
         )
         .await;
 
@@ -687,16 +732,10 @@ mod tests {
         let ch = channel(&state);
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
-        let config = TurnConfig {
-            provider: &provider,
-            tools: &tools,
-            max_iterations: 1,
-            context: &CTX,
-        };
 
         let _ = tokio::time::timeout(
             Duration::from_millis(100),
-            poll_loop::<MockProvider>(&ch, &ws, &config),
+            poll_loop::<MockProvider>(&ch, &ws, &provider, &tools, 1, CTX),
         )
         .await;
 

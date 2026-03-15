@@ -8,13 +8,14 @@ use std::str::FromStr;
 
 use tracing::error;
 
-use crate::agent::TurnConfig;
+use crate::config::ContextConfig;
 use crate::context;
 use crate::dispatch::Reply;
 use crate::heartbeat;
 use crate::provider::Provider;
 use crate::session::Session;
 use crate::stats;
+use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// A recognized slash command.
@@ -73,7 +74,10 @@ pub async fn execute<P: Provider>(
     cmd: SlashCommand,
     session_path: &Path,
     workspace: &Workspace,
-    config: &TurnConfig<'_, P>,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: ContextConfig,
 ) -> Result<Reply, String> {
     let mut session =
         Session::load(session_path).map_err(|e| format!("Session load error: {e}"))?;
@@ -82,7 +86,7 @@ pub async fn execute<P: Provider>(
         SlashCommand::Compact => {
             let system_prompt = workspace.system_prompt();
             let before = context::session_tokens(&session, system_prompt.len());
-            match context::force_compact(&mut session, config.provider).await {
+            match context::force_compact(&mut session, provider).await {
                 Ok(true) => {
                     let after = context::session_tokens(&session, system_prompt.len());
                     if let Err(e) = session.save(session_path) {
@@ -99,7 +103,7 @@ pub async fn execute<P: Provider>(
         SlashCommand::Context => {
             let system_prompt = workspace.system_prompt();
             let tokens = context::session_tokens(&session, system_prompt.len());
-            let budget = context::budget(config.context);
+            let budget = context::budget(ctx);
             let pct = if budget > 0 {
                 (tokens / budget) * 100
             } else {
@@ -110,17 +114,19 @@ pub async fn execute<P: Provider>(
                  Messages: {}\n\
                  Budget: {}% of {}",
                 session.len(),
-                config.context.budget_percent,
-                config.context.max_tokens,
+                ctx.budget_percent,
+                ctx.max_tokens,
             )))
         }
-        SlashCommand::Heartbeat => match heartbeat::run(workspace, config).await {
-            Ok(heartbeat::Outcome::Executed(response)) => Ok(Reply::text(response)),
-            Ok(heartbeat::Outcome::Skipped(reason)) => {
-                Ok(Reply::text(format!("Skipped: {reason}")))
+        SlashCommand::Heartbeat => {
+            match heartbeat::run(workspace, provider, tools, max_iterations, ctx).await {
+                Ok(heartbeat::Outcome::Executed(response)) => Ok(Reply::text(response)),
+                Ok(heartbeat::Outcome::Skipped(reason)) => {
+                    Ok(Reply::text(format!("Skipped: {reason}")))
+                }
+                Err(e) => Err(format!("Heartbeat failed: {e}")),
             }
-            Err(e) => Err(format!("Heartbeat failed: {e}")),
-        },
+        }
         SlashCommand::New => {
             session.clear();
             if let Err(e) = session.save(session_path) {

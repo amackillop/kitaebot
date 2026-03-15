@@ -22,7 +22,6 @@ mod tools;
 mod types;
 mod workspace;
 
-use agent::TurnConfig;
 use config::Config;
 use tracing::{error, info, warn};
 use workspace::Workspace;
@@ -59,13 +58,6 @@ async fn main() {
 
     // --- Everything below runs under Landlock confinement ---
 
-    let turn_config = TurnConfig {
-        provider: &rt.provider,
-        tools: &rt.tools,
-        max_iterations: config.agent.max_iterations,
-        context: &config.context,
-    };
-
     match std::env::args().nth(1).as_deref() {
         Some("run") => {
             info!(
@@ -75,7 +67,10 @@ async fn main() {
             );
             daemon::run(
                 &workspace,
-                &turn_config,
+                &rt.provider,
+                &rt.tools,
+                config.agent.max_iterations,
+                config.context,
                 config.heartbeat.interval_secs,
                 rt.telegram.as_ref(),
                 socket_path,

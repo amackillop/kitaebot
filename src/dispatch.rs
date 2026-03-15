@@ -10,9 +10,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::activity::Activity;
-use crate::agent::{self, TurnConfig};
+use crate::agent;
 use crate::commands::{self, SlashCommand};
+use crate::config::ContextConfig;
 use crate::provider::Provider;
+use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// Classified user input.
@@ -70,22 +72,45 @@ impl Reply {
 /// Route user input to the appropriate handler.
 ///
 /// Returns `Ok(reply)` on success or `Err(message)` on failure.
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch<P: Provider>(
     input: &str,
     session_path: &Path,
     workspace: &Workspace,
-    config: &TurnConfig<'_, P>,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: ContextConfig,
     activity_tx: Option<&mpsc::Sender<Activity>>,
     cancel: &CancellationToken,
 ) -> Result<Reply, String> {
     match Input::parse(input).map_err(|_| format!("Unknown command: {input}"))? {
-        Input::Command(cmd) => commands::execute(cmd, session_path, workspace, config).await,
-        Input::Message(text) => {
-            agent::process_message(session_path, workspace, text, config, activity_tx, cancel)
-                .await
-                .map(Reply::text)
-                .map_err(|e| e.to_string())
+        Input::Command(cmd) => {
+            commands::execute(
+                cmd,
+                session_path,
+                workspace,
+                provider,
+                tools,
+                max_iterations,
+                ctx,
+            )
+            .await
         }
+        Input::Message(text) => agent::process_message(
+            session_path,
+            workspace,
+            text,
+            provider,
+            tools,
+            max_iterations,
+            ctx,
+            activity_tx,
+            cancel,
+        )
+        .await
+        .map(Reply::text)
+        .map_err(|e| e.to_string()),
     }
 }
 

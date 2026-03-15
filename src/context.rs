@@ -28,7 +28,7 @@ pub fn session_tokens(session: &Session, system_prompt_chars: usize) -> usize {
 }
 
 /// Token budget at which compaction triggers.
-pub fn budget(config: &ContextConfig) -> usize {
+pub fn budget(config: ContextConfig) -> usize {
     config.max_tokens as usize * usize::from(config.budget_percent) / 100
 }
 
@@ -41,7 +41,7 @@ pub async fn compact_if_needed<P: Provider>(
     session: &mut Session,
     system_prompt: &str,
     provider: &P,
-    config: &ContextConfig,
+    config: ContextConfig,
 ) -> Result<bool, ProviderError> {
     let tokens = session_tokens(session, system_prompt.len());
     let limit = budget(config);
@@ -166,7 +166,7 @@ mod tests {
             max_tokens: 1000,
             budget_percent: 50,
         };
-        assert_eq!(budget(&config), 500);
+        assert_eq!(budget(config), 500);
     }
 
     #[test]
@@ -188,7 +188,7 @@ mod tests {
             content: "short".to_string(),
         });
 
-        let compacted = compact_if_needed(&mut session, "sys", &provider, &default_config())
+        let compacted = compact_if_needed(&mut session, "sys", &provider, default_config())
             .await
             .unwrap();
 
@@ -204,7 +204,7 @@ mod tests {
             content: "x".repeat(10000),
         });
 
-        let compacted = compact_if_needed(&mut session, "sys", &provider, &tiny_config())
+        let compacted = compact_if_needed(&mut session, "sys", &provider, tiny_config())
             .await
             .unwrap();
 
@@ -228,7 +228,7 @@ mod tests {
             tool_calls: None,
         });
 
-        let compacted = compact_if_needed(&mut session, "", &provider, &tiny_config())
+        let compacted = compact_if_needed(&mut session, "", &provider, tiny_config())
             .await
             .unwrap();
 

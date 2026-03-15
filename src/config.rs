@@ -146,7 +146,7 @@ pub struct SocketConfig {
 }
 
 /// Context window management settings.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ContextConfig {
     /// Maximum context window size in tokens.

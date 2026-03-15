@@ -11,10 +11,12 @@ use std::time::SystemTime;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{self, TurnConfig};
+use crate::agent;
+use crate::config::ContextConfig;
 use crate::error::{Error, HeartbeatError};
 use crate::lock::Lock;
 use crate::provider::Provider;
+use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// Why a heartbeat was skipped (not an error).
@@ -58,7 +60,10 @@ pub enum Outcome {
 /// 6. Save session and append result to `memory/HISTORY.md`
 pub async fn run<P: Provider>(
     workspace: &Workspace,
-    config: &TurnConfig<'_, P>,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: ContextConfig,
 ) -> Result<Outcome, Error> {
     let Ok(_lock) = Lock::acquire(&workspace.heartbeat_lock_path()) else {
         return Ok(Outcome::Skipped(SkipReason::HeartbeatLocked));
@@ -81,8 +86,18 @@ pub async fn run<P: Provider>(
     let session_path = workspace.heartbeat_session_path();
 
     let cancel = CancellationToken::new();
-    let response =
-        agent::process_message(&session_path, workspace, &prompt, config, None, &cancel).await?;
+    let response = agent::process_message(
+        &session_path,
+        workspace,
+        &prompt,
+        provider,
+        tools,
+        max_iterations,
+        ctx,
+        None,
+        &cancel,
+    )
+    .await?;
 
     append_history(&workspace.history_path(), &response).map_err(HeartbeatError::WriteHistory)?;
 
@@ -161,7 +176,6 @@ mod tests {
     use crate::config::ContextConfig;
     use crate::provider::MockProvider;
     use crate::session::Session;
-    use crate::tools::Tools;
     use crate::types::Response;
 
     #[test]
@@ -253,24 +267,12 @@ mod tests {
         (dir, ws)
     }
 
-    fn turn_config<'a>(
-        provider: &'a MockProvider,
-        tools: &'a Tools,
-    ) -> TurnConfig<'a, MockProvider> {
-        TurnConfig {
-            provider,
-            tools,
-            max_iterations: 1,
-            context: &CTX,
-        }
-    }
-
     #[tokio::test]
     async fn run_skips_when_no_heartbeat_file() {
         let (_dir, ws) = workspace();
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
-        let outcome = run(&ws, &turn_config(&provider, &tools)).await.unwrap();
+        let outcome = run(&ws, &provider, &tools, 1, CTX).await.unwrap();
         assert!(matches!(
             outcome,
             Outcome::Skipped(SkipReason::NoHeartbeatFile)
@@ -284,7 +286,7 @@ mod tests {
 
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
-        let outcome = run(&ws, &turn_config(&provider, &tools)).await.unwrap();
+        let outcome = run(&ws, &provider, &tools, 1, CTX).await.unwrap();
         assert!(matches!(
             outcome,
             Outcome::Skipped(SkipReason::NoActiveTasks)
@@ -300,7 +302,7 @@ mod tests {
 
         let provider = MockProvider::new(vec![]);
         let tools = Tools::default();
-        let outcome = run(&ws, &turn_config(&provider, &tools)).await.unwrap();
+        let outcome = run(&ws, &provider, &tools, 1, CTX).await.unwrap();
         assert!(matches!(
             outcome,
             Outcome::Skipped(SkipReason::HeartbeatLocked)
@@ -314,7 +316,7 @@ mod tests {
 
         let provider = MockProvider::new(vec![Ok(Response::Text("All builds green".into()))]);
         let tools = Tools::default();
-        let outcome = run(&ws, &turn_config(&provider, &tools)).await.unwrap();
+        let outcome = run(&ws, &provider, &tools, 1, CTX).await.unwrap();
 
         match outcome {
             Outcome::Executed(ref text) => assert_eq!(text, "All builds green"),

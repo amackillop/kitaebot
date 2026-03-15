@@ -32,25 +32,18 @@ const REPEAT_ERROR: &str = "ERROR: You have called this tool with identical \
     or action, or respond to the user explaining what you \
     tried and why it did not work.";
 
-/// Static dependencies for an agent turn.
-///
-/// Bundles the provider, tools, iteration limit, and context config that
-/// remain constant across turns, keeping `run_turn` signatures small.
-pub struct TurnConfig<'a, P: Provider> {
-    pub provider: &'a P,
-    pub tools: &'a Tools,
-    pub max_iterations: usize,
-    pub context: &'a ContextConfig,
-}
-
 /// Load session, run a single turn, and save regardless of outcome.
 ///
 /// Shared by all channels (telegram, socket, heartbeat).
+#[allow(clippy::too_many_arguments)]
 pub async fn process_message<P: Provider>(
     session_path: &Path,
     workspace: &Workspace,
     user_message: &str,
-    config: &TurnConfig<'_, P>,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: ContextConfig,
     activity_tx: Option<&mpsc::Sender<Activity>>,
     cancel: &CancellationToken,
 ) -> Result<String, Error> {
@@ -60,7 +53,10 @@ pub async fn process_message<P: Provider>(
         &mut session,
         &system_prompt,
         user_message,
-        config,
+        provider,
+        tools,
+        max_iterations,
+        ctx,
         activity_tx,
         cancel,
     )
@@ -78,11 +74,15 @@ pub async fn process_message<P: Provider>(
 ///
 /// # Errors
 /// Returns error if max iterations reached or provider fails
+#[allow(clippy::too_many_arguments)]
 async fn run_turn<P: Provider>(
     session: &mut Session,
     system_prompt: &str,
     user_message: &str,
-    config: &TurnConfig<'_, P>,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: ContextConfig,
     activity_tx: Option<&mpsc::Sender<Activity>>,
     cancel: &CancellationToken,
 ) -> Result<String, Error> {
@@ -92,8 +92,7 @@ async fn run_turn<P: Provider>(
     }
 
     let before = context::session_tokens(session, system_prompt.len());
-    let compact_fut =
-        context::compact_if_needed(session, system_prompt, config.provider, config.context);
+    let compact_fut = context::compact_if_needed(session, system_prompt, provider, ctx);
     let compacted = cancellable(compact_fut, cancel, activity_tx)
         .await?
         .map_err(Error::Provider)?;
@@ -106,11 +105,11 @@ async fn run_turn<P: Provider>(
         content: user_message.to_string(),
     });
 
-    let tool_definitions = config.tools.definitions();
+    let tool_definitions = tools.definitions();
 
     let mut repeats = RepeatDetector::new();
 
-    for iteration in 0..config.max_iterations {
+    for iteration in 0..max_iterations {
         if cancel.is_cancelled() {
             activity::emit(activity_tx, Activity::Cancelled);
             return Err(Error::Cancelled);
@@ -124,7 +123,7 @@ async fn run_turn<P: Provider>(
         messages.extend(session.messages().iter().cloned());
 
         let response = cancellable(
-            config.provider.chat(&messages, &tool_definitions),
+            provider.chat(&messages, &tool_definitions),
             cancel,
             activity_tx,
         )
@@ -169,10 +168,7 @@ async fn run_turn<P: Provider>(
                 }
 
                 // Execute all tool calls in parallel
-                let futures: Vec<_> = calls
-                    .iter()
-                    .map(|call| config.tools.execute(call))
-                    .collect();
+                let futures: Vec<_> = calls.iter().map(|call| tools.execute(call)).collect();
                 let results = cancellable(join_all(futures), cancel, activity_tx).await?;
 
                 record_tool_results(session, &calls, results, activity_tx);
@@ -324,18 +320,6 @@ mod tests {
         budget_percent: 80,
     };
 
-    fn turn_config<'a>(
-        provider: &'a MockProvider,
-        tools: &'a Tools,
-    ) -> TurnConfig<'a, MockProvider> {
-        TurnConfig {
-            provider,
-            tools,
-            max_iterations: MAX_ITER,
-            context: &CTX,
-        }
-    }
-
     #[tokio::test]
     async fn test_text_response() {
         let provider = MockProvider::new(vec![Ok(text("Hello from LLM"))]);
@@ -346,7 +330,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Hello",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             None,
             &noop_cancel(),
         )
@@ -369,7 +356,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Use a tool",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             None,
             &noop_cancel(),
         )
@@ -387,7 +377,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Infinite loop",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             None,
             &noop_cancel(),
         )
@@ -415,7 +408,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Loop test",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             Some(&tx),
             &noop_cancel(),
         )
@@ -483,7 +479,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "No repeat",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             None,
             &noop_cancel(),
         )
@@ -538,7 +537,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Reset test",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             Some(&tx),
             &noop_cancel(),
         )
@@ -569,7 +571,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Error case",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             None,
             &noop_cancel(),
         )
@@ -590,7 +595,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Parallel tools",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             None,
             &noop_cancel(),
         )
@@ -611,7 +619,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Leak test",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             None,
             &noop_cancel(),
         )
@@ -642,7 +653,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Wrap test",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             None,
             &noop_cancel(),
         )
@@ -675,7 +689,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Activity test",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             Some(&tx),
             &noop_cancel(),
         )
@@ -707,7 +724,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Max iter activity",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             Some(&tx),
             &noop_cancel(),
         )
@@ -735,7 +755,10 @@ mod tests {
             &mut session,
             SYSTEM,
             "Should not run",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             None,
             &cancel,
         )
@@ -761,7 +784,10 @@ mod tests {
             &session_path,
             &workspace,
             "Hello?",
-            &turn_config(&provider, &tools),
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
             None,
             &noop_cancel(),
         )

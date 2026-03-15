@@ -16,10 +16,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::agent::TurnConfig;
 use crate::commands;
+use crate::config::ContextConfig;
 use crate::dispatch;
 use crate::provider::Provider;
+use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 // ── Protocol types ──────────────────────────────────────────────────
@@ -50,7 +51,10 @@ enum ServerMsg {
 pub async fn listen<P: Provider>(
     socket_path: &Path,
     workspace: &Workspace,
-    config: &TurnConfig<'_, P>,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: ContextConfig,
 ) -> ! {
     let path = socket_path;
 
@@ -74,7 +78,16 @@ pub async fn listen<P: Provider>(
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                serve(&listener, stream, workspace, config).await;
+                serve(
+                    &listener,
+                    stream,
+                    workspace,
+                    provider,
+                    tools,
+                    max_iterations,
+                    ctx,
+                )
+                .await;
             }
             Err(e) => error!("Socket accept error: {e}"),
         }
@@ -88,7 +101,10 @@ async fn serve<P: Provider>(
     listener: &UnixListener,
     stream: UnixStream,
     workspace: &Workspace,
-    config: &TurnConfig<'_, P>,
+    provider: &P,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: ContextConfig,
 ) {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -132,8 +148,17 @@ async fn serve<P: Provider>(
         let cancel = CancellationToken::new();
 
         let result = {
-            let dispatch_fut =
-                dispatch::dispatch(&input, &session_path, workspace, config, Some(&tx), &cancel);
+            let dispatch_fut = dispatch::dispatch(
+                &input,
+                &session_path,
+                workspace,
+                provider,
+                tools,
+                max_iterations,
+                ctx,
+                Some(&tx),
+                &cancel,
+            );
             tokio::pin!(dispatch_fut);
 
             // Drain activity events while dispatch runs. Monitor the
@@ -344,13 +369,7 @@ mod tests {
 
         let path = sock_path.clone();
         let handle = tokio::spawn(async move {
-            let config = TurnConfig {
-                provider: &provider,
-                tools: &tools,
-                max_iterations: 1,
-                context: &CTX,
-            };
-            listen(&path, &ws, &config).await;
+            listen(&path, &ws, &provider, &tools, 1, CTX).await;
         });
 
         let client = TestClient::connect(&sock_path).await;
