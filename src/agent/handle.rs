@@ -6,12 +6,19 @@
 //! each public method on the handle maps to one message type. Callers never
 //! see [`Envelope`] — they call methods and `await` the reply.
 
+use std::sync::Arc;
+
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::activity::Activity;
+use crate::config::ContextConfig;
 use crate::dispatch::Reply;
+use crate::provider::Provider;
+use crate::tools::Tools;
+use crate::workspace::Workspace;
 
+use super::actor::Agent;
 use super::envelope::{ChannelSource, Envelope};
 
 /// Cloneable handle to the agent actor.
@@ -24,10 +31,24 @@ pub struct AgentHandle {
 }
 
 impl AgentHandle {
-    /// Create a handle wrapping an existing sender.
+    /// Spawn the agent actor and return a handle to it.
     ///
-    /// The actor's `spawn` constructor (added in a later commit) calls
-    /// this internally. Exposed as `pub(super)` so `actor.rs` can use it.
+    /// The actor task runs until all handles are dropped.
+    pub fn spawn<P: Provider + 'static>(
+        workspace: Arc<Workspace>,
+        provider: Arc<P>,
+        tools: Arc<Tools>,
+        max_iterations: usize,
+        ctx: ContextConfig,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(32);
+        let actor = Agent::new(rx, workspace, provider, tools, max_iterations, ctx);
+        tokio::spawn(actor.run());
+        Self { tx }
+    }
+
+    /// Create a handle wrapping an existing sender.
+    #[cfg(test)]
     pub(super) fn new(tx: mpsc::Sender<Envelope>) -> Self {
         Self { tx }
     }

@@ -11,6 +11,8 @@ pub use completions::CompletionsProvider;
 #[cfg(test)]
 pub use mock::MockProvider;
 
+use std::future::Future;
+
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolDefinition};
 
@@ -27,9 +29,9 @@ pub trait Provider: Send + Sync {
     ///
     /// # Returns
     /// Either a text response or tool call requests.
-    async fn chat(
+    fn chat(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<Response, ProviderError>;
+    ) -> impl Future<Output = Result<Response, ProviderError>> + Send;
 }

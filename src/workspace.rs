@@ -54,6 +54,12 @@ impl Workspace {
         &self.0
     }
 
+    /// Path to the unified agent session file.
+    #[allow(dead_code)]
+    pub fn session_path(&self) -> PathBuf {
+        self.0.join("sessions/session.json")
+    }
+
     /// Path to the heartbeat session file.
     pub fn heartbeat_session_path(&self) -> PathBuf {
         self.0.join("sessions/heartbeat.json")

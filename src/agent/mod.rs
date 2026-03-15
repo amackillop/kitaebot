@@ -4,6 +4,7 @@
 //! Each turn sends context to the LLM and either returns a text response
 //! or executes tool calls until the LLM completes.
 
+mod actor;
 pub(crate) mod envelope;
 mod handle;
 
