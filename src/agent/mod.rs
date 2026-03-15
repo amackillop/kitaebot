@@ -4,6 +4,14 @@
 //! Each turn sends context to the LLM and either returns a text response
 //! or executes tool calls until the LLM completes.
 
+pub(crate) mod envelope;
+mod handle;
+
+#[allow(unused_imports)]
+pub use envelope::ChannelSource;
+#[allow(unused_imports)]
+pub use handle::AgentHandle;
+
 use std::future::Future;
 use std::path::Path;
 

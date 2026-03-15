@@ -48,6 +48,7 @@ impl<'a> Input<'a> {
 ///
 /// Channels inspect `preformatted` to choose an appropriate rendering
 /// (e.g. Telegram `<pre>`, terminal raw output).
+#[derive(Debug)]
 pub struct Reply {
     pub content: String,
     pub preformatted: bool,
