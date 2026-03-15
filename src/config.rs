@@ -171,12 +171,14 @@ pub struct GitConfig {
 }
 
 /// GitHub integration settings.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GithubConfig {
     /// Enable the GitHub integration. Defaults to `false` so the daemon
     /// can start without a GitHub token.
     pub enabled: bool,
+    /// Seconds between PR polling cycles. Defaults to 300 (5 minutes).
+    pub poll_interval_secs: u64,
 }
 
 // --- Default impls ---
@@ -203,6 +205,15 @@ impl Default for ExecConfig {
         Self {
             timeout_secs: 60,
             max_output_bytes: 10 * 1024,
+        }
+    }
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: 300,
         }
     }
 }
@@ -323,6 +334,11 @@ impl Config {
                     "telegram poll_timeout_secs must be > 0".into(),
                 ));
             }
+        }
+        if self.github.enabled && self.github.poll_interval_secs == 0 {
+            return Err(ConfigError::Invalid(
+                "github poll_interval_secs must be > 0".into(),
+            ));
         }
         if self.tools.exec.timeout_secs == 0 {
             return Err(ConfigError::Invalid("timeout_secs must be > 0".into()));
@@ -590,17 +606,31 @@ max_output_bytes = 20480
     fn github_defaults() {
         let cfg = load_toml("").unwrap();
         assert!(!cfg.github.enabled);
+        assert_eq!(cfg.github.poll_interval_secs, 300);
     }
 
     #[test]
     fn github_parse() {
-        let cfg = load_toml("[github]\nenabled = true\n").unwrap();
+        let cfg = load_toml("[github]\nenabled = true\npoll_interval_secs = 600\n").unwrap();
         assert!(cfg.github.enabled);
+        assert_eq!(cfg.github.poll_interval_secs, 600);
     }
 
     #[test]
     fn github_reject_unknown_field() {
         let result = load_toml("[github]\ntypo = 1\n");
         assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn github_reject_zero_poll_interval_when_enabled() {
+        let result = load_toml("[github]\nenabled = true\npoll_interval_secs = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn github_disabled_skips_validation() {
+        let cfg = load_toml("[github]\nenabled = false\npoll_interval_secs = 0\n").unwrap();
+        assert!(!cfg.github.enabled);
     }
 }

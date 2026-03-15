@@ -28,6 +28,12 @@ impl GhCli {
         }
     }
 
+    /// Root directory of the workspace (used as cwd for non-repo commands).
+    #[allow(dead_code)] // Used by GitHub channel (commit 5).
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
     /// Resolve and validate a repo directory within the workspace.
     pub fn resolve_repo_dir(&self, repo_dir: &str) -> Result<PathBuf, ToolError> {
         crate::tools::git::resolve_repo_dir(&self.workspace_root, repo_dir)

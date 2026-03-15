@@ -44,16 +44,11 @@ pub use pr_diff_reply::PrDiffReply;
 pub use pr_list::PrList;
 pub use pr_reviews::PrReviews;
 
-use crate::secrets::Secret;
-use crate::workspace::Workspace;
-
 // Re-export parent utility so tool files can `use super::Tool`.
 pub(crate) use super::Tool;
 
-/// Build the GitHub tools. Returns an empty vec when no token is provided.
-pub(crate) fn build(token: Secret, workspace: &Workspace) -> Vec<Box<dyn Tool>> {
-    let gh = GhCli::new(token, workspace.path());
-
+/// Build the GitHub tools from a pre-constructed [`GhCli`].
+pub(crate) fn build(gh: GhCli) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(CiStatus(gh.clone())),
         Box::new(PrComment(gh.clone())),

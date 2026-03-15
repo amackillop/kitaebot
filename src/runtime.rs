@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::provider::CompletionsProvider;
 use crate::telegram::TelegramChannel;
 use crate::tools::Tools;
+use crate::tools::github::GhCli;
 use crate::workspace::Workspace;
 
 /// Fully-assembled application runtime returned by [`build`].
@@ -16,6 +17,8 @@ pub struct Runtime {
     pub provider: CompletionsProvider,
     pub tools: Tools,
     pub telegram: Option<TelegramChannel>,
+    #[allow(dead_code)] // Used by GitHub channel (commit 5).
+    pub gh_cli: Option<GhCli>,
 }
 
 // ---------------------------------------------------------------------------
@@ -41,7 +44,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     } else {
         None
     };
-    if config.git.enabled || config.github.enabled {
+    let gh_cli = if config.git.enabled || config.github.enabled {
         let token = load_secret("github-token").unwrap_or_else(|e| {
             error!("Failed to load GitHub token: {e}");
             std::process::exit(1);
@@ -53,10 +56,14 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 config.git.co_authors.clone(),
             ));
         }
+        let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
-            tools.extend(github::build(token, workspace));
+            tools.extend(github::build(gh.clone()));
         }
-    }
+        Some(gh)
+    } else {
+        None
+    };
 
     let provider_api_key = load_secret("provider-api-key").unwrap_or_else(|e| {
         error!("Failed to load Provider credentials: {e}");
@@ -84,6 +91,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             std::process::exit(1);
         }),
         telegram,
+        gh_cli,
     }
 }
 
@@ -107,7 +115,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     let provider = CompletionsProvider::new(client, &config.provider);
 
     let mut tools = Tools::local(workspace, config);
-    if config.git.enabled || config.github.enabled {
+    let gh_cli = if config.git.enabled || config.github.enabled {
         let token = load_secret("github-token").unwrap_or_else(|e| {
             error!("Failed to load GitHub token: {e}");
             std::process::exit(1);
@@ -119,10 +127,14 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 config.git.co_authors.clone(),
             ));
         }
+        let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
-            tools.extend(github::build(token, workspace));
+            tools.extend(github::build(gh.clone()));
         }
-    }
+        Some(gh)
+    } else {
+        None
+    };
 
     let telegram = if config.telegram.enabled {
         Some(TelegramChannel::new(
@@ -143,5 +155,6 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             std::process::exit(1);
         }),
         telegram,
+        gh_cli,
     }
 }
