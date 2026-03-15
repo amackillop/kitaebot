@@ -346,11 +346,6 @@ const DENY_RULES: &[DenyRule] = &[
         pattern: r"gpgsign=false",
         guidance: "GPG commit signing is configured — do not disable it",
     },
-    // Git destructive operations
-    DenyRule {
-        pattern: r"\bgit\b\s+reset\s+--hard\b",
-        guidance: BLOCKED,
-    },
     // gh CLI config (token may leak to disk)
     DenyRule {
         pattern: r"\bcat\b.*\.config/gh/",
@@ -753,8 +748,6 @@ mod tests {
         assert_blocked("git push origin main");
         assert_blocked("git push --force origin main");
         assert_blocked("git push -f origin master");
-        assert_blocked("git reset --hard origin/main");
-        assert_blocked("git reset --hard HEAD~3");
         assert_blocked("git commit -m 'fix bug'");
         assert_blocked("git commit --amend");
     }
@@ -795,6 +788,8 @@ mod tests {
         assert_allowed("curl https://api.example.com");
         assert_allowed("git status");
         assert_allowed("git branch feature-xyz");
+        assert_allowed("git reset --hard origin/main");
+        assert_allowed("git reset --hard HEAD~3");
         assert_allowed("find / -name justfile 2>/dev/null");
     }
 

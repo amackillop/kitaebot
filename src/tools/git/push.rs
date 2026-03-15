@@ -23,6 +23,13 @@ struct Args {
     /// Set upstream tracking (`--set-upstream`).
     #[serde(default)]
     set_upstream: bool,
+    /// Force-push with lease (`--force-with-lease`).
+    /// Required after rebase / squash / amend on a branch that has
+    /// already been pushed. Safer than bare `--force` because it
+    /// rejects pushes that would overwrite upstream commits the agent
+    /// has not fetched.
+    #[serde(default)]
+    force: bool,
 }
 
 pub struct Push(pub GitCli);
@@ -52,6 +59,7 @@ impl Tool for Push {
                 args.remote.as_deref(),
                 args.branch.as_deref(),
                 args.set_upstream,
+                args.force,
             )
             .await
         })
@@ -65,11 +73,15 @@ impl Push {
         remote: Option<&str>,
         branch: Option<&str>,
         set_upstream: bool,
+        force: bool,
     ) -> Result<SubprocessCall, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
         let remote = remote.unwrap_or("origin");
         let mut args: Vec<&str> = vec!["push"];
 
+        if force {
+            args.push("--force-with-lease");
+        }
         if set_upstream {
             args.push("--set-upstream");
         }
@@ -87,8 +99,9 @@ impl Push {
         remote: Option<&str>,
         branch: Option<&str>,
         set_upstream: bool,
+        force: bool,
     ) -> Result<String, ToolError> {
-        let call = self.prepare(repo_dir, remote, branch, set_upstream)?;
+        let call = self.prepare(repo_dir, remote, branch, set_upstream, force)?;
         self.0.exec_git(call, true).await?.format()
     }
 }
@@ -102,7 +115,7 @@ mod tests {
     fn defaults_to_origin() {
         let (git, repo) = stub_git_cli_with_repo();
         let tool = Push(git);
-        let call = tool.prepare(&repo, None, None, false).unwrap();
+        let call = tool.prepare(&repo, None, None, false, false).unwrap();
         assert_eq!(call.binary, "git");
         assert_eq!(call.args, ["push", "origin"]);
     }
@@ -112,8 +125,18 @@ mod tests {
         let (git, repo) = stub_git_cli_with_repo();
         let tool = Push(git);
         let call = tool
-            .prepare(&repo, Some("upstream"), Some("feat"), true)
+            .prepare(&repo, Some("upstream"), Some("feat"), true, false)
             .unwrap();
         assert_eq!(call.args, ["push", "--set-upstream", "upstream", "feat"]);
+    }
+
+    #[test]
+    fn force_uses_force_with_lease() {
+        let (git, repo) = stub_git_cli_with_repo();
+        let tool = Push(git);
+        let call = tool
+            .prepare(&repo, None, Some("feat"), false, true)
+            .unwrap();
+        assert_eq!(call.args, ["push", "--force-with-lease", "origin", "feat"]);
     }
 }

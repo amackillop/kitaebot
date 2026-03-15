@@ -68,7 +68,6 @@ Commands are checked against deny patterns before execution:
 - `shutdown`, `reboot` — system power
 - Fork bomb pattern
 - `git clone`, `git push`, `git commit` — must use dedicated tools (`git_clone`, `git_push`, `git_commit`)
-- `git reset --hard` — destructive git operations
 - `gpg --export-secret`, `.gnupg/` — GPG keyring access
 - `gpgsign=false` — cannot override commit signing config
 - Secret harvesting (`~/.ssh/id_*`, `~/.aws/`, `.config/gh/`)
