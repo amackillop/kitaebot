@@ -4,26 +4,30 @@ Autonomous programming agent in Rust. Runs in a NixOS VM with Landlock sandboxin
 
 ## Overview
 
-Kitaebot is a long-running daemon that accepts messages via Telegram or a Unix socket, routes them through an LLM agent loop with tool use, and persists conversation state per channel. A periodic heartbeat triggers autonomous task review.
+Kitaebot is a long-running daemon that accepts messages via Telegram, Unix socket, or GitHub PR comments, routes them through an LLM agent loop with tool use, and persists conversation state in a unified session. A periodic heartbeat triggers autonomous task review.
 
 Two binaries:
 
 | Binary | Purpose | Lifecycle |
 |--------|---------|-----------|
-| `kitaebot run` | Daemon (Telegram + socket + heartbeat) | systemd service |
+| `kitaebot run` | Daemon (Telegram + socket + heartbeat + GitHub) | systemd service |
 | `kchat <socket>` | Socket client REPL | On-demand |
 
 ## Architecture
 
 ```
-Channels (Telegram, Unix socket)
+Channels (Telegram, Unix socket, GitHub PR, Heartbeat)
         │
-        ├─ Messages ──► agent::process_message ──► LLM loop with tool use
+        ├─ Messages ──► AgentHandle ──► Agent actor (sequential)
+        │                                 ├─ process_message ──► LLM loop
+        │                                 └─ commands::execute ──► local ops
         │
-        └─ Slash commands ──► commands::execute ──► local ops (clear, compact, stats)
+        └─ Unified session (single session.json, messages tagged by source)
 ```
 
-The agent loop calls the LLM, dispatches tool calls, checks outputs for leaked secrets, and repeats until the model produces a final response or hits `max_iterations`.
+The agent is an actor (Ryhl pattern) — a spawned tokio task that processes one envelope at a time. Channels hold cloneable `AgentHandle`s and send messages via `send_message()`, awaiting a reply over a oneshot channel. This eliminates session locking: the actor owns the session and processes requests sequentially.
+
+The agent loop calls the LLM, dispatches tool calls in parallel, checks outputs for leaked secrets, and repeats until the model produces a final response or hits `max_iterations`.
 
 ### Tools
 
@@ -49,6 +53,7 @@ Typed tools replace a generic shell. The LLM declares intent via parameters inst
 | `github_pr_diff_comments` | Fetch PR diff comments |
 | `github_pr_diff_reply` | Reply to a PR diff comment |
 | `github_ci_status` | Check CI status for a ref |
+| `gh_cli` | General-purpose `gh` CLI wrapper |
 
 All tool outputs pass through `safety::check_tool_output` and execute inside the Landlock sandbox.
 
@@ -139,6 +144,7 @@ kitaebot = {
     };
     github = {
       enabled = true;
+      poll_interval_secs = 300;            # 5 minutes between PR polls
     };
     heartbeat = {
       interval_secs = 1800;
@@ -194,34 +200,43 @@ Secrets are loaded via systemd `LoadCredential` from `kitaebot.secretsDir`. One 
 src/
 ├── main.rs              Entry point, subcommand routing
 ├── bin/kchat.rs          Socket client REPL
-├── agent.rs              Core agent loop
-├── provider/             LLM abstraction (completions, mock)
-├── tools/                Tool trait + implementations (exec, files, grep, web, git, github)
-├── sandbox.rs            Landlock policy
-├── safety.rs             Leak detection
-├── secrets.rs            systemd credential loading
-├── session.rs            Atomic JSON persistence
-├── config.rs             TOML config with validation
-├── context.rs            Token budget management
-├── chat_completion.rs    LLM request/response formatting
-├── telegram.rs           Telegram Bot API channel
-├── socket.rs             Unix socket NDJSON channel
-├── daemon.rs             Event loop (select over channels + heartbeat)
-├── dispatch.rs           Route messages to agent or slash commands
-├── commands.rs           Slash command dispatch
-├── heartbeat.rs          Periodic autonomous task review
-├── activity.rs           Structured turn events for observability
-├── workspace.rs          Workspace init + system prompt assembly
-├── stats.rs              Conversation statistics
-├── lock.rs               File locking for atomic operations
-├── types.rs              Domain types (Message, ToolCall, Response)
-└── error.rs              Algebraic error types
+├── agent/               Agent actor module
+│   ├── mod.rs           Core agent loop (process_message, run_turn)
+│   ├── actor.rs         Agent struct, sequential envelope processing
+│   ├── handle.rs        AgentHandle (cloneable actor interface)
+│   └── envelope.rs      Envelope, ChannelSource types
+├── clients/             HTTP client abstractions
+│   ├── chat_completion.rs  OpenRouter/OpenAI-compatible API
+│   └── telegram.rs         Telegram Bot API
+├── provider/            LLM abstraction (completions, mock)
+├── tools/               Tool trait + implementations (exec, files, grep, web, git, github)
+├── sandbox.rs           Landlock policy
+├── safety.rs            Leak detection
+├── secrets.rs           systemd credential loading
+├── session.rs           Atomic JSON persistence
+├── config.rs            TOML config with validation
+├── context.rs           Token budget management
+├── telegram.rs          Telegram Bot API channel
+├── socket.rs            Unix socket NDJSON channel
+├── github_channel.rs    GitHub PR polling channel
+├── daemon.rs            Event loop (select over 4 channels)
+├── dispatch.rs          Input classification and Reply type
+├── commands.rs          Slash command dispatch
+├── heartbeat.rs         Periodic heartbeat channel (timer + prepare/finish)
+├── runtime.rs           Provider/tools/channels assembly
+├── activity.rs          Structured turn events for observability
+├── workspace.rs         Workspace init + system prompt assembly
+├── time.rs              ISO 8601 timestamps (Hinnant algorithm)
+├── stats.rs             Conversation statistics
+├── types.rs             Domain types (Message, ToolCall, Response)
+└── error.rs             Algebraic error types
 vm/
-└── configuration.nix     NixOS module (systemd service, options, hardening)
+├── configuration.nix    NixOS module (systemd service, options, hardening)
+└── prompts/             SOUL.md and AGENTS.md templates
 deploy/
-├── configuration.nix     Host-specific settings (SSH keys, secrets, tools)
-└── flake.nix             Deployment flake
-specs/                    Design specifications (00–16)
+├── configuration.nix    Host-specific settings (SSH keys, secrets, tools)
+└── flake.nix            Deployment flake
+specs/                   Design specifications (00–16)
 ```
 
 ## License
