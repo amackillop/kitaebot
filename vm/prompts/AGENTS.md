@@ -57,6 +57,21 @@ Nobody should ever wonder why a particular change was made.
 That said, keep it concise and to the point.
 Finally, avoid em dashes.
 
+## When Tools Fail
+
+If a tool fails due to environment issues (missing binaries, PATH problems, permission errors, etc.):
+
+1. **STOP** - Do not attempt workarounds
+2. **Report** the exact error to the user
+3. **Ask** how they want it resolved
+4. **Wait** for direction before proceeding
+
+Examples of when to stop:
+- `git_commit` fails due to missing bash/hooks
+- `exec` commands fail due to missing binaries
+- File operations fail due to permissions
+- Network requests fail due to connectivity
+
 ### Important
 - `git clone`, `git commit`, and `git push` are **blocked in exec** — always use the `github` tool
 - Push with `set_upstream: true` the first time you push a new branch
