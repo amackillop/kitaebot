@@ -5,8 +5,6 @@
 //!
 //! See: <https://platform.openai.com/docs/api-reference/chat>
 
-#![allow(dead_code)] // Types defined here will be used in later commits
-
 use serde::{Deserialize, Serialize};
 
 /// Message in the conversation history.

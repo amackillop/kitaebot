@@ -3,8 +3,6 @@
 //! Models all failure modes explicitly as algebraic data types.
 //! No generic "something failed" errors - each error explains what went wrong.
 
-#![allow(dead_code)] // Types defined here will be used in later commits
-
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -170,6 +168,7 @@ pub enum TelegramError {
     Network(String),
 
     /// Session load/save failure.
+    #[cfg(test)]
     #[error("Session error: {0}")]
     Session(String),
 }

@@ -100,7 +100,9 @@ fn is_transient(err: &TelegramError) -> bool {
     match err {
         TelegramError::Network(_) => true,
         TelegramError::Api { error_code, .. } => *error_code >= 500 || *error_code == 429,
-        TelegramError::Deserialize(_) | TelegramError::Session(_) => false,
+        TelegramError::Deserialize(_) => false,
+        #[cfg(test)]
+        TelegramError::Session(_) => false,
     }
 }
 
