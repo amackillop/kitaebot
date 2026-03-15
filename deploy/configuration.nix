@@ -22,7 +22,9 @@ in
     secretsDir = "/mnt/kitaebot-secrets";
     logLevel = "kitaebot=debug";
     tools = with pkgs; [
+      bash
       coreutils
+      direnv
       findutils
       gnugrep
       gnused

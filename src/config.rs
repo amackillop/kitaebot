@@ -208,7 +208,7 @@ impl Default for ContextConfig {
 impl Default for ExecConfig {
     fn default() -> Self {
         Self {
-            timeout_secs: 60,
+            timeout_secs: 600,
             max_output_bytes: 10 * 1024,
         }
     }
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(cfg.provider.max_tokens, 4096);
         assert!((cfg.provider.temperature - 0.7).abs() < f32::EPSILON);
         assert_eq!(cfg.agent.max_iterations, 100);
-        assert_eq!(cfg.tools.exec.timeout_secs, 60);
+        assert_eq!(cfg.tools.exec.timeout_secs, 600);
         assert_eq!(cfg.tools.exec.max_output_bytes, 10240);
     }
 
