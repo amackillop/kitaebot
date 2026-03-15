@@ -39,6 +39,10 @@ in
       signingKey = "D90B07BF61863EA1";
     };
     settings = {
+      provider = {
+        model = "moonshotai/kimi-k2.5";
+      };
+
       telegram = {
         enabled = true;
         chat_id = 7658696350;
