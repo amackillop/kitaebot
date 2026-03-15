@@ -128,8 +128,8 @@ mod tests {
 
     #[test]
     fn builds_correct_command() {
-        let (client, repo) = stub_gh_cli_with_repo();
-        let tool = PrReviews(client);
+        let (gh, repo) = stub_gh_cli_with_repo();
+        let tool = PrReviews(gh);
         let call = tool.prepare(&repo, 42).unwrap();
         assert_eq!(call.binary, "gh");
         assert!(call.args.contains(&"42".to_string()));

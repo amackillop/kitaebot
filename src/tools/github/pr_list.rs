@@ -104,16 +104,16 @@ mod tests {
 
     #[test]
     fn rejects_invalid_state() {
-        let (client, repo) = stub_gh_cli_with_repo();
-        let tool = PrList(client);
+        let (gh, repo) = stub_gh_cli_with_repo();
+        let tool = PrList(gh);
         let result = tool.prepare(&repo, "bogus");
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
     }
 
     #[test]
     fn builds_correct_list_command() {
-        let (client, repo) = stub_gh_cli_with_repo();
-        let tool = PrList(client);
+        let (gh, repo) = stub_gh_cli_with_repo();
+        let tool = PrList(gh);
         let call = tool.prepare(&repo, "open").unwrap();
         assert_eq!(call.binary, "gh");
         assert!(call.args.contains(&"--state".to_string()));

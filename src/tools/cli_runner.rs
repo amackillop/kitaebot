@@ -1,17 +1,11 @@
-//! Generic subprocess boundary for CLI tools.
+//! Subprocess execution for CLI tools.
 //!
-//! [`CliRunner`] is the raw trait — a single `exec` method that spawns
-//! a subprocess with an explicit binary, args, cwd, and environment.
-//! Auth-agnostic: callers build the full env (`safe_env` + credentials)
-//! and pass it in.
-//!
-//! [`RealCliRunner`] is the production implementation: a unit struct
-//! that spawns via `tokio::process::Command` with `env_clear().envs(env)`.
+//! [`SubprocessCall`] is a pure value describing what to run.
+//! [`exec`] performs the side effect: spawn, wait, collect output.
 
 use std::ffi::OsString;
 use std::fmt::Write;
-use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
@@ -24,49 +18,6 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 10 * 1024;
 
 /// Default timeout for subprocess operations.
 const TIMEOUT_SECS: u64 = 120;
-
-// ── Subprocess boundary trait ────────────────────────────────────────
-
-/// Generic subprocess boundary.
-///
-/// A single method that spawns any binary with explicit env. Callers
-/// are responsible for building the full environment (`safe_env` +
-/// credentials).
-#[allow(dead_code)] // removed in the next commit
-pub(crate) trait CliRunner: Send + Sync {
-    fn exec(
-        &self,
-        binary: &str,
-        args: &[&str],
-        cwd: &Path,
-        env: &[(OsString, OsString)],
-    ) -> impl Future<Output = Result<CmdOutput, ToolError>> + Send;
-}
-
-// ── Real subprocess implementation ──────────────────────────────────
-
-/// Production subprocess executor. Spawns the process with
-/// `env_clear().envs(env)`.
-#[allow(dead_code)] // removed in the next commit
-#[derive(Clone, Copy)]
-pub(crate) struct RealCliRunner;
-
-impl CliRunner for RealCliRunner {
-    async fn exec(
-        &self,
-        binary: &str,
-        args: &[&str],
-        cwd: &Path,
-        env: &[(OsString, OsString)],
-    ) -> Result<CmdOutput, ToolError> {
-        let mut cmd = Command::new(binary);
-        cmd.args(args)
-            .current_dir(cwd)
-            .env_clear()
-            .envs(env.iter().map(|(k, v)| (k, v)));
-        exec_cmd(&mut cmd, format!("{binary} {}", args.join(" "))).await
-    }
-}
 
 // ── Command output ──────────────────────────────────────────────────
 
