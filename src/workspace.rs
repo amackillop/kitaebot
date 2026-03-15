@@ -42,7 +42,6 @@ impl Workspace {
 
         mk(&path)?;
         mk(&path.join("sessions"))?;
-        mk(&path.join("locks"))?;
         mk(&path.join("memory"))?;
         mk(&path.join("projects"))?;
 
@@ -67,11 +66,6 @@ impl Workspace {
     /// Path to the heartbeat history log.
     pub fn history_path(&self) -> PathBuf {
         self.0.join("memory/HISTORY.md")
-    }
-
-    /// Path to the heartbeat lock file.
-    pub fn heartbeat_lock_path(&self) -> PathBuf {
-        self.0.join("locks/heartbeat.lock")
     }
 
     /// Build the system prompt from workspace files.
@@ -124,7 +118,6 @@ mod tests {
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
 
         assert!(ws.path().join("sessions").is_dir());
-        assert!(ws.path().join("locks").is_dir());
         assert!(ws.path().join("memory").is_dir());
         assert!(ws.path().join("projects").is_dir());
     }

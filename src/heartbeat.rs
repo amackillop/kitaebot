@@ -1,23 +1,29 @@
-//! Periodic heartbeat execution.
+//! Periodic heartbeat channel.
 //!
-//! Reads `HEARTBEAT.md` for active tasks, sends them to the agent for
-//! processing, and logs the result to `memory/HISTORY.md`. Skips
-//! gracefully when there is nothing to do or another heartbeat is running.
+//! [`poll_loop`] ticks on a configurable interval and sends `/heartbeat`
+//! through the agent handle. The command handler in [`crate::commands`]
+//! does the actual prepare/execute/finish work.
+//!
+//! [`prepare`] and [`finish`] are the lower-level building blocks used
+//! by the `/heartbeat` slash command.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
+use tokio::time::{self, MissedTickBehavior};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
+
+use crate::agent::AgentHandle;
+use crate::agent::envelope::ChannelSource;
 use crate::error::HeartbeatError;
-use crate::lock::Lock;
 use crate::workspace::Workspace;
 
 /// Why a heartbeat was skipped (not an error).
 #[derive(Debug, PartialEq, Eq)]
 pub enum SkipReason {
-    /// Another heartbeat process is already running.
-    HeartbeatLocked,
     /// File exists but contains no unchecked tasks.
     NoActiveTasks,
     /// No `HEARTBEAT.md` file in workspace.
@@ -27,39 +33,43 @@ pub enum SkipReason {
 impl fmt::Display for SkipReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::HeartbeatLocked => write!(f, "heartbeat already running"),
             Self::NoActiveTasks => write!(f, "no active tasks"),
             Self::NoHeartbeatFile => write!(f, "no HEARTBEAT.md"),
         }
     }
 }
 
-/// A heartbeat that is ready to execute.
-///
-/// Holds the heartbeat lock for the duration of its lifetime, so the
-/// caller must keep it alive until the agent response comes back.
-pub struct Ready {
-    pub prompt: String,
-    _lock: Lock,
-}
-
 /// Result of [`prepare`].
 pub enum Prepared {
-    /// Prompt built, lock held. Send `prompt` to the agent.
-    Ready(Ready),
+    /// Prompt built. Send it to the agent.
+    Ready(String),
     /// Nothing to do.
     Skipped(SkipReason),
 }
 
-/// Acquire lock, read tasks, build prompt. Returns [`Prepared`].
+/// Run the heartbeat channel loop.
 ///
-/// The returned [`Ready`] holds the heartbeat lock. Drop it after
-/// the agent responds and history is written.
-pub fn prepare(workspace: &Workspace) -> Result<Prepared, HeartbeatError> {
-    let Ok(lock) = Lock::acquire(&workspace.heartbeat_lock_path()) else {
-        return Ok(Prepared::Skipped(SkipReason::HeartbeatLocked));
-    };
+/// Sends `/heartbeat` to the agent on each tick. The command handler
+/// does prepare/execute/finish; this loop just provides the timer.
+pub async fn poll_loop(interval: Duration, handle: &AgentHandle) -> ! {
+    let mut tick = time::interval(interval);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    loop {
+        tick.tick().await;
+        let cancel = CancellationToken::new();
+        match handle
+            .send_message(ChannelSource::Heartbeat, "/heartbeat".into(), None, cancel)
+            .await
+        {
+            Ok(reply) => info!("Heartbeat: {}", reply.content),
+            Err(e) => error!("Heartbeat error (will retry next tick): {e}"),
+        }
+    }
+}
+
+/// Read tasks and build prompt. Returns [`Prepared`].
+pub fn prepare(workspace: &Workspace) -> Result<Prepared, HeartbeatError> {
     let content = match fs::read_to_string(workspace.heartbeat_path()) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -73,11 +83,7 @@ pub fn prepare(workspace: &Workspace) -> Result<Prepared, HeartbeatError> {
         return Ok(Prepared::Skipped(SkipReason::NoActiveTasks));
     }
 
-    let prompt = build_prompt(&tasks);
-    Ok(Prepared::Ready(Ready {
-        prompt,
-        _lock: lock,
-    }))
+    Ok(Prepared::Ready(build_prompt(&tasks)))
 }
 
 /// Append a timestamped response to `memory/HISTORY.md`.
@@ -261,24 +267,12 @@ mod tests {
     }
 
     #[test]
-    fn prepare_skips_when_locked() {
-        let (_dir, ws) = workspace();
-        fs::write(ws.heartbeat_path(), "- [ ] Pending task\n").unwrap();
-        let _lock = Lock::acquire(&ws.heartbeat_lock_path()).unwrap();
-        let result = prepare(&ws).unwrap();
-        assert!(matches!(
-            result,
-            Prepared::Skipped(SkipReason::HeartbeatLocked)
-        ));
-    }
-
-    #[test]
     fn prepare_returns_ready_with_prompt() {
         let (_dir, ws) = workspace();
         fs::write(ws.heartbeat_path(), "- [ ] Check builds\n").unwrap();
         let result = prepare(&ws).unwrap();
         match result {
-            Prepared::Ready(ready) => assert!(ready.prompt.contains("Check builds")),
+            Prepared::Ready(prompt) => assert!(prompt.contains("Check builds")),
             Prepared::Skipped(reason) => panic!("expected Ready, got Skipped({reason})"),
         }
     }

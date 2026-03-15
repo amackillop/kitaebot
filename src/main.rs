@@ -8,7 +8,6 @@ mod daemon;
 mod dispatch;
 mod error;
 mod heartbeat;
-mod lock;
 mod provider;
 mod runtime;
 mod safety;

@@ -124,12 +124,12 @@ pub async fn execute<P: Provider>(
             use tokio_util::sync::CancellationToken;
 
             match heartbeat::prepare(workspace) {
-                Ok(heartbeat::Prepared::Ready(ready)) => {
+                Ok(heartbeat::Prepared::Ready(prompt)) => {
                     let cancel = CancellationToken::new();
                     match agent::process_message(
                         session_path,
                         workspace,
-                        &ready.prompt,
+                        &prompt,
                         provider,
                         tools,
                         max_iterations,

@@ -14,12 +14,9 @@ use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
-use tokio::time::{self, MissedTickBehavior};
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::agent::AgentHandle;
-use crate::agent::envelope::ChannelSource;
 use crate::heartbeat;
 use crate::socket;
 use crate::telegram::{self, TelegramChannel};
@@ -53,15 +50,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     socket_path: &Path,
     shutdown: S,
 ) {
-    let mut tick = time::interval(interval);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    let heartbeat_loop = async {
-        loop {
-            tick.tick().await;
-            run_heartbeat_cycle(workspace, handle).await;
-        }
-    };
+    let heartbeat_loop = heartbeat::poll_loop(interval, handle);
 
     let telegram_loop = async {
         match telegram {
@@ -80,39 +69,6 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         () = shutdown => {
             info!("Shutdown signal received, exiting.");
             let _ = std::fs::remove_file(socket_path);
-        }
-    }
-}
-
-/// Run a single heartbeat cycle, logging the outcome.
-///
-/// Errors are logged and swallowed so the daemon loop survives.
-async fn run_heartbeat_cycle(workspace: &Workspace, handle: &AgentHandle) {
-    let ready = match heartbeat::prepare(workspace) {
-        Ok(heartbeat::Prepared::Ready(ready)) => ready,
-        Ok(heartbeat::Prepared::Skipped(reason)) => {
-            info!("Heartbeat skipped: {reason}");
-            return;
-        }
-        Err(e) => {
-            error!("Heartbeat error (will retry next tick): {e}");
-            return;
-        }
-    };
-
-    let cancel = CancellationToken::new();
-    match handle
-        .send_message(ChannelSource::Heartbeat, ready.prompt.clone(), None, cancel)
-        .await
-    {
-        Ok(reply) => {
-            if let Err(e) = heartbeat::finish(workspace, &reply.content) {
-                error!("Failed to write heartbeat history: {e}");
-            }
-            info!("Heartbeat complete: {}", reply.content);
-        }
-        Err(e) => {
-            error!("Heartbeat error (will retry next tick): {e}");
         }
     }
 }
