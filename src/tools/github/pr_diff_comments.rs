@@ -10,7 +10,7 @@ use super::Tool;
 use super::gh_cli::GhCli;
 use super::types::DiffComment;
 use crate::error::ToolError;
-use crate::tools::cli_runner::CliRunner;
+use crate::tools::cli_runner::SubprocessCall;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -20,9 +20,9 @@ struct Args {
     pr_number: u64,
 }
 
-pub struct PrDiffComments<R>(pub GhCli<R>);
+pub struct PrDiffComments(pub GhCli);
 
-impl<R: CliRunner> Tool for PrDiffComments<R> {
+impl Tool for PrDiffComments {
     fn name(&self) -> &'static str {
         "github_pr_diff_comments"
     }
@@ -47,18 +47,20 @@ impl<R: CliRunner> Tool for PrDiffComments<R> {
     }
 }
 
-impl<R: CliRunner> PrDiffComments<R> {
-    async fn run(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
+impl PrDiffComments {
+    fn prepare(&self, repo_dir: &str, pr_number: u64) -> Result<SubprocessCall, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
         let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments");
+        Ok(self.0.prepare_gh(&["api", &endpoint], &cwd))
+    }
 
-        let comments: Vec<DiffComment> = self.0.run_gh_api(&endpoint, &cwd).await?;
-
+    /// Pure: format diff comments for display.
+    fn format_output(comments: &[DiffComment]) -> String {
         if comments.is_empty() {
-            return Ok(format!("No inline comments on PR #{pr_number}."));
+            return String::new();
         }
 
-        Ok(comments
+        comments
             .iter()
             .map(|c| {
                 let location = c.line.map_or(c.path.clone(), |l| format!("{}:{l}", c.path));
@@ -68,26 +70,60 @@ impl<R: CliRunner> PrDiffComments<R> {
                 )
             })
             .collect::<Vec<_>>()
-            .join("\n\n"))
+            .join("\n\n")
+    }
+
+    async fn run(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
+        let call = self.prepare(repo_dir, pr_number)?;
+        let comments: Vec<DiffComment> = self.0.exec_parse(&call).await?;
+
+        if comments.is_empty() {
+            return Ok(format!("No inline comments on PR #{pr_number}."));
+        }
+
+        Ok(Self::format_output(&comments))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{ok_output, stub_gh_cli_with_repo};
+    use super::super::types::{Author, DiffComment};
     use super::*;
+    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
 
-    #[tokio::test]
-    async fn formats_output() {
-        let json = serde_json::to_string(&serde_json::json!([
-            {"id": 100, "path": "src/main.rs", "line": 42, "body": "Nit: rename this", "user": {"login": "alice"}},
-            {"id": 101, "path": "src/lib.rs", "line": null, "body": "Outdated", "user": {"login": "bob"}}
-        ]))
-        .unwrap();
+    #[test]
+    fn builds_correct_api_command() {
+        let (gh, repo) = stub_gh_cli_with_repo();
+        let tool = PrDiffComments(gh);
+        let call = tool.prepare(&repo, 5).unwrap();
+        assert_eq!(call.binary, "gh");
+        assert_eq!(call.args[0], "api");
+        assert!(call.args[1].contains("pulls/5/comments"));
+    }
 
-        let (client, repo, calls) = stub_gh_cli_with_repo(vec![ok_output(&json)]);
-        let tool = PrDiffComments(client);
-        let result = tool.run(&repo, 5).await.unwrap();
+    #[test]
+    fn formats_comments() {
+        let comments = vec![
+            DiffComment {
+                id: 100,
+                path: "src/main.rs".to_string(),
+                line: Some(42),
+                body: "Nit: rename this".to_string(),
+                user: Author {
+                    login: "alice".to_string(),
+                },
+            },
+            DiffComment {
+                id: 101,
+                path: "src/lib.rs".to_string(),
+                line: None,
+                body: "Outdated".to_string(),
+                user: Author {
+                    login: "bob".to_string(),
+                },
+            },
+        ];
+        let result = PrDiffComments::format_output(&comments);
         assert_eq!(
             result,
             "\
@@ -97,18 +133,11 @@ Nit: rename this
 [id:101] @bob at src/lib.rs
 Outdated"
         );
-
-        let recorded = calls.take().await;
-        assert_eq!(recorded[0].binary, "gh");
-        assert!(recorded[0].args.contains(&"api".to_string()));
-        assert!(recorded[0].args[1].contains("pulls/5/comments"));
     }
 
-    #[tokio::test]
-    async fn empty() {
-        let (client, repo, _) = stub_gh_cli_with_repo(vec![ok_output("[]")]);
-        let tool = PrDiffComments(client);
-        let result = tool.run(&repo, 5).await.unwrap();
-        assert_eq!(result, "No inline comments on PR #5.");
+    #[test]
+    fn empty_comments() {
+        let result = PrDiffComments::format_output(&[]);
+        assert!(result.is_empty());
     }
 }

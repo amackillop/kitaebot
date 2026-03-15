@@ -6,14 +6,16 @@
 //!
 //! # Architecture
 //!
-//! [`crate::tools::cli_runner::CliRunner`] is the raw subprocess boundary.
+//! [`crate::tools::cli_runner::exec`] is the subprocess boundary.
 //! [`git_cli::GitCli`] wraps the `git` binary (clone, push, commit).
 //! [`gh_cli::GhCli`] wraps the `gh` CLI (PRs, CI, API calls).
 //! Each tool owns a clone of the appropriate CLI struct and holds
 //! only its business logic.
 //!
-//! Tests substitute `StubCliRunner` to exercise the logic without
-//! spawning real subprocesses.
+//! Tools expose a `prepare()` method that returns a
+//! [`crate::tools::cli_runner::SubprocessCall`] — a pure value
+//! describing what to run. Tests check this value directly without
+//! spawning subprocesses.
 //!
 //! # Token injection
 //!
@@ -58,7 +60,6 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::error::ToolError;
 use crate::secrets::Secret;
-use crate::tools::cli_runner::RealCliRunner;
 use crate::workspace::Workspace;
 
 // Re-export parent utility so tool files can `use super::Tool`.
@@ -107,12 +108,11 @@ pub(crate) fn build(
     };
 
     let git = GitCli::new(
-        RealCliRunner,
         token.clone(),
         workspace.path(),
         config.git.co_authors.clone(),
     );
-    let gh = GhCli::new(RealCliRunner, token, workspace.path());
+    let gh = GhCli::new(token, workspace.path());
 
     vec![
         Box::new(Commit(git.clone())),

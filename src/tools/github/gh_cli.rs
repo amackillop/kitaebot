@@ -11,23 +11,18 @@ use serde::de::DeserializeOwned;
 
 use crate::error::ToolError;
 use crate::secrets::Secret;
-use crate::tools::cli_runner::{CliRunner, CmdOutput, SubprocessCall};
+use crate::tools::cli_runner::{self, SubprocessCall};
 
 /// Shared context for `gh` CLI tools.
-///
-/// Generic over [`CliRunner`] so tests can substitute a stub without
-/// spawning real subprocesses.
 #[derive(Clone)]
-pub struct GhCli<R> {
-    pub(super) runner: R,
+pub struct GhCli {
     pub(super) token: Secret,
     pub(super) workspace_root: PathBuf,
 }
 
-impl<R: CliRunner> GhCli<R> {
-    pub fn new(runner: R, token: Secret, workspace_root: impl Into<PathBuf>) -> Self {
+impl GhCli {
+    pub fn new(token: Secret, workspace_root: impl Into<PathBuf>) -> Self {
         Self {
-            runner,
             token,
             workspace_root: workspace_root.into(),
         }
@@ -39,7 +34,6 @@ impl<R: CliRunner> GhCli<R> {
     }
 
     /// Build a [`SubprocessCall`] for `gh` without executing it.
-    #[allow(dead_code)] // consumers added in a follow-up commit
     pub fn prepare_gh(&self, args: &[&str], cwd: &Path) -> SubprocessCall {
         let env: Vec<(OsString, OsString)> = crate::tools::safe_env()
             .chain([
@@ -56,38 +50,13 @@ impl<R: CliRunner> GhCli<R> {
         }
     }
 
-    /// Run a `gh` command, format output as envelope for the LLM.
-    pub async fn run_gh(&self, args: &[&str], cwd: &Path) -> Result<String, ToolError> {
-        self.run_gh_raw(args, cwd).await?.format()
-    }
-
-    /// Run `gh` with `--json <fields>` and deserialize the response.
-    pub async fn run_gh_json<T: DeserializeOwned>(
+    /// Execute a [`SubprocessCall`], check exit code, and parse stdout
+    /// as JSON.
+    pub async fn exec_parse<T: DeserializeOwned>(
         &self,
-        args: &[&str],
-        fields: &str,
-        cwd: &Path,
+        call: &SubprocessCall,
     ) -> Result<T, ToolError> {
-        let full_args: Vec<&str> = args.iter().copied().chain(["--json", fields]).collect();
-        self.run_gh_parse(&full_args, cwd).await
-    }
-
-    /// Run `gh api` and deserialize the JSON response.
-    pub async fn run_gh_api<T: DeserializeOwned>(
-        &self,
-        endpoint: &str,
-        cwd: &Path,
-    ) -> Result<T, ToolError> {
-        self.run_gh_parse(&["api", endpoint], cwd).await
-    }
-
-    /// Run `gh`, check exit code, and deserialize stdout as JSON.
-    pub async fn run_gh_parse<T: DeserializeOwned>(
-        &self,
-        args: &[&str],
-        cwd: &Path,
-    ) -> Result<T, ToolError> {
-        let output = self.run_gh_raw(args, cwd).await?;
+        let output = cli_runner::exec(call).await?;
         if output.exit_code != 0 {
             return Err(ToolError::ExecutionFailed(format!(
                 "{}: {}",
@@ -97,52 +66,21 @@ impl<R: CliRunner> GhCli<R> {
         serde_json::from_str(&output.stdout)
             .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", output.command)))
     }
-
-    // ── Private helpers ─────────────────────────────────────────────
-
-    /// Run `gh` with token + prompt-disabled env.
-    async fn run_gh_raw(&self, args: &[&str], cwd: &Path) -> Result<CmdOutput, ToolError> {
-        let env: Vec<(OsString, OsString)> = crate::tools::safe_env()
-            .chain([
-                ("GH_TOKEN".into(), self.token.expose().into()),
-                ("GH_PROMPT_DISABLED".into(), "1".into()),
-                ("NO_COLOR".into(), "1".into()),
-            ])
-            .collect();
-        self.runner.exec("gh", args, cwd, &env).await
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{err_output, ok_output, stub_gh_cli_with_repo};
-    use crate::error::ToolError;
+    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
 
-    #[tokio::test]
-    async fn run_gh_nonzero_exit_returns_error() {
-        let (cli, repo, _) = stub_gh_cli_with_repo(vec![err_output("not found")]);
+    #[test]
+    fn prepare_gh_sets_token_and_env() {
+        let (cli, repo) = stub_gh_cli_with_repo();
         let cwd = cli.resolve_repo_dir(&repo).unwrap();
-        let result = cli.run_gh(&["pr", "view"], &cwd).await;
-        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
-    }
-
-    #[tokio::test]
-    async fn run_gh_parse_malformed_json_returns_error() {
-        let (cli, repo, _) = stub_gh_cli_with_repo(vec![ok_output("not json")]);
-        let cwd = cli.resolve_repo_dir(&repo).unwrap();
-        let result: Result<Vec<serde_json::Value>, _> =
-            cli.run_gh_parse(&["pr", "list"], &cwd).await;
-        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
-    }
-
-    #[tokio::test]
-    async fn run_gh_parse_nonzero_exit_returns_stderr() {
-        let (cli, repo, _) = stub_gh_cli_with_repo(vec![err_output("permission denied")]);
-        let cwd = cli.resolve_repo_dir(&repo).unwrap();
-        let result: Result<Vec<serde_json::Value>, _> =
-            cli.run_gh_parse(&["pr", "list"], &cwd).await;
-        assert!(
-            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("permission denied"))
-        );
+        let call = cli.prepare_gh(&["pr", "view"], &cwd);
+        assert_eq!(call.binary, "gh");
+        assert_eq!(call.args, ["pr", "view"]);
+        assert!(call.has_env("GH_TOKEN"));
+        assert!(call.has_env("GH_PROMPT_DISABLED"));
+        assert!(call.has_env("NO_COLOR"));
     }
 }

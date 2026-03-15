@@ -10,7 +10,7 @@ use super::Tool;
 use super::gh_cli::GhCli;
 use super::types::PullRequest;
 use crate::error::ToolError;
-use crate::tools::cli_runner::CliRunner;
+use crate::tools::cli_runner::SubprocessCall;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -20,9 +20,9 @@ struct Args {
     state: Option<String>,
 }
 
-pub struct PrList<R>(pub GhCli<R>);
+pub struct PrList(pub GhCli);
 
-impl<R: CliRunner> Tool for PrList<R> {
+impl Tool for PrList {
     fn name(&self) -> &'static str {
         "github_pr_list"
     }
@@ -47,66 +47,96 @@ impl<R: CliRunner> Tool for PrList<R> {
     }
 }
 
-impl<R: CliRunner> PrList<R> {
-    async fn run(&self, repo_dir: &str, state: Option<&str>) -> Result<String, ToolError> {
+impl PrList {
+    fn prepare(&self, repo_dir: &str, state: &str) -> Result<SubprocessCall, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
-
-        let state = state.unwrap_or("open");
-        let valid_states = ["open", "closed", "merged", "all"];
-        if !valid_states.contains(&state) {
-            return Err(ToolError::InvalidArguments(format!(
-                "invalid state: {state} (expected one of: {})",
-                valid_states.join(", ")
-            )));
-        }
-
-        let prs: Vec<PullRequest> = self
-            .0
-            .run_gh_json(
-                &["pr", "list", "--state", state],
+        validate_state(state)?;
+        Ok(self.0.prepare_gh(
+            &[
+                "pr",
+                "list",
+                "--state",
+                state,
+                "--json",
                 "number,title,state,url",
-                &cwd,
-            )
-            .await?;
+            ],
+            &cwd,
+        ))
+    }
+
+    /// Pure: format pull requests for display.
+    fn format_output(prs: &[PullRequest]) -> String {
+        prs.iter()
+            .map(|pr| format!("#{} {} [{}]\n  {}", pr.number, pr.title, pr.state, pr.url))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    async fn run(&self, repo_dir: &str, state: Option<&str>) -> Result<String, ToolError> {
+        let state = state.unwrap_or("open");
+        let call = self.prepare(repo_dir, state)?;
+        let prs: Vec<PullRequest> = self.0.exec_parse(&call).await?;
 
         if prs.is_empty() {
             return Ok(format!("No {state} pull requests."));
         }
 
-        Ok(prs
-            .iter()
-            .map(|pr| format!("#{} {} [{}]\n  {}", pr.number, pr.title, pr.state, pr.url))
-            .collect::<Vec<_>>()
-            .join("\n"))
+        Ok(Self::format_output(&prs))
     }
+}
+
+fn validate_state(state: &str) -> Result<(), ToolError> {
+    let valid_states = ["open", "closed", "merged", "all"];
+    if !valid_states.contains(&state) {
+        return Err(ToolError::InvalidArguments(format!(
+            "invalid state: {state} (expected one of: {})",
+            valid_states.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{ok_output, stub_gh_cli_with_repo};
+    use super::super::types::PullRequest;
     use super::*;
+    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
 
     #[test]
     fn rejects_invalid_state() {
-        let (client, repo, _) = stub_gh_cli_with_repo(vec![]);
+        let (client, repo) = stub_gh_cli_with_repo();
         let tool = PrList(client);
-        let result = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(tool.run(&repo, Some("bogus")));
+        let result = tool.prepare(&repo, "bogus");
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
     }
 
-    #[tokio::test]
-    async fn formats_output() {
-        let json = serde_json::to_string(&serde_json::json!([
-            {"number": 1, "title": "Fix bug", "state": "OPEN", "url": "https://github.com/o/r/pull/1"},
-            {"number": 2, "title": "Add feature", "state": "OPEN", "url": "https://github.com/o/r/pull/2"},
-        ]))
-        .unwrap();
-
-        let (client, repo, calls) = stub_gh_cli_with_repo(vec![ok_output(&json)]);
+    #[test]
+    fn builds_correct_list_command() {
+        let (client, repo) = stub_gh_cli_with_repo();
         let tool = PrList(client);
-        let result = tool.run(&repo, None).await.unwrap();
+        let call = tool.prepare(&repo, "open").unwrap();
+        assert_eq!(call.binary, "gh");
+        assert!(call.args.contains(&"--state".to_string()));
+        assert!(call.args.contains(&"open".to_string()));
+    }
+
+    #[test]
+    fn formats_prs() {
+        let prs = vec![
+            PullRequest {
+                number: 1,
+                title: "Fix bug".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://github.com/o/r/pull/1".to_string(),
+            },
+            PullRequest {
+                number: 2,
+                title: "Add feature".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://github.com/o/r/pull/2".to_string(),
+            },
+        ];
+        let result = PrList::format_output(&prs);
         assert_eq!(
             result,
             "\
@@ -115,18 +145,5 @@ mod tests {
 #2 Add feature [OPEN]
   https://github.com/o/r/pull/2"
         );
-
-        let recorded = calls.take().await;
-        assert_eq!(recorded[0].binary, "gh");
-        assert!(recorded[0].args.contains(&"--state".to_string()));
-        assert!(recorded[0].args.contains(&"open".to_string()));
-    }
-
-    #[tokio::test]
-    async fn empty_response() {
-        let (client, repo, _) = stub_gh_cli_with_repo(vec![ok_output("[]")]);
-        let tool = PrList(client);
-        let result = tool.run(&repo, None).await.unwrap();
-        assert_eq!(result, "No open pull requests.");
     }
 }

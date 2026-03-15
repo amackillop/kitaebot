@@ -11,7 +11,7 @@ use super::gh_cli::GhCli;
 use super::git_cli::GitCli;
 use super::types::WorkflowRun;
 use crate::error::ToolError;
-use crate::tools::cli_runner::CliRunner;
+use crate::tools::cli_runner::{self, SubprocessCall};
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -22,12 +22,12 @@ struct Args {
     branch: Option<String>,
 }
 
-pub struct CiStatus<R> {
-    pub git: GitCli<R>,
-    pub gh: GhCli<R>,
+pub struct CiStatus {
+    pub git: GitCli,
+    pub gh: GhCli,
 }
 
-impl<R: CliRunner> Tool for CiStatus<R> {
+impl Tool for CiStatus {
     fn name(&self) -> &'static str {
         "github_ci_status"
     }
@@ -52,7 +52,44 @@ impl<R: CliRunner> Tool for CiStatus<R> {
     }
 }
 
-impl<R: CliRunner> CiStatus<R> {
+impl CiStatus {
+    /// Build the command to list failed runs on a branch.
+    fn prepare_list_runs(&self, branch: &str, cwd: &std::path::Path) -> SubprocessCall {
+        self.gh.prepare_gh(
+            &[
+                "run",
+                "list",
+                "--branch",
+                branch,
+                "--status",
+                "failure",
+                "--limit",
+                "1",
+                "--json",
+                "databaseId,displayTitle,createdAt,url,workflowName",
+            ],
+            cwd,
+        )
+    }
+
+    /// Build the command to fetch failed logs for a run.
+    fn prepare_view_logs(&self, run_id: &str, cwd: &std::path::Path) -> SubprocessCall {
+        self.gh
+            .prepare_gh(&["run", "view", run_id, "--log-failed"], cwd)
+    }
+
+    /// Pure: format the final output.
+    fn format_output(run: &WorkflowRun, logs: &str) -> String {
+        format!(
+            "Run #{}: \"{}\" ({})\n\
+             Created: {}\n\
+             URL: {}\n\n\
+             ---\n\n\
+             {}",
+            run.database_id, run.display_title, run.workflow_name, run.created_at, run.url, logs
+        )
+    }
+
     async fn run(&self, repo_dir: &str, branch: Option<&str>) -> Result<String, ToolError> {
         let cwd = self.gh.resolve_repo_dir(repo_dir)?;
 
@@ -61,72 +98,61 @@ impl<R: CliRunner> CiStatus<R> {
             None => self.git.current_branch(&cwd).await?,
         };
 
-        let runs: Vec<WorkflowRun> = self
-            .gh
-            .run_gh_json(
-                &[
-                    "run",
-                    "list",
-                    "--branch",
-                    &branch_name,
-                    "--status",
-                    "failure",
-                    "--limit",
-                    "1",
-                ],
-                "databaseId,displayTitle,createdAt,url,workflowName",
-                &cwd,
-            )
-            .await?;
+        let list_call = self.prepare_list_runs(&branch_name, &cwd);
+        let runs: Vec<WorkflowRun> = self.gh.exec_parse(&list_call).await?;
 
         let run = runs.first().ok_or_else(|| {
             ToolError::ExecutionFailed(format!("no failed runs on branch `{branch_name}`"))
         })?;
 
         let id_str = run.database_id.to_string();
-        let logs = self
-            .gh
-            .run_gh(&["run", "view", &id_str, "--log-failed"], &cwd)
-            .await?;
+        let logs_call = self.prepare_view_logs(&id_str, &cwd);
+        let logs = cli_runner::exec(&logs_call).await?.format()?;
 
-        let mut output = format!(
-            "Run #{}: \"{}\" ({})\n\
-             Created: {}\n\
-             URL: {}\n\n\
-             ---\n\n",
-            run.database_id, run.display_title, run.workflow_name, run.created_at, run.url
-        );
-        output.push_str(&logs);
-
-        Ok(output)
+        Ok(Self::format_output(run, &logs))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{ok_output, stub_gh_cli_with_repo, stub_git_cli_with_repo};
-    use super::CiStatus;
-    use crate::error::ToolError;
+    use super::super::types::WorkflowRun;
+    use super::*;
+    use crate::tools::github::test_helpers::{stub_gh_cli_with_repo, stub_git_cli_with_repo};
 
-    #[tokio::test]
-    async fn formats_run_and_logs() {
-        let runs_json = serde_json::to_string(&serde_json::json!([{
-            "databaseId": 9999,
-            "displayTitle": "CI",
-            "createdAt": "2025-01-15T10:00:00Z",
-            "url": "https://github.com/o/r/actions/runs/9999",
-            "workflowName": "test"
-        }]))
-        .unwrap();
-
-        let log_output = "test-job  Step failed";
-
-        // Branch explicitly provided, so git stub is unused.
-        let (git, _, git_calls) = stub_git_cli_with_repo(vec![]);
-        let (gh, repo, _) =
-            stub_gh_cli_with_repo(vec![ok_output(&runs_json), ok_output(log_output)]);
+    #[test]
+    fn prepare_list_runs_command() {
+        let (git, _) = stub_git_cli_with_repo();
+        let (gh, repo) = stub_gh_cli_with_repo();
+        let cwd = gh.resolve_repo_dir(&repo).unwrap();
         let tool = CiStatus { git, gh };
-        let result = tool.run(&repo, Some("main")).await.unwrap();
+        let call = tool.prepare_list_runs("main", &cwd);
+        assert_eq!(call.binary, "gh");
+        assert!(call.args.contains(&"main".to_string()));
+        assert!(call.args.contains(&"failure".to_string()));
+    }
+
+    #[test]
+    fn prepare_view_logs_command() {
+        let (git, _) = stub_git_cli_with_repo();
+        let (gh, repo) = stub_gh_cli_with_repo();
+        let cwd = gh.resolve_repo_dir(&repo).unwrap();
+        let tool = CiStatus { git, gh };
+        let call = tool.prepare_view_logs("9999", &cwd);
+        assert_eq!(call.binary, "gh");
+        assert!(call.args.contains(&"9999".to_string()));
+        assert!(call.args.contains(&"--log-failed".to_string()));
+    }
+
+    #[test]
+    fn formats_run_and_logs() {
+        let run = WorkflowRun {
+            database_id: 9999,
+            display_title: "CI".to_string(),
+            created_at: "2025-01-15T10:00:00Z".to_string(),
+            url: "https://github.com/o/r/actions/runs/9999".to_string(),
+            workflow_name: "test".to_string(),
+        };
+        let result = CiStatus::format_output(&run, "test-job  Step failed");
         assert_eq!(
             result,
             "\
@@ -136,53 +162,7 @@ URL: https://github.com/o/r/actions/runs/9999
 
 ---
 
-$ stub
-test-job  Step failed
-Exit code: 0"
+test-job  Step failed"
         );
-
-        // Explicit branch — git should not be called.
-        assert!(git_calls.take().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn no_failed_runs() {
-        let (git, _, _) = stub_git_cli_with_repo(vec![]);
-        let (gh, repo, _) = stub_gh_cli_with_repo(vec![ok_output("[]")]);
-        let tool = CiStatus { git, gh };
-        let result = tool.run(&repo, Some("main")).await;
-        assert!(
-            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("no failed runs"))
-        );
-    }
-
-    #[tokio::test]
-    async fn falls_back_to_current_branch() {
-        let runs_json = serde_json::to_string(&serde_json::json!([{
-            "databaseId": 100,
-            "displayTitle": "CI",
-            "createdAt": "2025-01-15T10:00:00Z",
-            "url": "https://github.com/o/r/actions/runs/100",
-            "workflowName": "build"
-        }]))
-        .unwrap();
-
-        let (git, _, git_calls) = stub_git_cli_with_repo(vec![ok_output("feat/xyz\n")]);
-        let (gh, repo, gh_calls) =
-            stub_gh_cli_with_repo(vec![ok_output(&runs_json), ok_output("FAIL")]);
-        let tool = CiStatus { git, gh };
-        let result = tool.run(&repo, None).await.unwrap();
-        assert!(result.contains("Run #100"));
-
-        // Should have called git rev-parse to get branch name.
-        let git_recorded = git_calls.take().await;
-        assert_eq!(git_recorded.len(), 1);
-        assert_eq!(git_recorded[0].binary, "git");
-        assert!(git_recorded[0].args.contains(&"rev-parse".to_string()));
-
-        // gh should have used the resolved branch.
-        let gh_recorded = gh_calls.take().await;
-        assert_eq!(gh_recorded.len(), 2);
-        assert!(gh_recorded[0].args.contains(&"feat/xyz".to_string()));
     }
 }

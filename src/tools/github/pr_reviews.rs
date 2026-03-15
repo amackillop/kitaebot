@@ -11,7 +11,7 @@ use super::Tool;
 use super::gh_cli::GhCli;
 use super::types::PrReviewsResponse;
 use crate::error::ToolError;
-use crate::tools::cli_runner::CliRunner;
+use crate::tools::cli_runner::SubprocessCall;
 
 /// Fetch top-level review verdicts and PR conversation comments.
 ///
@@ -26,9 +26,9 @@ struct Args {
     pr_number: u64,
 }
 
-pub struct PrReviews<R>(pub GhCli<R>);
+pub struct PrReviews(pub GhCli);
 
-impl<R: CliRunner> Tool for PrReviews<R> {
+impl Tool for PrReviews {
     fn name(&self) -> &'static str {
         "github_pr_reviews"
     }
@@ -53,20 +53,24 @@ impl<R: CliRunner> Tool for PrReviews<R> {
     }
 }
 
-impl<R: CliRunner> PrReviews<R> {
-    async fn run(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
+impl PrReviews {
+    fn prepare(&self, repo_dir: &str, pr_number: u64) -> Result<SubprocessCall, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
         let number = pr_number.to_string();
-
-        let resp: PrReviewsResponse = self
-            .0
-            .run_gh_json(
-                &["pr", "view", &number],
+        Ok(self.0.prepare_gh(
+            &[
+                "pr",
+                "view",
+                &number,
+                "--json",
                 "reviews,reviewRequests,comments",
-                &cwd,
-            )
-            .await?;
+            ],
+            &cwd,
+        ))
+    }
 
+    /// Pure: format the review response for display.
+    fn format_output(resp: &PrReviewsResponse, pr_number: u64) -> String {
         let mut output = String::new();
 
         if !resp.review_requests.is_empty() {
@@ -103,39 +107,58 @@ impl<R: CliRunner> PrReviews<R> {
         }
 
         if output.is_empty() {
-            return Ok(format!("No reviews or comments on PR #{pr_number}."));
+            return format!("No reviews or comments on PR #{pr_number}.");
         }
 
-        Ok(output)
+        output
+    }
+
+    async fn run(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
+        let call = self.prepare(repo_dir, pr_number)?;
+        let resp: PrReviewsResponse = self.0.exec_parse(&call).await?;
+        Ok(Self::format_output(&resp, pr_number))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{ok_output, stub_gh_cli_with_repo};
+    use super::super::types::*;
     use super::*;
+    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
 
-    #[tokio::test]
-    async fn formats_reviews_and_comments() {
-        let json = serde_json::to_string(&serde_json::json!({
-            "reviews": [{
-                "author": {"login": "alice"},
-                "body": "Looks good",
-                "state": "APPROVED",
-                "submittedAt": "2025-01-15T10:00:00Z"
-            }],
-            "reviewRequests": [{"login": "bob", "name": null}],
-            "comments": [{
-                "author": {"login": "carol"},
-                "body": "What about edge cases?",
-                "createdAt": "2025-01-15T11:00:00Z"
-            }]
-        }))
-        .unwrap();
-
-        let (client, repo, calls) = stub_gh_cli_with_repo(vec![ok_output(&json)]);
+    #[test]
+    fn builds_correct_command() {
+        let (client, repo) = stub_gh_cli_with_repo();
         let tool = PrReviews(client);
-        let result = tool.run(&repo, 42).await.unwrap();
+        let call = tool.prepare(&repo, 42).unwrap();
+        assert_eq!(call.binary, "gh");
+        assert!(call.args.contains(&"42".to_string()));
+    }
+
+    #[test]
+    fn formats_reviews_and_comments() {
+        let resp = PrReviewsResponse {
+            reviews: vec![Review {
+                author: Author {
+                    login: "alice".to_string(),
+                },
+                body: "Looks good".to_string(),
+                state: "APPROVED".to_string(),
+                submitted_at: "2025-01-15T10:00:00Z".to_string(),
+            }],
+            review_requests: vec![ReviewRequest {
+                login: Some("bob".to_string()),
+                name: None,
+            }],
+            comments: vec![PrCommentEntry {
+                author: Author {
+                    login: "carol".to_string(),
+                },
+                body: "What about edge cases?".to_string(),
+                created_at: "2025-01-15T11:00:00Z".to_string(),
+            }],
+        };
+        let result = PrReviews::format_output(&resp, 42);
         assert_eq!(
             result,
             "\
@@ -149,24 +172,16 @@ What about edge cases?
 
 "
         );
-
-        let recorded = calls.take().await;
-        assert_eq!(recorded[0].binary, "gh");
-        assert!(recorded[0].args.contains(&"42".to_string()));
     }
 
-    #[tokio::test]
-    async fn empty() {
-        let json = serde_json::to_string(&serde_json::json!({
-            "reviews": [],
-            "reviewRequests": [],
-            "comments": []
-        }))
-        .unwrap();
-
-        let (client, repo, _) = stub_gh_cli_with_repo(vec![ok_output(&json)]);
-        let tool = PrReviews(client);
-        let result = tool.run(&repo, 1).await.unwrap();
+    #[test]
+    fn empty() {
+        let resp = PrReviewsResponse {
+            reviews: vec![],
+            review_requests: vec![],
+            comments: vec![],
+        };
+        let result = PrReviews::format_output(&resp, 1);
         assert_eq!(result, "No reviews or comments on PR #1.");
     }
 }

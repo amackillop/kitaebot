@@ -9,7 +9,7 @@ use serde::Deserialize;
 use super::Tool;
 use super::git_cli::GitCli;
 use crate::error::ToolError;
-use crate::tools::cli_runner::CliRunner;
+use crate::tools::cli_runner::SubprocessCall;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -19,9 +19,9 @@ struct Args {
     message: String,
 }
 
-pub struct Commit<R>(pub GitCli<R>);
+pub struct Commit(pub GitCli);
 
-impl<R: CliRunner> Tool for Commit<R> {
+impl Tool for Commit {
     fn name(&self) -> &'static str {
         "git_commit"
     }
@@ -46,13 +46,16 @@ impl<R: CliRunner> Tool for Commit<R> {
     }
 }
 
-impl<R: CliRunner> Commit<R> {
-    async fn run(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
+impl Commit {
+    fn prepare(&self, repo_dir: &str, message: &str) -> Result<SubprocessCall, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
         let full_message = format_commit_message(message, self.0.co_authors());
-        self.0
-            .run_git(&["commit", "-m", &full_message], &cwd, false)
-            .await
+        Ok(self.0.prepare_git(&["commit", "-m", &full_message], &cwd))
+    }
+
+    async fn run(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
+        let call = self.prepare(repo_dir, message)?;
+        self.0.exec_git(call, false).await?.format()
     }
 }
 
@@ -80,7 +83,7 @@ fn format_commit_message(message: &str, co_authors: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::{ok_output, stub_git_cli_with_repo};
+    use crate::tools::github::test_helpers::stub_git_cli_with_repo;
 
     #[test]
     fn format_message_no_co_authors() {
@@ -111,17 +114,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn calls_git_commit_unauthenticated() {
-        let (git, repo, calls) =
-            stub_git_cli_with_repo(vec![ok_output("[master abc1234] Fix bug")]);
+    #[test]
+    fn builds_correct_commit_command() {
+        let (git, repo) = stub_git_cli_with_repo();
         let tool = Commit(git);
-        let _ = tool.run(&repo, "Fix bug").await.unwrap();
-
-        let recorded = calls.take().await;
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].binary, "git");
-        assert_eq!(recorded[0].args, ["commit", "-m", "Fix bug"]);
-        assert!(!recorded[0].has_env("GIT_ASKPASS"));
+        let call = tool.prepare(&repo, "Fix bug").unwrap();
+        assert_eq!(call.binary, "git");
+        assert_eq!(call.args, ["commit", "-m", "Fix bug"]);
+        assert!(!call.has_env("GIT_ASKPASS"));
     }
 }

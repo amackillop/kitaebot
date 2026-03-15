@@ -32,6 +32,7 @@ const TIMEOUT_SECS: u64 = 120;
 /// A single method that spawns any binary with explicit env. Callers
 /// are responsible for building the full environment (`safe_env` +
 /// credentials).
+#[allow(dead_code)] // removed in the next commit
 pub(crate) trait CliRunner: Send + Sync {
     fn exec(
         &self,
@@ -46,6 +47,7 @@ pub(crate) trait CliRunner: Send + Sync {
 
 /// Production subprocess executor. Spawns the process with
 /// `env_clear().envs(env)`.
+#[allow(dead_code)] // removed in the next commit
 #[derive(Clone, Copy)]
 pub(crate) struct RealCliRunner;
 
@@ -116,7 +118,6 @@ impl CmdOutput {
 /// A description of a subprocess invocation — what to run, not the
 /// act of running it. Callers build this value with pure logic;
 /// [`exec`] performs the side effect.
-#[allow(dead_code)] // consumers added in a follow-up commit
 #[derive(Debug, Clone)]
 pub struct SubprocessCall {
     pub binary: &'static str,
@@ -128,14 +129,12 @@ pub struct SubprocessCall {
 impl SubprocessCall {
     /// Check whether an environment variable is set.
     #[cfg(test)]
-    #[allow(dead_code)] // consumers added in a follow-up commit
     pub fn has_env(&self, key: &str) -> bool {
         self.env.iter().any(|(k, _)| k == key)
     }
 }
 
 /// Execute a [`SubprocessCall`] by spawning a subprocess.
-#[allow(dead_code)] // consumers added in a follow-up commit
 pub async fn exec(call: &SubprocessCall) -> Result<CmdOutput, ToolError> {
     let args_ref: Vec<&str> = call.args.iter().map(String::as_str).collect();
     let mut cmd = Command::new(call.binary);

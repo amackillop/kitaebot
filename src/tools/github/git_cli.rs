@@ -9,29 +9,19 @@ use std::path::{Path, PathBuf};
 
 use crate::error::ToolError;
 use crate::secrets::Secret;
-use crate::tools::cli_runner::{CliRunner, CmdOutput, SubprocessCall};
+use crate::tools::cli_runner::{self, CmdOutput, SubprocessCall};
 
 /// Shared context for git tools.
-///
-/// Generic over [`CliRunner`] so tests can substitute a stub without
-/// spawning real subprocesses.
 #[derive(Clone)]
-pub struct GitCli<R> {
-    pub(super) runner: R,
+pub struct GitCli {
     pub(super) token: Secret,
     pub(super) workspace_root: PathBuf,
     pub(super) co_authors: Vec<String>,
 }
 
-impl<R: CliRunner> GitCli<R> {
-    pub fn new(
-        runner: R,
-        token: Secret,
-        workspace_root: impl Into<PathBuf>,
-        co_authors: Vec<String>,
-    ) -> Self {
+impl GitCli {
+    pub fn new(token: Secret, workspace_root: impl Into<PathBuf>, co_authors: Vec<String>) -> Self {
         Self {
-            runner,
             token,
             workspace_root: workspace_root.into(),
             co_authors,
@@ -57,8 +47,7 @@ impl<R: CliRunner> GitCli<R> {
     /// Build a [`SubprocessCall`] for `git` without executing it.
     ///
     /// The returned call does **not** include `GIT_ASKPASS` — that is
-    /// an effect created at execution time by [`Self::run_git`].
-    #[allow(dead_code)] // consumers added in a follow-up commit
+    /// an effect created at execution time by [`Self::exec_git`].
     #[allow(clippy::unused_self)] // method for API consistency with prepare_gh
     pub fn prepare_git(&self, args: &[&str], cwd: &Path) -> SubprocessCall {
         let env: Vec<(OsString, OsString)> = crate::tools::safe_env().collect();
@@ -70,37 +59,13 @@ impl<R: CliRunner> GitCli<R> {
         }
     }
 
-    /// Get the current branch name from a git working directory.
-    pub async fn current_branch(&self, cwd: &Path) -> Result<String, ToolError> {
-        let output = self
-            .run_git_raw(&["rev-parse", "--abbrev-ref", "HEAD"], cwd, false)
-            .await?;
-        if output.exit_code != 0 {
-            return Err(ToolError::ExecutionFailed(format!(
-                "failed to get current branch: {}",
-                output.stderr
-            )));
-        }
-        Ok(output.stdout.trim().to_string())
-    }
-
-    /// Run a git command, format output as envelope for the LLM.
-    pub async fn run_git(
+    /// Execute a [`SubprocessCall`] with optional credential injection.
+    ///
+    /// When `authenticated` is true, a temporary `GIT_ASKPASS` script
+    /// is created, added to the call's env, and deleted after execution.
+    pub async fn exec_git(
         &self,
-        args: &[&str],
-        cwd: &Path,
-        authenticated: bool,
-    ) -> Result<String, ToolError> {
-        self.run_git_raw(args, cwd, authenticated).await?.format()
-    }
-
-    // ── Private helpers ─────────────────────────────────────────────
-
-    /// Run `git` with optional credential injection.
-    async fn run_git_raw(
-        &self,
-        args: &[&str],
-        cwd: &Path,
+        mut call: SubprocessCall,
         authenticated: bool,
     ) -> Result<CmdOutput, ToolError> {
         let askpass = if authenticated {
@@ -109,16 +74,28 @@ impl<R: CliRunner> GitCli<R> {
             None
         };
 
-        let mut env: Vec<(OsString, OsString)> = crate::tools::safe_env().collect();
-
         if let Some(ref ap) = askpass {
-            env.push(("GIT_ASKPASS".into(), ap.path().as_os_str().to_owned()));
-            env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+            call.env
+                .push(("GIT_ASKPASS".into(), ap.path().as_os_str().to_owned()));
+            call.env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
         }
 
-        let output = self.runner.exec("git", args, cwd, &env).await;
+        let output = cli_runner::exec(&call).await;
         drop(askpass);
         output
+    }
+
+    /// Get the current branch name from a git working directory.
+    pub async fn current_branch(&self, cwd: &Path) -> Result<String, ToolError> {
+        let call = self.prepare_git(&["rev-parse", "--abbrev-ref", "HEAD"], cwd);
+        let output = self.exec_git(call, false).await?;
+        if output.exit_code != 0 {
+            return Err(ToolError::ExecutionFailed(format!(
+                "failed to get current branch: {}",
+                output.stderr
+            )));
+        }
+        Ok(output.stdout.trim().to_string())
     }
 }
 
@@ -166,24 +143,15 @@ impl AskPass {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{err_output, ok_output, stub_git_cli_with_repo};
-    use crate::error::ToolError;
+    use crate::tools::github::test_helpers::stub_git_cli_with_repo;
 
-    #[tokio::test]
-    async fn current_branch_trims_output() {
-        let (cli, repo, _) = stub_git_cli_with_repo(vec![ok_output("  feature/foo\n")]);
+    #[test]
+    fn prepare_git_builds_correct_call() {
+        let (cli, repo) = stub_git_cli_with_repo();
         let cwd = cli.resolve_repo_dir(&repo).unwrap();
-        let branch = cli.current_branch(&cwd).await.unwrap();
-        assert_eq!(branch, "feature/foo");
-    }
-
-    #[tokio::test]
-    async fn current_branch_nonzero_exit() {
-        let (cli, repo, _) = stub_git_cli_with_repo(vec![err_output("not a git repo")]);
-        let cwd = cli.resolve_repo_dir(&repo).unwrap();
-        let result = cli.current_branch(&cwd).await;
-        assert!(
-            matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("current branch"))
-        );
+        let call = cli.prepare_git(&["rev-parse", "--abbrev-ref", "HEAD"], &cwd);
+        assert_eq!(call.binary, "git");
+        assert_eq!(call.args, ["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert!(!call.has_env("GIT_ASKPASS"));
     }
 }

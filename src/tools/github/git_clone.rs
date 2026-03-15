@@ -10,7 +10,7 @@ use super::Tool;
 use super::git_cli::GitCli;
 use super::url::{extract_repo_name, to_https_url, validate_name};
 use crate::error::ToolError;
-use crate::tools::cli_runner::CliRunner;
+use crate::tools::cli_runner::SubprocessCall;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -22,9 +22,9 @@ struct Args {
     name: Option<String>,
 }
 
-pub struct GitClone<R>(pub GitCli<R>);
+pub struct GitClone(pub GitCli);
 
-impl<R: CliRunner> Tool for GitClone<R> {
+impl Tool for GitClone {
     fn name(&self) -> &'static str {
         "git_clone"
     }
@@ -49,8 +49,12 @@ impl<R: CliRunner> Tool for GitClone<R> {
     }
 }
 
-impl<R: CliRunner> GitClone<R> {
-    async fn run(&self, url: &str, name: Option<&str>) -> Result<String, ToolError> {
+impl GitClone {
+    /// Pure: validate args and build the git clone command.
+    ///
+    /// Does **not** check whether the target directory already exists
+    /// (that's a filesystem effect handled by [`Self::run`]).
+    fn prepare(&self, url: &str, name: Option<&str>) -> Result<SubprocessCall, ToolError> {
         let https_url = to_https_url(url)?;
         let repo_name = match name {
             Some(n) => validate_name(n)?.to_string(),
@@ -58,7 +62,18 @@ impl<R: CliRunner> GitClone<R> {
         };
 
         let projects_dir = self.0.workspace_root().join("projects");
-        let target = projects_dir.join(&repo_name);
+        Ok(self
+            .0
+            .prepare_git(&["clone", "--", &https_url, &repo_name], &projects_dir))
+    }
+
+    async fn run(&self, url: &str, name: Option<&str>) -> Result<String, ToolError> {
+        let call = self.prepare(url, name)?;
+
+        // Filesystem effects: check target doesn't exist, create projects dir.
+        // repo_name is always the last arg: ["clone", "--", url, name]
+        let repo_name = &call.args[3];
+        let target = call.cwd.join(repo_name);
 
         if target.exists() {
             return Err(ToolError::ExecutionFailed(format!(
@@ -66,89 +81,67 @@ impl<R: CliRunner> GitClone<R> {
             )));
         }
 
-        tokio::fs::create_dir_all(&projects_dir)
+        tokio::fs::create_dir_all(&call.cwd)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("mkdir projects/: {e}")))?;
 
-        self.0
-            .run_git(
-                &["clone", "--", &https_url, &repo_name],
-                &projects_dir,
-                true,
-            )
-            .await
+        self.0.exec_git(call, true).await?.format()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ToolError;
-    use crate::tools::github::test_helpers::{ok_output, stub_git_cli_with_repo};
+    use crate::tools::github::test_helpers::stub_git_cli_with_repo;
 
-    #[tokio::test]
-    async fn clones_with_derived_name_authenticated() {
-        let (git, _, calls) = stub_git_cli_with_repo(vec![ok_output("Cloning into 'repo'...")]);
+    #[test]
+    fn builds_clone_command_with_derived_name() {
+        let (git, _) = stub_git_cli_with_repo();
         let tool = GitClone(git);
-        let _ = tool
-            .run("https://github.com/owner/repo.git", None)
-            .await
+        let call = tool
+            .prepare("https://github.com/owner/repo.git", None)
             .unwrap();
-
-        let recorded = calls.take().await;
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].binary, "git");
+        assert_eq!(call.binary, "git");
         assert_eq!(
-            recorded[0].args,
+            call.args,
             ["clone", "--", "https://github.com/owner/repo.git", "repo"]
         );
-        assert!(recorded[0].has_env("GIT_ASKPASS"));
     }
 
-    #[tokio::test]
-    async fn uses_custom_name() {
-        let (git, _, calls) = stub_git_cli_with_repo(vec![ok_output("ok")]);
+    #[test]
+    fn builds_clone_command_with_custom_name() {
+        let (git, _) = stub_git_cli_with_repo();
         let tool = GitClone(git);
-        let _ = tool
-            .run("https://github.com/owner/repo.git", Some("custom"))
-            .await
+        let call = tool
+            .prepare("https://github.com/owner/repo.git", Some("custom"))
             .unwrap();
-
-        let recorded = calls.take().await;
-        assert_eq!(recorded[0].args[3], "custom");
+        assert_eq!(call.args[3], "custom");
     }
 
-    #[tokio::test]
-    async fn rewrites_ssh_to_https() {
-        let (git, _, calls) = stub_git_cli_with_repo(vec![ok_output("ok")]);
+    #[test]
+    fn rewrites_ssh_to_https() {
+        let (git, _) = stub_git_cli_with_repo();
         let tool = GitClone(git);
-        let _ = tool
-            .run("git@github.com:owner/repo.git", None)
-            .await
-            .unwrap();
+        let call = tool.prepare("git@github.com:owner/repo.git", None).unwrap();
+        assert_eq!(call.args[2], "https://github.com/owner/repo.git");
+    }
 
-        let recorded = calls.take().await;
-        assert_eq!(recorded[0].args[2], "https://github.com/owner/repo.git");
+    #[test]
+    fn rejects_traversal_in_name() {
+        let (git, _) = stub_git_cli_with_repo();
+        let tool = GitClone(git);
+        let result = tool.prepare("https://github.com/owner/repo.git", Some("../escape"));
+        assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn rejects_already_existing_target() {
-        let (git, _, _) = stub_git_cli_with_repo(vec![]);
+        let (git, _) = stub_git_cli_with_repo();
         // The stub already creates projects/r — clone into "r" to hit the exists check.
         let tool = GitClone(git);
         let result = tool.run("https://github.com/owner/r.git", None).await;
         assert!(
             matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("already exists"))
         );
-    }
-
-    #[tokio::test]
-    async fn rejects_traversal_in_name() {
-        let (git, _, _) = stub_git_cli_with_repo(vec![]);
-        let tool = GitClone(git);
-        let result = tool
-            .run("https://github.com/owner/repo.git", Some("../escape"))
-            .await;
-        assert!(result.is_err());
     }
 }
