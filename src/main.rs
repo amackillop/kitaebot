@@ -18,6 +18,7 @@ mod session;
 mod socket;
 mod stats;
 mod telegram;
+mod time;
 mod tools;
 mod types;
 mod workspace;

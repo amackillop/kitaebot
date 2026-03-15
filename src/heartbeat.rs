@@ -10,7 +10,7 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -113,48 +113,9 @@ fn build_prompt(tasks: &[&str]) -> String {
 
 /// Append a timestamped entry to the history file.
 fn append_history(path: &std::path::Path, response: &str) -> Result<(), std::io::Error> {
-    let timestamp = format_timestamp(
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("system clock before Unix epoch")
-            .as_secs(),
-    );
-
+    let timestamp = crate::time::now_iso8601();
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-
     write!(file, "[{timestamp}] Heartbeat: {response}\n\n")
-}
-
-/// Format a Unix epoch as `YYYY-MM-DD HH:MM` UTC.
-///
-/// Uses Hinnant's `civil_from_days` algorithm to avoid pulling in `chrono`.
-fn format_timestamp(epoch: u64) -> String {
-    let days_since_epoch = (epoch / 86400).cast_signed();
-    let time_of_day = epoch % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-
-    let (year, month, day) = civil_from_days(days_since_epoch);
-
-    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
-}
-
-/// Convert days since 1970-01-01 to (year, month, day).
-///
-/// Howard Hinnant's algorithm. See:
-/// <https://howardhinnant.github.io/date_algorithms.html#civil_from_days>
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = u32::try_from(z.rem_euclid(146_097)).expect("day-of-era fits in u32");
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = i64::from(yoe) + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
 }
 
 #[cfg(test)]
@@ -190,26 +151,6 @@ mod tests {
         let content = "# Heartbeat\n\nNo tasks here.\n- [x] Done\n";
         let tasks = parse_active_tasks(content);
         assert!(tasks.is_empty());
-    }
-
-    #[test]
-    fn format_timestamp_epoch_zero() {
-        assert_eq!(format_timestamp(0), "1970-01-01 00:00");
-    }
-
-    #[test]
-    fn format_timestamp_y2k() {
-        // 2000-01-01 00:00:00 UTC = 946684800
-        assert_eq!(format_timestamp(946_684_800), "2000-01-01 00:00");
-    }
-
-    #[test]
-    fn format_timestamp_with_time() {
-        // 2024-02-21 00:00:00 UTC = 1708473600
-        assert_eq!(
-            format_timestamp(1_708_473_600 + 14 * 3600 + 30 * 60),
-            "2024-02-21 14:30"
-        );
     }
 
     #[test]
