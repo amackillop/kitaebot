@@ -86,6 +86,10 @@ vm-stop:
 vm-ssh *flags: (vm-run flags)
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost
 
+# Tail kitaebot logs from the VM
+vm-logs:
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost journalctl --output cat -xfu kitaebot
+
 # Chat with the daemon via SSH socket forwarding
 chat *flags: (vm-run flags)
     #!/usr/bin/env bash
