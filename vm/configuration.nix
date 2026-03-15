@@ -41,6 +41,13 @@ let
     log_filter = "^$"
   '';
 
+  # Sourced by non-interactive bash via BASH_ENV. Hooks direnv so that
+  # every `bash -c` invocation in the exec tool automatically loads the
+  # .envrc (and therefore the nix devshell) for the working directory.
+  bashEnvScript = pkgs.writeText "kitaebot-bash-env.sh" ''
+    eval "$(${pkgs.direnv}/bin/direnv hook bash)"
+  '';
+
   # Interactive chat via the daemon's Unix socket.
   kchat = pkgs.writeShellScriptBin "kchat" ''
     exec ${cfg.package}/bin/kchat /run/kitaebot/chat.sock
@@ -268,6 +275,7 @@ in
           KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
           RUST_LOG = cfg.logLevel;
           PATH = lib.mkForce toolPath;
+          BASH_ENV = bashEnvScript;
         }
         // lib.optionalAttrs signingEnabled {
           GNUPGHOME = "/var/lib/kitaebot/.gnupg";

@@ -58,6 +58,8 @@ const SAFE_ENV_VARS: &[&str] = &[
     "TMPDIR",
     "TMP",
     "TEMP",
+    // Shell init (direnv hook via BASH_ENV)
+    "BASH_ENV",
     // Nix
     "NIX_PATH",
     "NIX_PROFILES",

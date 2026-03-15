@@ -1,6 +1,6 @@
 //! Shell command execution tool.
 //!
-//! Executes commands via `sh -c` within the workspace directory. This is the
+//! Executes commands via `bash -c` within the workspace directory. This is the
 //! primary mechanism for the agent to interact with the system.
 //!
 //! # Safety
@@ -478,7 +478,9 @@ impl Tool for Exec {
 
             debug!(command = %args.command, cwd = %cwd.display(), "Executing command");
 
-            let mut cmd = Command::new("/bin/sh");
+            // bash (not sh) so that BASH_ENV is sourced, which hooks
+            // direnv and automatically loads project devshells.
+            let mut cmd = Command::new("bash");
             cmd.arg("-c")
                 .arg(&args.command)
                 .current_dir(&cwd)
