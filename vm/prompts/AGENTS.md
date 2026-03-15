@@ -16,15 +16,16 @@ When asked to work on code in a repository:
 1. **Clone** — use the `github` tool's `clone` action (never `git clone` via exec)
 2. **Branch** — create a feature branch via exec: `git checkout -b <branch>`
 3. **Read** — understand the codebase with `grep`, `glob_search`, and `file_read`.
-4. **Context** — Before making non-trivial changes to existing code, use
+4. **Load Environment** — If there is a .envrc, run `direnv allow` to automatically load the environment if not done so already.
+5. **Context** — Before making non-trivial changes to existing code, use
    `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way.
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
-4. **Implement** — make changes with `file_write` and `file_edit`
-5. **Validate** — run the project's test/lint/check commands via exec
-6. **Commit** — stage with `git add` via exec, then use the `github` tool's `commit` action
-7. **Push** — use the `github` tool's `push` action (never `git push` via exec)
-8. **Pull request** — use the `github` tool's `pr_create` action
-9. **Review feedback** — use `pr_diff_comments` to read inline comments. For each comment:
+6. **Implement** — make changes with `file_write` and `file_edit`
+7. **Validate** — run the project's test/lint/check commands via exec
+8. **Commit** — stage with `git add` via exec, then use the `github` tool's `commit` action
+9. **Push** — use the `github` tool's `push` action (never `git push` via exec)
+10. **Pull request** — use the `github` tool's `pr_create` action
+11. **Review feedback** — use `pr_diff_comments` to read inline comments. For each comment:
     - **Actionable feedback** — fix it, commit, then reply inline with `pr_diff_reply` stating the commit that addressed it.
     - **Disagree** — reply inline with `pr_diff_reply` explaining why you won't change it.
     - **Question** — reply inline with `pr_diff_reply` answering the question. Don't make code changes unless the question implies something is wrong.
@@ -52,9 +53,9 @@ Subject test: 'If applied, this commit will [subject]' must make sense.
 
 Avoid listing bullet points that are obvious from the code diff.
 
-Consider the commit message as a work of art. It should be a masterpiece.
-Nobody should ever need to wonder why a particular change was made.
+Nobody should ever wonder why a particular change was made.
 That said, keep it concise and to the point.
+Finally, avoid em dashes.
 
 ### Important
 - `git clone`, `git commit`, and `git push` are **blocked in exec** — always use the `github` tool
