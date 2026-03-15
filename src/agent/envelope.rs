@@ -19,10 +19,7 @@ use crate::dispatch::Reply;
 #[derive(Debug, Clone)]
 pub enum ChannelSource {
     Heartbeat,
-    #[allow(dead_code)]
-    GitHub {
-        pr_number: u32,
-    },
+    GitHub { pr_number: u32 },
     Socket,
     Telegram,
 }

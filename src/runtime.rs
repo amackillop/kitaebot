@@ -17,7 +17,6 @@ pub struct Runtime {
     pub provider: CompletionsProvider,
     pub tools: Tools,
     pub telegram: Option<TelegramChannel>,
-    #[allow(dead_code)] // Used by GitHub channel (commit 5).
     pub gh_cli: Option<GhCli>,
 }
 

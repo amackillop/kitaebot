@@ -1,10 +1,11 @@
-//! Long-running daemon that drives the heartbeat, Telegram, and socket loops.
+//! Long-running daemon that drives the heartbeat, GitHub, Telegram, and socket loops.
 //!
-//! The daemon runs three concurrent loops — heartbeat ticks on a
-//! configurable interval, the Telegram poller long-polls for incoming
-//! messages, and the socket listener accepts Unix domain socket clients.
-//! All are pinned futures inside a single `tokio::select!`, so they
-//! make progress concurrently.
+//! The daemon runs four concurrent loops — heartbeat ticks on a
+//! configurable interval, the GitHub PR poller checks for new reviews
+//! and comments, the Telegram poller long-polls for incoming messages,
+//! and the socket listener accepts Unix domain socket clients. All are
+//! pinned futures inside a single `tokio::select!`, so they make
+//! progress concurrently.
 //!
 //! The core loop ([`run_with_shutdown`]) is generic over its shutdown
 //! future so tests can substitute a simple `sleep` instead of real
@@ -17,9 +18,11 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::agent::AgentHandle;
+use crate::github_channel;
 use crate::heartbeat;
 use crate::socket;
 use crate::telegram::{self, TelegramChannel};
+use crate::tools::github::GhCli;
 use crate::workspace::Workspace;
 
 /// Production entry point — runs until SIGINT or SIGTERM.
@@ -28,6 +31,8 @@ pub async fn run(
     handle: &AgentHandle,
     interval_secs: u64,
     telegram: Option<&TelegramChannel>,
+    gh_cli: Option<&GhCli>,
+    github_interval: Duration,
     socket_path: &Path,
 ) {
     run_with_shutdown(
@@ -35,18 +40,23 @@ pub async fn run(
         handle,
         Duration::from_secs(interval_secs),
         telegram,
+        gh_cli,
+        github_interval,
         socket_path,
         shutdown_signal(),
     )
     .await;
 }
 
-/// Testable core: runs heartbeat + telegram until `shutdown` resolves.
+/// Testable core: runs heartbeat + github + telegram + socket until `shutdown` resolves.
+#[allow(clippy::too_many_arguments)]
 async fn run_with_shutdown<S: Future<Output = ()>>(
     workspace: &Workspace,
     handle: &AgentHandle,
     interval: Duration,
     telegram: Option<&TelegramChannel>,
+    gh_cli: Option<&GhCli>,
+    github_interval: Duration,
     socket_path: &Path,
     shutdown: S,
 ) {
@@ -59,12 +69,21 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         }
     };
 
+    let state_path = workspace.github_poll_state_path();
+    let github_loop = async {
+        match gh_cli {
+            Some(gh) => github_channel::poll_loop(gh, github_interval, handle, &state_path).await,
+            None => std::future::pending().await,
+        }
+    };
+
     let session_path = workspace.session_path();
     let socket_loop = socket::listen(socket_path, &session_path, handle);
 
     tokio::select! {
         () = heartbeat_loop => unreachable!("heartbeat loop never exits"),
         () = telegram_loop => unreachable!("telegram loop never exits"),
+        () = github_loop => unreachable!("github loop never exits"),
         () = socket_loop => unreachable!("socket loop never exits"),
         () = shutdown => {
             info!("Shutdown signal received, exiting.");
@@ -131,6 +150,8 @@ mod tests {
             &handle,
             Duration::from_secs(3600), // large interval — only the immediate first tick matters
             None,
+            None,
+            Duration::ZERO,
             &sock_path,
             tokio::time::sleep(Duration::from_millis(50)),
         )
@@ -161,6 +182,8 @@ mod tests {
             &handle,
             Duration::from_millis(100), // 100ms interval for fast test
             None,
+            None,
+            Duration::ZERO,
             &sock_path,
             async {
                 // Let 3 ticks fire: immediate + 2 more.
@@ -200,6 +223,8 @@ mod tests {
             &handle,
             Duration::from_secs(3600),
             None,
+            None,
+            Duration::ZERO,
             &sock_path,
             tokio::time::sleep(Duration::from_millis(50)),
         )

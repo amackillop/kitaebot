@@ -29,7 +29,6 @@ impl GhCli {
     }
 
     /// Root directory of the workspace (used as cwd for non-repo commands).
-    #[allow(dead_code)] // Used by GitHub channel (commit 5).
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }

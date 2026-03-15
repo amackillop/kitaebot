@@ -68,6 +68,11 @@ impl Workspace {
         self.0.join("memory/HISTORY.md")
     }
 
+    /// Path to the GitHub poll state file.
+    pub fn github_poll_state_path(&self) -> PathBuf {
+        self.0.join("memory/github_poll_state.json")
+    }
+
     /// Build the system prompt from workspace files.
     ///
     /// Reads [`SYSTEM_PROMPTS`] concatenating

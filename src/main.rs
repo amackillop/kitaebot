@@ -7,6 +7,7 @@ mod context;
 mod daemon;
 mod dispatch;
 mod error;
+mod github_channel;
 mod heartbeat;
 mod provider;
 mod runtime;
@@ -22,6 +23,7 @@ mod types;
 mod workspace;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use config::Config;
 use tracing::{error, info, warn};
@@ -81,6 +83,8 @@ async fn main() {
                 &handle,
                 config.heartbeat.interval_secs,
                 rt.telegram.as_ref(),
+                rt.gh_cli.as_ref(),
+                Duration::from_secs(config.github.poll_interval_secs),
                 socket_path,
             )
             .await;
