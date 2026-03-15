@@ -145,6 +145,8 @@ kitaebot = {
     github = {
       enabled = true;
       poll_interval_secs = 300;            # 5 minutes between PR polls
+      owner = "amackillop";                # Required when enabled
+      trusted_users = [];                  # Additional allowed users
     };
     heartbeat = {
       interval_secs = 1800;

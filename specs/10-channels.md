@@ -215,9 +215,9 @@ For each of the bot's open PRs (across all repos):
 
 | Item | Source | Filtered by |
 |------|--------|-------------|
-| Reviews | `gh pr view --json reviews` | `submitted_at > last_poll`, not by bot |
-| PR comments | `gh pr view --json comments` | `created_at > last_poll`, not by bot |
-| Inline diff comments | `gh api repos/{nwo}/pulls/{n}/comments` | `created_at > last_poll`, not by bot |
+| Reviews | `gh pr view --json reviews` | `submitted_at > last_poll`, not by bot, trusted user only |
+| PR comments | `gh pr view --json comments` | `created_at > last_poll`, not by bot, trusted user only |
+| Inline diff comments | `gh api repos/{nwo}/pulls/{n}/comments` | `created_at > last_poll`, not by bot, trusted user only |
 
 ### Message Format
 
@@ -237,8 +237,22 @@ Poll state (`last_poll` timestamp) is persisted at `memory/github_poll_state.jso
 |-----|---------|---------|
 | `github.enabled` | `false` | Enable the GitHub channel |
 | `github.poll_interval_secs` | `300` | Seconds between poll cycles (5 minutes) |
+| `github.owner` | — | GitHub username of the bot owner (required when enabled) |
+| `github.trusted_users` | `[]` | Additional GitHub usernames allowed to interact with the bot |
 
 Requires the `github-token` secret.
+
+### Access Control
+
+The bot owner (configured via `github.owner`) is always allowed to interact with the bot. Additional users can be granted access via `trusted_users`. Messages from anyone else are logged and skipped.
+
+Example configuration:
+```toml
+[github]
+enabled = true
+owner = "alice"
+trusted_users = ["bob", "charlie"]
+```
 
 ### Error Handling
 

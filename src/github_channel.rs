@@ -99,6 +99,8 @@ pub async fn poll_loop(
     interval: Duration,
     handle: &AgentHandle,
     state_path: &Path,
+    owner: &str,
+    trusted_users: &[String],
 ) -> ! {
     let bot_login = match resolve_bot_login(gh).await {
         Ok(login) => {
@@ -119,7 +121,7 @@ pub async fn poll_loop(
 
     loop {
         tick.tick().await;
-        match poll_once(gh, handle, &bot_login, &last_poll).await {
+        match poll_once(gh, handle, &bot_login, &last_poll, owner, trusted_users).await {
             Ok(count) => {
                 info!(count, "GitHub poll: dispatched {count} items");
                 last_poll = now_iso8601();
@@ -141,6 +143,8 @@ async fn poll_once(
     handle: &AgentHandle,
     bot_login: &str,
     last_poll: &str,
+    owner: &str,
+    trusted_users: &[String],
 ) -> Result<usize, ToolError> {
     let prs = list_bot_prs(gh).await?;
     let mut count = 0;
@@ -158,6 +162,13 @@ async fn poll_once(
             if review.submitted_at.as_str() <= last_poll {
                 continue;
             }
+            if !is_trusted(&review.author.login, owner, trusted_users) {
+                warn!(
+                    author = %review.author.login,
+                    "Skipping review from untrusted user"
+                );
+                continue;
+            }
             send(handle, pr.number, format_review(pr, nwo, review)).await;
             count += 1;
         }
@@ -169,6 +180,13 @@ async fn poll_once(
             if comment.created_at.as_str() <= last_poll {
                 continue;
             }
+            if !is_trusted(&comment.author.login, owner, trusted_users) {
+                warn!(
+                    author = %comment.author.login,
+                    "Skipping comment from untrusted user"
+                );
+                continue;
+            }
             send(handle, pr.number, format_comment(pr, nwo, comment)).await;
             count += 1;
         }
@@ -178,6 +196,13 @@ async fn poll_once(
                 continue;
             }
             if dc.created_at.as_str() <= last_poll {
+                continue;
+            }
+            if !is_trusted(&dc.user.login, owner, trusted_users) {
+                warn!(
+                    author = %dc.user.login,
+                    "Skipping diff comment from untrusted user"
+                );
                 continue;
             }
             send(handle, pr.number, format_diff_comment(pr, nwo, dc)).await;
@@ -197,6 +222,14 @@ async fn send(handle: &AgentHandle, pr_number: u32, message: String) {
         Ok(reply) => info!(pr_number, "GitHub PR #{pr_number}: {}", reply.content),
         Err(e) => error!(pr_number, "GitHub PR #{pr_number} error: {e}"),
     }
+}
+
+/// Check if a user is trusted (owner or in `trusted_users` list).
+fn is_trusted(login: &str, owner: &str, trusted_users: &[String]) -> bool {
+    if login.eq_ignore_ascii_case(owner) {
+        return true;
+    }
+    trusted_users.iter().any(|u| u.eq_ignore_ascii_case(login))
 }
 
 // ---------------------------------------------------------------------------
@@ -499,5 +532,34 @@ mod tests {
         let loaded = load_last_poll(&path);
         assert!(loaded.ends_with('Z'));
         assert!(loaded.contains('T'));
+    }
+
+    #[test]
+    fn is_trusted_owner_always_allowed() {
+        let owner = "alice";
+        let trusted: Vec<String> = vec![];
+        assert!(is_trusted("alice", owner, &trusted));
+        assert!(is_trusted("ALICE", owner, &trusted));
+    }
+
+    #[test]
+    fn is_trusted_filters_untrusted_users() {
+        let owner = "alice";
+        let trusted = vec!["bob".to_string(), "charlie".to_string()];
+        assert!(is_trusted("alice", owner, &trusted));
+        assert!(is_trusted("bob", owner, &trusted));
+        assert!(is_trusted("charlie", owner, &trusted));
+        assert!(!is_trusted("eve", owner, &trusted));
+        assert!(!is_trusted("mallory", owner, &trusted));
+    }
+
+    #[test]
+    fn is_trusted_case_insensitive() {
+        let owner = "Alice";
+        let trusted = vec!["BOB".to_string()];
+        assert!(is_trusted("alice", owner, &trusted));
+        assert!(is_trusted("ALICE", owner, &trusted));
+        assert!(is_trusted("bob", owner, &trusted));
+        assert!(is_trusted("Bob", owner, &trusted));
     }
 }

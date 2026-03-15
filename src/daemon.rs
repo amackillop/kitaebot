@@ -26,6 +26,7 @@ use crate::tools::github::GhCli;
 use crate::workspace::Workspace;
 
 /// Production entry point — runs until SIGINT or SIGTERM.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     workspace: &Workspace,
     handle: &AgentHandle,
@@ -33,6 +34,8 @@ pub async fn run(
     telegram: Option<&TelegramChannel>,
     gh_cli: Option<&GhCli>,
     github_interval: Duration,
+    github_owner: &str,
+    github_trusted_users: &[String],
     socket_path: &Path,
 ) {
     run_with_shutdown(
@@ -42,6 +45,8 @@ pub async fn run(
         telegram,
         gh_cli,
         github_interval,
+        github_owner,
+        github_trusted_users,
         socket_path,
         shutdown_signal(),
     )
@@ -57,6 +62,8 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     telegram: Option<&TelegramChannel>,
     gh_cli: Option<&GhCli>,
     github_interval: Duration,
+    github_owner: &str,
+    github_trusted_users: &[String],
     socket_path: &Path,
     shutdown: S,
 ) {
@@ -70,9 +77,20 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     };
 
     let state_path = workspace.github_poll_state_path();
+    #[allow(clippy::too_many_arguments)]
     let github_loop = async {
         match gh_cli {
-            Some(gh) => github_channel::poll_loop(gh, github_interval, handle, &state_path).await,
+            Some(gh) => {
+                github_channel::poll_loop(
+                    gh,
+                    github_interval,
+                    handle,
+                    &state_path,
+                    github_owner,
+                    github_trusted_users,
+                )
+                .await;
+            }
             None => std::future::pending().await,
         }
     };
@@ -152,6 +170,8 @@ mod tests {
             None,
             None,
             Duration::ZERO,
+            "",  // github_owner
+            &[], // github_trusted_users
             &sock_path,
             tokio::time::sleep(Duration::from_millis(50)),
         )
@@ -184,6 +204,8 @@ mod tests {
             None,
             None,
             Duration::ZERO,
+            "",  // github_owner
+            &[], // github_trusted_users
             &sock_path,
             async {
                 // Let 3 ticks fire: immediate + 2 more.
@@ -225,6 +247,8 @@ mod tests {
             None,
             None,
             Duration::ZERO,
+            "",  // github_owner
+            &[], // github_trusted_users
             &sock_path,
             tokio::time::sleep(Duration::from_millis(50)),
         )

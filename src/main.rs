@@ -86,6 +86,8 @@ async fn main() {
                 rt.telegram.as_ref(),
                 rt.gh_cli.as_ref(),
                 Duration::from_secs(config.github.poll_interval_secs),
+                &config.github.owner,
+                &config.github.trusted_users,
                 socket_path,
             )
             .await;

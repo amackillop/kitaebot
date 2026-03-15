@@ -179,6 +179,11 @@ pub struct GithubConfig {
     pub enabled: bool,
     /// Seconds between PR polling cycles. Defaults to 300 (5 minutes).
     pub poll_interval_secs: u64,
+    /// GitHub username of the bot owner. Required when enabled.
+    /// The owner is always allowed to interact with the bot.
+    pub owner: String,
+    /// Additional GitHub usernames allowed to interact with the bot.
+    pub trusted_users: Vec<String>,
 }
 
 // --- Default impls ---
@@ -214,6 +219,8 @@ impl Default for GithubConfig {
         Self {
             enabled: false,
             poll_interval_secs: 300,
+            owner: String::new(),
+            trusted_users: Vec::new(),
         }
     }
 }
@@ -338,6 +345,11 @@ impl Config {
         if self.github.enabled && self.github.poll_interval_secs == 0 {
             return Err(ConfigError::Invalid(
                 "github poll_interval_secs must be > 0".into(),
+            ));
+        }
+        if self.github.enabled && self.github.owner.is_empty() {
+            return Err(ConfigError::Invalid(
+                "github owner must be set when enabled".into(),
             ));
         }
         if self.tools.exec.timeout_secs == 0 {
@@ -607,13 +619,34 @@ max_output_bytes = 20480
         let cfg = load_toml("").unwrap();
         assert!(!cfg.github.enabled);
         assert_eq!(cfg.github.poll_interval_secs, 300);
+        assert!(cfg.github.owner.is_empty());
+        assert!(cfg.github.trusted_users.is_empty());
     }
 
     #[test]
     fn github_parse() {
-        let cfg = load_toml("[github]\nenabled = true\npoll_interval_secs = 600\n").unwrap();
+        let cfg =
+            load_toml("[github]\nenabled = true\nowner = \"alice\"\npoll_interval_secs = 600\n")
+                .unwrap();
         assert!(cfg.github.enabled);
+        assert_eq!(cfg.github.owner, "alice");
         assert_eq!(cfg.github.poll_interval_secs, 600);
+    }
+
+    #[test]
+    fn github_parse_trusted_users() {
+        let cfg =
+            load_toml("[github]\nenabled = true\nowner = \"alice\"\ntrusted_users = [\"bob\"]\n")
+                .unwrap();
+        assert!(cfg.github.enabled);
+        assert_eq!(cfg.github.owner, "alice");
+        assert_eq!(cfg.github.trusted_users, vec!["bob"]);
+    }
+
+    #[test]
+    fn github_reject_missing_owner_when_enabled() {
+        let result = load_toml("[github]\nenabled = true\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 
     #[test]

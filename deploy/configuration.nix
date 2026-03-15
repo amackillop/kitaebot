@@ -49,7 +49,11 @@ in
       };
       git.enabled = true;
       git.co_authors = [ "Austin Mackillop <github.roundworm216@passmail.net>" ];
-      github.enabled = true;
+      github = {
+        enabled = true;
+        owner = "amackillop";
+        trusted_users = [ ];
+      };
     };
   };
 
