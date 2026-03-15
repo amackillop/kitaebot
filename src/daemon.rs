@@ -4,7 +4,7 @@
 //! configurable interval, the Telegram poller long-polls for incoming
 //! messages, and the socket listener accepts Unix domain socket clients.
 //! All are pinned futures inside a single `tokio::select!`, so they
-//! make progress concurrently without spawning tasks or requiring `Arc`.
+//! make progress concurrently.
 //!
 //! The core loop ([`run_with_shutdown`]) is generic over its shutdown
 //! future so tests can substitute a simple `sleep` instead of real
@@ -15,34 +15,27 @@ use std::path::Path;
 use std::time::Duration;
 
 use tokio::time::{self, MissedTickBehavior};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::config::ContextConfig;
+use crate::agent::AgentHandle;
+use crate::agent::envelope::ChannelSource;
 use crate::heartbeat;
-use crate::provider::Provider;
 use crate::socket;
 use crate::telegram::{self, TelegramChannel};
-use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// Production entry point — runs until SIGINT or SIGTERM.
-#[allow(clippy::too_many_arguments)]
-pub async fn run<P: Provider>(
+pub async fn run(
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: ContextConfig,
+    handle: &AgentHandle,
     interval_secs: u64,
     telegram: Option<&TelegramChannel>,
     socket_path: &Path,
 ) {
     run_with_shutdown(
         workspace,
-        provider,
-        tools,
-        max_iterations,
-        ctx,
+        handle,
         Duration::from_secs(interval_secs),
         telegram,
         socket_path,
@@ -52,13 +45,9 @@ pub async fn run<P: Provider>(
 }
 
 /// Testable core: runs heartbeat + telegram until `shutdown` resolves.
-#[allow(clippy::too_many_arguments)]
-async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
+async fn run_with_shutdown<S: Future<Output = ()>>(
     workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: ContextConfig,
+    handle: &AgentHandle,
     interval: Duration,
     telegram: Option<&TelegramChannel>,
     socket_path: &Path,
@@ -70,20 +59,19 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
     let heartbeat_loop = async {
         loop {
             tick.tick().await;
-            run_heartbeat_cycle(workspace, provider, tools, max_iterations, ctx).await;
+            run_heartbeat_cycle(workspace, handle).await;
         }
     };
 
     let telegram_loop = async {
         match telegram {
-            Some(ch) => {
-                telegram::poll_loop(ch, workspace, provider, tools, max_iterations, ctx).await;
-            }
+            Some(ch) => telegram::poll_loop(ch, handle).await,
             None => std::future::pending().await,
         }
     };
 
-    let socket_loop = socket::listen(socket_path, workspace, provider, tools, max_iterations, ctx);
+    let session_path = workspace.session_path();
+    let socket_loop = socket::listen(socket_path, &session_path, handle);
 
     tokio::select! {
         () = heartbeat_loop => unreachable!("heartbeat loop never exits"),
@@ -99,19 +87,29 @@ async fn run_with_shutdown<P: Provider, S: Future<Output = ()>>(
 /// Run a single heartbeat cycle, logging the outcome.
 ///
 /// Errors are logged and swallowed so the daemon loop survives.
-async fn run_heartbeat_cycle<P: Provider>(
-    workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: ContextConfig,
-) {
-    match heartbeat::run(workspace, provider, tools, max_iterations, ctx).await {
-        Ok(heartbeat::Outcome::Executed(response)) => {
-            info!("Heartbeat complete: {response}");
-        }
-        Ok(heartbeat::Outcome::Skipped(reason)) => {
+async fn run_heartbeat_cycle(workspace: &Workspace, handle: &AgentHandle) {
+    let ready = match heartbeat::prepare(workspace) {
+        Ok(heartbeat::Prepared::Ready(ready)) => ready,
+        Ok(heartbeat::Prepared::Skipped(reason)) => {
             info!("Heartbeat skipped: {reason}");
+            return;
+        }
+        Err(e) => {
+            error!("Heartbeat error (will retry next tick): {e}");
+            return;
+        }
+    };
+
+    let cancel = CancellationToken::new();
+    match handle
+        .send_message(ChannelSource::Heartbeat, ready.prompt.clone(), None, cancel)
+        .await
+    {
+        Ok(reply) => {
+            if let Err(e) = heartbeat::finish(workspace, &reply.content) {
+                error!("Failed to write heartbeat history: {e}");
+            }
+            info!("Heartbeat complete: {}", reply.content);
         }
         Err(e) => {
             error!("Heartbeat error (will retry next tick): {e}");
@@ -138,11 +136,18 @@ mod tests {
     use crate::config::ContextConfig;
     use crate::provider::MockProvider;
     use crate::tools::Tools;
+    use crate::types::Response;
+    use std::sync::Arc;
 
-    fn workspace() -> (tempfile::TempDir, Workspace) {
+    const CTX: ContextConfig = ContextConfig {
+        max_tokens: 200_000,
+        budget_percent: 80,
+    };
+
+    fn workspace() -> (tempfile::TempDir, Arc<Workspace>) {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        (dir, ws)
+        (dir, Arc::new(ws))
     }
 
     /// Socket path in a temp dir — avoids collisions and `/run` dependency.
@@ -152,25 +157,22 @@ mod tests {
         (dir, path)
     }
 
-    const CTX: ContextConfig = ContextConfig {
-        max_tokens: 200_000,
-        budget_percent: 80,
-    };
-
     #[tokio::test]
     async fn fires_immediately_then_shuts_down() {
         let (_dir, ws) = workspace();
         let (_sock_dir, sock_path) = sock_path();
         // No HEARTBEAT.md → skipped, but proves the tick fired.
-        let provider = MockProvider::new(vec![]);
-        let tools = Tools::default();
+        let handle = AgentHandle::spawn(
+            ws.clone(),
+            Arc::new(MockProvider::new(vec![])),
+            Arc::new(Tools::default()),
+            1,
+            CTX,
+        );
 
         run_with_shutdown(
             &ws,
-            &provider,
-            &tools,
-            1,
-            CTX,
+            &handle,
             Duration::from_secs(3600), // large interval — only the immediate first tick matters
             None,
             &sock_path,
@@ -184,22 +186,23 @@ mod tests {
 
     #[tokio::test]
     async fn multiple_cycles_with_short_interval() {
-        use crate::types::Response;
-
         let (_dir, ws) = workspace();
         let (_sock_dir, sock_path) = sock_path();
         std::fs::write(ws.heartbeat_path(), "- [ ] task\n").unwrap();
 
         // Over-provision: we expect ~3 ticks but provide enough headroom.
-        let provider = MockProvider::new(vec![Ok(Response::Text("ok".into())); 10]);
-        let tools = Tools::default();
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text("ok".into())); 10]));
+        let handle = AgentHandle::spawn(
+            ws.clone(),
+            provider.clone(),
+            Arc::new(Tools::default()),
+            1,
+            CTX,
+        );
 
         run_with_shutdown(
             &ws,
-            &provider,
-            &tools,
-            1,
-            CTX,
+            &handle,
             Duration::from_millis(100), // 100ms interval for fast test
             None,
             &sock_path,
@@ -226,15 +229,19 @@ mod tests {
         std::fs::write(ws.heartbeat_path(), "- [ ] task\n").unwrap();
 
         // Provider returns an error — loop should survive.
-        let provider = MockProvider::new(vec![Err(ProviderError::Network("test".into()))]);
-        let tools = Tools::default();
+        let handle = AgentHandle::spawn(
+            ws.clone(),
+            Arc::new(MockProvider::new(vec![Err(ProviderError::Network(
+                "test".into(),
+            ))])),
+            Arc::new(Tools::default()),
+            1,
+            CTX,
+        );
 
         run_with_shutdown(
             &ws,
-            &provider,
-            &tools,
-            1,
-            CTX,
+            &handle,
             Duration::from_secs(3600),
             None,
             &sock_path,

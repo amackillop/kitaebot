@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Actor message protocol.
 //!
 //! [`Envelope`] is the single message type the agent actor receives.
@@ -21,7 +19,10 @@ use crate::dispatch::Reply;
 #[derive(Debug, Clone)]
 pub enum ChannelSource {
     Heartbeat,
-    GitHub { pr_number: u32 },
+    #[allow(dead_code)]
+    GitHub {
+        pr_number: u32,
+    },
     Socket,
     Telegram,
 }

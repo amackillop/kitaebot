@@ -9,14 +9,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::time::SystemTime;
 
-use tokio_util::sync::CancellationToken;
-
-use crate::agent;
-use crate::config::ContextConfig;
-use crate::error::{Error, HeartbeatError};
+use crate::error::HeartbeatError;
 use crate::lock::Lock;
-use crate::provider::Provider;
-use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// Why a heartbeat was skipped (not an error).
@@ -40,68 +34,55 @@ impl fmt::Display for SkipReason {
     }
 }
 
-/// Result of a heartbeat run.
-#[derive(Debug)]
-pub enum Outcome {
-    /// Agent processed tasks and produced a response.
-    Executed(String),
-    /// Heartbeat was skipped for a known reason.
+/// A heartbeat that is ready to execute.
+///
+/// Holds the heartbeat lock for the duration of its lifetime, so the
+/// caller must keep it alive until the agent response comes back.
+pub struct Ready {
+    pub prompt: String,
+    _lock: Lock,
+}
+
+/// Result of [`prepare`].
+pub enum Prepared {
+    /// Prompt built, lock held. Send `prompt` to the agent.
+    Ready(Ready),
+    /// Nothing to do.
     Skipped(SkipReason),
 }
 
-/// Run a single heartbeat cycle.
+/// Acquire lock, read tasks, build prompt. Returns [`Prepared`].
 ///
-/// # Flow
-/// 1. Acquire heartbeat lock — skip if another heartbeat is running
-/// 2. Read `HEARTBEAT.md` — skip if missing
-/// 3. Parse active tasks — skip if none
-/// 4. Load persistent session
-/// 5. Build prompt and run one agent turn
-/// 6. Save session and append result to `memory/HISTORY.md`
-pub async fn run<P: Provider>(
-    workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: ContextConfig,
-) -> Result<Outcome, Error> {
-    let Ok(_lock) = Lock::acquire(&workspace.heartbeat_lock_path()) else {
-        return Ok(Outcome::Skipped(SkipReason::HeartbeatLocked));
+/// The returned [`Ready`] holds the heartbeat lock. Drop it after
+/// the agent responds and history is written.
+pub fn prepare(workspace: &Workspace) -> Result<Prepared, HeartbeatError> {
+    let Ok(lock) = Lock::acquire(&workspace.heartbeat_lock_path()) else {
+        return Ok(Prepared::Skipped(SkipReason::HeartbeatLocked));
     };
 
     let content = match fs::read_to_string(workspace.heartbeat_path()) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Outcome::Skipped(SkipReason::NoHeartbeatFile));
+            return Ok(Prepared::Skipped(SkipReason::NoHeartbeatFile));
         }
-        Err(e) => return Err(HeartbeatError::ReadTasks(e).into()),
+        Err(e) => return Err(HeartbeatError::ReadTasks(e)),
     };
 
     let tasks = parse_active_tasks(&content);
     if tasks.is_empty() {
-        return Ok(Outcome::Skipped(SkipReason::NoActiveTasks));
+        return Ok(Prepared::Skipped(SkipReason::NoActiveTasks));
     }
 
     let prompt = build_prompt(&tasks);
-    let session_path = workspace.heartbeat_session_path();
+    Ok(Prepared::Ready(Ready {
+        prompt,
+        _lock: lock,
+    }))
+}
 
-    let cancel = CancellationToken::new();
-    let response = agent::process_message(
-        &session_path,
-        workspace,
-        &prompt,
-        provider,
-        tools,
-        max_iterations,
-        ctx,
-        None,
-        &cancel,
-    )
-    .await?;
-
-    append_history(&workspace.history_path(), &response).map_err(HeartbeatError::WriteHistory)?;
-
-    Ok(Outcome::Executed(response))
+/// Append a timestamped response to `memory/HISTORY.md`.
+pub fn finish(workspace: &Workspace, response: &str) -> Result<(), HeartbeatError> {
+    append_history(&workspace.history_path(), response).map_err(HeartbeatError::WriteHistory)
 }
 
 /// Extract unchecked task lines (`- [ ]`) from markdown content.
@@ -173,10 +154,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ContextConfig;
-    use crate::provider::MockProvider;
-    use crate::session::Session;
-    use crate::types::Response;
 
     #[test]
     fn parse_finds_unchecked_tasks() {
@@ -254,12 +231,7 @@ mod tests {
         assert_eq!(content.matches("Heartbeat:").count(), 2);
     }
 
-    // -- integration tests for heartbeat::run --
-
-    const CTX: ContextConfig = ContextConfig {
-        max_tokens: 200_000,
-        budget_percent: 80,
-    };
+    // -- prepare tests --
 
     fn workspace() -> (tempfile::TempDir, Workspace) {
         let dir = tempfile::tempdir().unwrap();
@@ -267,69 +239,47 @@ mod tests {
         (dir, ws)
     }
 
-    #[tokio::test]
-    async fn run_skips_when_no_heartbeat_file() {
+    #[test]
+    fn prepare_skips_when_no_heartbeat_file() {
         let (_dir, ws) = workspace();
-        let provider = MockProvider::new(vec![]);
-        let tools = Tools::default();
-        let outcome = run(&ws, &provider, &tools, 1, CTX).await.unwrap();
+        let result = prepare(&ws).unwrap();
         assert!(matches!(
-            outcome,
-            Outcome::Skipped(SkipReason::NoHeartbeatFile)
+            result,
+            Prepared::Skipped(SkipReason::NoHeartbeatFile)
         ));
     }
 
-    #[tokio::test]
-    async fn run_skips_when_no_active_tasks() {
+    #[test]
+    fn prepare_skips_when_no_active_tasks() {
         let (_dir, ws) = workspace();
         fs::write(ws.heartbeat_path(), "- [x] Done\n- [x] Also done\n").unwrap();
-
-        let provider = MockProvider::new(vec![]);
-        let tools = Tools::default();
-        let outcome = run(&ws, &provider, &tools, 1, CTX).await.unwrap();
+        let result = prepare(&ws).unwrap();
         assert!(matches!(
-            outcome,
-            Outcome::Skipped(SkipReason::NoActiveTasks)
+            result,
+            Prepared::Skipped(SkipReason::NoActiveTasks)
         ));
     }
 
-    #[tokio::test]
-    async fn run_skips_when_heartbeat_lock_held() {
+    #[test]
+    fn prepare_skips_when_locked() {
         let (_dir, ws) = workspace();
         fs::write(ws.heartbeat_path(), "- [ ] Pending task\n").unwrap();
-        // Hold the heartbeat lock for the duration of this test.
         let _lock = Lock::acquire(&ws.heartbeat_lock_path()).unwrap();
-
-        let provider = MockProvider::new(vec![]);
-        let tools = Tools::default();
-        let outcome = run(&ws, &provider, &tools, 1, CTX).await.unwrap();
+        let result = prepare(&ws).unwrap();
         assert!(matches!(
-            outcome,
-            Outcome::Skipped(SkipReason::HeartbeatLocked)
+            result,
+            Prepared::Skipped(SkipReason::HeartbeatLocked)
         ));
     }
 
-    #[tokio::test]
-    async fn run_executes_and_writes_history() {
+    #[test]
+    fn prepare_returns_ready_with_prompt() {
         let (_dir, ws) = workspace();
         fs::write(ws.heartbeat_path(), "- [ ] Check builds\n").unwrap();
-
-        let provider = MockProvider::new(vec![Ok(Response::Text("All builds green".into()))]);
-        let tools = Tools::default();
-        let outcome = run(&ws, &provider, &tools, 1, CTX).await.unwrap();
-
-        match outcome {
-            Outcome::Executed(ref text) => assert_eq!(text, "All builds green"),
-            other @ Outcome::Skipped(_) => panic!("expected Executed, got {other:?}"),
+        let result = prepare(&ws).unwrap();
+        match result {
+            Prepared::Ready(ready) => assert!(ready.prompt.contains("Check builds")),
+            Prepared::Skipped(reason) => panic!("expected Ready, got Skipped({reason})"),
         }
-
-        let history = fs::read_to_string(ws.history_path()).unwrap();
-        assert!(history.contains("All builds green"));
-        assert!(history.contains("Heartbeat:"));
-
-        // Session persisted to disk.
-        assert!(ws.heartbeat_session_path().exists());
-        let session = Session::load(&ws.heartbeat_session_path()).unwrap();
-        assert!(!session.messages().is_empty());
     }
 }

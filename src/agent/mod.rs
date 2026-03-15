@@ -8,9 +8,6 @@ mod actor;
 pub(crate) mod envelope;
 mod handle;
 
-#[allow(unused_imports)]
-pub use envelope::ChannelSource;
-#[allow(unused_imports)]
 pub use handle::AgentHandle;
 
 use std::future::Future;

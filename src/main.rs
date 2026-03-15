@@ -22,6 +22,8 @@ mod tools;
 mod types;
 mod workspace;
 
+use std::sync::Arc;
+
 use config::Config;
 use tracing::{error, info, warn};
 use workspace::Workspace;
@@ -65,12 +67,19 @@ async fn main() {
                 telegram = config.telegram.enabled,
                 "Daemon starting",
             );
-            daemon::run(
-                &workspace,
-                &rt.provider,
-                &rt.tools,
+
+            let workspace = Arc::new(workspace);
+            let handle = agent::AgentHandle::spawn(
+                workspace.clone(),
+                Arc::new(rt.provider),
+                Arc::new(rt.tools),
                 config.agent.max_iterations,
                 config.context,
+            );
+
+            daemon::run(
+                &workspace,
+                &handle,
                 config.heartbeat.interval_secs,
                 rt.telegram.as_ref(),
                 socket_path,

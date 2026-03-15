@@ -16,12 +16,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::agent::AgentHandle;
+use crate::agent::envelope::ChannelSource;
 use crate::commands;
-use crate::config::ContextConfig;
-use crate::dispatch;
-use crate::provider::Provider;
-use crate::tools::Tools;
-use crate::workspace::Workspace;
 
 // ── Protocol types ──────────────────────────────────────────────────
 
@@ -48,14 +45,7 @@ enum ServerMsg {
 /// If the socket directory does not exist (no `RuntimeDirectory`),
 /// logs an info message and parks forever so the daemon can still
 /// run without the socket channel.
-pub async fn listen<P: Provider>(
-    socket_path: &Path,
-    workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: ContextConfig,
-) -> ! {
+pub async fn listen(socket_path: &Path, session_path: &Path, handle: &AgentHandle) -> ! {
     let path = socket_path;
 
     // Unlink stale socket left by a previous run.
@@ -78,16 +68,7 @@ pub async fn listen<P: Provider>(
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                serve(
-                    &listener,
-                    stream,
-                    workspace,
-                    provider,
-                    tools,
-                    max_iterations,
-                    ctx,
-                )
-                .await;
+                serve(&listener, stream, session_path, handle).await;
             }
             Err(e) => error!("Socket accept error: {e}"),
         }
@@ -97,20 +78,17 @@ pub async fn listen<P: Provider>(
 // ── Connection handling ─────────────────────────────────────────────
 
 /// Serve a single client, rejecting concurrent connections.
-async fn serve<P: Provider>(
+async fn serve(
     listener: &UnixListener,
     stream: UnixStream,
-    workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: ContextConfig,
+    session_path: &Path,
+    handle: &AgentHandle,
 ) {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
     // Greeting
-    let greeting = commands::greeting(&workspace.socket_session_path());
+    let greeting = commands::greeting(session_path);
     if send(&mut writer, &ServerMsg::Greeting { content: greeting })
         .await
         .is_err()
@@ -121,7 +99,6 @@ async fn serve<P: Provider>(
     // Message loop: read from client, reject new connections concurrently.
     let mut verbose = false;
     let mut line = String::new();
-    let (tx, mut rx) = mpsc::channel(64);
     loop {
         line.clear();
         tokio::select! {
@@ -144,22 +121,13 @@ async fn serve<P: Provider>(
             continue;
         };
 
-        let session_path = workspace.socket_session_path();
+        let (tx, mut rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
 
         let result = {
-            let dispatch_fut = dispatch::dispatch(
-                &input,
-                &session_path,
-                workspace,
-                provider,
-                tools,
-                max_iterations,
-                ctx,
-                Some(&tx),
-                &cancel,
-            );
-            tokio::pin!(dispatch_fut);
+            let reply_fut =
+                handle.send_message(ChannelSource::Socket, input, Some(tx), cancel.clone());
+            tokio::pin!(reply_fut);
 
             // Drain activity events while dispatch runs. Monitor the
             // client reader so we can cancel on disconnect.
@@ -184,7 +152,7 @@ async fn serve<P: Provider>(
                             }
                         }
                     }
-                    result = &mut dispatch_fut => break result,
+                    result = &mut reply_fut => break result,
                 }
             }
         };
@@ -288,8 +256,10 @@ mod tests {
     use super::*;
     use crate::config::ContextConfig;
     use crate::provider::MockProvider;
+    use crate::tools::Tools;
     use crate::types::Response;
     use crate::workspace::Workspace;
+    use std::sync::Arc;
     use tokio::io::BufReader as TokioBufReader;
     use tokio::net::unix::OwnedWriteHalf as ClientWriteHalf;
 
@@ -361,26 +331,33 @@ mod tests {
     ) {
         let ws_dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(ws_dir.path().to_path_buf()).unwrap();
-        let provider = MockProvider::new(responses);
-        let tools = crate::tools::Tools::default();
+        let session_path = ws.session_path();
+
+        let handle = AgentHandle::spawn(
+            Arc::new(ws),
+            Arc::new(MockProvider::new(responses)),
+            Arc::new(Tools::default()),
+            1,
+            CTX,
+        );
 
         let sock_dir = tempfile::tempdir().unwrap();
         let sock_path = sock_dir.path().join("test.sock");
 
         let path = sock_path.clone();
-        let handle = tokio::spawn(async move {
-            listen(&path, &ws, &provider, &tools, 1, CTX).await;
+        let join = tokio::spawn(async move {
+            listen(&path, &session_path, &handle).await;
         });
 
         let client = TestClient::connect(&sock_path).await;
-        (client, handle, ws_dir, sock_dir)
+        (client, join, ws_dir, sock_dir)
     }
 
     // ── Integration tests ───────────────────────────────────────────
 
     #[tokio::test]
     async fn greeting_then_message_roundtrip() {
-        let (mut client, handle, _ws, _sock) =
+        let (mut client, join, _ws, _sock) =
             spawn_listener(vec![Ok(Response::Text("pong".into()))]).await;
 
         assert!(matches!(client.recv().await, ServerMsg::Greeting { .. }));
@@ -392,12 +369,12 @@ mod tests {
             other => panic!("expected Response, got {other:?}"),
         }
 
-        handle.abort();
+        join.abort();
     }
 
     #[tokio::test]
     async fn second_client_is_rejected() {
-        let (mut client, handle, _ws, sock_dir) =
+        let (mut client, join, _ws, sock_dir) =
             spawn_listener(vec![Ok(Response::Text("ok".into())); 5]).await;
 
         client.recv().await; // greeting
@@ -410,12 +387,12 @@ mod tests {
         assert!(matches!(client2.recv().await, ServerMsg::Error { .. }));
 
         drop(client);
-        handle.abort();
+        join.abort();
     }
 
     #[tokio::test]
     async fn invalid_json_returns_error() {
-        let (mut client, handle, _ws, _sock) = spawn_listener(vec![]).await;
+        let (mut client, join, _ws, _sock) = spawn_listener(vec![]).await;
 
         client.recv().await; // greeting
 
@@ -426,7 +403,7 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         }
 
-        handle.abort();
+        join.abort();
     }
 
     // ── Unit tests ──────────────────────────────────────────────────

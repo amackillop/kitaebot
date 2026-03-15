@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Typed handle for communicating with the agent actor.
 //!
 //! Follows [Ryhl's actor pattern](https://ryhl.io/blog/actors-with-tokio/):

@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 use tracing::error;
 
+use crate::agent;
 use crate::config::ContextConfig;
 use crate::context;
 use crate::dispatch::Reply;
@@ -67,9 +68,10 @@ pub fn greeting(session_path: &Path) -> String {
 
 /// Execute a slash command.
 ///
-/// Loads the session from disk, runs the command, and saves when the
-/// command modifies it. Returns a [`Reply`] on success or an error
-/// message on failure.
+/// Called by the agent actor. `session_path` is the unified session
+/// managed by the actor. `/heartbeat` calls `agent::process_message`
+/// directly rather than going through the handle (which would deadlock).
+#[allow(clippy::too_many_arguments)]
 pub async fn execute<P: Provider>(
     cmd: SlashCommand,
     session_path: &Path,
@@ -119,9 +121,34 @@ pub async fn execute<P: Provider>(
             )))
         }
         SlashCommand::Heartbeat => {
-            match heartbeat::run(workspace, provider, tools, max_iterations, ctx).await {
-                Ok(heartbeat::Outcome::Executed(response)) => Ok(Reply::text(response)),
-                Ok(heartbeat::Outcome::Skipped(reason)) => {
+            use tokio_util::sync::CancellationToken;
+
+            match heartbeat::prepare(workspace) {
+                Ok(heartbeat::Prepared::Ready(ready)) => {
+                    let cancel = CancellationToken::new();
+                    match agent::process_message(
+                        session_path,
+                        workspace,
+                        &ready.prompt,
+                        provider,
+                        tools,
+                        max_iterations,
+                        ctx,
+                        None,
+                        &cancel,
+                    )
+                    .await
+                    {
+                        Ok(response) => {
+                            if let Err(e) = heartbeat::finish(workspace, &response) {
+                                error!("Failed to write heartbeat history: {e}");
+                            }
+                            Ok(Reply::text(response))
+                        }
+                        Err(e) => Err(format!("Heartbeat failed: {e}")),
+                    }
+                }
+                Ok(heartbeat::Prepared::Skipped(reason)) => {
                     Ok(Reply::text(format!("Skipped: {reason}")))
                 }
                 Err(e) => Err(format!("Heartbeat failed: {e}")),

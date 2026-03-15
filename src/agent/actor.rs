@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Agent actor run loop.
 //!
 //! The [`Agent`] struct owns the session, provider, tools, and config.

@@ -1,21 +1,9 @@
-//! Input classification and routing.
+//! Input classification types.
 //!
-//! Every channel funnels user text through [`dispatch`], which classifies
-//! it as a slash command or agent message and routes accordingly. The
-//! [`Input`] type makes the fork explicit in the type system.
+//! Every channel funnels user text through the agent actor, which
+//! classifies it as a slash command or agent message using [`Input`].
 
-use std::path::Path;
-
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-
-use crate::activity::Activity;
-use crate::agent;
-use crate::commands::{self, SlashCommand};
-use crate::config::ContextConfig;
-use crate::provider::Provider;
-use crate::tools::Tools;
-use crate::workspace::Workspace;
+use crate::commands::SlashCommand;
 
 /// Classified user input.
 pub enum Input<'a> {
@@ -67,51 +55,6 @@ impl Reply {
             content,
             preformatted: true,
         }
-    }
-}
-
-/// Route user input to the appropriate handler.
-///
-/// Returns `Ok(reply)` on success or `Err(message)` on failure.
-#[allow(clippy::too_many_arguments)]
-pub async fn dispatch<P: Provider>(
-    input: &str,
-    session_path: &Path,
-    workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: ContextConfig,
-    activity_tx: Option<&mpsc::Sender<Activity>>,
-    cancel: &CancellationToken,
-) -> Result<Reply, String> {
-    match Input::parse(input).map_err(|_| format!("Unknown command: {input}"))? {
-        Input::Command(cmd) => {
-            commands::execute(
-                cmd,
-                session_path,
-                workspace,
-                provider,
-                tools,
-                max_iterations,
-                ctx,
-            )
-            .await
-        }
-        Input::Message(text) => agent::process_message(
-            session_path,
-            workspace,
-            text,
-            provider,
-            tools,
-            max_iterations,
-            ctx,
-            activity_tx,
-            cancel,
-        )
-        .await
-        .map(Reply::text)
-        .map_err(|e| e.to_string()),
     }
 }
 

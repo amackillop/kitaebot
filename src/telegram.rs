@@ -1,8 +1,9 @@
 //! Telegram Bot API channel.
 //!
-//! Long-polls `getUpdates` for incoming messages, runs them through the
-//! agent, and sends responses back via `sendMessage`. Designed to run as
-//! an async loop alongside the heartbeat in the daemon's `tokio::select!`.
+//! Long-polls `getUpdates` for incoming messages, sends them to the
+//! agent actor via [`AgentHandle`], and sends responses back via
+//! `sendMessage`. Designed to run as an async loop alongside the
+//! heartbeat in the daemon's `tokio::select!`.
 
 use std::time::Duration;
 
@@ -10,14 +11,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::activity::Activity;
+use crate::agent::AgentHandle;
+use crate::agent::envelope::ChannelSource;
 use crate::clients::telegram::TelegramClient;
-use crate::config::ContextConfig;
-use crate::dispatch;
 use crate::error::TelegramError;
-use crate::provider::Provider;
-use crate::tools::Tools;
-use crate::workspace::Workspace;
 
 // --- Channel ---
 
@@ -114,18 +111,10 @@ fn is_transient(err: &TelegramError) -> bool {
 /// This future never resolves normally — it loops forever, yielding at
 /// each `getUpdates` call. The parent `tokio::select!` drops it on
 /// shutdown.
-pub async fn poll_loop<P: Provider>(
-    channel: &TelegramChannel,
-    workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: ContextConfig,
-) -> ! {
+pub async fn poll_loop(channel: &TelegramChannel, handle: &AgentHandle) -> ! {
     info!(chat_id = channel.chat_id(), "Telegram poller starting");
     let mut offset: i64 = 0;
     let mut verbose = false;
-    let (tx, mut rx) = mpsc::channel(64);
 
     loop {
         let updates = match channel.client.poll_updates(offset, 30).await {
@@ -163,36 +152,17 @@ pub async fn poll_loop<P: Provider>(
                 continue;
             };
 
-            handle_message(
-                channel,
-                workspace,
-                provider,
-                tools,
-                max_iterations,
-                ctx,
-                &text,
-                &mut verbose,
-                &tx,
-                &mut rx,
-            )
-            .await;
+            handle_message(channel, handle, &text, &mut verbose).await;
         }
     }
 }
 
 /// Process a single authorized text message.
-#[allow(clippy::too_many_arguments)]
-async fn handle_message<P: Provider>(
+async fn handle_message(
     channel: &TelegramChannel,
-    workspace: &Workspace,
-    provider: &P,
-    tools: &Tools,
-    max_iterations: usize,
-    ctx: ContextConfig,
+    handle: &AgentHandle,
     text: &str,
     verbose: &mut bool,
-    tx: &mpsc::Sender<Activity>,
-    rx: &mut mpsc::Receiver<Activity>,
 ) {
     let trimmed = text.trim();
 
@@ -206,22 +176,17 @@ async fn handle_message<P: Provider>(
         return;
     }
 
-    let session_path = workspace.telegram_session_path();
-
+    let (tx, mut rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
+
     let result = {
-        let dispatch_fut = dispatch::dispatch(
-            trimmed,
-            &session_path,
-            workspace,
-            provider,
-            tools,
-            max_iterations,
-            ctx,
+        let reply_fut = handle.send_message(
+            ChannelSource::Telegram,
+            trimmed.to_string(),
             Some(tx),
-            &cancel,
+            cancel,
         );
-        tokio::pin!(dispatch_fut);
+        tokio::pin!(reply_fut);
 
         loop {
             tokio::select! {
@@ -233,7 +198,7 @@ async fn handle_message<P: Provider>(
                         error!("Failed to send activity: {e}");
                     }
                 }
-                result = &mut dispatch_fut => break result,
+                result = &mut reply_fut => break result,
             }
         }
     };
@@ -410,10 +375,19 @@ mod tests {
         TelegramChannel::new(fake_client(state), CHAT_ID)
     }
 
-    fn workspace() -> (tempfile::TempDir, Workspace) {
+    fn spawn_handle(
+        responses: Vec<Result<AgentResponse, crate::error::ProviderError>>,
+    ) -> (AgentHandle, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        (dir, ws)
+        let handle = AgentHandle::spawn(
+            Arc::new(ws),
+            Arc::new(MockProvider::new(responses)),
+            Arc::new(Tools::default()),
+            1,
+            CTX,
+        );
+        (handle, dir)
     }
 
     // -- Pure unit tests --
@@ -538,27 +512,12 @@ mod tests {
 
     #[tokio::test]
     async fn handle_message_dispatches_and_sends_reply() {
-        let (_dir, ws) = workspace();
         let state = FakeTelegram::new(vec![Ok(())]);
         let ch = channel(&state);
-        let provider = MockProvider::new(vec![Ok(AgentResponse::Text("pong".into()))]);
-        let tools = Tools::default();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (handle, _dir) = spawn_handle(vec![Ok(AgentResponse::Text("pong".into()))]);
         let mut verbose = false;
 
-        handle_message::<MockProvider>(
-            &ch,
-            &ws,
-            &provider,
-            &tools,
-            1,
-            CTX,
-            "ping",
-            &mut verbose,
-            &tx,
-            &mut rx,
-        )
-        .await;
+        handle_message(&ch, &handle, "ping", &mut verbose).await;
 
         let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -568,27 +527,12 @@ mod tests {
 
     #[tokio::test]
     async fn handle_message_sends_preformatted_for_preformatted_reply() {
-        let (_dir, ws) = workspace();
         let state = FakeTelegram::new(vec![Ok(())]);
         let ch = channel(&state);
-        let provider = MockProvider::new(vec![]);
-        let tools = Tools::default();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (handle, _dir) = spawn_handle(vec![]);
         let mut verbose = false;
 
-        handle_message::<MockProvider>(
-            &ch,
-            &ws,
-            &provider,
-            &tools,
-            1,
-            CTX,
-            "/stats",
-            &mut verbose,
-            &tx,
-            &mut rx,
-        )
-        .await;
+        handle_message(&ch, &handle, "/stats", &mut verbose).await;
 
         let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -599,75 +543,30 @@ mod tests {
 
     #[tokio::test]
     async fn handle_message_verbose_toggle() {
-        let (_dir, ws) = workspace();
         let state = FakeTelegram::new(vec![Ok(()), Ok(())]);
         let ch = channel(&state);
-        let provider = MockProvider::new(vec![]);
-        let tools = Tools::default();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (handle, _dir) = spawn_handle(vec![]);
         let mut verbose = false;
 
-        handle_message::<MockProvider>(
-            &ch,
-            &ws,
-            &provider,
-            &tools,
-            1,
-            CTX,
-            "/verbose",
-            &mut verbose,
-            &tx,
-            &mut rx,
-        )
-        .await;
+        handle_message(&ch, &handle, "/verbose", &mut verbose).await;
         assert!(verbose);
         let sent = state.sent_messages();
         assert_eq!(sent[0].text, "Verbose: on");
 
-        handle_message::<MockProvider>(
-            &ch,
-            &ws,
-            &provider,
-            &tools,
-            1,
-            CTX,
-            "/verbose",
-            &mut verbose,
-            &tx,
-            &mut rx,
-        )
-        .await;
+        handle_message(&ch, &handle, "/verbose", &mut verbose).await;
         assert!(!verbose);
         let sent = state.sent_messages();
         assert_eq!(sent[1].text, "Verbose: off");
-
-        // Provider was never called — /verbose is intercepted before dispatch.
-        assert_eq!(provider.call_count(), 0);
     }
 
     #[tokio::test]
     async fn handle_message_unknown_command_sends_error() {
-        let (_dir, ws) = workspace();
         let state = FakeTelegram::new(vec![Ok(())]);
         let ch = channel(&state);
-        let provider = MockProvider::new(vec![]);
-        let tools = Tools::default();
-        let (tx, mut rx) = mpsc::channel(64);
+        let (handle, _dir) = spawn_handle(vec![]);
         let mut verbose = false;
 
-        handle_message::<MockProvider>(
-            &ch,
-            &ws,
-            &provider,
-            &tools,
-            1,
-            CTX,
-            "/bogus",
-            &mut verbose,
-            &tx,
-            &mut rx,
-        )
-        .await;
+        handle_message(&ch, &handle, "/bogus", &mut verbose).await;
 
         let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -679,7 +578,6 @@ mod tests {
     #[tokio::test]
     async fn poll_loop_dispatches_valid_message() {
         tokio::time::pause();
-        let (_dir, ws) = workspace();
         let state = FakeTelegram::new(vec![Ok(())]).with_poll_results(vec![vec![Update {
             update_id: 1,
             message: Some(TgMessage {
@@ -689,14 +587,9 @@ mod tests {
             }),
         }]]);
         let ch = channel(&state);
-        let provider = MockProvider::new(vec![Ok(AgentResponse::Text("reply".into()))]);
-        let tools = Tools::default();
+        let (handle, _dir) = spawn_handle(vec![Ok(AgentResponse::Text("reply".into()))]);
 
-        let _ = tokio::time::timeout(
-            Duration::from_millis(100),
-            poll_loop::<MockProvider>(&ch, &ws, &provider, &tools, 1, CTX),
-        )
-        .await;
+        let _ = tokio::time::timeout(Duration::from_millis(100), poll_loop(&ch, &handle)).await;
 
         let sent = state.sent_messages();
         assert_eq!(sent.len(), 1);
@@ -706,7 +599,6 @@ mod tests {
     #[tokio::test]
     async fn poll_loop_filters_irrelevant_updates() {
         tokio::time::pause();
-        let (_dir, ws) = workspace();
         let state = FakeTelegram::new(vec![]).with_poll_results(vec![vec![
             Update {
                 update_id: 1,
@@ -730,16 +622,10 @@ mod tests {
             },
         ]]);
         let ch = channel(&state);
-        let provider = MockProvider::new(vec![]);
-        let tools = Tools::default();
+        let (handle, _dir) = spawn_handle(vec![]);
 
-        let _ = tokio::time::timeout(
-            Duration::from_millis(100),
-            poll_loop::<MockProvider>(&ch, &ws, &provider, &tools, 1, CTX),
-        )
-        .await;
+        let _ = tokio::time::timeout(Duration::from_millis(100), poll_loop(&ch, &handle)).await;
 
         assert!(state.sent_messages().is_empty());
-        assert_eq!(provider.call_count(), 0);
     }
 }

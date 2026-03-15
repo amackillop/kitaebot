@@ -55,24 +55,8 @@ impl Workspace {
     }
 
     /// Path to the unified agent session file.
-    #[allow(dead_code)]
     pub fn session_path(&self) -> PathBuf {
         self.0.join("sessions/session.json")
-    }
-
-    /// Path to the heartbeat session file.
-    pub fn heartbeat_session_path(&self) -> PathBuf {
-        self.0.join("sessions/heartbeat.json")
-    }
-
-    /// Path to the Telegram channel session file.
-    pub fn telegram_session_path(&self) -> PathBuf {
-        self.0.join("sessions/telegram.json")
-    }
-
-    /// Path to the Unix socket channel session file.
-    pub fn socket_session_path(&self) -> PathBuf {
-        self.0.join("sessions/socket.json")
     }
 
     /// Path to the heartbeat task file.
