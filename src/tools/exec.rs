@@ -467,6 +467,15 @@ impl Tool for Exec {
 
             let cwd = resolve_working_dir(&self.workspace_root, args.working_dir.as_deref())?;
 
+            if !cwd.is_dir() {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "working directory does not exist: {}",
+                    cwd.strip_prefix(&self.workspace_root)
+                        .unwrap_or(&cwd)
+                        .display(),
+                )));
+            }
+
             debug!(command = %args.command, cwd = %cwd.display(), "Executing command");
 
             let mut cmd = Command::new("/bin/sh");
@@ -918,6 +927,18 @@ mod tests {
         let args = serde_json::json!({"command": "pwd", "working_dir": "../escape"});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::Blocked(_))));
+    }
+
+    #[tokio::test]
+    async fn test_exec_working_dir_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = Exec::new(dir.path(), &ExecConfig::default());
+        let args = serde_json::json!({"command": "pwd", "working_dir": "no_such_dir"});
+        let result = tool.execute(args).await;
+        assert!(
+            matches!(&result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("does not exist")),
+            "expected 'does not exist' error, got: {result:?}",
+        );
     }
 
     // ── Nix deny rules ──────────────────────────────────────────────
