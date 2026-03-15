@@ -1,5 +1,6 @@
 //! `git_clone` tool — clone a repository into the workspace.
 
+use std::fmt::Write;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -72,8 +73,8 @@ impl GitClone {
 
         // Filesystem effects: check target doesn't exist, create projects dir.
         // repo_name is always the last arg: ["clone", "--", url, name]
-        let repo_name = &call.args[3];
-        let target = call.cwd.join(repo_name);
+        let repo_name = call.args[3].clone();
+        let target = call.cwd.join(&repo_name);
 
         if target.exists() {
             return Err(ToolError::ExecutionFailed(format!(
@@ -85,7 +86,12 @@ impl GitClone {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("mkdir projects/: {e}")))?;
 
-        self.0.exec_git(call, true).await?.format()
+        let mut output = self.0.exec_git(call, true).await?.format()?;
+        let _ = write!(
+            output,
+            "\nCloned to projects/{repo_name} (use working_dir: \"projects/{repo_name}\" with exec)"
+        );
+        Ok(output)
     }
 }
 

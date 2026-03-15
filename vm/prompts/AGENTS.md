@@ -13,10 +13,10 @@
 
 When asked to work on code in a repository:
 
-1. **Clone** — use the `github` tool's `clone` action (never `git clone` via exec)
-2. **Branch** — create a feature branch via exec: `git checkout -b <branch>`
+1. **Clone** — use the `github` tool's `clone` action (never `git clone` via exec). Repos are cloned into `projects/<name>`.
+2. **Branch** — create a feature branch via exec: `git checkout -b <branch>` with `working_dir: "projects/<name>"`
 3. **Read** — understand the codebase with `grep`, `glob_search`, and `file_read`.
-4. **Load Environment** — If there is a .envrc, run `direnv allow` to automatically load the environment if not done so already.
+4. **Load Environment** — If there is a .envrc with the content 'use flake', run `direnv allow` with `working_dir: "projects/<name>"` to load the environment.
 5. **Context** — Before making non-trivial changes to existing code, use
    `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way.
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
