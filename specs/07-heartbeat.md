@@ -11,8 +11,8 @@ These are complementary, not interchangeable:
 | Aspect | Heartbeat | Cron |
 |--------|-----------|------|
 | **Timing** | Approximate intervals | Exact schedules |
-| **Session** | Persistent (conversational continuity) | Isolated (no context) |
-| **Context** | Aware of prior heartbeat history | Standalone |
+| **Session** | Unified (conversational continuity) | Isolated (no context) |
+| **Context** | Aware of full conversation history | Standalone |
 | **Batching** | Multiple checks per turn | One job per execution |
 | **Decision** | Agent decides what needs attention | Executes unconditionally |
 
@@ -23,41 +23,32 @@ One heartbeat replaces many small polling tasks. "Check email, review calendar, 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│            kitaebot run (daemon)            │
-│                                             │
-│  ┌───────────────────────────────────────┐  │
-│  │        tokio::interval (30min)        │  │
-│  └───────────────────┬───────────────────┘  │
-│                      │                      │
-│                      ▼                      │
-│  1. Acquire heartbeat.lock — skip if held   │
-│  2. Read HEARTBEAT.md — skip if missing     │
-│  3. Parse active tasks — skip if none       │
-│  4. Load sessions/heartbeat.json            │
-│  5. Build prompt from active task lines     │
-│  6. Run agent turn (persistent session)     │
-│  7. Save session                            │
-│  8. Append result to memory/HISTORY.md      │
-│  9. Release heartbeat.lock                  │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│            kitaebot run (daemon)             │
+│                                              │
+│  ┌────────────────────────────────────────┐  │
+│  │     tokio::interval (configurable)     │  │
+│  └──────────────────┬─────────────────────┘  │
+│                     │                        │
+│                     ▼                        │
+│  1. Send "/heartbeat" through AgentHandle    │
+│  2. Actor classifies as slash command        │
+│  3. /heartbeat handler:                      │
+│     a. prepare() — read HEARTBEAT.md         │
+│     b. Skip if no file or no active tasks    │
+│     c. Run agent turn with heartbeat prompt  │
+│     d. finish() — append to HISTORY.md       │
+│  4. Reply logged, errors retried next tick   │
+└──────────────────────────────────────────────┘
 ```
 
-The heartbeat runs inside the daemon process (`kitaebot run`) as a `tokio::interval` timer, not as an external systemd timer. This simplifies deployment and lets the heartbeat share the daemon's provider and tool instances.
+The heartbeat is a thin timer loop (`poll_loop`) that sends `/heartbeat` through the `AgentHandle` on each tick. The actual logic lives in the `/heartbeat` slash command handler, which calls `heartbeat::prepare()` and `heartbeat::finish()`.
 
-## Persistent Session
+Because all messages go through the actor sequentially, there is no need for lock files. The actor naturally serializes heartbeat turns with messages from other channels.
 
-The heartbeat has its own persistent session at `sessions/heartbeat.json`. This gives it conversational continuity across runs — the agent can reason about changes over time:
+## Unified Session
 
-- "I checked the builds an hour ago and they were passing. Now they're failing."
-- "I already summarized these inbox files last cycle, skipping."
-- "The user asked me to watch this metric — it's been stable for 3 cycles."
-
-Without session persistence, every heartbeat is amnesiac and the agent repeats work or misses trends.
-
-### Session Growth
-
-The heartbeat session will grow unboundedly. This is a known concern, addressed later via summarization/truncation (see [04-session.md](04-session.md)). Don't make the heartbeat stateless to avoid this problem — the value of context outweighs the cost of managing session size.
+The heartbeat shares the unified session with all other channels. Messages are tagged with `[Heartbeat]` so the agent can distinguish heartbeat context from user messages. This gives the heartbeat full conversational continuity — it sees prior user conversations, GitHub reviews, and its own previous heartbeat results.
 
 ## HEARTBEAT.md Format
 
@@ -81,52 +72,35 @@ Tasks below are checked every 30 minutes.
 
 ## Prompt and Response
 
-The heartbeat prompt is built from active task lines only (`- [ ]` checkboxes), not the full file content. The agent is instructed:
+`heartbeat::prepare()` reads HEARTBEAT.md, extracts active task lines (`- [ ]` checkboxes), and builds a prompt. If there are no active tasks or no HEARTBEAT.md file, it returns `Prepared::Skipped`.
 
-> Read HEARTBEAT.md if it exists. Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
-
-If the agent responds with only `HEARTBEAT_OK`, nothing is delivered — the heartbeat is silent. If the response contains actionable content, it is appended to `memory/HISTORY.md` with a UTC timestamp.
+The `/heartbeat` command handler runs an agent turn with the prepared prompt. If the response contains actionable content, `heartbeat::finish()` appends it to `memory/HISTORY.md` with a UTC timestamp.
 
 ## Execution Flow
 
-See `src/heartbeat.rs` for the implementation. The core function:
+See `src/heartbeat.rs`. Three public entry points:
 
-```rust
-pub async fn run<P: Provider>(
-    workspace: &Workspace, provider: &P, tools: &Tools,
-) -> Result<Outcome, Error>
-```
-
-Returns `Outcome::Executed(response)` on success or `Outcome::Skipped(reason)` when there is nothing to do.
-
-The full agent response is appended to `memory/HISTORY.md` with a UTC timestamp formatted via Hinnant's `civil_from_days` (no `chrono` dependency).
+- **`prepare`** — reads HEARTBEAT.md, returns either a ready prompt or a skip reason
+- **`finish`** — appends a timestamped response to `memory/HISTORY.md`
+- **`poll_loop`** — ticks on a configurable interval, sends `/heartbeat` through the handle, logs errors and retries next tick
 
 ## Skipping Heartbeat
 
 Heartbeat is skipped (not an error) when:
 
-1. Another heartbeat holds `locks/heartbeat.lock`
-2. `HEARTBEAT.md` doesn't exist
-3. No active tasks (no unchecked `- [ ]` lines)
+1. `HEARTBEAT.md` doesn't exist
+2. No active tasks (no unchecked `- [ ]` lines)
 
-Checks run in this order. Skip reason is logged to stderr.
-
-Note: the heartbeat no longer checks for the REPL lock. The REPL and heartbeat use separate sessions and can run concurrently. The lock only prevents two heartbeat turns from overlapping.
-
-## Locking
-
-The heartbeat acquires `locks/heartbeat.lock` for the duration of a turn. This prevents overlapping heartbeat runs (e.g., if a turn takes longer than the interval).
-
-See `src/lock.rs` for the PID-based file lock implementation. RAII guard removes the lock on drop. Stale locks (dead PID) are automatically recovered.
+Skip reason is logged to stderr.
 
 ## Logging
 
 Executed heartbeats are logged to `memory/HISTORY.md`. Skip events are printed to stderr but not persisted.
 
 ```markdown
-[2024-02-21 14:30] Heartbeat: Checked project builds - all passing. No new inbox files.
+[2024-02-21T14:30:00Z] Heartbeat: Checked project builds - all passing. No new inbox files.
 
-[2024-02-21 15:30] Heartbeat: Found 3 new files in inbox, summarized and filed.
+[2024-02-21T15:30:00Z] Heartbeat: Found 3 new files in inbox, summarized and filed.
 ```
 
 ## Task Management
@@ -153,21 +127,17 @@ sed -i 's/- \[x\] specific task/- [ ] specific task/' HEARTBEAT.md
 sed -i '/specific task/d' HEARTBEAT.md
 ```
 
-## MVP Simplifications
+## Configuration
 
-1. **Fixed interval** — 30 minutes, not configurable
-2. **No task scheduling** — Just "do these things periodically"
-3. **Simple parsing** — Look for `- [ ]` checkboxes
-4. **Single execution** — No parallelism
-5. **No HEARTBEAT_OK suppression** — All responses logged (suppression added later)
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `heartbeat.interval_secs` | `1800` | Seconds between heartbeat ticks |
 
 ## Future Considerations
 
-- **Configurable interval** — Per-task or global
 - **Priority levels** — Some tasks more urgent
 - **Conditional tasks** — Only run if condition met
 - **Active hours** — Skip heartbeats outside configured time window (e.g., 9am–10pm)
 - **Resource limits** — Cap API usage per heartbeat
-- **HEARTBEAT_OK suppression** — Don't log or deliver when nothing needs attention
-- **Session summarization** — Compact old heartbeat history to prevent unbounded growth
+- **Session summarization** — Compact old history to prevent unbounded growth
 - **Cron jobs** — Separate scheduled task system for exact-time, isolated execution (complement to heartbeat)

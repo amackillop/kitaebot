@@ -67,9 +67,9 @@ The `activity` parameter is threaded as `Option<&mpsc::Sender<Activity>>`:
 
 - `agent::run_turn` — receives and emits events
 - `agent::process_message` — receives and forwards to `run_turn`
-- `dispatch::dispatch` — receives and forwards to `process_message`
+- `AgentHandle::send_message` — accepts `activity_tx` and forwards to the actor via `Envelope`
 
-All existing callers pass `None` initially. Channels that want events create an `mpsc::channel(64)` per dispatch call and pass the sender.
+Channels that want events create an `mpsc::channel(64)` per message and pass the sender. Channels that don't care pass `None`.
 
 ## Consumption
 

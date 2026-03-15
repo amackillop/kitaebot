@@ -30,13 +30,8 @@ Resolved via fallback chain:
 ├── USER.md                  # User profile (optional, user-created)
 ├── HEARTBEAT.md             # Periodic task definitions
 │
-├── sessions/                # Per-channel conversation history
-│   ├── telegram.json
-│   ├── socket.json
-│   └── heartbeat.json
-│
-├── locks/                   # PID lock files
-│   └── heartbeat.lock
+├── sessions/                # Session storage
+│   └── session.json         # Unified session (all channels)
 │
 ├── memory/                  # Shared long-term memory
 │   ├── HISTORY.md           # Heartbeat execution log
@@ -62,8 +57,7 @@ Loaded into the system prompt (concatenated in order):
 
 | File | Purpose | Who Edits |
 |------|---------|-----------|
-| `sessions/*.json` | Per-channel conversation state | Agent (automatic) |
-| `locks/*.lock` | Mutual exclusion per channel | Agent (automatic) |
+| `sessions/session.json` | Unified conversation state (all channels) | Agent (automatic) |
 | `memory/HISTORY.md` | Heartbeat execution log | Agent (automatic) |
 | `memory/daily-*.md` | Daily logs (timestamped entries) | Agent (automatic) |
 | `HEARTBEAT.md` | Periodic task definitions | User or agent |
@@ -96,7 +90,7 @@ The agent's system prompt includes the last 2 days of daily logs (today + yester
 
 On startup, `Workspace::init()` creates the directory tree and writes default templates for `SOUL.md` and `AGENTS.md` using `create_new` (O_EXCL) — existing files are never overwritten.
 
-Directories created: workspace root, `sessions/`, `locks/`, `memory/`, `projects/`.
+Directories created: workspace root, `sessions/`, `memory/`, `projects/`.
 
 ## Isolation Enforcement
 

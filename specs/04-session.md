@@ -4,38 +4,34 @@
 
 The session module persists conversation history across agent restarts. It maintains the context that makes the agent feel continuous rather than amnesiac.
 
-## Per-Channel Sessions
+## Unified Session
 
-Each channel has its own session file under `sessions/`:
+All channels share a single session file:
 
 ```
-sessions/
-├── telegram.json      # Telegram channel
-├── socket.json        # Unix socket channel
-├── heartbeat.json     # Periodic awareness checks
-└── repl.json          # Local debug/testing
+session.json      # Unified session for all channels
 ```
 
-Sessions are isolated — a Telegram conversation and a REPL session carry independent history. The agent sees different conversational context depending on which channel it's serving.
+Messages from different channels are tagged with their `ChannelSource` (e.g. `[Telegram]`, `[GitHub PR #42]`, `[Socket]`, `[Heartbeat]`) before being appended. The agent sees the full cross-channel conversation history, giving it continuity across all interfaces.
 
-### Why Separate Sessions?
+### Why Unified?
 
-1. **Different interaction contexts** — A Telegram conversation with the user is a different context than a heartbeat awareness check
-2. **No cross-contamination** — Debug REPL messages don't appear in Telegram context
-3. **Independent lifecycles** — Clearing the REPL session doesn't wipe Telegram history
-4. **Concurrent access** — Different channels can run turns simultaneously without session conflicts
+1. **Cross-channel context** — The agent knows about a GitHub PR review when responding on Telegram
+2. **No session locking** — The agent actor processes envelopes sequentially; only one turn runs at a time
+3. **Simpler persistence** — One file, one load/save path
+4. **Natural conversation flow** — The agent's full history is available regardless of which channel is active
 
 ### Shared Long-Term Memory
 
-While sessions are isolated, all channels share the workspace:
+In addition to the unified session, all channels share the workspace:
 
 | Layer | Scope | Example |
 |-------|-------|---------|
-| `sessions/<channel>.json` | Per-channel | Conversational history |
+| `session.json` | Unified | Tagged conversational history from all channels |
 | `memory/` | Shared | HISTORY.md, learnings, notes |
 | Workspace files | Shared | SOUL.md, HEARTBEAT.md, projects/ |
 
-A learning from a Telegram conversation (written to `memory/`) is visible during the next heartbeat or REPL session. The agent's knowledge persists across channels even though conversations don't.
+A learning from a Telegram conversation (written to `memory/`) is visible immediately in the next turn from any channel.
 
 ## Data Structure
 
@@ -45,7 +41,7 @@ Timestamps use a custom `Timestamp(u64)` type — seconds since Unix epoch — t
 
 ## Storage Format
 
-Session files live in `sessions/` under the workspace root. Example (`sessions/telegram.json`):
+The session file lives at `session.json` under the workspace root. Example:
 
 ```json
 {
@@ -85,23 +81,23 @@ Session files live in `sessions/` under the workspace root. Example (`sessions/t
 - **`Session::messages()`** — Return full message slice (no windowing)
 - **`Session::clear()`** — Wipe messages, preserve `created_at`
 
-The session module is channel-agnostic. It doesn't know which channel it serves — the caller provides the path (`sessions/telegram.json`, `sessions/repl.json`, etc).
+The session module is channel-agnostic. The caller (the agent actor) provides the path. With the unified session, there is only one path: `session.json`.
 
 ## File Safety
 
-Writes use atomic rename to prevent corruption: write to `sessions/<channel>.json.tmp`, then rename to `sessions/<channel>.json`.
+Writes use atomic rename to prevent corruption: write to `session.json.tmp`, then rename to `session.json`.
 
 ## Session Commands
 
 | Command | Action | Scope |
 |---------|--------|-------|
-| `/new` | Clear session, start fresh | REPL and socket |
+| `/new` | Clear session, start fresh | Any channel (clears the unified session) |
 
 ## MVP Simplifications
 
 1. **No consolidation** — Messages accumulate unbounded
 2. **No windowing** — All messages sent to LLM (until context limit)
-3. **No backup** — Single file per channel, atomic write
+3. **No backup** — Single file, atomic write
 4. **No encryption** — Plain JSON (workspace is private anyway)
 5. **No per-message timestamps** — Only session-level `created_at`/`updated_at`
 

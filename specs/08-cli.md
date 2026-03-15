@@ -17,13 +17,12 @@ The `kitaebot` CLI is the user-facing entry point. A single binary with subcomma
 $ kitaebot <command>
 
 Commands:
-  run        Start the daemon (Telegram poller + socket listener + heartbeat timer)
-  heartbeat  One-shot heartbeat cycle
+  run  Start daemon (heartbeat + channels)
 ```
 
 Bare invocation prints usage and exits with code 1.
 
-The `chat` subcommand (interactive REPL) has been removed. Interactive access is through `kchat` over the Unix socket channel, which provides identical functionality with activity event support.
+Interactive access is through `kchat` over the Unix socket channel. The `chat` and `heartbeat` subcommands have been removed — interactive access uses the socket, and heartbeat runs as a channel inside the daemon.
 
 ## Run Mode (Daemon)
 
@@ -31,19 +30,20 @@ The `chat` subcommand (interactive REPL) has been removed. Interactive access is
 $ kitaebot run
 ```
 
-Long-lived process that runs until signaled (SIGTERM/SIGINT). Spawns two async tasks on the tokio runtime:
+Long-lived process that runs until signaled (SIGTERM/SIGINT). Spawns an agent actor and four concurrent channel loops inside a `tokio::select!`:
 
-1. **Telegram poller** — Long-polls `getUpdates`, processes messages, sends responses
-2. **Socket listener** — Accepts connections on `/run/kitaebot/chat.sock`, NDJSON protocol
-3. **Heartbeat timer** — Fires every 30 minutes, runs awareness check
+1. **Heartbeat timer** — Sends `/heartbeat` through the agent handle on a configurable interval
+2. **Telegram poller** — Long-polls `getUpdates`, sends messages through the agent handle
+3. **GitHub PR poller** — Polls for new reviews/comments on the bot's open PRs
+4. **Socket listener** — Accepts connections on `/run/kitaebot/chat.sock`, NDJSON protocol
 
-All three loops share a single `TurnConfig` (provider, tools, iteration limit, context config) constructed once at startup and passed by reference.
+All channels hold a clone of `AgentHandle` and communicate with the agent actor via `send_message()`. The actor owns the provider, tools, and unified session.
 
 ### Daemon Lifecycle
 
-- **Startup**: Initialize workspace, load config, create provider, register tools, spawn channel tasks
-- **Running**: Both tasks run concurrently on the tokio runtime
-- **Shutdown**: On SIGTERM/SIGINT, cancel tasks gracefully, release locks, exit 0
+- **Startup**: Initialize workspace, load config, load secrets, apply sandbox, assemble runtime, spawn agent actor
+- **Running**: Four channel loops run concurrently via `tokio::select!`
+- **Shutdown**: On SIGTERM/SIGINT, clean up socket file and exit
 
 ### Systemd Integration
 

@@ -73,9 +73,27 @@ The counter resets when the call signature changes, so interleaved different cal
 | Max iterations reached | Return `Error::MaxIterationsReached` to caller |
 | Parse error | Return error to user |
 
+## Actor Pattern
+
+The agent loop runs inside an actor. The `Agent` struct owns the session, provider, tools, and config. It processes one `Envelope` at a time in a sequential `while let Some(envelope) = rx.recv().await` loop. This eliminates session locking entirely.
+
+### AgentHandle
+
+`AgentHandle` is a cloneable wrapper around an `mpsc::Sender<Envelope>`. Each channel holds one clone. Callers never construct envelopes directly — they call `send_message()` with a `ChannelSource`, input text, optional activity sender, and cancellation token, then await the reply over a oneshot channel.
+
+### ChannelSource
+
+Messages are tagged with their origin (Heartbeat, GitHub PR, Socket, Telegram) before entering the unified session. The actor prepends `[ChannelSource]` to each message so the agent (and humans reviewing logs) can tell where input came from.
+
+### Input Classification
+
+The actor classifies each envelope's input text:
+- Text starting with `/` must match a known slash command or it's an error
+- Everything else is a free-text message routed through the agent loop
+
 ## State
 
-The agent loop itself is stateless. All persistence is handled by the session module. This makes the loop easy to test and reason about.
+The agent loop functions (`process_message`, `run_turn`) are stateless — they take session, provider, and tools by reference. The actor owns the session path and handles load/save around each envelope. This makes the loop easy to test in isolation.
 
 ## Activity Events
 
