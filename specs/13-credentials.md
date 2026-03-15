@@ -60,7 +60,7 @@ No single layer is sufficient. Together they make credential exfiltration requir
 |------|---------|-------------|
 | `provider-api-key` | LLM provider authentication | Always |
 | `telegram-bot-token` | Telegram Bot API token | Always |
-| `github-token` | GitHub PAT for clone/push/PRs | `github.enabled` |
+| `github-token` | GitHub PAT for clone/push/PRs | `git.enabled` or `github.enabled` |
 | `gpg-signing-key` | GPG private key for commit signing | `gitConfig.signingKey` set |
 
 **Note on GPG key isolation**: Unlike other secrets which remain in `CREDENTIALS_DIRECTORY` (inaccessible to child processes), the GPG key is imported into `/var/lib/kitaebot/.gnupg` at service start so that git can sign commits. This keyring is readable by exec tool commands. Heuristic deny rules block `gpg --export-secret`, `.gnupg/` access, and `commit.gpgsign=false` overrides. See STATUS.md for the planned gpg-agent isolation improvement.

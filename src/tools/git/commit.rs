@@ -19,7 +19,10 @@ struct Args {
     message: String,
 }
 
-pub struct Commit(pub GitCli);
+pub struct Commit {
+    cli: GitCli,
+    co_authors: Vec<String>,
+}
 
 impl Tool for Commit {
     fn name(&self) -> &'static str {
@@ -47,15 +50,19 @@ impl Tool for Commit {
 }
 
 impl Commit {
+    pub fn new(cli: GitCli, co_authors: Vec<String>) -> Self {
+        Self { cli, co_authors }
+    }
+
     fn prepare(&self, repo_dir: &str, message: &str) -> Result<SubprocessCall, ToolError> {
-        let cwd = self.0.resolve_repo_dir(repo_dir)?;
-        let full_message = format_commit_message(message, self.0.co_authors());
-        Ok(self.0.prepare_git(&["commit", "-m", &full_message], &cwd))
+        let cwd = self.cli.resolve_repo_dir(repo_dir)?;
+        let full_message = format_commit_message(message, &self.co_authors);
+        Ok(self.cli.prepare_git(&["commit", "-m", &full_message], &cwd))
     }
 
     async fn run(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
         let call = self.prepare(repo_dir, message)?;
-        self.0.exec_git(call, false).await?.format()
+        self.cli.exec_git(call, false).await?.format()
     }
 }
 
@@ -83,7 +90,7 @@ fn format_commit_message(message: &str, co_authors: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::stub_git_cli_with_repo;
+    use crate::tools::git::test_helpers::stub_git_cli_with_repo;
 
     #[test]
     fn format_message_no_co_authors() {
@@ -117,10 +124,17 @@ mod tests {
     #[test]
     fn builds_correct_commit_command() {
         let (git, repo) = stub_git_cli_with_repo();
-        let tool = Commit(git);
+        let tool = Commit::new(git, vec!["Alice <alice@bob.net>".to_string()]);
         let call = tool.prepare(&repo, "Fix bug").unwrap();
         assert_eq!(call.binary, "git");
-        assert_eq!(call.args, ["commit", "-m", "Fix bug"]);
+        assert_eq!(
+            call.args,
+            [
+                "commit",
+                "-m",
+                "Fix bug\n\nCo-authored-by: Alice <alice@bob.net>\n"
+            ]
+        );
         assert!(!call.has_env("GIT_ASKPASS"));
     }
 }

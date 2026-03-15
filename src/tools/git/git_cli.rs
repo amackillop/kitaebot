@@ -16,15 +16,13 @@ use crate::tools::cli_runner::{self, CmdOutput, SubprocessCall};
 pub struct GitCli {
     pub(super) token: Secret,
     pub(super) workspace_root: PathBuf,
-    pub(super) co_authors: Vec<String>,
 }
 
 impl GitCli {
-    pub fn new(token: Secret, workspace_root: impl Into<PathBuf>, co_authors: Vec<String>) -> Self {
+    pub fn new(token: Secret, workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             token,
             workspace_root: workspace_root.into(),
-            co_authors,
         }
     }
 
@@ -37,11 +35,6 @@ impl GitCli {
     /// `projects/` directory.
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
-    }
-
-    /// Co-author trailers appended to commit messages.
-    pub fn co_authors(&self) -> &[String] {
-        &self.co_authors
     }
 
     /// Build a [`SubprocessCall`] for `git` without executing it.
@@ -83,19 +76,6 @@ impl GitCli {
         let output = cli_runner::exec(&call).await;
         drop(askpass);
         output
-    }
-
-    /// Get the current branch name from a git working directory.
-    pub async fn current_branch(&self, cwd: &Path) -> Result<String, ToolError> {
-        let call = self.prepare_git(&["rev-parse", "--abbrev-ref", "HEAD"], cwd);
-        let output = self.exec_git(call, false).await?;
-        if output.exit_code != 0 {
-            return Err(ToolError::ExecutionFailed(format!(
-                "failed to get current branch: {}",
-                output.stderr
-            )));
-        }
-        Ok(output.stdout.trim().to_string())
     }
 }
 
@@ -143,7 +123,7 @@ impl AskPass {
 
 #[cfg(test)]
 mod tests {
-    use crate::tools::github::test_helpers::stub_git_cli_with_repo;
+    use crate::tools::git::test_helpers::stub_git_cli_with_repo;
 
     #[test]
     fn prepare_git_builds_correct_call() {

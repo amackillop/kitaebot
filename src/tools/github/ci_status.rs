@@ -8,7 +8,6 @@ use serde::Deserialize;
 
 use super::Tool;
 use super::gh_cli::GhCli;
-use super::git_cli::GitCli;
 use super::types::WorkflowRun;
 use crate::error::ToolError;
 use crate::tools::cli_runner::{self, SubprocessCall};
@@ -22,10 +21,7 @@ struct Args {
     branch: Option<String>,
 }
 
-pub struct CiStatus {
-    pub git: GitCli,
-    pub gh: GhCli,
-}
+pub struct CiStatus(pub GhCli);
 
 impl Tool for CiStatus {
     fn name(&self) -> &'static str {
@@ -52,10 +48,29 @@ impl Tool for CiStatus {
     }
 }
 
+/// Get the current branch name from a git working directory.
+async fn current_branch(cwd: &std::path::Path) -> Result<String, ToolError> {
+    let env = crate::tools::safe_env().collect();
+    let call = SubprocessCall {
+        binary: "git",
+        args: vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+        cwd: cwd.to_path_buf(),
+        env,
+    };
+    let output = cli_runner::exec(&call).await?;
+    if output.exit_code != 0 {
+        return Err(ToolError::ExecutionFailed(format!(
+            "failed to get current branch: {}",
+            output.stderr
+        )));
+    }
+    Ok(output.stdout.trim().to_string())
+}
+
 impl CiStatus {
     /// Build the command to list failed runs on a branch.
     fn prepare_list_runs(&self, branch: &str, cwd: &std::path::Path) -> SubprocessCall {
-        self.gh.prepare_gh(
+        self.0.prepare_gh(
             &[
                 "run",
                 "list",
@@ -74,7 +89,7 @@ impl CiStatus {
 
     /// Build the command to fetch failed logs for a run.
     fn prepare_view_logs(&self, run_id: &str, cwd: &std::path::Path) -> SubprocessCall {
-        self.gh
+        self.0
             .prepare_gh(&["run", "view", run_id, "--log-failed"], cwd)
     }
 
@@ -91,15 +106,15 @@ impl CiStatus {
     }
 
     async fn run(&self, repo_dir: &str, branch: Option<&str>) -> Result<String, ToolError> {
-        let cwd = self.gh.resolve_repo_dir(repo_dir)?;
+        let cwd = self.0.resolve_repo_dir(repo_dir)?;
 
         let branch_name = match branch {
             Some(b) => b.to_string(),
-            None => self.git.current_branch(&cwd).await?,
+            None => current_branch(&cwd).await?,
         };
 
         let list_call = self.prepare_list_runs(&branch_name, &cwd);
-        let runs: Vec<WorkflowRun> = self.gh.exec_parse(&list_call).await?;
+        let runs: Vec<WorkflowRun> = self.0.exec_parse(&list_call).await?;
 
         let run = runs.first().ok_or_else(|| {
             ToolError::ExecutionFailed(format!("no failed runs on branch `{branch_name}`"))
@@ -117,14 +132,13 @@ impl CiStatus {
 mod tests {
     use super::super::types::WorkflowRun;
     use super::*;
-    use crate::tools::github::test_helpers::{stub_gh_cli_with_repo, stub_git_cli_with_repo};
+    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
 
     #[test]
     fn prepare_list_runs_command() {
-        let (git, _) = stub_git_cli_with_repo();
         let (gh, repo) = stub_gh_cli_with_repo();
         let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let tool = CiStatus { git, gh };
+        let tool = CiStatus(gh);
         let call = tool.prepare_list_runs("main", &cwd);
         assert_eq!(call.binary, "gh");
         assert!(call.args.contains(&"main".to_string()));
@@ -133,10 +147,9 @@ mod tests {
 
     #[test]
     fn prepare_view_logs_command() {
-        let (git, _) = stub_git_cli_with_repo();
         let (gh, repo) = stub_gh_cli_with_repo();
         let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let tool = CiStatus { git, gh };
+        let tool = CiStatus(gh);
         let call = tool.prepare_view_logs("9999", &cwd);
         assert_eq!(call.binary, "gh");
         assert!(call.args.contains(&"9999".to_string()));

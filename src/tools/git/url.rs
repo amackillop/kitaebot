@@ -1,4 +1,4 @@
-//! URL handling for GitHub tools.
+//! URL handling for git clone operations.
 
 use crate::error::ToolError;
 
@@ -8,7 +8,7 @@ use crate::error::ToolError;
 /// - `git@github.com:owner/repo.git` → `https://github.com/owner/repo.git`
 /// - `ssh://git@github.com/owner/repo.git` → `https://github.com/owner/repo.git`
 /// - `https://github.com/owner/repo.git` → unchanged
-pub(super) fn to_https_url(url: &str) -> Result<String, ToolError> {
+pub(crate) fn to_https_url(url: &str) -> Result<String, ToolError> {
     // Already HTTPS
     if url.starts_with("https://") {
         return Ok(url.to_string());
@@ -35,7 +35,7 @@ pub(super) fn to_https_url(url: &str) -> Result<String, ToolError> {
 ///
 /// `https://github.com/owner/repo.git` → `repo`
 /// `https://github.com/owner/repo` → `repo`
-pub(super) fn extract_repo_name(url: &str) -> Result<String, ToolError> {
+pub(crate) fn extract_repo_name(url: &str) -> Result<String, ToolError> {
     let path = url
         .strip_prefix("https://")
         .unwrap_or(url)
@@ -52,7 +52,7 @@ pub(super) fn extract_repo_name(url: &str) -> Result<String, ToolError> {
 /// Validate a user-provided directory name.
 ///
 /// Rejects path traversal, absolute paths, and slashes.
-pub(super) fn validate_name(name: &str) -> Result<&str, ToolError> {
+pub(crate) fn validate_name(name: &str) -> Result<&str, ToolError> {
     if name.is_empty()
         || name.contains('/')
         || name.contains('\\')

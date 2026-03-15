@@ -185,7 +185,7 @@ Secrets are loaded via systemd `LoadCredential` from `kitaebot.secretsDir`. One 
 |------|----------|
 | `provider-api-key` | Always |
 | `telegram-bot-token` | When `telegram.enabled = true` |
-| `github-token` | When `github.enabled = true` |
+| `github-token` | When `git.enabled` or `github.enabled` |
 | `gpg-signing-key` | When `gitConfig.signingKey` is set |
 
 ## Project layout
@@ -196,7 +196,7 @@ src/
 ├── bin/kchat.rs          Socket client REPL
 ├── agent.rs              Core agent loop
 ├── provider/             LLM abstraction (completions, mock)
-├── tools/                Tool trait + implementations (exec, files, grep, web, github)
+├── tools/                Tool trait + implementations (exec, files, grep, web, git, github)
 ├── sandbox.rs            Landlock policy
 ├── safety.rs             Leak detection
 ├── secrets.rs            systemd credential loading

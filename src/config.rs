@@ -162,6 +162,9 @@ pub struct ContextConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitConfig {
+    /// Enable the git tools (clone, push, commit). Defaults to `false`
+    /// so the daemon can start without a GitHub token.
+    pub enabled: bool,
     /// `Co-authored-by` trailers appended to commit messages.
     /// Each entry is `"Name <email>"`.
     pub co_authors: Vec<String>,
@@ -562,12 +565,16 @@ max_output_bytes = 20480
     #[test]
     fn git_defaults() {
         let cfg = load_toml("").unwrap();
+        assert!(!cfg.git.enabled);
         assert!(cfg.git.co_authors.is_empty());
     }
 
     #[test]
     fn git_parse() {
-        let cfg = load_toml("[git]\nco_authors = [\"Alice <alice@example.com>\"]\n").unwrap();
+        let cfg =
+            load_toml("[git]\nenabled = true\nco_authors = [\"Alice <alice@example.com>\"]\n")
+                .unwrap();
+        assert!(cfg.git.enabled);
         assert_eq!(cfg.git.co_authors, vec!["Alice <alice@example.com>"]);
     }
 

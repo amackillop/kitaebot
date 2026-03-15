@@ -30,7 +30,9 @@ let
   configFile = format.generate "config.toml" cfg.settings;
   toolPath = lib.makeBinPath cfg.tools;
 
+  gitEnabled = cfg.settings.git.enabled or false;
   githubEnabled = cfg.settings.github.enabled or false;
+  needsGithubToken = gitEnabled || githubEnabled;
   signingEnabled = cfg.gitConfig != null && cfg.gitConfig.signingKey != null;
 
   # Suppress direnv's noisy "loading/unloading" output from exec tool results.
@@ -216,7 +218,7 @@ in
             "provider-api-key:${config.kitaebot.secretsDir}/provider-api-key"
             "telegram-bot-token:${config.kitaebot.secretsDir}/telegram-bot-token"
           ]
-          ++ lib.optional githubEnabled "github-token:${config.kitaebot.secretsDir}/github-token"
+          ++ lib.optional needsGithubToken "github-token:${config.kitaebot.secretsDir}/github-token"
           ++ lib.optional signingEnabled "gpg-signing-key:${config.kitaebot.secretsDir}/gpg-signing-key";
 
           # Process isolation

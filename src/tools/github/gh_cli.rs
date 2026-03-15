@@ -30,7 +30,7 @@ impl GhCli {
 
     /// Resolve and validate a repo directory within the workspace.
     pub fn resolve_repo_dir(&self, repo_dir: &str) -> Result<PathBuf, ToolError> {
-        super::resolve_repo_dir(&self.workspace_root, repo_dir)
+        crate::tools::git::resolve_repo_dir(&self.workspace_root, repo_dir)
     }
 
     /// Build a [`SubprocessCall`] for `gh` without executing it.

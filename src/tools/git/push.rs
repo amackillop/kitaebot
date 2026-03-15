@@ -96,7 +96,7 @@ impl Push {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::stub_git_cli_with_repo;
+    use crate::tools::git::test_helpers::stub_git_cli_with_repo;
 
     #[test]
     fn defaults_to_origin() {

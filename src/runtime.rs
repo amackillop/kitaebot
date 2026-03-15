@@ -29,7 +29,9 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::chat_completion::CompletionsClient;
     use crate::clients::telegram::TelegramClient;
     use crate::secrets::load_secret;
-    use crate::tools::{github, network};
+    use crate::tools::{git, github, network};
+
+    let mut tools = Tools::local(workspace, config);
 
     let telegram_token = if config.telegram.enabled {
         Some(load_secret("telegram-bot-token").unwrap_or_else(|e| {
@@ -39,14 +41,22 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     } else {
         None
     };
-    let github_token = if config.github.enabled {
-        Some(load_secret("github-token").unwrap_or_else(|e| {
+    if config.git.enabled || config.github.enabled {
+        let token = load_secret("github-token").unwrap_or_else(|e| {
             error!("Failed to load GitHub token: {e}");
             std::process::exit(1);
-        }))
-    } else {
-        None
-    };
+        });
+        if config.git.enabled {
+            tools.extend(git::build(
+                token.clone(),
+                workspace,
+                config.git.co_authors.clone(),
+            ));
+        }
+        if config.github.enabled {
+            tools.extend(github::build(token, workspace));
+        }
+    }
 
     let provider_api_key = load_secret("provider-api-key").unwrap_or_else(|e| {
         error!("Failed to load Provider credentials: {e}");
@@ -57,8 +67,6 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         CompletionsClient::new(config.provider.api.endpoint().to_string(), provider_api_key);
     let provider = CompletionsProvider::new(client.clone(), &config.provider);
 
-    let mut tools = Tools::local(workspace, config);
-    tools.extend(github::build(github_token, workspace, config));
     tools.extend(network::build(config, client));
 
     let telegram = telegram_token.map(|token| {
@@ -90,7 +98,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::chat_completion::CompletionsClient;
     use crate::clients::telegram::TelegramClient;
     use crate::secrets::{Secret, load_secret};
-    use crate::tools::github;
+    use crate::tools::{git, github};
 
     let client = CompletionsClient::new(
         config.provider.api.endpoint().to_string(),
@@ -98,14 +106,23 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     );
     let provider = CompletionsProvider::new(client, &config.provider);
 
-    let github_token = if config.github.enabled {
-        load_secret("github-token").ok()
-    } else {
-        None
-    };
-
     let mut tools = Tools::local(workspace, config);
-    tools.extend(github::build(github_token, workspace, config));
+    if config.git.enabled || config.github.enabled {
+        let token = load_secret("github-token").unwrap_or_else(|e| {
+            error!("Failed to load GitHub token: {e}");
+            std::process::exit(1);
+        });
+        if config.git.enabled {
+            tools.extend(git::build(
+                token.clone(),
+                workspace,
+                config.git.co_authors.clone(),
+            ));
+        }
+        if config.github.enabled {
+            tools.extend(github::build(token, workspace));
+        }
+    }
 
     let telegram = if config.telegram.enabled {
         Some(TelegramChannel::new(

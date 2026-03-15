@@ -5,7 +5,7 @@
 # Secrets: one file per credential in secrets/
 #   echo 'sk-or-...' > secrets/provider-api-key
 #   echo '0000000000:...' > secrets/telegram-bot-token
-#   echo 'ghp_...'    > secrets/github-token  (when github.enabled = true)
+#   echo 'ghp_...'    > secrets/github-token  (when git.enabled or github.enabled)
 #   gpg --export-secret-keys --armor KEY_ID > secrets/gpg-signing-key
 #
 # Update the sharedDirectories source path to match your checkout.
@@ -43,8 +43,9 @@ in
         enabled = true;
         chat_id = 7658696350;
       };
-      github.enabled = true;
+      git.enabled = true;
       git.co_authors = [ "Austin Mackillop <github.roundworm216@passmail.net>" ];
+      github.enabled = true;
     };
   };
 

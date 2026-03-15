@@ -7,6 +7,7 @@ mod exec;
 mod file_edit;
 mod file_read;
 mod file_write;
+pub(crate) mod git;
 pub(crate) mod github;
 mod glob_search;
 mod grep;
