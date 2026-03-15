@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Context window management.
 //!
 //! Estimates token usage and compacts the session when it exceeds the
