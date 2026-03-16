@@ -75,6 +75,8 @@ pub struct SubprocessCall {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(OsString, OsString)>,
+    /// Per-call timeout override. Falls back to [`TIMEOUT_SECS`] when `None`.
+    pub timeout_secs: Option<u64>,
 }
 
 impl SubprocessCall {
@@ -94,16 +96,21 @@ pub async fn exec(call: &SubprocessCall) -> Result<CmdOutput, ToolError> {
         .env_clear()
         .envs(call.env.iter().map(|(k, v)| (k, v)));
     let label = format!("{} {}", call.binary, args_ref.join(" "));
-    exec_cmd(&mut cmd, label).await
+    let timeout_secs = call.timeout_secs.unwrap_or(TIMEOUT_SECS);
+    exec_cmd(&mut cmd, label, timeout_secs).await
 }
 
 // ── Command execution ───────────────────────────────────────────────
 
 /// Run a command with timeout and collect output.
-async fn exec_cmd(cmd: &mut Command, command: String) -> Result<CmdOutput, ToolError> {
+async fn exec_cmd(
+    cmd: &mut Command,
+    command: String,
+    timeout_secs: u64,
+) -> Result<CmdOutput, ToolError> {
     debug!(%command, "Running command");
 
-    let output = timeout(Duration::from_secs(TIMEOUT_SECS), cmd.output())
+    let output = timeout(Duration::from_secs(timeout_secs), cmd.output())
         .await
         .map_err(|_| ToolError::Timeout)?
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;

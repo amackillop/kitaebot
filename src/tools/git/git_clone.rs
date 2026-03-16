@@ -2,16 +2,19 @@
 
 use std::fmt::Write;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tracing::debug;
 
 use super::Tool;
 use super::git_cli::GitCli;
 use super::url::{extract_repo_name, to_https_url, validate_name};
 use crate::error::ToolError;
-use crate::tools::cli_runner::SubprocessCall;
+use crate::tools::DirenvCache;
+use crate::tools::cli_runner::{self, SubprocessCall};
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -23,7 +26,7 @@ struct Args {
     name: Option<String>,
 }
 
-pub struct GitClone(pub GitCli);
+pub struct GitClone(pub GitCli, pub DirenvCache);
 
 impl Tool for GitClone {
     fn name(&self) -> &'static str {
@@ -91,8 +94,52 @@ impl GitClone {
             output,
             "\nCloned to projects/{repo_name} (use working_dir: \"projects/{repo_name}\" with exec)"
         );
+
+        if target.join(".envrc").exists() {
+            // Trust the .envrc synchronously so that any subsequent exec
+            // call (which may race with the background warm) can already
+            // run `direnv export json` successfully.
+            direnv_allow(&target).await;
+
+            warm_direnv_cache(self.1.clone(), target);
+            let _ = write!(
+                output,
+                "\nDetected .envrc — warming direnv cache in the background. \
+                 The devshell will be available shortly."
+            );
+        }
+
         Ok(output)
     }
+}
+
+/// Run `direnv allow` for a directory. Must complete before any
+/// `direnv export json` call so the `.envrc` is trusted.
+async fn direnv_allow(dir: &Path) {
+    let call = SubprocessCall {
+        binary: "direnv",
+        args: vec!["allow".into()],
+        cwd: dir.to_path_buf(),
+        env: crate::tools::safe_env().collect(),
+        timeout_secs: Some(10),
+    };
+    if let Err(e) = cli_runner::exec(&call).await {
+        debug!(dir = %dir.display(), error = %e, "direnv allow failed");
+    }
+}
+
+/// Spawn a background task to pre-populate the shared direnv cache so the
+/// first `exec` call in this directory is fast. `direnv allow` must have
+/// already been run for the directory.
+fn warm_direnv_cache(cache: DirenvCache, repo_dir: PathBuf) {
+    tokio::spawn(async move {
+        debug!(dir = %repo_dir.display(), "Warming direnv cache");
+        match cache.get(&repo_dir).await {
+            Ok(Some(_)) => debug!(dir = %repo_dir.display(), "Direnv cache warmed"),
+            Ok(None) => debug!(dir = %repo_dir.display(), "No .envrc found"),
+            Err(e) => debug!(dir = %repo_dir.display(), error = %e, "Direnv cache warming failed"),
+        }
+    });
 }
 
 #[cfg(test)]
@@ -100,10 +147,14 @@ mod tests {
     use super::*;
     use crate::tools::git::test_helpers::stub_git_cli_with_repo;
 
+    fn stub_clone() -> (GitClone, String) {
+        let (git, repo) = stub_git_cli_with_repo();
+        (GitClone(git, DirenvCache::new()), repo)
+    }
+
     #[test]
     fn builds_clone_command_with_derived_name() {
-        let (git, _) = stub_git_cli_with_repo();
-        let tool = GitClone(git);
+        let (tool, _) = stub_clone();
         let call = tool
             .prepare("https://github.com/owner/repo.git", None)
             .unwrap();
@@ -116,8 +167,7 @@ mod tests {
 
     #[test]
     fn builds_clone_command_with_custom_name() {
-        let (git, _) = stub_git_cli_with_repo();
-        let tool = GitClone(git);
+        let (tool, _) = stub_clone();
         let call = tool
             .prepare("https://github.com/owner/repo.git", Some("custom"))
             .unwrap();
@@ -126,25 +176,22 @@ mod tests {
 
     #[test]
     fn rewrites_ssh_to_https() {
-        let (git, _) = stub_git_cli_with_repo();
-        let tool = GitClone(git);
+        let (tool, _) = stub_clone();
         let call = tool.prepare("git@github.com:owner/repo.git", None).unwrap();
         assert_eq!(call.args[2], "https://github.com/owner/repo.git");
     }
 
     #[test]
     fn rejects_traversal_in_name() {
-        let (git, _) = stub_git_cli_with_repo();
-        let tool = GitClone(git);
+        let (tool, _) = stub_clone();
         let result = tool.prepare("https://github.com/owner/repo.git", Some("../escape"));
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn rejects_already_existing_target() {
-        let (git, _) = stub_git_cli_with_repo();
+        let (tool, _) = stub_clone();
         // The stub already creates projects/r — clone into "r" to hit the exists check.
-        let tool = GitClone(git);
         let result = tool.run("https://github.com/owner/r.git", None).await;
         assert!(
             matches!(result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("already exists"))

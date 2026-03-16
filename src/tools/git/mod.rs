@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::ToolError;
 use crate::secrets::Secret;
+use crate::tools::DirenvCache;
 use crate::workspace::Workspace;
 
 // Re-export parent utility so tool files can `use super::Tool`.
@@ -63,13 +64,14 @@ pub(crate) fn build(
     token: Secret,
     workspace: &Workspace,
     co_authors: Vec<String>,
+    direnv: DirenvCache,
 ) -> Vec<Box<dyn Tool>> {
     let git = GitCli::new(token, workspace.path());
 
     vec![
         Box::new(Commit::new(git.clone(), co_authors)),
         Box::new(Push(git.clone())),
-        Box::new(GitClone(git)),
+        Box::new(GitClone(git, direnv)),
     ]
 }
 

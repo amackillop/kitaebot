@@ -41,13 +41,6 @@ let
     log_filter = "^$"
   '';
 
-  # Sourced by non-interactive bash via BASH_ENV. Hooks direnv so that
-  # every `bash -c` invocation in the exec tool automatically loads the
-  # .envrc (and therefore the nix devshell) for the working directory.
-  bashEnvScript = pkgs.writeText "kitaebot-bash-env.sh" ''
-    eval "$(${pkgs.direnv}/bin/direnv hook bash)"
-  '';
-
   # Interactive chat via the daemon's Unix socket.
   kchat = pkgs.writeShellScriptBin "kchat" ''
     exec ${cfg.package}/bin/kchat /run/kitaebot/chat.sock
@@ -63,12 +56,6 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       description = "SSH public keys for root access";
-    };
-
-    dev = lib.mkOption {
-      type = lib.types.bool;
-      default = false;
-      description = "Enable dev mode (shares host nix store for faster builds)";
     };
 
     package = lib.mkOption {
@@ -218,6 +205,14 @@ in
           Group = "kitaebot";
           WorkingDirectory = "/var/lib/kitaebot";
 
+          # The exec tool spawns nix builds (evaluator + builders + fetchers)
+          # and arbitrary dev toolchains (Go, Rust, etc). Raise both the
+          # cgroup task limit and the per-UID process/thread limit — they
+          # are independent enforcement points and both default too low
+          # for nix build workloads in a small VM.
+          TasksMax = 4096;
+          LimitNPROC = 4096;
+
           # Secrets as files, not env vars.
           # systemd copies these to /run/credentials/kitaebot.service/
           # with mode 0400 and sets CREDENTIALS_DIRECTORY automatically.
@@ -248,7 +243,6 @@ in
           SystemCallFilter = [
             "@system-service"
             "~@privileged"
-            "~@resources"
           ];
           SystemCallArchitectures = "native";
 
@@ -275,7 +269,6 @@ in
           KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
           RUST_LOG = cfg.logLevel;
           PATH = lib.mkForce toolPath;
-          BASH_ENV = bashEnvScript;
         }
         // lib.optionalAttrs signingEnabled {
           GNUPGHOME = "/var/lib/kitaebot/.gnupg";
@@ -319,6 +312,12 @@ in
     virtualisation = {
       inherit (cfg.vm) memorySize cores diskSize;
       graphics = false;
+      # The default qemu-vm.nix behavior mounts the host nix store
+      # read-only and overlays a tmpfs for writes. That tmpfs is half
+      # of RAM (2G with 4G VM), which fills up the moment the agent
+      # runs `nix develop` to build a devshell. Put the writable store
+      # on disk instead so it has the full diskSize to work with.
+      writableStoreUseTmpfs = false;
       # Port forwarding for SSH (host 2222 -> guest 22)
       forwardPorts = [
         {
@@ -327,10 +326,6 @@ in
           guest.port = 22;
         }
       ];
-    }
-    // lib.optionalAttrs config.kitaebot.dev {
-      mountHostNixStore = true;
-      writableStoreUseTmpfs = true;
     };
 
     environment.systemPackages = [

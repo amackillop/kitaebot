@@ -31,9 +31,10 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::chat_completion::CompletionsClient;
     use crate::clients::telegram::TelegramClient;
     use crate::secrets::load_secret;
-    use crate::tools::{git, github, network};
+    use crate::tools::{DirenvCache, git, github, network};
 
-    let mut tools = Tools::local(workspace, config);
+    let direnv_cache = DirenvCache::new();
+    let mut tools = Tools::local(workspace, config, direnv_cache.clone());
 
     let telegram_token = if config.telegram.enabled {
         Some(load_secret("telegram-bot-token").unwrap_or_else(|e| {
@@ -53,6 +54,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 token.clone(),
                 workspace,
                 config.git.co_authors.clone(),
+                direnv_cache.clone(),
             ));
         }
         let gh = GhCli::new(token, workspace.path());
@@ -105,7 +107,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::chat_completion::CompletionsClient;
     use crate::clients::telegram::TelegramClient;
     use crate::secrets::{Secret, load_secret};
-    use crate::tools::{git, github};
+    use crate::tools::{DirenvCache, git, github};
 
     let client = CompletionsClient::new(
         config.provider.api.endpoint().to_string(),
@@ -113,7 +115,8 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     );
     let provider = CompletionsProvider::new(client, &config.provider);
 
-    let mut tools = Tools::local(workspace, config);
+    let direnv_cache = DirenvCache::new();
+    let mut tools = Tools::local(workspace, config, direnv_cache.clone());
     let gh_cli = if config.git.enabled || config.github.enabled {
         let token = load_secret("github-token").unwrap_or_else(|e| {
             error!("Failed to load GitHub token: {e}");
@@ -124,6 +127,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 token.clone(),
                 workspace,
                 config.git.co_authors.clone(),
+                direnv_cache.clone(),
             ));
         }
         let gh = GhCli::new(token, workspace.path());

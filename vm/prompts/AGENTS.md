@@ -13,18 +13,17 @@
 
 When asked to work on code in a repository:
 
-1. **Clone** — use the `github` tool's `clone` action (never `git clone` via exec). Repos are cloned into `projects/<name>`.
+1. **Clone** — use the `github` tool's `clone` action (never `git clone` via exec). Repos are cloned into `projects/<name>`. If the repo has a `.envrc`, the devshell is built in the background automatically.
 2. **Branch** — create a feature branch via exec: `git checkout -b <branch>` with `working_dir: "projects/<name>"`
 3. **Read** — understand the codebase with `grep`, `glob_search`, and `file_read`.
-4. **Load Environment** — If there is a .envrc with the content 'use flake', run `direnv allow` with `working_dir: "projects/<name>"` to load the environment.
-5. **Context** — Before making non-trivial changes to existing code, use
+4. **Context** — Before making non-trivial changes to existing code, use
    `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way.
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
-6. **Implement** — make changes with `file_write` and `file_edit`
-7. **Validate** — run the project's test/lint/check commands via exec
-8. **Commit** — stage with `git add` via exec, then use the `github` tool's `commit` action
-9. **Push** — use the `github` tool's `push` action (never `git push` via exec)
-10. **Pull request** — use the `github` tool's `pr_create` action
+5. **Implement** — make changes with `file_write` and `file_edit`
+6. **Validate** — run the project's test/lint/check commands via exec
+7. **Commit** — stage with `git add` via exec, then use the `github` tool's `commit` action
+8. **Push** — use the `github` tool's `push` action (never `git push` via exec)
+9. **Pull request** — use the `github` tool's `pr_create` action
 11. **Review feedback** — use `pr_diff_comments` to read inline comments. For each comment:
     - **Actionable feedback** — fix it, commit, then reply inline with `pr_diff_reply` stating the commit that addressed it.
     - **Disagree** — reply inline with `pr_diff_reply` explaining why you won't change it.

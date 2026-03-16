@@ -3,6 +3,7 @@
 //! Tools are functions the agent can call (exec, `read_file`, `web_search`, etc.).
 
 pub(crate) mod cli_runner;
+pub(crate) mod direnv;
 mod exec;
 mod file_edit;
 mod file_read;
@@ -38,6 +39,8 @@ use crate::error::{ConfigError, ToolError};
 use crate::types::{ToolCall, ToolDefinition};
 use crate::workspace::Workspace;
 
+pub use direnv::DirenvCache;
+
 /// Environment variables forwarded to child processes.
 ///
 /// Everything else is scrubbed. Notably absent: `CREDENTIALS_DIRECTORY`.
@@ -58,8 +61,6 @@ const SAFE_ENV_VARS: &[&str] = &[
     "TMPDIR",
     "TMP",
     "TEMP",
-    // Shell init (direnv hook via BASH_ENV)
-    "BASH_ENV",
     // Nix
     "NIX_PATH",
     "NIX_PROFILES",
@@ -133,11 +134,15 @@ impl Tools {
     }
 
     /// Build the set of local (non-network) tools.
-    pub fn local(workspace: &Workspace, config: &Config) -> Vec<Box<dyn Tool>> {
+    pub fn local(
+        workspace: &Workspace,
+        config: &Config,
+        direnv: DirenvCache,
+    ) -> Vec<Box<dyn Tool>> {
         let guard = path::PathGuard::new(workspace.path());
 
         vec![
-            Box::new(Exec::new(workspace.path(), &config.tools.exec)),
+            Box::new(Exec::new(workspace.path(), &config.tools.exec, direnv)),
             Box::new(FileRead::new(guard.clone())),
             Box::new(FileWrite::new(guard.clone())),
             Box::new(FileEdit::new(guard.clone())),

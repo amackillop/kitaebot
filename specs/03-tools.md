@@ -41,7 +41,7 @@ The `Tools` struct uses `Vec` with linear scan for lookup. For small tool counts
 
 ### `exec` — Shell Command Execution
 
-Executes commands via `sh -c` within the workspace directory.
+Executes commands via `bash -c` within the workspace directory.
 
 #### Parameters
 
@@ -93,6 +93,10 @@ Child processes run with a scrubbed environment. Only a known-safe allowlist of 
 - **XDG**: `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`
 
 Notably absent: `CREDENTIALS_DIRECTORY`. The agent's shell commands cannot discover or read the credential files path. See [spec 13](13-credentials.md) for the credential isolation design.
+
+#### Direnv Integration
+
+When the working directory contains a `.envrc`, the exec tool injects cached devshell environment variables into the subprocess. On cache miss, the first exec call blocks until evaluation completes; subsequent calls in the same directory are instant. If evaluation fails, the command runs without the devshell and a warning is logged. See the [Direnv Cache](#direnv-cache) section.
 
 #### Restrictions
 
@@ -335,6 +339,28 @@ via `resolve_repo_dir` — rejects traversal, absolute paths, and
 directories without `.git`.
 
 ---
+
+## Direnv Cache
+
+### Problem
+
+Projects cloned into the workspace use Nix flake devshells (`.envrc` + `use flake`). The exec tool must run commands inside these devshells so the project's toolchain is available.
+
+A naive approach — hooking direnv into every `bash -c` via `BASH_ENV` — causes a thundering herd. The agent runs tool calls in parallel, so N concurrent commands each trigger a full `nix print-dev-env` evaluation. This exhausts the VM's process/thread limits and takes minutes per command.
+
+### Requirements
+
+1. **Evaluate once** — `direnv export json` runs at most once per directory, regardless of how many concurrent exec calls target it
+2. **Invalidate on change** — a modified `.envrc` or `flake.lock` triggers re-evaluation on the next exec call
+3. **Don't cache failures** — a transient direnv error must not poison the cache; the next caller retries
+4. **Graceful degradation** — if direnv fails, the exec command still runs (without the devshell) and a warning is logged
+5. **Warm on clone** — `git_clone` pre-populates the cache in the background so the first exec call is fast
+6. **Trust before evaluate** — `git_clone` must run `direnv allow` synchronously before returning, so that any subsequent `direnv export json` (from exec or the background warm) finds the `.envrc` trusted
+7. **Shared across tools** — a single cache instance is shared between the exec tool and git_clone; a warm from clone is immediately visible to exec
+
+### Invalidation
+
+Cache keys are directories. Staleness is determined by the mtime of `.envrc` and `flake.lock` — two `stat` calls per lookup. This mirrors nix-direnv's own cache semantics.
 
 ## Error Handling
 

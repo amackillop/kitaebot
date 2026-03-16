@@ -35,6 +35,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::Tool;
+use super::direnv::DirenvCache;
 use crate::config::ExecConfig;
 use crate::error::ToolError;
 
@@ -422,14 +423,20 @@ pub struct Exec {
     workspace_root: PathBuf,
     timeout: Duration,
     max_output_bytes: usize,
+    direnv_cache: DirenvCache,
 }
 
 impl Exec {
-    pub fn new(workspace_root: impl Into<PathBuf>, config: &ExecConfig) -> Self {
+    pub fn new(
+        workspace_root: impl Into<PathBuf>,
+        config: &ExecConfig,
+        direnv_cache: DirenvCache,
+    ) -> Self {
         Self {
             workspace_root: workspace_root.into(),
             timeout: Duration::from_secs(config.timeout_secs),
             max_output_bytes: config.max_output_bytes,
+            direnv_cache,
         }
     }
 }
@@ -478,14 +485,27 @@ impl Tool for Exec {
 
             debug!(command = %args.command, cwd = %cwd.display(), "Executing command");
 
-            // bash (not sh) so that BASH_ENV is sourced, which hooks
-            // direnv and automatically loads project devshells.
+            let direnv_env = self.direnv_cache.get(&cwd).await;
+
+            // bash (not sh) for consistent shell semantics across all
+            // exec tool invocations. Direnv devshell env is injected
+            // directly via Command::envs() from the in-process cache.
             let mut cmd = Command::new("bash");
             cmd.arg("-c")
                 .arg(&args.command)
                 .current_dir(&cwd)
                 .env_clear()
                 .envs(super::safe_env());
+
+            match direnv_env {
+                Ok(Some(ref env)) => {
+                    cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+                }
+                Ok(None) => {} // no .envrc — nothing to inject
+                Err(ref e) => {
+                    warn!(dir = %cwd.display(), error = %e, "direnv failed, running without devshell");
+                }
+            }
 
             let output = timeout(self.timeout, cmd.output())
                 .await
@@ -584,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_parameters_schema() {
-        let tool = Exec::new(".", &ExecConfig::default());
+        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new());
         let schema = tool.parameters();
 
         assert_eq!(schema["type"], "object");
@@ -815,7 +835,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_simple_command() {
-        let tool = Exec::new(".", &ExecConfig::default());
+        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new());
         let args = serde_json::json!({"command": "echo hello"});
         let result = tool.execute(args).await.unwrap();
         assert!(result.contains("hello"));
@@ -824,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_missing_command() {
-        let tool = Exec::new(".", &ExecConfig::default());
+        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new());
         let args = serde_json::json!({});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
@@ -832,7 +852,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_blocked_command() {
-        let tool = Exec::new(".", &ExecConfig::default());
+        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new());
         // "echo shutdown" is harmless if executed but matches the deny pattern.
         // Never use a genuinely destructive command here — if the deny list has
         // a bug, execute() will run it for real.
@@ -843,7 +863,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_path_traversal_blocked() {
-        let tool = Exec::new(".", &ExecConfig::default());
+        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new());
         let args = serde_json::json!({"command": "cat ../secret"});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::Blocked(_))));
@@ -854,7 +874,7 @@ mod tests {
         // Set a variable that is NOT on the allowlist
         // SAFETY: test-only, no concurrent threads depend on this var.
         unsafe { std::env::set_var("KITAEBOT_TEST_SECRET", "leaked") };
-        let tool = Exec::new(".", &ExecConfig::default());
+        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new());
         let args = serde_json::json!({"command": "echo $KITAEBOT_TEST_SECRET"});
         let result = tool.execute(args).await.unwrap();
         // Shell expands unset vars to empty string, so output should just be a blank line
@@ -867,7 +887,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_path_available() {
-        let tool = Exec::new(".", &ExecConfig::default());
+        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new());
         let args = serde_json::json!({"command": "echo $PATH"});
         let result = tool.execute(args).await.unwrap();
         // PATH should be forwarded — output should contain something (not just "$ echo $PATH\n\n")
@@ -916,7 +936,7 @@ mod tests {
     async fn test_exec_working_dir_subdir() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
-        let tool = Exec::new(dir.path(), &ExecConfig::default());
+        let tool = Exec::new(dir.path(), &ExecConfig::default(), DirenvCache::new());
         let args = serde_json::json!({"command": "pwd", "working_dir": "sub"});
         let result = tool.execute(args).await.unwrap();
         assert!(result.contains("sub"), "expected cwd in sub: {result}");
@@ -925,7 +945,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_working_dir_traversal_blocked() {
-        let tool = Exec::new(".", &ExecConfig::default());
+        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new());
         let args = serde_json::json!({"command": "pwd", "working_dir": "../escape"});
         let result = tool.execute(args).await;
         assert!(matches!(result, Err(ToolError::Blocked(_))));
@@ -934,7 +954,7 @@ mod tests {
     #[tokio::test]
     async fn test_exec_working_dir_nonexistent() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = Exec::new(dir.path(), &ExecConfig::default());
+        let tool = Exec::new(dir.path(), &ExecConfig::default(), DirenvCache::new());
         let args = serde_json::json!({"command": "pwd", "working_dir": "no_such_dir"});
         let result = tool.execute(args).await;
         assert!(

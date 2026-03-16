@@ -49,6 +49,7 @@ impl GitCli {
             args: args.iter().map(ToString::to_string).collect(),
             cwd: cwd.to_path_buf(),
             env,
+            timeout_secs: None,
         }
     }
 
