@@ -20,9 +20,8 @@ will replace the original messages, so nothing important should be lost.";
 
 /// Total estimated tokens for a session, including an external system prompt.
 pub fn session_tokens(session: &Session, system_prompt_chars: usize) -> usize {
-    let message_chars: usize = session.messages().iter().map(Message::char_count).sum();
     // Crude approximation for English text
-    (system_prompt_chars + message_chars) / 4
+    (system_prompt_chars + session.char_count()) / 4
 }
 
 /// Token budget at which compaction triggers.

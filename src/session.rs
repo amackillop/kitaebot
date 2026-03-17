@@ -16,6 +16,8 @@ use crate::types::Message;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     messages: Vec<Message>,
+    #[serde(skip)]
+    char_count: usize,
     created_at: Timestamp,
     updated_at: Timestamp,
 }
@@ -26,6 +28,7 @@ impl Session {
         let now = Timestamp::now();
         Self {
             messages: Vec::new(),
+            char_count: 0,
             created_at: now,
             updated_at: now,
         }
@@ -38,6 +41,7 @@ impl Session {
 
     /// Add a message to the session.
     pub fn add_message(&mut self, message: Message) {
+        self.char_count += message.char_count();
         self.messages.push(message);
         self.updated_at = Timestamp::now();
     }
@@ -45,7 +49,11 @@ impl Session {
     /// Load a session from disk, or create a new one if the file doesn't exist.
     pub fn load(path: &Path) -> Result<Self, SessionError> {
         match fs::read_to_string(path) {
-            Ok(data) => serde_json::from_str(&data).map_err(SessionError::Parse),
+            Ok(data) => {
+                let mut session: Self = serde_json::from_str(&data).map_err(SessionError::Parse)?;
+                session.char_count = session.messages.iter().map(Message::char_count).sum();
+                Ok(session)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new()),
             Err(e) => Err(SessionError::Io(e)),
         }
@@ -67,6 +75,7 @@ impl Session {
     /// Used by context compaction to shrink conversation history while
     /// preserving a condensed record of what happened.
     pub fn compact(&mut self, summary: Message) {
+        self.char_count = summary.char_count();
         self.messages.clear();
         self.messages.push(summary);
         self.updated_at = Timestamp::now();
@@ -77,9 +86,15 @@ impl Session {
         self.messages.len()
     }
 
+    /// Total character count across all messages.
+    pub fn char_count(&self) -> usize {
+        self.char_count
+    }
+
     /// Clear conversation history, preserving `created_at`.
     pub fn clear(&mut self) {
         self.messages.clear();
+        self.char_count = 0;
         self.updated_at = Timestamp::now();
     }
 }
@@ -201,5 +216,125 @@ mod tests {
             content: "x".to_string(),
         });
         assert_eq!(session.len(), 1);
+    }
+
+    #[test]
+    fn char_count_tracks_added_messages() {
+        let mut session = Session::new();
+        assert_eq!(session.char_count(), 0);
+
+        session.add_message(Message::User {
+            content: "hello".to_string(),
+        });
+        assert_eq!(session.char_count(), 5);
+
+        session.add_message(Message::Assistant {
+            content: "world".to_string(),
+        });
+        assert_eq!(session.char_count(), 10);
+    }
+
+    #[test]
+    fn char_count_includes_all_message_types() {
+        let mut session = Session::new();
+
+        session.add_message(Message::System {
+            content: "sys".to_string(),
+        });
+        assert_eq!(session.char_count(), 3);
+
+        session.add_message(Message::User {
+            content: "user".to_string(),
+        });
+        assert_eq!(session.char_count(), 7);
+
+        session.add_message(Message::Assistant {
+            content: "assistant".to_string(),
+        });
+        assert_eq!(session.char_count(), 16);
+
+        session.add_message(Message::Tool {
+            call_id: "id".to_string(),
+            content: "tool".to_string(),
+        });
+        assert_eq!(session.char_count(), 20);
+    }
+
+    #[test]
+    fn char_count_reset_on_clear() {
+        let mut session = Session::new();
+        session.add_message(Message::User {
+            content: "hello world".to_string(),
+        });
+        assert_eq!(session.char_count(), 11);
+
+        session.clear();
+        assert_eq!(session.char_count(), 0);
+        assert!(session.messages.is_empty());
+    }
+
+    #[test]
+    fn char_count_updated_on_compact() {
+        let mut session = Session::new();
+        session.add_message(Message::User {
+            content: "first message".to_string(),
+        });
+        session.add_message(Message::User {
+            content: "second message".to_string(),
+        });
+        assert_eq!(session.char_count(), 27);
+
+        let summary = Message::System {
+            content: "summary".to_string(),
+        };
+        session.compact(summary);
+
+        assert_eq!(session.char_count(), 7);
+        assert_eq!(session.messages.len(), 1);
+    }
+
+    #[test]
+    fn char_count_recomputed_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+
+        let mut session = Session::new();
+        session.add_message(Message::User {
+            content: "hello".to_string(),
+        });
+        session.add_message(Message::Assistant {
+            content: "world".to_string(),
+        });
+        session.save(&path).unwrap();
+
+        // char_count is not serialized, so loaded session must recompute it
+        let loaded = Session::load(&path).unwrap();
+        assert_eq!(loaded.char_count(), 10);
+    }
+
+    #[test]
+    fn char_count_empty_session() {
+        let session = Session::new();
+        assert_eq!(session.char_count(), 0);
+    }
+
+    #[test]
+    fn char_count_with_tool_calls() {
+        use crate::types::ToolCall;
+        use crate::types::ToolFunction;
+
+        let mut session = Session::new();
+        session.add_message(Message::ToolCalls {
+            content: "content".to_string(),
+            calls: vec![ToolCall::new(
+                "id".to_string(),
+                ToolFunction {
+                    name: "func".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            )],
+        });
+        // Message content (7) + tool call name (4) + arguments (2) = 13
+        assert_eq!(session.char_count(), 13);
     }
 }
