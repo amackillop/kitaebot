@@ -38,6 +38,15 @@ const REPEAT_ERROR: &str = "ERROR: You have called this tool with identical \
     or action, or respond to the user explaining what you \
     tried and why it did not work.";
 
+/// Maximum policy violations (Blocked errors) before the turn is halted.
+const POLICY_STRIKE_LIMIT: usize = 2;
+
+const POLICY_STOP_DIRECTIVE: &str = "POLICY VIOLATION: A tool call was blocked. \
+    Do NOT work around this. Report the situation to the user and await direction.";
+
+const POLICY_HALT_MSG: &str = "I attempted to use a blocked operation multiple times. \
+    The turn was halted automatically. Please advise how to proceed.";
+
 /// Load session, run a single turn, and save regardless of outcome.
 ///
 /// Shared by all channels (telegram, socket, heartbeat).
@@ -114,6 +123,7 @@ async fn run_turn<P: Provider>(
     let tool_definitions = tools.definitions();
 
     let mut repeats = RepeatDetector::new();
+    let mut policy_strikes: usize = 0;
 
     for iteration in 0..max_iterations {
         if cancel.is_cancelled() {
@@ -176,7 +186,22 @@ async fn run_turn<P: Provider>(
                 let futures: Vec<_> = calls.iter().map(|call| tools.execute(call)).collect();
                 let results = cancellable(join_all(futures), cancel, activity_tx).await?;
 
+                let has_blocked = results
+                    .iter()
+                    .any(|r| matches!(r, Err(ToolError::Blocked(_))));
+
                 record_tool_results(session, &calls, results, activity_tx);
+
+                if has_blocked {
+                    policy_strikes += 1;
+                    if policy_strikes >= POLICY_STRIKE_LIMIT {
+                        warn!("Policy strike limit reached, halting turn");
+                        return Ok(POLICY_HALT_MSG.to_string());
+                    }
+                    session.add_message(Message::System {
+                        content: POLICY_STOP_DIRECTIVE.to_string(),
+                    });
+                }
             }
         }
     }
@@ -286,7 +311,7 @@ mod tests {
     use crate::config::ContextConfig;
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
-    use crate::tools::MockTool;
+    use crate::tools::{MockBlockedTool, MockTool};
     use crate::types::{ToolCall, ToolFunction};
 
     fn noop_cancel() -> CancellationToken {
@@ -805,5 +830,133 @@ mod tests {
             &saved.messages()[0],
             Message::User { content } if content == "Hello?"
         ));
+    }
+
+    // ── Policy violation gate ─────────────────────────────────────────
+
+    fn blocked_call(id: &str) -> ToolCall {
+        ToolCall::new(
+            id.to_string(),
+            ToolFunction {
+                name: "mock_blocked".to_string(),
+                arguments: "{}".to_string(),
+            },
+        )
+    }
+
+    fn blocked_tool_calls(ids: &[&str]) -> Response {
+        Response::ToolCalls {
+            content: String::new(),
+            calls: ids.iter().map(|&id| blocked_call(id)).collect(),
+        }
+    }
+
+    fn blocked_tools() -> Tools {
+        Tools::new(vec![Box::new(MockBlockedTool::new("not allowed"))], &[]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_first_blocked_injects_system_directive() {
+        // Provider: blocked tool call, then text response.
+        let provider = MockProvider::new(vec![
+            Ok(blocked_tool_calls(&["b1"])),
+            Ok(text("OK I'll stop")),
+        ]);
+        let tools = blocked_tools();
+        let mut session = Session::new();
+
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Try blocked",
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
+            None,
+            &noop_cancel(),
+        )
+        .await;
+        assert_eq!(result.unwrap(), "OK I'll stop");
+
+        // Session should contain a System message with the policy directive.
+        let has_directive = session.messages().iter().any(
+            |m| matches!(m, Message::System { content } if content.contains("POLICY VIOLATION")),
+        );
+        assert!(has_directive, "expected POLICY VIOLATION system message");
+    }
+
+    #[tokio::test]
+    async fn test_second_blocked_halts_turn() {
+        // Provider: two consecutive blocked tool calls.
+        let provider = MockProvider::new(vec![
+            Ok(blocked_tool_calls(&["b1"])),
+            Ok(blocked_tool_calls(&["b2"])),
+        ]);
+        let tools = blocked_tools();
+        let mut session = Session::new();
+
+        let result = run_turn(
+            &mut session,
+            SYSTEM,
+            "Keep trying",
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
+            None,
+            &noop_cancel(),
+        )
+        .await;
+
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("halted automatically"),
+            "expected halt message, got: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_policy_strikes_reset_between_turns() {
+        // Two separate turns, each with one blocked call. Neither should halt
+        // because strikes reset per turn.
+        let provider = MockProvider::new(vec![
+            // Turn 1
+            Ok(blocked_tool_calls(&["b1"])),
+            Ok(text("Turn 1 done")),
+            // Turn 2
+            Ok(blocked_tool_calls(&["b2"])),
+            Ok(text("Turn 2 done")),
+        ]);
+        let tools = blocked_tools();
+        let mut session = Session::new();
+
+        let r1 = run_turn(
+            &mut session,
+            SYSTEM,
+            "Turn 1",
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
+            None,
+            &noop_cancel(),
+        )
+        .await;
+        assert_eq!(r1.unwrap(), "Turn 1 done");
+
+        let r2 = run_turn(
+            &mut session,
+            SYSTEM,
+            "Turn 2",
+            &provider,
+            &tools,
+            MAX_ITER,
+            CTX,
+            None,
+            &noop_cancel(),
+        )
+        .await;
+        assert_eq!(r2.unwrap(), "Turn 2 done");
     }
 }

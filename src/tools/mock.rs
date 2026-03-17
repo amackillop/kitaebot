@@ -1,6 +1,4 @@
-//! Mock tool for tests.
-//!
-//! Returns a pre-configured output string on every call.
+//! Mock tools for tests.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -11,7 +9,7 @@ use serde::Deserialize;
 use super::Tool;
 use crate::error::ToolError;
 
-/// Arguments for the mock tool.
+/// Arguments for mock tools (accepts anything).
 #[derive(Deserialize, JsonSchema)]
 struct Args {}
 
@@ -47,5 +45,40 @@ impl Tool for MockTool {
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         let output = self.output.clone();
         Box::pin(async move { Ok(output) })
+    }
+}
+
+/// Mock tool that always returns `ToolError::Blocked`.
+pub struct MockBlockedTool {
+    guidance: String,
+}
+
+impl MockBlockedTool {
+    pub fn new(guidance: impl Into<String>) -> Self {
+        Self {
+            guidance: guidance.into(),
+        }
+    }
+}
+
+impl Tool for MockBlockedTool {
+    fn name(&self) -> &'static str {
+        "mock_blocked"
+    }
+
+    fn description(&self) -> &'static str {
+        "Mock tool that always blocks"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+    }
+
+    fn execute(
+        &self,
+        _args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
+        let guidance = self.guidance.clone();
+        Box::pin(async move { Err(ToolError::Blocked(guidance)) })
     }
 }

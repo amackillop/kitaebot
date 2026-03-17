@@ -27,7 +27,7 @@ use glob_search::GlobSearch;
 use grep::Grep;
 
 #[cfg(test)]
-pub use mock::MockTool;
+pub use mock::{MockBlockedTool, MockTool};
 
 use std::borrow::Cow;
 use std::ffi::OsString;
