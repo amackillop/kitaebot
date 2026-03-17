@@ -126,8 +126,7 @@ fn analyze(sessions: &[Session]) -> Report {
             |(mut pending, mut by_tool, mut by_exec_cmd, mut blocked_cmds, mut tool_errors),
              msg| {
                 match msg {
-                    Message::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
-                        let calls = tool_calls;
+                    Message::ToolCalls { calls, .. } => {
                         let is_exec = |name: &str| name == "exec";
                         let call_infos = calls.iter().map(|call| CallInfo {
                             tool_name: call.function.name.clone(),
@@ -382,9 +381,9 @@ mod tests {
     use crate::types::{ToolCall, ToolFunction};
 
     fn make_assistant(calls: Vec<ToolCall>) -> Message {
-        Message::Assistant {
+        Message::ToolCalls {
             content: String::new(),
-            tool_calls: calls,
+            calls,
         }
     }
 

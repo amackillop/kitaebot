@@ -50,20 +50,14 @@ pub struct WireFunction<'a> {
 impl<'a> From<&'a Message> for WireMessage<'a> {
     fn from(msg: &'a Message) -> Self {
         match msg {
-            Message::Assistant {
+            Message::Assistant { content } => Self::Assistant {
                 content,
-                tool_calls,
-            } => {
-                let calls = if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(tool_calls.iter().map(WireToolCall::from).collect())
-                };
-                Self::Assistant {
-                    content,
-                    tool_calls: calls,
-                }
-            }
+                tool_calls: None,
+            },
+            Message::ToolCalls { content, calls } => Self::Assistant {
+                content,
+                tool_calls: Some(calls.iter().map(WireToolCall::from).collect()),
+            },
             Message::System { content } => Self::System { content },
             Message::Tool { call_id, content } => Self::Tool { call_id, content },
             Message::User { content } => Self::User { content },
@@ -136,7 +130,6 @@ mod tests {
     fn assistant_text_only_omits_tool_calls() {
         let msg = Message::Assistant {
             content: "sure".to_string(),
-            tool_calls: vec![],
         };
         let wire = WireMessage::from(&msg);
         let json = serde_json::to_value(&wire).unwrap();
@@ -147,9 +140,9 @@ mod tests {
 
     #[test]
     fn assistant_with_tool_calls() {
-        let msg = Message::Assistant {
+        let msg = Message::ToolCalls {
             content: String::new(),
-            tool_calls: vec![ToolCall::new(
+            calls: vec![ToolCall::new(
                 "call_1".to_string(),
                 ToolFunction {
                     name: "exec".to_string(),

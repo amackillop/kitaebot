@@ -11,12 +11,8 @@ use serde::{Deserialize, Serialize};
 /// Represents one turn in the conversation between user, assistant, and tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
-    /// Assistant message containing either text or tool call requests.
-    Assistant {
-        content: String,
-        /// Tool calls requested by the assistant. Empty if text-only response.
-        tool_calls: Vec<ToolCall>,
-    },
+    /// Assistant text response (no tool calls).
+    Assistant { content: String },
 
     /// System message containing instructions and context.
     System { content: String },
@@ -26,6 +22,12 @@ pub enum Message {
         /// ID of the tool call this result corresponds to.
         call_id: String,
         content: String,
+    },
+
+    /// Assistant response requesting tool execution.
+    ToolCalls {
+        content: String,
+        calls: Vec<ToolCall>,
     },
 
     /// User message containing the input request.
@@ -56,26 +58,32 @@ pub struct ToolFunction {
 }
 
 impl Message {
+    /// The text content common to every variant.
+    pub fn content(&self) -> &str {
+        match self {
+            Self::Assistant { content }
+            | Self::System { content }
+            | Self::Tool { content, .. }
+            | Self::ToolCalls { content, .. }
+            | Self::User { content } => content,
+        }
+    }
+
     /// Total character count across all content fields.
     ///
     /// Used for token estimation (`chars / 4`). Counts content strings
-    /// and, for assistant messages, tool call function names + arguments.
+    /// and, for tool-call messages, function names + arguments.
     pub fn char_count(&self) -> usize {
         match self {
-            Message::Assistant {
-                content,
-                tool_calls,
-            } => {
+            Self::ToolCalls { content, calls } => {
                 let base = content.len();
-                let calls: usize = tool_calls
+                let extra: usize = calls
                     .iter()
                     .map(|tc| tc.function.name.len() + tc.function.arguments.len())
                     .sum();
-                base + calls
+                base + extra
             }
-            Message::System { content }
-            | Message::Tool { content, .. }
-            | Message::User { content } => content.len(),
+            _ => self.content().len(),
         }
     }
 }
@@ -176,16 +184,15 @@ mod tests {
     fn char_count_assistant_text_only() {
         let msg = Message::Assistant {
             content: "response".to_string(),
-            tool_calls: vec![],
         };
         assert_eq!(msg.char_count(), 8);
     }
 
     #[test]
-    fn char_count_assistant_with_tool_calls() {
-        let msg = Message::Assistant {
+    fn char_count_tool_calls() {
+        let msg = Message::ToolCalls {
             content: "ok".to_string(),
-            tool_calls: vec![ToolCall::new(
+            calls: vec![ToolCall::new(
                 "id".to_string(),
                 ToolFunction {
                     name: "exec".to_string(),                 // 4
