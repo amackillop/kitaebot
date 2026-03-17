@@ -112,14 +112,12 @@ fn format_messages_for_summary(messages: &[Message]) -> String {
             } => {
                 out.push_str("[assistant] ");
                 out.push_str(content);
-                if let Some(calls) = tool_calls {
-                    for tc in calls {
-                        out.push_str("\n  [tool_call] ");
-                        out.push_str(&tc.function.name);
-                        out.push('(');
-                        out.push_str(&tc.function.arguments);
-                        out.push(')');
-                    }
+                for tc in tool_calls {
+                    out.push_str("\n  [tool_call] ");
+                    out.push_str(&tc.function.name);
+                    out.push('(');
+                    out.push_str(&tc.function.arguments);
+                    out.push(')');
                 }
             }
             Message::System { content } => {
@@ -223,7 +221,7 @@ mod tests {
         });
         session.add_message(Message::Assistant {
             content: "b".repeat(200),
-            tool_calls: None,
+            tool_calls: vec![],
         });
 
         let compacted = compact_if_needed(&mut session, "", &provider, tiny_config())

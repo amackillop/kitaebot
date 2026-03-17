@@ -1,80 +1,47 @@
 //! Core domain types for the agent protocol.
 //!
-//! These types follow the `OpenAI` Chat Completions API format, which is also
-//! compatible with `OpenRouter` and other OpenAI-compatible providers.
-//!
-//! See: <https://platform.openai.com/docs/api-reference/chat>
+//! These are internal domain types, decoupled from any wire format.
+//! Wire-format types for the `OpenAI` Chat Completions API live in
+//! [`crate::provider::wire`].
 
 use serde::{Deserialize, Serialize};
 
 /// Message in the conversation history.
 ///
 /// Represents one turn in the conversation between user, assistant, and tools.
-/// Uses tagged enum serialization where the `role` field determines the variant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "role", rename_all = "lowercase")]
 pub enum Message {
     /// Assistant message containing either text or tool call requests.
     Assistant {
-        /// Text content of the response (may be empty if tool calls are present)
         content: String,
-
-        /// Optional tool calls requested by the assistant
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tool_calls: Option<Vec<ToolCall>>,
+        /// Tool calls requested by the assistant. Empty if text-only response.
+        tool_calls: Vec<ToolCall>,
     },
 
     /// System message containing instructions and context.
-    ///
-    /// Typically includes SOUL.md, AGENTS.md, and tool definitions.
-    System {
-        /// The system prompt content
-        content: String,
-    },
+    System { content: String },
 
     /// Tool execution result message.
-    ///
-    /// Contains the output from executing a tool call.
     Tool {
-        /// ID of the tool call this result corresponds to
-        #[serde(rename = "tool_call_id")]
+        /// ID of the tool call this result corresponds to.
         call_id: String,
-
-        /// The tool's output (success or error message)
         content: String,
     },
 
     /// User message containing the input request.
-    User {
-        /// The user's message text
-        content: String,
-    },
+    User { content: String },
 }
 
 /// A request from the LLM to execute a tool.
-///
-/// The LLM generates these when it wants to use a tool instead of
-/// responding with text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
-    /// Unique identifier for this tool call
     pub id: String,
-
-    /// The function to be called
     pub function: ToolFunction,
-
-    /// Type of tool call (always "function")
-    #[serde(rename = "type")]
-    call_type: String,
 }
 
 impl ToolCall {
     pub fn new(id: String, function: ToolFunction) -> Self {
-        Self {
-            id,
-            function,
-            call_type: String::from("function"),
-        }
+        Self { id, function }
     }
 }
 
@@ -100,12 +67,10 @@ impl Message {
                 tool_calls,
             } => {
                 let base = content.len();
-                let calls = tool_calls.as_ref().map_or(0, |calls| {
-                    calls
-                        .iter()
-                        .map(|tc| tc.function.name.len() + tc.function.arguments.len())
-                        .sum()
-                });
+                let calls: usize = tool_calls
+                    .iter()
+                    .map(|tc| tc.function.name.len() + tc.function.arguments.len())
+                    .sum();
                 base + calls
             }
             Message::System { content }
@@ -211,7 +176,7 @@ mod tests {
     fn char_count_assistant_text_only() {
         let msg = Message::Assistant {
             content: "response".to_string(),
-            tool_calls: None,
+            tool_calls: vec![],
         };
         assert_eq!(msg.char_count(), 8);
     }
@@ -220,13 +185,13 @@ mod tests {
     fn char_count_assistant_with_tool_calls() {
         let msg = Message::Assistant {
             content: "ok".to_string(),
-            tool_calls: Some(vec![ToolCall::new(
+            tool_calls: vec![ToolCall::new(
                 "id".to_string(),
                 ToolFunction {
                     name: "exec".to_string(),                 // 4
                     arguments: r#"{"cmd":"ls"}"#.to_string(), // 12
                 },
-            )]),
+            )],
         };
         // "ok" (2) + "exec" (4) + arguments (12) = 18
         assert_eq!(msg.char_count(), 18);

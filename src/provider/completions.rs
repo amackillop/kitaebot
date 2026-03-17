@@ -11,6 +11,8 @@ use crate::config::ProviderConfig;
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
+use super::wire::WireMessage;
+
 use super::Provider;
 
 /// Provider for any OpenAI-compatible chat completions endpoint.
@@ -57,9 +59,10 @@ impl Provider for CompletionsProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<Response, ProviderError> {
+        let wire_messages: Vec<WireMessage> = messages.iter().map(WireMessage::from).collect();
         let request = ChatRequest {
             model: &self.model,
-            messages,
+            messages: wire_messages,
             tools: if tools.is_empty() { None } else { Some(tools) },
             max_tokens: self.max_tokens,
             temperature: self.temperature,
@@ -88,7 +91,7 @@ fn into_tool_call(tc: ApiToolCall) -> ToolCall {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: &'a [Message],
+    messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [ToolDefinition]>,
     max_tokens: u32,

@@ -140,14 +140,14 @@ async fn run_turn<P: Provider>(
             Response::Text(content) => {
                 session.add_message(Message::Assistant {
                     content: content.clone(),
-                    tool_calls: None,
+                    tool_calls: vec![],
                 });
                 return Ok(content);
             }
             Response::ToolCalls { content, calls } => {
                 session.add_message(Message::Assistant {
                     content,
-                    tool_calls: Some(calls.clone()),
+                    tool_calls: calls.clone(),
                 });
 
                 if repeats.record(&calls) {

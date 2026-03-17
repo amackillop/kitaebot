@@ -6,6 +6,7 @@
 mod completions;
 #[cfg(test)]
 mod mock;
+pub(crate) mod wire;
 
 pub use completions::CompletionsProvider;
 #[cfg(test)]
