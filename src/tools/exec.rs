@@ -573,12 +573,132 @@ fn has_path_traversal(cmd: &str) -> bool {
 
 /// Check if command matches any deny pattern. Returns the guidance
 /// message for the first matching rule, or `None` if allowed.
+///
+/// Two layers: regex on the raw string (catches textual patterns),
+/// then a parsed-command layer that tokenizes with shell quoting to
+/// catch bypasses like `VAR=x git commit`.
 fn blocked_reason(cmd: &str) -> Option<&'static str> {
-    DENY_SET
-        .matches(cmd)
-        .iter()
-        .next()
-        .map(|i| DENY_RULES[i].guidance)
+    // Layer 1: regex on raw string
+    if let Some(i) = DENY_SET.matches(cmd).iter().next() {
+        return Some(DENY_RULES[i].guidance);
+    }
+    // Layer 2: shell-aware structural match
+    command_blocked(cmd)
+}
+
+// ── Shell-aware command deny list ────────────────────────────────────
+
+/// A structural deny rule: binary + optional subcommand.
+struct CommandDeny {
+    binary: &'static str,
+    subcommand: Option<&'static str>,
+    guidance: &'static str,
+}
+
+/// Structural deny rules checked after shell tokenization.
+///
+/// These catch bypass patterns (env-var prefixes, absolute paths,
+/// interleaved flags) that the regex layer misses.
+const COMMAND_DENY_RULES: &[CommandDeny] = &[
+    CommandDeny {
+        binary: "git",
+        subcommand: Some("clone"),
+        guidance: "use the git_clone tool",
+    },
+    CommandDeny {
+        binary: "git",
+        subcommand: Some("push"),
+        guidance: "use the git_push tool",
+    },
+    CommandDeny {
+        binary: "git",
+        subcommand: Some("commit"),
+        guidance: "use the git_commit tool",
+    },
+    CommandDeny {
+        binary: "nix",
+        subcommand: Some("profile"),
+        guidance: "use nix develop or nix-shell for ephemeral environments",
+    },
+];
+
+/// True if `token` looks like a shell variable assignment (`KEY=value`).
+fn is_env_assignment(token: &str) -> bool {
+    let Some((key, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Shell operators that separate simple commands.
+const SHELL_OPERATORS: &[&str] = &["&&", "||", "|", ";"];
+
+/// Split a token list on shell operators into individual simple commands.
+fn parse_simple_commands(tokens: &[String]) -> Vec<&[String]> {
+    let mut commands = Vec::new();
+    let mut start = 0;
+    for (i, tok) in tokens.iter().enumerate() {
+        if SHELL_OPERATORS.contains(&tok.as_str()) {
+            if start < i {
+                commands.push(&tokens[start..i]);
+            }
+            start = i + 1;
+        }
+    }
+    if start < tokens.len() {
+        commands.push(&tokens[start..]);
+    }
+    commands
+}
+
+/// Check a command string against structural deny rules.
+///
+/// Returns guidance for the first matching rule, or `None`.
+fn command_blocked(cmd: &str) -> Option<&'static str> {
+    let Some(tokens) = shlex::split(cmd) else {
+        return Some("unparseable shell syntax");
+    };
+
+    for segment in parse_simple_commands(&tokens) {
+        // Skip leading KEY=VALUE tokens
+        let rest: Vec<&str> = segment
+            .iter()
+            .map(String::as_str)
+            .skip_while(|t| is_env_assignment(t))
+            .collect();
+
+        let Some(raw_binary) = rest.first() else {
+            continue;
+        };
+        // Strip path prefix: /usr/bin/git -> git
+        let binary = raw_binary.rsplit('/').next().unwrap_or(raw_binary);
+
+        // Find first positional arg: skip flags and flag-value tokens
+        // (e.g. `-c core.hooksPath=...` where the value contains `=`).
+        let subcommand = rest
+            .iter()
+            .skip(1)
+            .find(|t| !t.starts_with('-') && !t.contains('='))
+            .copied();
+
+        for rule in COMMAND_DENY_RULES {
+            if binary != rule.binary {
+                continue;
+            }
+            match rule.subcommand {
+                None => return Some(rule.guidance),
+                Some(sub) if subcommand == Some(sub) => return Some(rule.guidance),
+                Some(_) => {}
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -1035,5 +1155,92 @@ mod tests {
         assert_allowed("nix eval --json .#attr");
         assert_allowed("nix log .#package");
         assert_allowed("nix flake metadata");
+    }
+
+    // ── Shell-aware command parser ────────────────────────────────────
+
+    #[test]
+    fn test_is_env_assignment() {
+        assert!(is_env_assignment("FOO=bar"));
+        assert!(is_env_assignment("GIT_CONFIG_GLOBAL=/dev/null"));
+        assert!(is_env_assignment("_PRIVATE=1"));
+        assert!(is_env_assignment("A="));
+
+        assert!(!is_env_assignment("git"));
+        assert!(!is_env_assignment("--flag=value"));
+        assert!(!is_env_assignment("123=bad"));
+        assert!(!is_env_assignment("=no_key"));
+    }
+
+    #[test]
+    fn test_parse_simple_commands() {
+        let tokens: Vec<String> = vec!["echo", "hello", "&&", "git", "commit"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let cmds = parse_simple_commands(&tokens);
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(
+            cmds[0].iter().map(String::as_str).collect::<Vec<_>>(),
+            ["echo", "hello"]
+        );
+        assert_eq!(
+            cmds[1].iter().map(String::as_str).collect::<Vec<_>>(),
+            ["git", "commit"]
+        );
+    }
+
+    #[test]
+    fn test_parse_simple_commands_pipe_and_semicolon() {
+        let tokens: Vec<String> = vec!["a", "|", "b", ";", "c", "||", "d"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let cmds = parse_simple_commands(&tokens);
+        assert_eq!(cmds.len(), 4);
+    }
+
+    #[test]
+    fn test_command_blocked_env_prefix_git_commit() {
+        assert_blocked("GIT_CONFIG_GLOBAL=/dev/null git commit -m 'msg'");
+    }
+
+    #[test]
+    fn test_command_blocked_flag_before_subcommand() {
+        assert_blocked("git -c core.hooksPath=/dev/null commit -m 'msg'");
+    }
+
+    #[test]
+    fn test_command_blocked_env_prefix_git_push() {
+        assert_blocked("FOO=bar git push origin main");
+    }
+
+    #[test]
+    fn test_command_blocked_absolute_path_git_clone() {
+        assert_blocked("/usr/bin/git clone https://example.com/r");
+    }
+
+    #[test]
+    fn test_command_blocked_chained_with_and() {
+        assert_blocked("echo hello && git commit -m 'fix'");
+    }
+
+    #[test]
+    fn test_command_blocked_chained_with_semicolon() {
+        assert_blocked("echo hello; git push origin main");
+    }
+
+    #[test]
+    fn test_command_allowed_git_status_with_env() {
+        assert_allowed("GIT_PAGER=cat git status");
+    }
+
+    #[test]
+    fn test_command_allowed_quoted_git_commit() {
+        // The regex layer operates on raw text, so `echo 'git commit'`
+        // is a known false positive there. Test the structural layer
+        // directly: shlex treats the quoted string as a single token,
+        // so `command_blocked` alone should not flag it.
+        assert!(command_blocked("echo 'git commit'").is_none());
     }
 }
