@@ -66,7 +66,7 @@ pub(crate) fn build(
     co_authors: Vec<String>,
     direnv: DirenvCache,
 ) -> Vec<Box<dyn Tool>> {
-    let git = GitCli::new(token, workspace.path());
+    let git = GitCli::new(token, workspace.path(), direnv.clone());
 
     vec![
         Box::new(Commit::new(git.clone(), co_authors)),

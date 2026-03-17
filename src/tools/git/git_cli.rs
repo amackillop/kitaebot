@@ -7,8 +7,11 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use tracing::warn;
+
 use crate::error::ToolError;
 use crate::secrets::Secret;
+use crate::tools::DirenvCache;
 use crate::tools::cli_runner::{self, CmdOutput, SubprocessCall};
 
 /// Shared context for git tools.
@@ -16,13 +19,19 @@ use crate::tools::cli_runner::{self, CmdOutput, SubprocessCall};
 pub struct GitCli {
     pub(super) token: Secret,
     pub(super) workspace_root: PathBuf,
+    direnv_cache: DirenvCache,
 }
 
 impl GitCli {
-    pub fn new(token: Secret, workspace_root: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        token: Secret,
+        workspace_root: impl Into<PathBuf>,
+        direnv_cache: DirenvCache,
+    ) -> Self {
         Self {
             token,
             workspace_root: workspace_root.into(),
+            direnv_cache,
         }
     }
 
@@ -62,6 +71,18 @@ impl GitCli {
         mut call: SubprocessCall,
         authenticated: bool,
     ) -> Result<CmdOutput, ToolError> {
+        // Inject direnv devshell env so git hooks can find tools like `just`.
+        match self.direnv_cache.get(&call.cwd).await {
+            Ok(Some(ref env)) => {
+                call.env
+                    .extend(env.iter().map(|(k, v)| (k.into(), v.into())));
+            }
+            Ok(None) => {}
+            Err(ref e) => {
+                warn!(dir = %call.cwd.display(), error = %e, "direnv failed, running git without devshell");
+            }
+        }
+
         let askpass = if authenticated {
             Some(AskPass::create(&self.token).await?)
         } else {

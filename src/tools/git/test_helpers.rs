@@ -2,6 +2,7 @@
 
 use super::git_cli::GitCli;
 use crate::secrets::Secret;
+use crate::tools::DirenvCache;
 
 /// Build a `GitCli` backed by a fake `.git` dir for testing.
 ///
@@ -12,5 +13,8 @@ pub fn stub_git_cli_with_repo() -> (GitCli, String) {
     let repo = "projects/r";
     std::fs::create_dir_all(dir.path().join(repo).join(".git")).unwrap();
     let path = dir.into_path();
-    (GitCli::new(Secret::test("fake"), &path), repo.to_string())
+    (
+        GitCli::new(Secret::test("fake"), &path, DirenvCache::new()),
+        repo.to_string(),
+    )
 }
