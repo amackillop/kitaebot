@@ -63,7 +63,10 @@ impl Tool for GlobSearch {
             debug!(pattern = %args.pattern, "Searching files");
 
             if args.pattern.contains("../") || args.pattern.contains("..\\") {
-                return Err(ToolError::Blocked("path traversal in pattern".into()));
+                return Err(ToolError::Blocked {
+                    operation: args.pattern,
+                    guidance: "path traversal in pattern".into(),
+                });
             }
 
             let full_pattern = self.root.join(&args.pattern);
@@ -156,7 +159,7 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"pattern": "../**/*"}))
             .await;
-        assert!(matches!(result, Err(ToolError::Blocked(_))));
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 
     #[tokio::test]

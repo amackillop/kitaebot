@@ -44,8 +44,18 @@ const POLICY_STRIKE_LIMIT: usize = 2;
 const POLICY_STOP_DIRECTIVE: &str = "POLICY VIOLATION: A tool call was blocked. \
     Do NOT work around this. Report the situation to the user and await direction.";
 
-const POLICY_HALT_MSG: &str = "I attempted to use a blocked operation multiple times. \
-    The turn was halted automatically. Please advise how to proceed.";
+fn policy_halt_msg(reasons: &[String]) -> String {
+    use std::fmt::Write;
+    let mut msg = String::from(
+        "I attempted to use a blocked operation multiple times. \
+         The turn was halted automatically.",
+    );
+    if !reasons.is_empty() {
+        let _ = write!(msg, " Blocked: {}", reasons.join("; "));
+    }
+    msg.push_str(" Please advise how to proceed.");
+    msg
+}
 
 /// Load session, run a single turn, and save regardless of outcome.
 ///
@@ -186,17 +196,24 @@ async fn run_turn<P: Provider>(
                 let futures: Vec<_> = calls.iter().map(|call| tools.execute(call)).collect();
                 let results = cancellable(join_all(futures), cancel, activity_tx).await?;
 
-                let has_blocked = results
+                let blocked_reasons: Vec<String> = results
                     .iter()
-                    .any(|r| matches!(r, Err(ToolError::Blocked(_))));
+                    .filter_map(|r| match r {
+                        Err(ToolError::Blocked {
+                            operation,
+                            guidance,
+                        }) => Some(format!("{operation} ({guidance})")),
+                        _ => None,
+                    })
+                    .collect();
 
                 record_tool_results(session, &calls, results, activity_tx);
 
-                if has_blocked {
+                if !blocked_reasons.is_empty() {
                     policy_strikes += 1;
                     if policy_strikes >= POLICY_STRIKE_LIMIT {
                         warn!("Policy strike limit reached, halting turn");
-                        return Ok(POLICY_HALT_MSG.to_string());
+                        return Ok(policy_halt_msg(&blocked_reasons));
                     }
                     session.add_message(Message::System {
                         content: POLICY_STOP_DIRECTIVE.to_string(),
@@ -913,6 +930,10 @@ mod tests {
         assert!(
             msg.contains("halted automatically"),
             "expected halt message, got: {msg}",
+        );
+        assert!(
+            msg.contains("not allowed"),
+            "expected blocked reason in halt message, got: {msg}",
         );
     }
 

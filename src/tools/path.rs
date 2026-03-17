@@ -48,16 +48,22 @@ impl PathGuard {
 
     fn validate_and_join(&self, path: &str) -> Result<PathBuf, ToolError> {
         if path.contains('\0') {
-            return Err(ToolError::Blocked("null byte in path".into()));
+            return Err(ToolError::Blocked {
+                operation: path.to_string(),
+                guidance: "null byte in path".into(),
+            });
         }
-        if path.contains("../") || path.contains("..\\") {
-            return Err(ToolError::Blocked("path traversal detected".into()));
-        }
-        if path == ".." {
-            return Err(ToolError::Blocked("path traversal detected".into()));
+        if path.contains("../") || path.contains("..\\") || path == ".." {
+            return Err(ToolError::Blocked {
+                operation: path.to_string(),
+                guidance: "path traversal detected".into(),
+            });
         }
         if Path::new(path).is_absolute() {
-            return Err(ToolError::Blocked("absolute paths not allowed".into()));
+            return Err(ToolError::Blocked {
+                operation: path.to_string(),
+                guidance: "absolute paths not allowed".into(),
+            });
         }
         Ok(self.root.join(path))
     }
@@ -66,9 +72,10 @@ impl PathGuard {
         if resolved.starts_with(&self.root) {
             Ok(resolved.to_path_buf())
         } else {
-            Err(ToolError::Blocked(format!(
-                "path escapes workspace: {original}"
-            )))
+            Err(ToolError::Blocked {
+                operation: original.to_string(),
+                guidance: "path escapes workspace".into(),
+            })
         }
     }
 }
@@ -105,7 +112,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let guard = PathGuard::new(dir.path());
         let err = guard.resolve("../etc/passwd").unwrap_err();
-        assert!(matches!(err, ToolError::Blocked(_)));
+        assert!(matches!(err, ToolError::Blocked { .. }));
     }
 
     #[test]
@@ -113,7 +120,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let guard = PathGuard::new(dir.path());
         let err = guard.resolve("..").unwrap_err();
-        assert!(matches!(err, ToolError::Blocked(_)));
+        assert!(matches!(err, ToolError::Blocked { .. }));
     }
 
     #[test]
@@ -121,7 +128,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let guard = PathGuard::new(dir.path());
         let err = guard.resolve("/etc/passwd").unwrap_err();
-        assert!(matches!(err, ToolError::Blocked(_)));
+        assert!(matches!(err, ToolError::Blocked { .. }));
     }
 
     #[test]
@@ -129,7 +136,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let guard = PathGuard::new(dir.path());
         let err = guard.resolve("foo\0bar").unwrap_err();
-        assert!(matches!(err, ToolError::Blocked(_)));
+        assert!(matches!(err, ToolError::Blocked { .. }));
     }
 
     #[test]
@@ -164,6 +171,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let guard = PathGuard::new(dir.path());
         let err = guard.resolve_new("../escape.txt").unwrap_err();
-        assert!(matches!(err, ToolError::Blocked(_)));
+        assert!(matches!(err, ToolError::Blocked { .. }));
     }
 }

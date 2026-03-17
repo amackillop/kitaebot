@@ -66,8 +66,13 @@ pub enum ProviderError {
 #[derive(Debug, Error)]
 pub enum ToolError {
     /// Tool execution blocked by policy.
-    #[error("Tool blocked: {0}")]
-    Blocked(String),
+    #[error("Blocked: {operation} ({guidance})")]
+    Blocked {
+        /// What was attempted (e.g. the shell command or path).
+        operation: String,
+        /// Why it was blocked / what to do instead.
+        guidance: String,
+    },
 
     /// Tool execution failed.
     #[error("Execution failed: {0}")]

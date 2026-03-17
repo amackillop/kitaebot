@@ -79,6 +79,11 @@ impl Tool for MockBlockedTool {
         _args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         let guidance = self.guidance.clone();
-        Box::pin(async move { Err(ToolError::Blocked(guidance)) })
+        Box::pin(async move {
+            Err(ToolError::Blocked {
+                operation: "mock_blocked".into(),
+                guidance,
+            })
+        })
     }
 }

@@ -183,6 +183,6 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"pattern": "secret", "path": "../etc"}))
             .await;
-        assert!(matches!(result, Err(ToolError::Blocked(_))));
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 }

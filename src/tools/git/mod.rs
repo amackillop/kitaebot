@@ -36,19 +36,24 @@ pub(crate) fn resolve_repo_dir(
     repo_dir: &str,
 ) -> Result<PathBuf, ToolError> {
     if repo_dir.contains("..") {
-        return Err(ToolError::Blocked(
-            "repo_dir: path traversal detected".into(),
-        ));
+        return Err(ToolError::Blocked {
+            operation: repo_dir.to_string(),
+            guidance: "repo_dir: path traversal detected".into(),
+        });
     }
     if Path::new(repo_dir).is_absolute() {
-        return Err(ToolError::Blocked(
-            "repo_dir: absolute paths not allowed".into(),
-        ));
+        return Err(ToolError::Blocked {
+            operation: repo_dir.to_string(),
+            guidance: "repo_dir: absolute paths not allowed".into(),
+        });
     }
 
     let resolved = workspace_root.join(repo_dir);
     if !resolved.starts_with(workspace_root) {
-        return Err(ToolError::Blocked("repo_dir: escapes workspace".into()));
+        return Err(ToolError::Blocked {
+            operation: repo_dir.to_string(),
+            guidance: "repo_dir: escapes workspace".into(),
+        });
     }
     if !resolved.join(".git").is_dir() {
         return Err(ToolError::InvalidArguments(format!(
@@ -84,7 +89,7 @@ mod resolve_repo_dir_tests {
         let workspace = tempfile::tempdir().unwrap();
         assert!(matches!(
             resolve_repo_dir(workspace.path(), "../escape"),
-            Err(ToolError::Blocked(_))
+            Err(ToolError::Blocked { .. })
         ));
     }
 
@@ -93,7 +98,7 @@ mod resolve_repo_dir_tests {
         let workspace = tempfile::tempdir().unwrap();
         assert!(matches!(
             resolve_repo_dir(workspace.path(), "/etc"),
-            Err(ToolError::Blocked(_))
+            Err(ToolError::Blocked { .. })
         ));
     }
 

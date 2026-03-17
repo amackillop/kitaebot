@@ -71,11 +71,14 @@ impl Tool for FileRead {
 
             if meta.len() > MAX_FILE_SIZE {
                 warn!(path = %args.path, size = meta.len(), "File too large");
-                return Err(ToolError::Blocked(format!(
-                    "file too large: {} bytes (max {})",
-                    meta.len(),
-                    MAX_FILE_SIZE
-                )));
+                return Err(ToolError::Blocked {
+                    operation: args.path,
+                    guidance: format!(
+                        "file too large: {} bytes (max {})",
+                        meta.len(),
+                        MAX_FILE_SIZE,
+                    ),
+                });
             }
 
             let content = std::fs::read_to_string(&resolved)
@@ -187,7 +190,7 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"path": "../etc/passwd"}))
             .await;
-        assert!(matches!(result, Err(ToolError::Blocked(_))));
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 
     #[tokio::test]
@@ -210,6 +213,6 @@ mod tests {
 
         let tool = FileRead::new(PathGuard::new(dir.path()));
         let result = tool.execute(serde_json::json!({"path": "big.txt"})).await;
-        assert!(matches!(result, Err(ToolError::Blocked(_))));
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 }

@@ -125,6 +125,6 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"path": "../escape.txt", "content": "bad"}))
             .await;
-        assert!(matches!(result, Err(ToolError::Blocked(_))));
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 }

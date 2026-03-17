@@ -464,12 +464,18 @@ impl Tool for Exec {
 
             if has_path_traversal(&args.command) {
                 warn!(command = %args.command, "Path traversal detected");
-                return Err(ToolError::Blocked("path traversal detected".into()));
+                return Err(ToolError::Blocked {
+                    operation: args.command,
+                    guidance: "path traversal detected".into(),
+                });
             }
 
             if let Some(guidance) = blocked_reason(&args.command) {
                 warn!(command = %args.command, guidance, "Command blocked");
-                return Err(ToolError::Blocked(guidance.into()));
+                return Err(ToolError::Blocked {
+                    operation: args.command,
+                    guidance: guidance.into(),
+                });
             }
 
             let cwd = resolve_working_dir(&self.workspace_root, args.working_dir.as_deref())?;
@@ -548,19 +554,24 @@ fn resolve_working_dir(workspace_root: &Path, dir: Option<&str>) -> Result<PathB
     };
 
     if dir.contains("../") || dir.contains("..\\") || dir == ".." {
-        return Err(ToolError::Blocked(
-            "working_dir: path traversal detected".into(),
-        ));
+        return Err(ToolError::Blocked {
+            operation: dir.to_string(),
+            guidance: "working_dir: path traversal detected".into(),
+        });
     }
     if std::path::Path::new(dir).is_absolute() {
-        return Err(ToolError::Blocked(
-            "working_dir: absolute paths not allowed".into(),
-        ));
+        return Err(ToolError::Blocked {
+            operation: dir.to_string(),
+            guidance: "working_dir: absolute paths not allowed".into(),
+        });
     }
 
     let resolved = workspace_root.join(dir);
     if !resolved.starts_with(workspace_root) {
-        return Err(ToolError::Blocked("working_dir: escapes workspace".into()));
+        return Err(ToolError::Blocked {
+            operation: dir.to_string(),
+            guidance: "working_dir: escapes workspace".into(),
+        });
     }
 
     Ok(resolved)
@@ -978,7 +989,7 @@ mod tests {
         // a bug, execute() will run it for real.
         let args = serde_json::json!({"command": "echo shutdown"});
         let result = tool.execute(args).await;
-        assert!(matches!(result, Err(ToolError::Blocked(_))));
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 
     #[tokio::test]
@@ -986,7 +997,7 @@ mod tests {
         let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new());
         let args = serde_json::json!({"command": "cat ../secret"});
         let result = tool.execute(args).await;
-        assert!(matches!(result, Err(ToolError::Blocked(_))));
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 
     #[tokio::test]
@@ -1039,7 +1050,7 @@ mod tests {
         let root = Path::new("/workspace");
         assert!(matches!(
             resolve_working_dir(root, Some("../escape")),
-            Err(ToolError::Blocked(_)),
+            Err(ToolError::Blocked { .. }),
         ));
     }
 
@@ -1048,7 +1059,7 @@ mod tests {
         let root = Path::new("/workspace");
         assert!(matches!(
             resolve_working_dir(root, Some("/etc")),
-            Err(ToolError::Blocked(_)),
+            Err(ToolError::Blocked { .. }),
         ));
     }
 
@@ -1068,7 +1079,7 @@ mod tests {
         let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new());
         let args = serde_json::json!({"command": "pwd", "working_dir": "../escape"});
         let result = tool.execute(args).await;
-        assert!(matches!(result, Err(ToolError::Blocked(_))));
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 
     #[tokio::test]
