@@ -10,45 +10,45 @@ use crate::types::{Message, ToolCall, ToolFunction};
 /// Wire-format message for the `OpenAI` Chat Completions request body.
 #[derive(Serialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
-pub enum WireMessage {
+pub enum WireMessage<'a> {
     Assistant {
-        content: String,
+        content: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
-        tool_calls: Option<Vec<WireToolCall>>,
+        tool_calls: Option<Vec<WireToolCall<'a>>>,
     },
     System {
-        content: String,
+        content: &'a str,
     },
     Tool {
         #[serde(rename = "tool_call_id")]
-        call_id: String,
-        content: String,
+        call_id: &'a str,
+        content: &'a str,
     },
     User {
-        content: String,
+        content: &'a str,
     },
 }
 
 /// Wire-format tool call within an assistant message.
 #[derive(Serialize)]
-pub struct WireToolCall {
-    pub id: String,
-    pub function: WireFunction,
+pub struct WireToolCall<'a> {
+    pub id: &'a str,
+    pub function: WireFunction<'a>,
     #[serde(rename = "type")]
     pub call_type: &'static str,
 }
 
 /// Wire-format function within a tool call.
 #[derive(Serialize)]
-pub struct WireFunction {
-    pub name: String,
-    pub arguments: String,
+pub struct WireFunction<'a> {
+    pub name: &'a str,
+    pub arguments: &'a str,
 }
 
 // ── From conversions (domain → wire) ────────────────────────────────
 
-impl From<&Message> for WireMessage {
-    fn from(msg: &Message) -> Self {
+impl<'a> From<&'a Message> for WireMessage<'a> {
+    fn from(msg: &'a Message) -> Self {
         match msg {
             Message::Assistant {
                 content,
@@ -60,39 +60,32 @@ impl From<&Message> for WireMessage {
                     Some(tool_calls.iter().map(WireToolCall::from).collect())
                 };
                 Self::Assistant {
-                    content: content.clone(),
+                    content,
                     tool_calls: calls,
                 }
             }
-            Message::System { content } => Self::System {
-                content: content.clone(),
-            },
-            Message::Tool { call_id, content } => Self::Tool {
-                call_id: call_id.clone(),
-                content: content.clone(),
-            },
-            Message::User { content } => Self::User {
-                content: content.clone(),
-            },
+            Message::System { content } => Self::System { content },
+            Message::Tool { call_id, content } => Self::Tool { call_id, content },
+            Message::User { content } => Self::User { content },
         }
     }
 }
 
-impl From<&ToolCall> for WireToolCall {
-    fn from(tc: &ToolCall) -> Self {
+impl<'a> From<&'a ToolCall> for WireToolCall<'a> {
+    fn from(tc: &'a ToolCall) -> Self {
         Self {
-            id: tc.id.clone(),
+            id: &tc.id,
             function: WireFunction::from(&tc.function),
             call_type: "function",
         }
     }
 }
 
-impl From<&ToolFunction> for WireFunction {
-    fn from(f: &ToolFunction) -> Self {
+impl<'a> From<&'a ToolFunction> for WireFunction<'a> {
+    fn from(f: &'a ToolFunction) -> Self {
         Self {
-            name: f.name.clone(),
-            arguments: f.arguments.clone(),
+            name: &f.name,
+            arguments: &f.arguments,
         }
     }
 }

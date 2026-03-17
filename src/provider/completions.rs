@@ -91,7 +91,7 @@ fn into_tool_call(tc: ApiToolCall) -> ToolCall {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: Vec<WireMessage>,
+    messages: Vec<WireMessage<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [ToolDefinition]>,
     max_tokens: u32,
