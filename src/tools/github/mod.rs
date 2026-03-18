@@ -24,8 +24,8 @@
 //! script is used — see [`crate::tools::git`].
 
 mod ci_status;
+mod gh;
 mod gh_cli;
-mod pr_comment;
 mod pr_create;
 mod pr_diff_comments;
 mod pr_diff_reply;
@@ -36,8 +36,8 @@ mod test_helpers;
 mod types;
 
 pub use ci_status::CiStatus;
+pub use gh::Gh;
 pub use gh_cli::GhCli;
-pub use pr_comment::PrComment;
 pub use pr_create::PrCreate;
 pub use pr_diff_comments::PrDiffComments;
 pub use pr_diff_reply::PrDiffReply;
@@ -51,7 +51,7 @@ pub(crate) use super::Tool;
 pub(crate) fn build(gh: GhCli) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(CiStatus(gh.clone())),
-        Box::new(PrComment(gh.clone())),
+        Box::new(Gh(gh.clone())),
         Box::new(PrCreate(gh.clone())),
         Box::new(PrDiffComments(gh.clone())),
         Box::new(PrDiffReply(gh.clone())),
