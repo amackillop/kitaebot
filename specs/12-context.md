@@ -1,100 +1,110 @@
-# Context Window Management
+# Spec 12: Context Window Management
 
-## Purpose
+## Motivation
 
-Manage the conversation's token budget so sessions can run indefinitely without exceeding the model's context window. Automatic summarization compacts the conversation when the budget is approached.
+Manage the conversation's token budget so sessions can run indefinitely without
+exceeding the model's context window. Automatic summarization compacts the
+conversation when the budget is approached.
 
-## Why This Design?
+## Behavior
 
-1. **Sessions grow unboundedly** — Without management, long conversations exceed the context window and the provider returns an error (or silently truncates)
-2. **Simple heuristic over tokenizer** — `chars / 4` is close enough for English text and avoids a tokenizer dependency
-3. **Summarization over truncation** — Compressing old messages preserves key facts and decisions; hard truncation loses context
-4. **Whole-conversation compaction** — Summarize everything into one system message rather than batching. Simpler, and real-world testing will reveal if recent messages need preserving
-
-## Token Estimation
+### Token Estimation
 
 Approximate tokens per message using character count:
 
 ```
-estimated_tokens = chars / 4
+estimated_tokens = (system_prompt_chars + message_chars) / 4
 ```
 
-Counts message content strings and, for assistant messages, tool call function names + arguments. This is a rough heuristic — it overestimates for code (more ASCII) and underestimates for CJK text, but it's sufficient for budget decisions. No tokenizer dependency.
+`Message::char_count()` sums the content string length. For `ToolCalls`, it
+additionally sums function names and argument strings. This is a rough
+heuristic — overestimates for code, underestimates for CJK — but sufficient
+for budget decisions. No tokenizer dependency.
 
-## Context Budget
+### Budget
 
-Configurable via `config.toml`:
+The effective budget is `max_tokens * budget_percent / 100` (integer
+arithmetic, no floating point).
 
-```toml
-[context]
-max_tokens = 200000    # Model context window
-budget_percent = 80    # Compact at 80% usage
-```
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `context.max_tokens` | 200000 | Model's advertised context window |
+| `context.budget_percent` | 80 | Percentage that triggers compaction (1-100) |
 
-The effective budget is `max_tokens * budget_percent / 100`. The remaining headroom is reserved for the system prompt and the model's response.
+### Compaction Trigger
 
-| Field | Default | Purpose |
-|-------|---------|---------|
-| `max_tokens` | 200000 | Model's advertised context window |
-| `budget_percent` | 80 | Percentage of window that triggers compaction (1–100) |
-
-Integer percentage avoids floating-point lint issues with `f32` ratios.
-
-## Compaction Strategy
-
-When the estimated token count exceeds the budget:
-
-1. Summarize the entire conversation via a separate LLM call (same provider, no tools)
-2. Replace all messages with a single `Message::System` containing the summary
-3. Proceed with the turn
-
-The summarization prompt asks the model to preserve important facts, decisions, tool results, and open questions.
-
-## Trigger
-
-Compaction runs at the top of `run_turn()`, before the user message is pushed:
+Compaction runs at the top of `run_turn()`, **before** the user message is
+pushed:
 
 1. Estimate total tokens (session messages + system prompt)
-2. If estimate exceeds budget and session has >= 2 messages, compact
+2. If estimate exceeds budget **and** session has >= 2 messages, compact
 3. Otherwise no-op
 
-This is a single integration point that covers all entry paths (REPL, heartbeat, Telegram).
+The compaction call is wrapped in the cancellation token and can be
+interrupted.
 
-## REPL Commands
+### Compaction Strategy
 
-- `/context` — Display estimated token usage, message count, and budget. Pure computation, no LLM call.
-- `/compact` — Force a compaction cycle regardless of budget. Prints before/after token counts.
+When triggered:
 
-## Future Work
+1. Format all session messages as `[role] content` text
+2. Send to the provider as a separate LLM call (same model, no tools) with
+   a summarization prompt requesting preservation of important facts,
+   decisions, tool results, and open questions
+3. Replace all session messages with a single `Message::System` containing
+   the summary
 
-### Tool output pruning
+If the provider returns `Response::ToolCalls` (shouldn't happen since no tools
+are provided), the `content` field is used as a fallback.
 
-Before resorting to an LLM summarization call, walk backwards through tool results and erase output from old tool calls. Protect the most recent N turns and a configurable token threshold of tool output. This is cheap (no LLM call) and effective since tool output is typically the bulk of token usage. Only fall through to full summarization if pruning doesn't reclaim enough.
+### Activity Event
 
-Reference: opencode `prune()` — protects 40k tokens of recent tool output, requires >20k reclaimable before acting.
+On successful compaction, emits `Activity::Compaction { before, after }` with
+estimated token counts.
 
-### Structured summary template
+### Commands
 
-Replace the freeform summarization prompt with a structured template:
+- `/context` — display estimated token usage, message count, and budget
+- `/compact` — force a compaction cycle regardless of budget (still requires
+  >= 2 messages). Prints before/after token counts.
 
-- **Goal**: What the user is trying to accomplish
-- **Instructions**: Important user directives still in effect
-- **Discoveries**: Notable things learned during the session
-- **Accomplished**: What's done, in progress, and remaining
-- **Relevant files**: Structured list of files read/edited/created
+Both commands are available from any channel.
 
-### Message replay after compaction
+`force_compact()` skips the budget check but applies the same >= 2 message
+guard as auto-compaction.
 
-After auto-compaction, replay the user's last message so the agent can continue working seamlessly rather than requiring the user to re-state their request.
+## Boundaries
 
-### Keep recent messages
+### Owns
 
-If full-conversation summarization loses too much conversational continuity, add a `keep_last` parameter to preserve the N most recent messages unsummarized.
+- Token estimation (`session_tokens`, `Message::char_count`)
+- Budget calculation
+- Compaction trigger logic
+- Summarization prompt and LLM call
+- `/context` and `/compact` command implementations
 
-### Separate compaction model
+### Does Not Own
 
-Allow configuring a different (cheaper/faster) model for summarization calls, since the summary doesn't need the same capabilities as the main agent.
+- Session message storage — the session module handles `compact(summary)`
+- Provider call execution — delegates to the provider trait
+- When to call `compact_if_needed` — the agent loop owns that
 
-### Proper tokenizer
+## Failure Modes
 
-Use `tiktoken` or a model-specific tokenizer for accurate counts when precision matters.
+| Failure | Behavior |
+|---------|----------|
+| Provider error during summarization | `ProviderError` propagated to caller |
+| Session has < 2 messages | Compaction skipped (not an error) |
+| Cancellation during compaction | `Error::Cancelled` returned |
+
+## Constraints
+
+- Token estimation is `chars / 4` — no tokenizer library
+- Compaction summarizes the entire conversation into one message (no partial
+  windowing)
+- The summarization uses the same provider and model as the agent — no
+  separate compaction model
+
+## Open Questions
+
+None currently.

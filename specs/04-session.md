@@ -1,125 +1,127 @@
-# Session Management
+# Spec 04: Session
 
-## Purpose
+## Motivation
 
-The session module persists conversation history across agent restarts. It maintains the context that makes the agent feel continuous rather than amnesiac.
+The session persists conversation history across turns and restarts. All
+channels share a single unified session, giving the agent cross-channel
+continuity — it knows about a GitHub PR review when responding on Telegram.
 
-## Unified Session
+## Behavior
 
-All channels share a single session file:
+### Unified Model
 
-```
-session.json      # Unified session for all channels
-```
+All channels write to one session file. Messages are tagged with their
+`ChannelSource` (e.g. `[Telegram]`, `[GitHub PR #42]`, `[Socket]`,
+`[Heartbeat]`) by the actor before appending. The agent sees the full
+cross-channel history regardless of which channel is active.
 
-Messages from different channels are tagged with their `ChannelSource` (e.g. `[Telegram]`, `[GitHub PR #42]`, `[Socket]`, `[Heartbeat]`) before being appended. The agent sees the full cross-channel conversation history, giving it continuity across all interfaces.
+In addition to the session, all channels share the workspace:
 
-### Why Unified?
-
-1. **Cross-channel context** — The agent knows about a GitHub PR review when responding on Telegram
-2. **No session locking** — The agent actor processes envelopes sequentially; only one turn runs at a time
-3. **Simpler persistence** — One file, one load/save path
-4. **Natural conversation flow** — The agent's full history is available regardless of which channel is active
-
-### Shared Long-Term Memory
-
-In addition to the unified session, all channels share the workspace:
-
-| Layer | Scope | Example |
-|-------|-------|---------|
-| `session.json` | Unified | Tagged conversational history from all channels |
+| Layer | Scope | Description |
+|-------|-------|-------------|
+| `sessions/session.json` | Unified | Tagged conversational history |
 | `memory/` | Shared | HISTORY.md, learnings, notes |
-| Workspace files | Shared | SOUL.md, HEARTBEAT.md, projects/ |
+| Workspace files | Shared | SOUL.md, AGENTS.md, projects/ |
 
-A learning from a Telegram conversation (written to `memory/`) is visible immediately in the next turn from any channel.
+### Data Structure
 
-## Data Structure
+The session stores `Message` enum values directly:
 
-The session stores `Message` values directly (the same enum used by the agent loop and provider). This avoids a separate `SessionMessage` type and keeps the serialization format aligned with the OpenAI wire format.
-
-Timestamps use a custom `Timestamp(u64)` type — seconds since Unix epoch — to avoid pulling in `chrono` for two fields. Messages do not carry individual timestamps.
-
-## Storage Format
-
-The session file lives at `session.json` under the workspace root. Example:
-
-```json
-{
-    "messages": [
-        {
-            "role": "user",
-            "content": "What files are in my workspace?"
-        },
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"id": "call_123", "type": "function", "function": {"name": "exec", "arguments": "{\"command\": \"ls\"}"}}
-            ]
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "call_123",
-            "content": "$ ls\nSOUL.md\nsession.json\nprojects/\n\nExit code: 0"
-        },
-        {
-            "role": "assistant",
-            "content": "Your workspace contains: SOUL.md, session.json, projects/"
-        }
-    ],
-    "created_at": 1708516800,
-    "updated_at": 1708516802
+```
+Session {
+    messages: Vec<Message>,
+    created_at: Timestamp,    // seconds since Unix epoch
+    updated_at: Timestamp,
 }
 ```
 
-## Operations
+`Timestamp` is a newtype over `u64`. Messages do not carry individual
+timestamps.
 
-- **`Session::new()`** — Create empty session with current timestamp
-- **`Session::load(path)`** — Load from disk; create new if file doesn't exist; return parse error if corrupt
-- **`Session::save(path)`** — Atomic write (tmp + rename) to prevent corruption
-- **`Session::add_message(msg)`** — Append message, update `updated_at`
-- **`Session::messages()`** — Return full message slice (no windowing)
-- **`Session::clear()`** — Wipe messages, preserve `created_at`
+The `Message` enum:
 
-The session module is channel-agnostic. The caller (the agent actor) provides the path. With the unified session, there is only one path: `session.json`.
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `User` | `content` | User input |
+| `Assistant` | `content` | LLM text response |
+| `ToolCalls` | `content`, `calls: Vec<ToolCall>` | LLM requesting tool invocations |
+| `Tool` | `call_id`, `content` | Tool execution result |
+| `System` | `content` | System-injected message (compaction summary, policy directive) |
 
-## File Safety
+On disk, messages are serialized using serde's default externally-tagged enum
+format (e.g. `{"User": {"content": "..."}}`). This is **not** the OpenAI wire
+format — wire conversion happens in the provider module.
 
-Writes use atomic rename to prevent corruption: write to `session.json.tmp`, then rename to `session.json`.
+### Operations
 
-## Session Commands
+| Method | Behavior |
+|--------|----------|
+| `new()` | Create empty session with current timestamp |
+| `load(path)` | Load from disk. Create new if file doesn't exist. Return `SessionError::Parse` if corrupt. |
+| `save(path)` | Update `updated_at`, then atomic write (tmp + rename) |
+| `add_message(msg)` | Append message, update `updated_at` |
+| `messages()` | Return full message slice |
+| `clear()` | Wipe messages, preserve `created_at`, update `updated_at` |
+| `compact(summary)` | Replace all messages with a single summary message |
+| `len()` | Message count |
 
-| Command | Action | Scope |
-|---------|--------|-------|
-| `/new` | Clear session, start fresh | Any channel (clears the unified session) |
+### Token Estimation
 
-## MVP Simplifications
+Each `Message` exposes a `char_count()` method. For `ToolCalls`, this sums the
+content length plus all function names and argument strings. Token count is
+estimated as `total_chars / 4` (crude English approximation). This feeds into
+the context budget system (see [spec 12](12-context.md)).
 
-1. **No consolidation** — Messages accumulate unbounded
-2. **No windowing** — All messages sent to LLM (until context limit)
-3. **No backup** — Single file, atomic write
-4. **No encryption** — Plain JSON (workspace is private anyway)
-5. **No per-message timestamps** — Only session-level `created_at`/`updated_at`
+### File Safety
 
-## Future Considerations
+Writes use atomic rename: write to `session.json.tmp`, then rename to
+`session.json`. A crash during write leaves the original file intact.
 
-### Memory Consolidation
+## Boundaries
 
-When sessions grow large (particularly heartbeat), we'll need to consolidate:
+### Owns
 
-1. Take oldest N messages
-2. Ask LLM to summarize key facts
-3. Write summary to `memory/`
-4. Remove old messages from session
+- Message storage and retrieval
+- Atomic persistence to disk
+- Timestamps (`created_at`, `updated_at`)
+- The `compact()` operation (replacing messages with a summary)
 
-### Token Counting
+### Does Not Own
 
-Currently no token awareness. Eventually:
+- Deciding when to compact — the context module triggers that
+- Generating the summary — the context module calls the provider
+- Channel tagging — the actor prepends `[ChannelSource]` before adding
+- Session file path — the workspace module defines it (`sessions/session.json`)
+- System prompt assembly — prepended per provider call, never stored
 
-1. Estimate tokens per message
-2. Track cumulative context size
-3. Trigger consolidation before hitting limit
+### Interactions
 
-### Session Metadata
+- The **actor** calls `load()` before and `save()` after each envelope.
+  Save happens unconditionally, even on turn failure.
+- The **context module** calls `compact(summary)` when the token budget is
+  exceeded.
+- The **`/new` command** calls `clear()` then `save()`.
+- The **`/compact` command** calls `force_compact()` which delegates to the
+  context module.
 
-May want to store channel-specific metadata alongside the message history (e.g., Telegram chat_id, last update_id offset). Keep the session format extensible — additional top-level fields are ignored by older code.
+## Failure Modes
+
+| Failure | Error | Behavior |
+|---------|-------|----------|
+| File doesn't exist | — | Return new empty session |
+| Corrupt JSON | `SessionError::Parse` | Error propagated to caller |
+| Filesystem read error | `SessionError::Io` | Error propagated to caller |
+| Serialization failure | `SessionError::Serialize` | Error propagated to caller |
+| Crash during write | — | Atomic rename protects the original file |
+
+## Constraints
+
+- Session path: `<workspace>/sessions/session.json`
+- No per-message timestamps
+- No encryption (workspace is private)
+- No version field (unknown fields are silently ignored by serde for forward
+  compatibility)
+
+## Open Questions
+
+None currently.

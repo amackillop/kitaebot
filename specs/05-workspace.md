@@ -1,17 +1,14 @@
-# Workspace
+# Spec 05: Workspace
 
-## Purpose
+## Motivation
 
-The workspace is the agent's home directory. It contains configuration, state, and user files. All agent operations are confined to this directory.
+The workspace is the agent's home directory — configuration, state, prompt
+files, and user projects all live here. All agent operations are confined to
+this directory (enforced by Landlock, see [spec 15](15-sandbox.md)).
 
-## Why Workspace Isolation?
+## Behavior
 
-1. **Security** — Agent can't access system files or other users' data
-2. **Predictability** — Agent always knows where it is
-3. **Portability** — Workspace can be backed up, moved, or reset
-4. **Simplicity** — No complex permission system needed
-
-## Location
+### Location
 
 Resolved via fallback chain:
 
@@ -19,107 +16,108 @@ Resolved via fallback chain:
 2. `$XDG_DATA_HOME/kitaebot`
 3. `~/.local/share/kitaebot`
 
-## Directory Structure
+### Directory Structure
 
 ```
-~/.local/share/kitaebot/     (or KITAEBOT_WORKSPACE)
-├── config.toml              # Runtime configuration
+<workspace>/
+├── config.toml              # Runtime configuration (Nix-provisioned)
 │
-├── SOUL.md                  # Agent personality (system prompt)
-├── AGENTS.md                # Agent instructions
-├── USER.md                  # User profile (optional, user-created)
-├── HEARTBEAT.md             # Periodic task definitions
+├── SOUL.md                  # Agent personality (Nix-provisioned)
+├── AGENTS.md                # Agent instructions (Nix-provisioned)
+├── USER.md                  # User profile (Nix-provisioned, optional)
+├── HEARTBEAT.md             # Periodic task definitions (Nix-provisioned)
 │
 ├── sessions/                # Session storage
 │   └── session.json         # Unified session (all channels)
 │
 ├── memory/                  # Shared long-term memory
 │   ├── HISTORY.md           # Heartbeat execution log
-│   └── daily-*.md           # Auto-created daily logs
+│   └── github_poll_state.json  # GitHub channel poll cursor
 │
 └── projects/                # User's working area
-    └── ...
 ```
 
-## File Purposes
+### Initialization
 
-### Prompt Files
+`Workspace::init()` resolves the path and delegates to `init_at()`, which
+creates the directory tree: workspace root, `sessions/`, `memory/`, `projects/`.
 
-Loaded into the system prompt (concatenated in order):
+Prompt files (`SOUL.md`, `AGENTS.md`, `USER.md`, `HEARTBEAT.md`) and
+`config.toml` are **not** created by the Rust binary. They are provisioned
+externally by the NixOS module via `systemd.tmpfiles.rules` as symlinks into
+the Nix store. This keeps content management declarative and outside the
+binary's responsibility.
 
-| File | Purpose | Who Edits |
-|------|---------|-----------|
-| `SOUL.md` | Personality, values, style | User |
-| `AGENTS.md` | Instructions for the agent | User |
-| `USER.md` | User profile, preferences | User (optional) |
+Workspace init failure is fatal — the process exits.
 
-### State Files
+### System Prompt Assembly
 
-| File | Purpose | Who Edits |
-|------|---------|-----------|
-| `sessions/session.json` | Unified conversation state (all channels) | Agent (automatic) |
-| `memory/HISTORY.md` | Heartbeat execution log | Agent (automatic) |
-| `memory/daily-*.md` | Daily logs (timestamped entries) | Agent (automatic) |
-| `HEARTBEAT.md` | Periodic task definitions | User or agent |
-| `config.toml` | Runtime configuration | User |
+`system_prompt()` concatenates files in order:
 
-### Shared Memory
+1. `SOUL.md` — personality, values, style
+2. `AGENTS.md` — instructions for the agent
+3. `USER.md` — user profile, preferences
 
-The `memory/` directory is shared across all channels. Any channel can read or write files here. This is the mechanism for cross-channel knowledge transfer:
+Files are separated by a single `\n`. Missing files produce a `warn` log but
+are not fatal — the function returns whatever it could read, possibly empty.
 
-- Heartbeat writes execution logs to `memory/HISTORY.md`
-- Telegram conversations can write learnings to `memory/`
-- Socket sessions can read memory to debug agent behavior
+The system prompt is assembled fresh on every provider call (not cached). Edits
+to prompt files take effect on the next turn without restart.
 
-### Memory Search
+### Path Helpers
 
-See [spec 14 (Memory)](14-memory.md) for the full retrieval system. Storage lives in `memory/memory.db` (SQLite with FTS5). The original `memory/*.md` files are migrated on first run and retained as a read-only archive.
+| Method | Returns |
+|--------|---------|
+| `path()` | Workspace root |
+| `session_path()` | `sessions/session.json` |
+| `heartbeat_path()` | `HEARTBEAT.md` |
+| `history_path()` | `memory/HISTORY.md` |
+| `github_poll_state_path()` | `memory/github_poll_state.json` |
 
-### Daily Logs
+## Boundaries
 
-Auto-created daily log files provide temporal awareness across channels.
+### Owns
 
-- **File:** `memory/daily-YYYY-MM-DD.md` — created on first write each day
-- Any channel can append to today's log via the exec tool
-- Daily logs are append-only markdown with timestamped entries
-- Lives in `memory/` alongside `HISTORY.md` — no new directory needed
+- Directory structure creation (`sessions/`, `memory/`, `projects/`)
+- Path resolution (env var / XDG fallback)
+- System prompt assembly (concatenation of prompt files)
+- Path helpers for well-known files
 
-The agent's system prompt includes the last 2 days of daily logs (today + yesterday). This gives the agent a sense of "what happened recently" without loading full session history from all channels.
+### Does Not Own
 
-## Initialization
+- Prompt file content — provisioned by NixOS
+- Config file content — provisioned by NixOS
+- Session persistence — the session module handles that
+- Filesystem confinement — Landlock handles that
+- File content written by the agent — tools handle that
 
-On startup, `Workspace::init()` creates the directory tree and writes default templates for `SOUL.md` and `AGENTS.md` using `create_new` (O_EXCL) — existing files are never overwritten.
+### Interactions
 
-Directories created: workspace root, `sessions/`, `memory/`, `projects/`.
+- **Landlock sandbox** receives the workspace path and grants full access
+  within it. All other filesystem access is restricted.
+- **Agent actor** calls `system_prompt()` on each turn and `session_path()`
+  for session load/save.
+- **Heartbeat** uses `heartbeat_path()` and `history_path()`.
+- **GitHub channel** uses `github_poll_state_path()` for poll cursor
+  persistence.
 
-## Isolation Enforcement
+## Failure Modes
 
-### Path Traversal
+| Failure | Behavior |
+|---------|----------|
+| Workspace path unresolvable (no env var, no HOME) | Fatal exit |
+| Directory creation fails | Fatal exit (`WorkspaceError::Init`) |
+| Prompt file missing | Warn log, prompt assembled from remaining files |
+| Prompt file read error | Warn log, file skipped |
 
-The `exec` tool rejects commands containing `../` to prevent escaping the workspace.
+## Constraints
 
-### Shell Restrictions
+- Workspace must exist before the agent starts (init is synchronous at
+  startup)
+- Prompt files are expected to be provisioned externally — the binary creates
+  no files, only directories
+- `system_prompt()` never fails — it degrades gracefully to an empty string
 
-The `exec` tool always runs with `cwd` = workspace root.
+## Open Questions
 
-### VM Sandbox
-
-The VM provides the real security boundary:
-- Separate filesystem namespace
-- Limited network access
-- Resource constraints
-
-## Backup & Recovery
-
-Workspace is self-contained. To backup:
-
-```bash
-tar -czf kitaebot-backup.tar.gz ~/.local/share/kitaebot/
-```
-
-## Future Considerations
-
-- **Git integration** — Auto-commit workspace changes
-- **Encryption at rest** — For sensitive data
-- **Quota management** — Prevent disk exhaustion
-- **Multiple workspaces** — For different projects/personas
+None currently.

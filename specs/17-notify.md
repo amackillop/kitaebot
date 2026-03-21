@@ -1,106 +1,63 @@
-# Notify
+# Spec 17: Notify
 
-## Purpose
+## Status: Not Implemented
 
-The `notify` tool lets the agent push a message to the user outside the current request-reply flow. Without it, the agent can only respond to whoever asked — a heartbeat finding gets logged, a GitHub review response goes nowhere visible. With `notify`, the agent can escalate: "I found a failing build during heartbeat, here's what I know" lands on the user's phone.
+This spec describes a planned tool that does not yet exist.
 
-## Why a Tool?
+## Motivation
 
-The agent already decides *what* to do during a turn. Making notification a tool means the agent also decides *when* something is worth interrupting the user. No configuration for "forward heartbeat results if non-trivial" — the agent judges that itself, in context.
+The `notify` tool lets the agent push a message to the user outside the current
+request-reply flow. Without it, a heartbeat finding gets logged but doesn't
+reach the user. With `notify`, the agent can escalate to the user's phone.
 
-A tool also composes naturally with every channel. Heartbeat, GitHub, socket — any turn can notify. No special routing rules per channel.
+Making notification a tool means the agent decides when something is worth
+interrupting the user — no configuration for "forward heartbeat results if
+non-trivial."
 
-## Behavior
+## Planned Design
+
+### Parameters
 
 | Param | Type | Required | Notes |
 |-------|------|----------|-------|
-| `message` | `String` | yes | Content to send to the user |
-| `urgency` | `String` | no | `low` (default) or `high` — determines delivery policy |
-
-The tool sends `message` to the configured notification sink (Telegram by default). Returns a confirmation string on success, error text on failure. The agent sees the result and can retry or rephrase.
+| `message` | String | yes | Content to send |
+| `urgency` | String | no | `low` (default) or `high` |
 
 ### Urgency
 
-- **`low`** — batched. Messages are accumulated and delivered as a single combined Telegram message at the end of the current turn. Prevents spam during chatty heartbeat turns. Individual messages are joined with blank lines.
-- **`high`** — immediate. Sent as soon as the tool executes. Use for blockers, failures, or anything the user should see right now.
+- **`low`** — batched. Accumulated and delivered as a single Telegram message
+  at the end of the current turn.
+- **`high`** — immediate. Sent as soon as the tool executes.
 
-The LLM's system prompt should describe when to use each level. Example guidance: "Use `high` for errors, blockers, or questions you need answered. Use `low` for status updates and informational findings."
+### Sink
 
-## Notification Sink
+Telegram via `sendMessage` to the configured `chat_id`. Reuses the existing
+`TelegramClient`. If Telegram is disabled, the tool is not registered.
 
-The sink is the delivery backend. Telegram is the only sink for now. The tool holds a reference to the sink at construction time, injected by the runtime.
+### Rate Limiting
 
-### Telegram Sink
+Max 5 notifications per turn. Counter lives in the actor, resets per envelope.
 
-Sends via `sendMessage` to the configured `telegram.chat_id`. Reuses the existing `TelegramClient` — no new HTTP client, no new credentials.
+### Batching
 
-If Telegram is disabled (`telegram.enabled = false`), the tool is not registered. The agent cannot call what doesn't exist in its toolbox.
+The actor owns the low-urgency buffer. After the turn completes (success or
+error), buffered messages are joined with `\n\n` and sent as a single Telegram
+message.
 
-### Future Sinks
-
-The sink could be a trait or an enum. Not worth abstracting until there's a second backend. Candidates:
-
-- **Ntfy** — push notifications without a bot, works with any device
-- **Email** — SMTP, good for non-urgent summaries
-- **Desktop** — D-Bus notification on the host (via socket channel? via exec?)
-
-## Construction
-
-The runtime builds the `Notify` tool alongside the other tools. It needs a clone of the `TelegramClient` and the `chat_id`. If Telegram is disabled and no other sink is configured, the tool is omitted from the toolbox entirely.
-
-## Rate Limiting
-
-Max 5 notifications per agent turn. After the limit, the tool returns an error ("notification limit reached for this turn"). Prevents runaway loops where the agent decides everything is worth notifying about.
-
-The counter lives in the actor. It resets at the start of each envelope. The actor passes a shared counter (or a flush callback) to the tool at execution time, and flushes batched `low` messages after the turn completes.
-
-## Batching
-
-The actor owns the low-urgency buffer (`Vec<String>`). When the tool executes with `urgency: low`, it appends to this buffer and returns immediately with "queued for delivery". After the turn completes (agent loop returns), the actor joins all buffered messages with `\n\n`, sends a single Telegram message, and clears the buffer. If the turn errors out, buffered notifications are still flushed — the agent wanted them sent.
-
-## Interaction with Channels
-
-| Channel | Typical use |
-|---------|-------------|
-| Heartbeat | "Build X is failing, needs your attention" |
-| GitHub | "I'm stuck on PR #42 review — reviewer asked something I can't answer" |
-| Socket | Less useful — user is already connected. But could notify on long tool executions. |
-| Telegram | Available but rarely useful — user is already the recipient. Makes sense for deferred follow-ups ("I finished that task you asked about earlier"). |
-
-## System Prompt Guidance
-
-The SOUL.md or AGENTS.md should include instructions like:
-
-> You have a `notify` tool to send push notifications to the user. Use it when:
-> - A heartbeat check finds something that needs human attention
-> - You're stuck and need input during autonomous work
-> - A long-running operation completes or fails
->
-> Don't notify for routine findings or status-quo confirmations. If nothing needs attention, stay quiet.
-
-The agent's judgment here is the whole point. Over-notification is worse than under-notification.
-
-## Error Handling
+### Error Handling
 
 | Error | Behavior |
 |-------|----------|
-| Telegram API failure | Return error text to agent. Agent can retry or skip. |
-| Rate limit exceeded | Return "notification limit reached" to agent. |
-| No sink configured | Tool not registered — agent never sees it. |
+| Telegram API failure | Error text returned to agent |
+| Rate limit exceeded | Error text returned to agent |
+| No sink configured | Tool not registered |
 
-## Configuration
+### Configuration
 
-No new config keys. The tool's availability is derived from existing config:
+No new config keys. Tool availability is derived from `telegram.enabled`.
 
-- `telegram.enabled = true` → Telegram sink available → tool registered
-- `telegram.enabled = false` and no other sink → tool omitted
+## Open Questions
 
-Future: a `notify.sink` config key if multiple backends exist.
-
-## Simplifications
-
-1. **Telegram only** — one sink, no abstraction
-2. **No delivery confirmation** — fire and hope. Telegram's API is reliable enough.
-3. **No user reply path** — notification is one-way. If the user wants to respond, they message normally on Telegram. The unified session means the agent will see it in context.
-4. **No scheduling** — no "notify me at 5pm". The heartbeat already handles periodic checks.
-5. **No per-channel sink routing** — all notifications go to the same place regardless of which channel triggered them
+1. Should there be a sink abstraction (trait/enum), or is Telegram-only fine
+   until a second backend exists?
+2. Should batched messages be flushed on turn error, or only on success?

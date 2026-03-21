@@ -1,143 +1,137 @@
-# Heartbeat
+# Spec 07: Heartbeat
 
-## Purpose
+## Motivation
 
-The heartbeat is a periodic awareness check. It allows the agent to proactively review its workspace and surface anything that needs attention — without waiting for user input.
+The heartbeat is a periodic awareness check. It lets the agent proactively
+review its workspace and surface anything that needs attention — without
+waiting for user input.
 
-## Heartbeat vs Cron
+## Behavior
 
-These are complementary, not interchangeable:
+### Timer
 
-| Aspect | Heartbeat | Cron |
-|--------|-----------|------|
-| **Timing** | Approximate intervals | Exact schedules |
-| **Session** | Unified (conversational continuity) | Isolated (no context) |
-| **Context** | Aware of full conversation history | Standalone |
-| **Batching** | Multiple checks per turn | One job per execution |
-| **Decision** | Agent decides what needs attention | Executes unconditionally |
+A `tokio::time::interval` fires on a configurable cadence (default 30 minutes).
+Missed ticks are skipped, not burst. On each tick, the literal string
+`"/heartbeat"` is sent through the `AgentHandle` with
+`ChannelSource::Heartbeat`.
 
-Heartbeat is about **awareness within a session**. Cron is about **scheduled independence**.
+The first tick fires immediately on daemon startup.
 
-One heartbeat replaces many small polling tasks. "Check email, review calendar, scan inbox" is one heartbeat turn — cheap and batched — versus three separate cron jobs.
+### Execution Flow
 
-## Architecture
+1. Actor receives the envelope, classifies `"/heartbeat"` as
+   `Input::Command(SlashCommand::Heartbeat)`.
+2. **Prepare**: `heartbeat::prepare()` reads `HEARTBEAT.md` and extracts
+   active task lines (`- [ ]` checkboxes). Returns `Prepared::Ready(prompt)`
+   or `Prepared::Skipped(reason)`.
+3. **Execute**: On ready, the command handler calls `agent::process_message()`
+   directly (not through the handle — that would deadlock since we're already
+   inside the actor). The heartbeat turn runs in the unified session with full
+   conversational context.
+4. **Finish**: On success, `heartbeat::finish()` appends the response to
+   `memory/HISTORY.md` with a UTC timestamp. A finish write failure is logged
+   but does not fail the heartbeat.
 
-```
-┌──────────────────────────────────────────────┐
-│            kitaebot run (daemon)             │
-│                                              │
-│  ┌────────────────────────────────────────┐  │
-│  │     tokio::interval (configurable)     │  │
-│  └──────────────────┬─────────────────────┘  │
-│                     │                        │
-│                     ▼                        │
-│  1. Send "/heartbeat" through AgentHandle    │
-│  2. Actor classifies as slash command        │
-│  3. /heartbeat handler:                      │
-│     a. prepare() — read HEARTBEAT.md         │
-│     b. Skip if no file or no active tasks    │
-│     c. Run agent turn with heartbeat prompt  │
-│     d. finish() — append to HISTORY.md       │
-│  4. Reply logged, errors retried next tick   │
-└──────────────────────────────────────────────┘
-```
+Because `/heartbeat` routes through the `Command` dispatch branch (not the
+`Message` branch), the heartbeat prompt enters the session **without** a
+`[Heartbeat]` channel prefix. Source tagging only applies to free-text
+messages.
 
-The heartbeat is a thin timer loop (`poll_loop`) that sends `/heartbeat` through the `AgentHandle` on each tick. The actual logic lives in the `/heartbeat` slash command handler, which calls `heartbeat::prepare()` and `heartbeat::finish()`.
+### HEARTBEAT.md Format
 
-Because all messages go through the actor sequentially, there is no need for lock files. The actor naturally serializes heartbeat turns with messages from other channels.
-
-## Unified Session
-
-The heartbeat shares the unified session with all other channels. Messages are tagged with `[Heartbeat]` so the agent can distinguish heartbeat context from user messages. This gives the heartbeat full conversational continuity — it sees prior user conversations, GitHub reviews, and its own previous heartbeat results.
-
-## HEARTBEAT.md Format
-
-Tasks are recurring — they run every heartbeat cycle, not once. Checkboxes
-act as an enable/disable toggle: `- [ ]` is enabled, `- [x]` is disabled.
-The user (or agent) toggles checkboxes to activate or deactivate tasks
-without deleting them. This avoids re-adding tasks with slightly different
-wording.
+Tasks are recurring — they run every heartbeat cycle, not once. Checkboxes act
+as an enable/disable toggle: `- [ ]` is enabled, `- [x]` is disabled. The
+agent or user toggles checkboxes to activate or deactivate tasks without
+deleting them.
 
 ```markdown
 # Heartbeat Tasks
-
-Tasks below are checked every 30 minutes.
-
-## Tasks
 
 - [ ] Check if any project builds are failing
 - [ ] Summarize any new files in projects/inbox
 - [x] Review memory and clean up stale entries
 ```
 
-## Prompt and Response
+### Prompt Construction
 
-`heartbeat::prepare()` reads HEARTBEAT.md, extracts active task lines (`- [ ]` checkboxes), and builds a prompt. If there are no active tasks or no HEARTBEAT.md file, it returns `Prepared::Skipped`.
+Active tasks are extracted and injected into a prompt:
 
-The `/heartbeat` command handler runs an agent turn with the prepared prompt. If the response contains actionable content, `heartbeat::finish()` appends it to `memory/HISTORY.md` with a UTC timestamp.
+```
+This is a heartbeat check. Review the following tasks and handle any
+that need attention:
 
-## Execution Flow
+- [ ] Check if any project builds are failing
+- [ ] Summarize any new files in projects/inbox
+```
 
-See `src/heartbeat.rs`. Three public entry points:
+### History Logging
 
-- **`prepare`** — reads HEARTBEAT.md, returns either a ready prompt or a skip reason
-- **`finish`** — appends a timestamped response to `memory/HISTORY.md`
-- **`poll_loop`** — ticks on a configurable interval, sends `/heartbeat` through the handle, logs errors and retries next tick
+Responses are appended to `memory/HISTORY.md`:
 
-## Skipping Heartbeat
+```
+[2024-02-21T14:30:00Z] Heartbeat: Checked project builds - all passing.
+
+[2024-02-21T15:30:00Z] Heartbeat: Found 3 new files in inbox, summarized.
+```
+
+Every successful response is logged — there is no "actionable content" filter.
+
+### Skipping
 
 Heartbeat is skipped (not an error) when:
 
 1. `HEARTBEAT.md` doesn't exist
 2. No active tasks (no unchecked `- [ ]` lines)
 
-Skip reason is logged to stderr.
+Skip events are logged at `info` level via the reply path. They are not
+persisted to HISTORY.md.
 
-## Logging
+## Boundaries
 
-Executed heartbeats are logged to `memory/HISTORY.md`. Skip events are printed to stderr but not persisted.
+### Owns
 
-```markdown
-[2024-02-21T14:30:00Z] Heartbeat: Checked project builds - all passing. No new inbox files.
+- Timer loop (`poll_loop`) — interval tick, send through handle, log errors
+- Task parsing — extract `- [ ]` lines from HEARTBEAT.md
+- Prompt construction — build the heartbeat prompt from active tasks
+- History logging — append timestamped responses to HISTORY.md
 
-[2024-02-21T15:30:00Z] Heartbeat: Found 3 new files in inbox, summarized and filed.
-```
+### Does Not Own
 
-## Task Management
+- Agent turn execution — delegates to `agent::process_message()`
+- Session persistence — the session module handles that
+- HEARTBEAT.md content — provisioned by NixOS, edited by user or agent
+- Activity events — heartbeat passes `None` for the activity sender
 
-The agent can modify `HEARTBEAT.md` using the `exec` tool:
+### Interactions
 
-**Add a task:**
-```bash
-echo "- [ ] New periodic task" >> HEARTBEAT.md
-```
+- **Daemon** spawns the `poll_loop` as a concurrent task alongside other
+  channels.
+- **Actor** processes heartbeat envelopes sequentially with all other channels.
+  No lock files needed.
+- **Workspace** provides `heartbeat_path()` and `history_path()`.
 
-**Disable a task:**
-```bash
-sed -i 's/- \[ \] specific task/- [x] specific task/' HEARTBEAT.md
-```
+## Failure Modes
 
-**Enable a task:**
-```bash
-sed -i 's/- \[x\] specific task/- [ ] specific task/' HEARTBEAT.md
-```
+| Failure | Behavior |
+|---------|----------|
+| HEARTBEAT.md missing | Skip, log, retry next tick |
+| HEARTBEAT.md unreadable | `HeartbeatError::ReadTasks`, logged, retry next tick |
+| No active tasks | Skip, log, retry next tick |
+| Agent turn error | Logged via `tracing::error!`, retry next tick |
+| HISTORY.md write failure | `HeartbeatError::WriteHistory`, logged, response still returned |
 
-**Remove a task permanently:**
-```bash
-sed -i '/specific task/d' HEARTBEAT.md
-```
+The heartbeat loop never crashes. All errors are logged and retried on the
+next tick.
 
-## Configuration
+## Constraints
 
-| Key | Default | Purpose |
-|-----|---------|---------|
-| `heartbeat.interval_secs` | `1800` | Seconds between heartbeat ticks |
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `heartbeat.interval_secs` | 1800 | Seconds between ticks (must be > 0) |
 
-## Future Considerations
+There is no `enabled` flag for heartbeat. It naturally no-ops when
+HEARTBEAT.md has no active tasks.
 
-- **Priority levels** — Some tasks more urgent
-- **Conditional tasks** — Only run if condition met
-- **Active hours** — Skip heartbeats outside configured time window (e.g., 9am–10pm)
-- **Resource limits** — Cap API usage per heartbeat
-- **Session summarization** — Compact old history to prevent unbounded growth
-- **Cron jobs** — Separate scheduled task system for exact-time, isolated execution (complement to heartbeat)
+## Open Questions
+
+None currently.

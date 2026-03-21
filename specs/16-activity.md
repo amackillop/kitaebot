@@ -1,20 +1,18 @@
-# Activity Events
+# Spec 16: Activity Events
 
-## Purpose
+## Motivation
 
-Structured side-channel events emitted during an agent turn so channels can display what the agent is doing (tool calls, compaction, iteration limits) without altering the dispatch contract.
+Structured side-channel events emitted during an agent turn so channels can
+display progress (tool calls, compaction, cancellation) without altering the
+dispatch contract.
 
-## Why This Design?
+## Behavior
 
-1. **Observability** — Tool calls and compaction happen silently today. Channels have no way to show progress to the user during a long turn.
-2. **Side-channel, not return value** — `dispatch` still returns `Result<String, String>`. Activity events flow through an `mpsc` channel as fire-and-forget side effects. No coupling between event production and consumption.
-3. **Optional** — The sender is `Option<&mpsc::Sender<Activity>>`. Callers that don't care (heartbeat, tests) pass `None`. No overhead, no panics.
-4. **Channel-local verbosity** — Whether to display events is a UI decision, not an agent decision. Each channel manages its own `/verbose` toggle.
-
-## Event Type
+### Event Type
 
 ```rust
 pub enum Activity {
+    Cancelled,
     Compaction { before: usize, after: usize },
     MaxIterations,
     ToolEnd { tool: String, error: Option<String> },
@@ -22,20 +20,20 @@ pub enum Activity {
 }
 ```
 
-Variants in alphabetical order per codebase convention.
-
 | Variant | When | Fields |
 |---------|------|--------|
+| `Cancelled` | Cancellation token fires | — |
 | `Compaction` | After `compact_if_needed` returns `Ok(true)` | `before`/`after`: estimated token counts |
 | `MaxIterations` | Loop exhausts `max_iterations` | — |
 | `ToolEnd` | After each tool result | `tool`: name, `error`: `Some(msg)` if failed/blocked |
-| `ToolStart` | Before `join_all` for each pending call | `tool`: name only (args in journalctl) |
+| `ToolStart` | Before `join_all` for each pending call | `tool`: name |
 
 ### Display
 
 Human-readable via `Display` impl:
 
 ```
+Turn cancelled
 Compacting context: 150432 -> 2841 tokens
 Running tool: exec
 Tool finished: exec
@@ -45,11 +43,10 @@ Max iterations reached
 
 ### Serialization
 
-`Serialize` derive for NDJSON transport over the socket channel.
+Tagged JSON via `#[serde(tag = "kind", rename_all = "snake_case")]` for NDJSON
+transport over the socket channel.
 
-## Emission
-
-A free function handles the send:
+### Emission
 
 ```rust
 pub fn emit(tx: Option<&mpsc::Sender<Activity>>, event: Activity) {
@@ -59,56 +56,79 @@ pub fn emit(tx: Option<&mpsc::Sender<Activity>>, event: Activity) {
 }
 ```
 
-`try_send` is non-blocking. If the channel is full (backpressure from a slow consumer), events are silently dropped. This is acceptable — events are informational, not transactional.
+`try_send` is non-blocking. If the channel is full, events are silently
+dropped. Events are informational, not transactional.
 
-## Threading
+### Threading
 
-The `activity` parameter is threaded as `Option<&mpsc::Sender<Activity>>`:
+The activity sender is threaded through:
 
-- `agent::run_turn` — receives and emits events
-- `agent::process_message` — receives and forwards to `run_turn`
-- `AgentHandle::send_message` — accepts `activity_tx` and forwards to the actor via `Envelope`
+- `AgentHandle::send_message` — accepts `Option<mpsc::Sender<Activity>>`
+  (owned, for `'static` bound on the envelope)
+- `Envelope` — stores the owned sender
+- Actor — converts to `Option<&mpsc::Sender<Activity>>` (borrowed reference)
+- `process_message` and `run_turn` — receive and emit via borrowed reference
 
-Channels that want events create an `mpsc::channel(64)` per message and pass the sender. Channels that don't care pass `None`.
+Channels that want events create an `mpsc::channel(64)` per message and pass
+the sender. Channels that don't care pass `None`.
 
-## Consumption
+### Consumption
 
-Channels that opt into activity events use `tokio::select! { biased }`:
+Channels use `tokio::select! { biased }` to drain events before checking
+dispatch completion, followed by a `try_recv` drain loop for any remaining
+buffered events:
 
 ```rust
-let (tx, mut rx) = mpsc::channel(64);
-let result = tokio::spawn(dispatch(..., Some(&tx)));
-
 loop {
     tokio::select! {
         biased;
         Some(event) = rx.recv() => { /* display if verbose */ }
-        result = &mut result => { break; }
+        result = &mut reply => { break; }
     }
 }
-// drain remaining buffered events
 while let Ok(event) = rx.try_recv() { /* display */ }
 ```
 
-`biased` ensures events drain before checking dispatch completion, so no events are lost between the last emit and the join.
+### `/verbose` Toggle
 
-## `/verbose` Toggle
+Channel-local UI state, intercepted before dispatch:
 
-Channel-local UI state, not a slash command:
+- **Socket**: toggled per connection in `parse_line`. Resets on disconnect.
+- **Telegram**: toggled per polling session in `handle_message`. Resets on
+  daemon restart.
+- **Heartbeat**: no toggle (passes `None` for activity sender).
 
-- **Socket**: toggled per connection, intercepted in `handle_line` before dispatch. Resets on reconnect.
-- **Telegram**: toggled per polling session, intercepted in `handle_message`. Resets on restart.
-- **Heartbeat**: no toggle (no interactive user).
+Response: `"Verbose: on"` / `"Verbose: off"` — sent directly, not through the
+agent.
 
-Response: `"Verbose: on"` / `"Verbose: off"` — sent directly, not through the agent.
+## Boundaries
 
-## Channel Buffer Size
+### Owns
 
-64 events. A single tool-heavy turn with 20 parallel calls produces ~40 events (start + end per call). 64 gives comfortable headroom without memory concerns.
+- `Activity` enum definition and `Display` implementation
+- `emit()` free function
+- Channel buffer size convention (64)
 
-## Simplifications
+### Does Not Own
 
-1. **No event filtering** — All-or-nothing verbose flag. No per-event-type filtering.
-2. **No event persistence** — Events are ephemeral. `tracing` handles durable logs.
-3. **No timestamps on events** — `tracing` spans cover timing.
-4. **No streaming** — Events are discrete, not a byte stream.
+- When events are emitted — the agent loop decides
+- Whether events are displayed — each channel's `/verbose` toggle decides
+- Event persistence — `tracing` handles durable logs
+
+## Failure Modes
+
+| Failure | Behavior |
+|---------|----------|
+| Channel full (backpressure) | Event silently dropped |
+| No sender (`None`) | No-op |
+
+## Constraints
+
+- Buffer size: 64 events per channel per message
+- Non-blocking emission — never blocks the agent loop
+- No event filtering — all-or-nothing verbose flag
+- No event persistence — ephemeral, for live display only
+
+## Open Questions
+
+None currently.

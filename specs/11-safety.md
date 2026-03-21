@@ -1,30 +1,25 @@
-# Safety
+# Spec 11: Safety
 
-## Purpose
+## Motivation
 
-A lightweight safety layer providing two cheap, high-value defenses: leak detection and output wrapping. Applied to tool output before it enters the LLM conversation.
+A lightweight safety layer providing two cheap, high-value defenses: leak
+detection and output wrapping. Applied to every tool output before it enters
+the LLM conversation. Once a secret enters the context window, it can be
+exfiltrated in subsequent responses — block before injection, not after.
 
-## Why This Design?
+This is one layer in a defense-in-depth stack. Secrets should never reach tool
+output in the first place — they're loaded from credential files (not env
+vars) and the exec tool scrubs the child environment. See
+[spec 13](13-credentials.md) for the full stack.
 
-1. **Leaked secrets are unrecoverable** — Once a secret enters LLM context, it can be exfiltrated in subsequent responses. Block before injection, not after.
-2. **Prompt injection is cheap to mitigate** — Wrapping tool output in tags tells the LLM to treat content as data, not instructions. Near-zero cost.
-3. **No policy engine** — No severity levels, no sanitizer, no configurability. Just two hard rules.
+## Behavior
 
-Output scanning is layer 4 in a five-layer defense-in-depth stack. Secrets should never reach tool output in the first place — they're loaded from credential files (not env vars) and the exec tool scrubs the child environment. See [spec 13](13-credentials.md) for the full stack.
+### Leak Detection
 
-## Architecture
+`check_tool_output(tool_name, output)` scans tool output against a compiled
+`RegexSet` (built once via `LazyLock`, matched in a single pass).
 
-A `Safety` struct with one method:
-
-- `check_tool_output(tool_name: &str, output: &str) -> Result<String, LeakDetected>`
-
-On success, returns the output wrapped in tags. On failure, returns `LeakDetected` with the matched pattern name (not the secret itself).
-
-## Leak Detection
-
-Scan tool output for known secret patterns before sending to the LLM. Each pattern is a regex requiring enough structure beyond the bare prefix to avoid false positives when the agent reads its own source code.
-
-### Patterns
+**Patterns:**
 
 | Pattern | Matches |
 |---------|---------|
@@ -34,52 +29,86 @@ Scan tool output for known secret patterns before sending to the LLM. Each patte
 | `gho_[a-zA-Z0-9]{30,}` | GitHub OAuth tokens |
 | `ghs_[a-zA-Z0-9]{30,}` | GitHub server tokens |
 | `AKIA[0-9A-Z]{16}` | AWS access key IDs |
-| `-----BEGIN [A-Z ]+PRIVATE KEY-----` | Private key headers (RSA, EC, etc.) |
-| `postgres://\S+:\S+@` | PostgreSQL connection strings (with credentials) |
-| `mysql://\S+:\S+@` | MySQL connection strings (with credentials) |
-| `mongodb(\+srv)?://\S+:\S+@` | MongoDB connection strings (with credentials) |
-| `redis://\S+:\S+@` | Redis connection strings (with credentials) |
+| `-----BEGIN [A-Z ]+PRIVATE KEY-----` | Private key headers |
+| `postgres://\S+:\S+@` | PostgreSQL connection strings |
+| `mysql://\S+:\S+@` | MySQL connection strings |
+| `mongodb(\+srv)?://\S+:\S+@` | MongoDB connection strings |
+| `redis://\S+:\S+@` | Redis connection strings |
 
-### Behavior
+Each pattern requires enough structure beyond the bare prefix to avoid false
+positives when the agent reads its own source code.
 
-- **Action: block** — Return `Err(LeakDetected)` to the caller. The agent loop converts this to a sanitized error message for the LLM: `"Tool output blocked: potential secret detected (pattern: {name}). Do not retry."`.
-- This is a hard failure. The original output never enters the conversation.
-- Patterns are hardcoded, not configurable. They're well-known prefixes — no reason to make them dynamic.
+**On match**: returns `Err(SafetyError::LeakDetected { pattern_name })`. The
+agent loop substitutes a sanitized error message:
+`"Tool output blocked: Potential secret detected (pattern: {name}). Do not retry."`
 
-### Scanning Strategy
+The original output is **discarded** — it never enters the session.
 
-Compiled `RegexSet` (same approach as the exec deny list). All patterns are compiled once via `LazyLock` and matched in a single pass. Returns the first matching pattern name.
+**On no match**: wraps the output in XML tags and returns it.
 
-## Output Wrapping
+Patterns are hardcoded, not configurable.
 
-Wrap tool output in XML-style tags before injecting into the conversation:
+### Output Wrapping
+
+Clean tool output is wrapped in XML-style tags:
 
 ```
 <tool_output name="exec">
 $ ls -la
 total 24
-drwxr-xr-x  3 kitaebot kitaebot 4096 Feb 21 12:00 .
--rw-r--r--  1 kitaebot kitaebot  512 Feb 21 12:00 SOUL.md
-
+...
 Exit code: 0
 </tool_output>
 ```
 
-This tells the LLM to treat the content as data, not instructions. Cheap defense against prompt injection from command output (e.g., a file containing "ignore previous instructions").
+This tells the LLM to treat the content as data, not instructions. Cheap
+defense against prompt injection from command output.
 
-## Error Handling
+### Agent Loop Integration
 
-`LeakDetected` is a domain error, not a system error. The agent loop handles it by substituting a safe error message. The LLM sees the error and can inform the user or try a different approach.
+In the agent loop's result recording step, every successful tool result passes
+through `check_tool_output`. On leak detection:
 
-```rust
-enum SafetyError {
-    LeakDetected { pattern_name: String },
-}
-```
+1. Original output dropped
+2. Sanitized error stored as the `Message::Tool` content
+3. `Activity::ToolEnd` emitted with error for observability
+4. Turn continues — the LLM sees the error and can respond accordingly
 
-## Future Considerations
+Failed tool calls (execution errors) skip the safety check — there's no
+output to leak.
 
-- **Scan LLM responses** — Also check model output before delivering to the user. Adds latency but catches reflection attacks.
-- **Custom patterns** — Allow users to add workspace-specific patterns via `config.toml`.
-- **Allowlisting** — Let specific tool invocations bypass leak detection (e.g., a secrets-management tool).
-- **Defense-in-depth audit** — Periodically verify all five layers (VM, credential files, systemd hardening, env scrubbing, output scanning) are active and correctly configured.
+## Boundaries
+
+### Owns
+
+- Leak pattern definitions and compilation
+- Single-pass regex scanning
+- XML output wrapping
+- The `SafetyError` type
+
+### Does Not Own
+
+- Decision of what to do on leak detection — the agent loop substitutes the
+  error message and continues
+- Exec deny-list / policy violations — separate concern (see
+  [spec 03](03-tools.md))
+- Credential isolation — see [spec 13](13-credentials.md)
+
+## Failure Modes
+
+| Failure | Behavior |
+|---------|----------|
+| Leak detected | Output blocked, sanitized error to LLM, turn continues |
+
+There are no failure modes for the safety module itself — regex compilation
+is infallible (`LazyLock` panics on invalid regex, caught at startup).
+
+## Constraints
+
+- No configurability — patterns are hardcoded
+- No severity levels — all leaks are hard blocks
+- Single pass scanning via `RegexSet`
+
+## Open Questions
+
+None currently.

