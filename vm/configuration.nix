@@ -6,14 +6,16 @@
 # Options:
 #   kitaebot.package    - The kitaebot package (required)
 #   kitaebot.sshKeys    - List of SSH public keys for root access
-#   kitaebot.dev        - Enable dev mode (shares host nix store for faster builds)
+#   kitaebot.dev        - Enable dev mode (adds debugging tools: vim, curl, dig, htop, kchat)
 #   kitaebot.secretsDir - Directory containing one file per credential
 #   kitaebot.settings   - Attrset written as config.toml (uses pkgs.formats.toml)
 #   kitaebot.logLevel   - RUST_LOG filter string (default: "kitaebot=info")
 #   kitaebot.tools      - Packages available to the exec tool via PATH
 #   kitaebot.gitConfig  - Attrset { name, email, signingKey? } for git identity via programs.git
 #   kitaebot.promptsDir - Directory of .md prompt files symlinked into the workspace
-#   kitaebot.vm         - VM resource options: { memorySize, cores, diskSize } (all in MB except cores)
+#   kitaebot.vm              - VM resource options: { memorySize, cores, diskSize } (all in MB except cores)
+#   kitaebot.egressAllowlist - Domains the kitaebot uid may connect to (all others blocked)
+#   kitaebot.dnsUpstream     - Upstream DNS resolver for allowlisted domains (default: Quad9)
 #
 # For local development, see deploy/configuration.nix
 {
@@ -29,6 +31,13 @@ let
   cfg = config.kitaebot;
   configFile = format.generate "config.toml" cfg.settings;
   toolPath = lib.makeBinPath cfg.tools;
+
+  # Static UID so nftables rules can reference it at load time without
+  # depending on user-creation ordering.
+  kitaebotUid = 900;
+
+  # Egress filter — loopback address for the filtering DNS proxy.
+  egressDnsAddr = "127.0.0.2";
 
   gitEnabled = cfg.settings.git.enabled or false;
   githubEnabled = cfg.settings.github.enabled or false;
@@ -61,6 +70,12 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       description = "The kitaebot package";
+    };
+
+    dev = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Enable dev mode (adds debugging tools to system packages)";
     };
 
     promptsDir = lib.mkOption {
@@ -139,12 +154,90 @@ in
         example = 40960;
       };
     };
+
+    egressAllowlist = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [
+        "openrouter.ai"
+        "api.telegram.org"
+        "github.com"
+        "api.github.com"
+        "githubusercontent.com"
+        "flakehub.com"
+        "api.perplexity.ai"
+      ];
+      description = "Domains the kitaebot process may connect to. All others blocked.";
+    };
+
+    dnsUpstream = lib.mkOption {
+      type = lib.types.str;
+      default = "9.9.9.9";
+      description = "Upstream DNS resolver for allowlisted domains (Quad9)";
+    };
   };
 
   config = {
     system.stateVersion = "25.11";
 
-    networking.hostName = "kitaebot";
+    networking = {
+      hostName = "kitaebot";
+      firewall.allowedTCPPorts = [ 22 ];
+
+      # ── Egress filter: nftables IP enforcement (spec 18) ────────────
+      #
+      # Output chain scoped to kitaebot uid. Only allows TCP 443 to IPs
+      # that dnsmasq resolved and injected into the nft set via `nftset`.
+      # Direct-IP connections (bypassing DNS) are dropped.
+      nftables = {
+        enable = true;
+        tables."kitaebot-egress" = {
+          family = "inet";
+          content = ''
+            set allowed_v4 {
+              type ipv4_addr
+              flags timeout
+              timeout 1h
+            }
+
+            set allowed_v6 {
+              type ipv6_addr
+              flags timeout
+              timeout 1h
+            }
+
+            chain output {
+              type filter hook output priority 0; policy accept;
+
+              # Only restrict kitaebot uid — root, sshd, nix-daemon unaffected
+              meta skuid != ${toString kitaebotUid} accept
+
+              # Loopback always allowed (Unix sockets, DNS proxy)
+              oifname "lo" accept
+
+              # Established connections (responses to allowed requests)
+              ct state established,related accept
+
+              # DNS to local filtering proxy only
+              meta l4proto { tcp, udp } th dport 53 ip daddr ${egressDnsAddr} accept
+
+              # HTTPS to IPs resolved from allowlisted domains
+              tcp dport 443 ip daddr @allowed_v4 accept
+              tcp dport 443 ip6 daddr @allowed_v6 accept
+
+              # Everything else from kitaebot uid is dropped
+              log prefix "kitaebot-egress-drop: " counter drop
+            }
+
+            chain nat_output {
+              type nat hook output priority -100; policy accept;
+
+              # Redirect kitaebot DNS queries to the filtering proxy
+              meta skuid ${toString kitaebotUid} meta l4proto { tcp, udp } th dport 53 dnat ip to ${egressDnsAddr}
+            }
+          '';
+        };
+      };
+    };
 
     services.openssh = {
       enable = true;
@@ -159,6 +252,7 @@ in
       # Dedicated system user for the daemon service
       users.kitaebot = {
         isSystemUser = true;
+        uid = kitaebotUid;
         group = "kitaebot";
         home = "/var/lib/kitaebot";
       };
@@ -180,12 +274,24 @@ in
         "L+ /var/lib/kitaebot/.config/direnv/direnv.toml - - - - ${direnvConfig}"
       ];
 
+      # nft sets must exist before dnsmasq writes to them.
+      services.dnsmasq = {
+        after = [ "nftables.service" ];
+        wants = [ "nftables.service" ];
+      };
+
       # Kitaebot daemon
       services.kitaebot = {
         description = "Kitaebot daemon";
         wantedBy = [ "multi-user.target" ];
-        after = [ "network-online.target" ];
-        wants = [ "network-online.target" ];
+        after = [
+          "network-online.target"
+          "dnsmasq.service"
+        ];
+        wants = [
+          "network-online.target"
+          "dnsmasq.service"
+        ];
         serviceConfig = {
           Type = "simple";
           ExecStartPre = lib.optional signingEnabled (
@@ -307,7 +413,31 @@ in
       };
     };
 
-    networking.firewall.allowedTCPPorts = [ 22 ];
+    # ── Egress filter: DNS allowlist (spec 18) ────────────────────────
+    #
+    # dnsmasq resolves only allowlisted domains (NXDOMAIN for the rest).
+    # All DNS from kitaebot uid is DNAT'd here via the nftables nat chain.
+    # Resolved IPs are injected into the nft set via dnsmasq `nftset`.
+    services.dnsmasq = {
+      enable = true;
+      resolveLocalQueries = false;
+      settings =
+        let
+          inherit (cfg) egressAllowlist dnsUpstream;
+        in
+        {
+          listen-address = egressDnsAddr;
+          bind-dynamic = true;
+          no-resolv = true;
+          no-poll = true;
+          log-queries = true;
+          local = "/#/";
+          server = map (d: "/${d}/${dnsUpstream}") egressAllowlist;
+          nftset = map (
+            d: "/${d}/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6"
+          ) egressAllowlist;
+        };
+    };
 
     virtualisation = {
       inherit (cfg.vm) memorySize cores diskSize;
@@ -330,10 +460,12 @@ in
 
     environment.systemPackages = [
       config.kitaebot.package
+    ]
+    ++ lib.optionals cfg.dev [
       kchat
       pkgs.vim
-      pkgs.git
       pkgs.curl
+      pkgs.dig
       pkgs.htop
     ];
   };

@@ -74,6 +74,13 @@
           );
         };
 
+        # NixOS VM integration tests — separated from checks so
+        # `nix flake check` stays fast. CI runs these in a dedicated
+        # job with KVM access. Add new VM tests here.
+        nixosTests = nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          egress = import ./vm/test-egress.nix { inherit pkgs self; };
+        };
+
         packages.lightpanda = pkgs.callPackage ./nix/lightpanda.nix { };
 
         packages.default = craneLib.buildPackage (

@@ -38,16 +38,17 @@ If Landlock is unavailable (old kernel, non-Linux), log a warning and continue. 
 ## Defense-in-Depth Stack
 
 1. VM isolation (QEMU)
-2. Unprivileged user (`kitaebot`)
-3. systemd hardening (`ProtectSystem`, `NoNewPrivileges`, seccomp)
-4. **Landlock filesystem confinement** ← this spec
-5. Exec deny-list (heuristic UX layer)
-6. `PathGuard` (file tool workspace confinement)
-7. Output leak detection
+2. Egress filter (nftables + dnsmasq domain allowlist) — [spec 18](18-egress-filter.md)
+3. Unprivileged user (`kitaebot`)
+4. systemd hardening (`ProtectSystem`, `NoNewPrivileges`, seccomp)
+5. **Landlock filesystem confinement** ← this spec
+6. Exec deny-list (heuristic UX layer)
+7. `PathGuard` (file tool workspace confinement)
+8. Output leak detection
 
 ## Future Work
 
 - bubblewrap per-command isolation for exec tool (namespace isolation per shell invocation)
 - cgroup resource limits (`TasksMax`, `MemoryMax` on systemd unit)
 - seccomp-bpf tightening in-process (covers `kchat` path)
-- Landlock network restrictions (kernel 6.7+, not yet stable in the crate)
+- Landlock network restrictions (kernel 6.7+, not yet stable in the crate) — would supplement nftables egress filter from in-process

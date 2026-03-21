@@ -23,6 +23,21 @@ build:
 test:
     cargo test --features mock-network
 
+# Run all NixOS VM integration tests
+test-nixos:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tests=$(nix eval .#nixosTests.x86_64-linux --apply builtins.attrNames --json)
+    echo "NixOS tests: $tests"
+    for name in $(echo "$tests" | jq -r '.[]'); do
+        echo "── $name ──"
+        nix build ".#nixosTests.x86_64-linux.$name" --print-build-logs
+    done
+
+# Run a single NixOS VM test by name (e.g. just test-nixos-one egress)
+test-nixos-one name:
+    nix build .#nixosTests.x86_64-linux.{{name}} --print-build-logs
+
 # Lint with clippy (both real and test builds)
 lint:
     cargo clippy -- --deny warnings
@@ -93,6 +108,10 @@ vm-shell *flags: (vm-run flags)
 # Tail kitaebot logs from the VM
 vm-logs:
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost journalctl --output cat -xfu kitaebot
+
+# Tail dnsmasq (egress filter) logs — shows allowed/blocked DNS queries
+vm-logs-dns:
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost journalctl --output cat -xfu dnsmasq
 
 # Chat with the daemon via SSH socket forwarding
 chat *flags: (vm-run flags)

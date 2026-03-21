@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   check:
-    name: Nix Flake Check
+    name: Cargo checks
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -32,5 +32,40 @@ jobs:
       - name: Setup Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v13
 
-      - name: Run Nix checks
-        run: nix flake check
+      - name: Run checks
+        run: nix flake check --print-build-logs
+
+  nixos-tests:
+    name: NixOS VM tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v21
+        with:
+          extra-conf: |
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: Setup Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run NixOS VM tests
+        run: |
+          tests=$(nix eval .#nixosTests.x86_64-linux --apply builtins.attrNames --json)
+          echo "NixOS tests: $tests"
+          for name in $(echo "$tests" | jq -r '.[]'); do
+            echo "::group::$name"
+            nix build ".#nixosTests.x86_64-linux.$name" --print-build-logs
+            echo "::endgroup::"
+          done
