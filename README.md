@@ -1,6 +1,6 @@
 # Kitaebot
 
-Autonomous programming agent in Rust. Runs in a NixOS VM with Landlock sandboxing, credential isolation, and leak detection.
+Autonomous programming agent in Rust. Runs in a NixOS VM with Landlock sandboxing, DNS-based egress filtering, credential isolation, and leak detection.
 
 ## Overview
 
@@ -35,35 +35,38 @@ Typed tools replace a generic shell. The LLM declares intent via parameters inst
 
 | Tool | Description |
 |------|-------------|
-| `exec` | Run a shell command (timeout, output cap, env scrubbing) |
+| `exec` | Run a shell command (timeout, output cap, deny-list, env scrubbing) |
 | `file_read` | Read a file |
 | `file_write` | Write a file |
 | `file_edit` | Patch a file |
 | `glob_search` | Find files by pattern |
-| `grep` | Search file contents (Ripgrep backend) |
+| `grep` | Search file contents (ripgrep backend) |
 | `web_fetch` | HTTP GET (timeout, response size limit) |
 | `web_search` | LLM-powered web search (Perplexity) |
-| `git_clone` | Clone a repository |
+| `git_clone` | Clone a repository (auto-warms direnv cache) |
 | `git_commit` | Commit staged changes |
 | `git_push` | Push commits to a remote |
 | `github_pr_create` | Create a pull request |
 | `github_pr_list` | List pull requests |
 | `github_pr_reviews` | Fetch PR reviews |
-| `github_pr_comment` | Post a PR comment |
 | `github_pr_diff_comments` | Fetch PR diff comments |
 | `github_pr_diff_reply` | Reply to a PR diff comment |
 | `github_ci_status` | Check CI status for a ref |
-| `gh_cli` | General-purpose `gh` CLI wrapper |
+| `github_gh` | General-purpose `gh` CLI wrapper |
+
+Git and GitHub tools are gated on `git.enabled` and `github.enabled` respectively. Tools can be individually disabled via `tools.disabled`.
 
 All tool outputs pass through `safety::check_tool_output` and execute inside the Landlock sandbox.
 
 ### Security model
 
 1. **Landlock sandbox** — Filesystem access restricted to workspace, `/nix/store` (ro), `/tmp`, `/etc` (ro), `/dev`. Applied at startup, inherited by child processes.
-2. **Leak detection** — Regex scan on tool outputs before they enter the context window.
-3. **Credential isolation** — Secrets loaded via systemd `LoadCredential` before Landlock enforcement. Inaccessible to child processes.
-4. **Environment scrubbing** — `exec` runs with a safe allowlist of environment variables.
-5. **Path confinement** — `PathGuard` rejects path traversal in file tools.
+2. **DNS-based egress filter** — dnsmasq resolves only allowlisted domains; nftables drops all other outbound traffic from the kitaebot uid. Prevents prompt-injection-driven exfiltration.
+3. **Leak detection** — Regex scan on tool outputs before they enter the context window.
+4. **Credential isolation** — Secrets loaded via systemd `LoadCredential` before Landlock enforcement. Inaccessible to child processes.
+5. **Environment scrubbing** — `exec` runs with a safe allowlist of environment variables.
+6. **Path confinement** — `PathGuard` rejects path traversal in file tools.
+7. **systemd hardening** — `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, empty `CapabilityBoundingSet`, `MemoryDenyWriteExecute`, syscall filter.
 
 ### Provider
 
@@ -80,23 +83,30 @@ Any OpenAI-compatible chat completions API. Supported endpoints:
 Requires [Nix](https://nixos.org/) with flakes enabled.
 
 ```bash
-nix develop          # Enter dev shell
-just check           # Full validation: nix flake check, clippy, fmt, tests
-just build           # Compile
-just test            # Run tests (mock-network feature)
-just lint            # Clippy with --deny warnings
-just fmt             # Format Rust + Nix
+nix develop              # Enter dev shell
+just check               # Full validation: nix flake check, nix lint/fmt, clippy, tests
+just build               # Compile
+just test                # Run tests (mock-network feature)
+just test-nixos          # Run all NixOS VM integration tests
+just test-nixos-one NAME # Run a single NixOS VM test (e.g. egress)
+just lint                # Clippy with --deny warnings
+just fmt                 # Format Rust + Nix
+just fix                 # Auto-fix clippy issues
 ```
 
 ### VM workflow
 
 ```bash
-just vm-build        # Build NixOS VM
-just vm-run          # Start VM, wait for SSH
-just vm-run --fresh  # Wipe state and restart
-just chat            # Connect to daemon via SSH socket forwarding
-just vm-ssh          # SSH into running VM
-just vm-stop         # Kill VM
+just vm-build           # Build NixOS VM
+just vm-run             # Start VM, wait for SSH
+just vm-run --fresh     # Wipe state and restart
+just vm-run --rebuild   # Rebuild and restart
+just chat               # Connect to daemon via SSH socket forwarding
+just vm-ssh             # SSH into running VM
+just vm-shell           # Shell as kitaebot daemon user (debugging)
+just vm-logs            # Tail kitaebot systemd logs
+just vm-logs-dns        # Tail dnsmasq egress filter logs
+just vm-stop            # Kill VM
 ```
 
 ## Configuration
@@ -140,6 +150,7 @@ kitaebot = {
       budget_percent = 80;
     };
     git = {
+      enabled = true;                            # Enables git tools (clone, commit, push)
       co_authors = [ "Name <email>" ];
     };
     github = {
@@ -165,8 +176,9 @@ kitaebot = {
       chat_id = 123456789;
     };
     tools = {
+      disabled = [ "web_search" ];               # Disable specific tools by name
       exec = {
-        timeout_secs = 60;
+        timeout_secs = 600;
         max_output_bytes = 10240;
       };
       web_fetch = {
@@ -180,6 +192,17 @@ kitaebot = {
       };
     };
   };
+
+  egressAllowlist = [                            # Domains kitaebot uid may connect to
+    "openrouter.ai"                              # (all others get NXDOMAIN + nftables drop)
+    "api.telegram.org"
+    "github.com"
+    "api.github.com"
+    "githubusercontent.com"
+    "flakehub.com"
+    "api.perplexity.ai"
+  ];
+  dnsUpstream = "9.9.9.9";                       # Upstream DNS for allowlisted domains (Quad9)
 };
 ```
 
@@ -193,7 +216,7 @@ Secrets are loaded via systemd `LoadCredential` from `kitaebot.secretsDir`. One 
 |------|----------|
 | `provider-api-key` | Always |
 | `telegram-bot-token` | When `telegram.enabled = true` |
-| `github-token` | When `git.enabled` or `github.enabled` |
+| `github-token` | When `git.enabled = true` or `github.enabled = true` |
 | `gpg-signing-key` | When `gitConfig.signingKey` is set |
 
 ## Project layout
@@ -208,22 +231,32 @@ src/
 │   ├── handle.rs        AgentHandle (cloneable actor interface)
 │   └── envelope.rs      Envelope, ChannelSource types
 ├── clients/             HTTP client abstractions
-│   ├── chat_completion.rs  OpenRouter/OpenAI-compatible API
+│   ├── chat_completion.rs  OpenAI-compatible API
 │   └── telegram.rs         Telegram Bot API
-├── provider/            LLM abstraction (completions, mock)
-├── tools/               Tool trait + implementations (exec, files, grep, web, git, github)
+├── provider/            LLM abstraction (completions, wire format, mock)
+├── tools/               Tool trait + implementations
+│   ├── exec.rs          Shell command (timeout, deny-list, env scrubbing)
+│   ├── file_*.rs        File read/write/edit with PathGuard
+│   ├── glob_search.rs   File pattern matching
+│   ├── grep.rs          Content search (ripgrep backend)
+│   ├── git/             Clone, commit, push, URL validation
+│   ├── github/          PR ops, CI status, generic gh CLI
+│   ├── network/         web_fetch, web_search (Perplexity)
+│   ├── cli_runner.rs    Subprocess boundary for git/gh
+│   ├── direnv.rs        Dev environment cache
+│   └── path.rs          PathGuard (traversal rejection)
 ├── sandbox.rs           Landlock policy
 ├── safety.rs            Leak detection
 ├── secrets.rs           systemd credential loading
 ├── session.rs           Atomic JSON persistence
 ├── config.rs            TOML config with validation
-├── context.rs           Token budget management
+├── context.rs           Token budget management and compaction
 ├── telegram.rs          Telegram Bot API channel
 ├── socket.rs            Unix socket NDJSON channel
 ├── github_channel.rs    GitHub PR polling channel
 ├── daemon.rs            Event loop (select over 4 channels)
 ├── dispatch.rs          Input classification and Reply type
-├── commands.rs          Slash command dispatch
+├── commands.rs          Slash commands (/new, /context, /compact, /heartbeat, /stats)
 ├── heartbeat.rs         Periodic heartbeat channel (timer + prepare/finish)
 ├── runtime.rs           Provider/tools/channels assembly
 ├── activity.rs          Structured turn events for observability
@@ -233,12 +266,16 @@ src/
 ├── types.rs             Domain types (Message, ToolCall, Response)
 └── error.rs             Algebraic error types
 vm/
-├── configuration.nix    NixOS module (systemd service, options, hardening)
-└── prompts/             SOUL.md and AGENTS.md templates
+├── configuration.nix    NixOS module (systemd service, egress filter, hardening)
+├── test-egress.nix      NixOS VM integration test for egress filter
+├── test-fixtures/       Test fixture data
+└── prompts/             SOUL.md, AGENTS.md, HEARTBEAT.md, USER.md
+nix/
+└── lightpanda.nix       Headless browser package
 deploy/
 ├── configuration.nix    Host-specific settings (SSH keys, secrets, tools)
 └── flake.nix            Deployment flake
-specs/                   Design specifications (00–16)
+specs/                   Design specifications (00–18)
 ```
 
 ## License
