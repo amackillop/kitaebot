@@ -86,6 +86,10 @@ vm-stop:
 vm-ssh *flags: (vm-run flags)
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost
 
+# Shell into the VM as the kitaebot daemon user (for debugging)
+vm-shell *flags: (vm-run flags)
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} -t root@localhost su -s /bin/sh - kitaebot
+
 # Tail kitaebot logs from the VM
 vm-logs:
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost journalctl --output cat -xfu kitaebot
