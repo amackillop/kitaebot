@@ -7,8 +7,10 @@
 //! - **Flat session** (`flat.rs`): wraps `Session` + `context.rs`. No `SQLite`.
 //! - **LCM** (future): hierarchical DAG of summaries over `SQLite`.
 
-// Types defined here are consumed starting in commit 1.2 (FlatSession impl).
+// Consumed by the agent loop starting in commit 1.3.
 #![allow(dead_code)]
+
+pub mod flat;
 
 use std::future::Future;
 use std::pin::Pin;
