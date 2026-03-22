@@ -1,6 +1,6 @@
 //! Agent actor run loop.
 //!
-//! The [`Agent`] struct owns the session, provider, tools, and config.
+//! The [`Agent`] struct owns the engine, provider, tools, and config.
 //! It processes one [`Envelope`] at a time in a sequential loop, which
 //! eliminates the need for session locking or `Arc<Mutex<Session>>`.
 //!
@@ -8,9 +8,11 @@
 
 use std::sync::Arc;
 
+use tracing::error;
+
 use crate::commands;
-use crate::config::ContextConfig;
 use crate::dispatch::{Input, Reply};
+use crate::engine::{ContextEngine, SummarizeFn};
 use crate::provider::Provider;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
@@ -21,23 +23,25 @@ use super::envelope::Envelope;
 /// The actor that processes envelopes sequentially.
 ///
 /// Owns all dependencies so the run loop has no borrows and is `'static`.
-pub(super) struct Agent<P: Provider> {
+pub(super) struct Agent<P: Provider, E: ContextEngine> {
     rx: mpsc::Receiver<Envelope>,
     workspace: Arc<Workspace>,
     provider: Arc<P>,
     tools: Arc<Tools>,
     max_iterations: usize,
-    ctx: ContextConfig,
+    engine: E,
+    summarize: SummarizeFn,
 }
 
-impl<P: Provider + 'static> Agent<P> {
+impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
     pub fn new(
         rx: mpsc::Receiver<Envelope>,
         workspace: Arc<Workspace>,
         provider: Arc<P>,
         tools: Arc<Tools>,
         max_iterations: usize,
-        ctx: ContextConfig,
+        engine: E,
+        summarize: SummarizeFn,
     ) -> Self {
         Self {
             rx,
@@ -45,53 +49,54 @@ impl<P: Provider + 'static> Agent<P> {
             provider,
             tools,
             max_iterations,
-            ctx,
+            engine,
+            summarize,
         }
     }
 
     /// Consume envelopes until all handles are dropped.
     pub async fn run(mut self) {
-        let session_path = self.workspace.session_path();
         while let Some(envelope) = self.rx.recv().await {
-            let result = self.handle(&envelope, &session_path).await;
+            let result = self.handle(&envelope).await;
             let _ = envelope.reply_tx.send(result);
         }
     }
 
-    async fn handle(
-        &self,
-        envelope: &Envelope,
-        session_path: &std::path::Path,
-    ) -> Result<Reply, String> {
+    async fn handle(&mut self, envelope: &Envelope) -> Result<Reply, String> {
         match Input::parse(&envelope.input) {
             Ok(Input::Command(cmd)) => {
                 commands::execute(
                     cmd,
-                    session_path,
+                    &mut self.engine,
+                    &self.summarize,
                     &self.workspace,
                     &*self.provider,
                     &self.tools,
                     self.max_iterations,
-                    self.ctx,
                 )
                 .await
             }
             Ok(Input::Message(text)) => {
                 let tagged = format!("[{}]: {text}", envelope.source);
-                super::process_message(
-                    session_path,
+                let result = super::process_message(
+                    &mut self.engine,
+                    &self.summarize,
                     &self.workspace,
                     &tagged,
                     &*self.provider,
                     &self.tools,
                     self.max_iterations,
-                    self.ctx,
                     envelope.activity_tx.as_ref(),
                     &envelope.cancel,
                 )
                 .await
                 .map(Reply::text)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string());
+
+                if let Err(e) = self.engine.save().await {
+                    error!("Failed to save session: {e}");
+                }
+                result
             }
             Err(_) => Err(format!("Unknown command: {}", envelope.input)),
         }
@@ -103,19 +108,24 @@ mod tests {
     use super::*;
     use crate::agent::AgentHandle;
     use crate::agent::envelope::ChannelSource;
+    use crate::config::ContextConfig;
+    use crate::engine::flat::FlatSession;
+    use crate::engine::make_summarize_fn;
     use crate::provider::MockProvider;
     use crate::types::Response;
     use tokio_util::sync::CancellationToken;
-
-    const CTX: ContextConfig = ContextConfig {
-        max_tokens: 200_000,
-        budget_percent: 80,
-    };
 
     fn workspace() -> (tempfile::TempDir, Arc<Workspace>) {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
         (dir, Arc::new(ws))
+    }
+
+    fn spawn_agent(ws: Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
+        let tools = Arc::new(Tools::default());
+        let engine = FlatSession::new(ws.session_path(), ContextConfig::default()).unwrap();
+        let summarize = make_summarize_fn(provider.clone());
+        AgentHandle::spawn(ws, provider, tools, 1, engine, summarize)
     }
 
     #[tokio::test]
@@ -124,9 +134,8 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
             "hello back".into(),
         ))]));
-        let tools = Arc::new(Tools::default());
 
-        let handle = AgentHandle::spawn(ws, provider, tools, 1, CTX);
+        let handle = spawn_agent(ws, provider);
         let result = handle
             .send_message(
                 ChannelSource::Socket,
@@ -143,9 +152,8 @@ mod tests {
     async fn slash_new_clears_session() {
         let (_dir, ws) = workspace();
         let provider = Arc::new(MockProvider::new(vec![]));
-        let tools = Arc::new(Tools::default());
 
-        let handle = AgentHandle::spawn(ws, provider, tools, 1, CTX);
+        let handle = spawn_agent(ws, provider);
         let result = handle
             .send_message(
                 ChannelSource::Socket,
@@ -162,9 +170,8 @@ mod tests {
     async fn unknown_command_returns_error() {
         let (_dir, ws) = workspace();
         let provider = Arc::new(MockProvider::new(vec![]));
-        let tools = Arc::new(Tools::default());
 
-        let handle = AgentHandle::spawn(ws, provider, tools, 1, CTX);
+        let handle = spawn_agent(ws, provider);
         let result = handle
             .send_message(
                 ChannelSource::Socket,
@@ -182,12 +189,11 @@ mod tests {
     async fn cancelled_token_returns_error() {
         let (_dir, ws) = workspace();
         let provider = Arc::new(MockProvider::new(vec![]));
-        let tools = Arc::new(Tools::default());
 
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let handle = AgentHandle::spawn(ws, provider, tools, 1, CTX);
+        let handle = spawn_agent(ws, provider);
         let result = handle
             .send_message(ChannelSource::Socket, "hi".into(), None, cancel)
             .await;
@@ -198,14 +204,12 @@ mod tests {
     #[tokio::test]
     async fn sequential_messages_share_session() {
         let (_dir, ws) = workspace();
-        // Two responses for two messages.
         let provider = Arc::new(MockProvider::new(vec![
             Ok(Response::Text("first".into())),
             Ok(Response::Text("second".into())),
         ]));
-        let tools = Arc::new(Tools::default());
 
-        let handle = AgentHandle::spawn(ws, provider, tools, 1, CTX);
+        let handle = spawn_agent(ws, provider);
 
         let r1 = handle
             .send_message(
@@ -232,11 +236,8 @@ mod tests {
     async fn drop_handle_shuts_down_actor() {
         let (_dir, ws) = workspace();
         let provider = Arc::new(MockProvider::new(vec![]));
-        let tools = Arc::new(Tools::default());
 
-        let handle = AgentHandle::spawn(ws, provider, tools, 1, CTX);
+        let handle = spawn_agent(ws, provider);
         drop(handle);
-        // If the actor panicked or hung, the test runtime would catch it.
-        // Reaching here means clean shutdown.
     }
 }

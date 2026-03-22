@@ -9,9 +9,8 @@ use std::str::FromStr;
 use tracing::error;
 
 use crate::agent;
-use crate::config::ContextConfig;
-use crate::context;
 use crate::dispatch::Reply;
+use crate::engine::{ContextEngine, SummarizeFn};
 use crate::heartbeat;
 use crate::provider::Provider;
 use crate::session::Session;
@@ -68,56 +67,50 @@ pub fn greeting(session_path: &Path) -> String {
 
 /// Execute a slash command.
 ///
-/// Called by the agent actor. `session_path` is the unified session
-/// managed by the actor. `/heartbeat` calls `agent::process_message`
+/// Called by the agent actor. `/heartbeat` calls `agent::process_message`
 /// directly rather than going through the handle (which would deadlock).
 #[allow(clippy::too_many_arguments)]
-pub async fn execute<P: Provider>(
+pub async fn execute(
     cmd: SlashCommand,
-    session_path: &Path,
+    engine: &mut impl ContextEngine,
+    summarize: &SummarizeFn,
     workspace: &Workspace,
-    provider: &P,
+    provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
-    ctx: ContextConfig,
 ) -> Result<Reply, String> {
-    let mut session =
-        Session::load(session_path).map_err(|e| format!("Session load error: {e}"))?;
-
     match cmd {
-        SlashCommand::Compact => {
-            let system_prompt = workspace.system_prompt();
-            let before = context::session_tokens(&session, system_prompt.len());
-            match context::force_compact(&mut session, provider).await {
-                Ok(true) => {
-                    let after = context::session_tokens(&session, system_prompt.len());
-                    if let Err(e) = session.save(session_path) {
+        SlashCommand::Compact => match engine.force_compact(summarize).await {
+            Ok(event) => {
+                if event.before == 0 && event.after == 0 {
+                    Ok(Reply::text("Nothing to compact.".into()))
+                } else {
+                    if let Err(e) = engine.save().await {
                         error!("Failed to save session: {e}");
                     }
                     Ok(Reply::text(format!(
-                        "Compacted: {before} -> {after} tokens"
+                        "Compacted: {} -> {} tokens",
+                        event.before, event.after,
                     )))
                 }
-                Ok(false) => Ok(Reply::text("Nothing to compact.".into())),
-                Err(e) => Err(format!("Compaction failed: {e}")),
             }
-        }
+            Err(e) => Err(format!("Compaction failed: {e}")),
+        },
         SlashCommand::Context => {
-            let system_prompt = workspace.system_prompt();
-            let tokens = context::session_tokens(&session, system_prompt.len());
-            let budget = context::budget(ctx);
-            let pct = if budget > 0 {
-                (tokens / budget) * 100
+            let stats = engine.stats();
+            let pct = if stats.budget > 0 {
+                (stats.token_estimate / stats.budget) * 100
             } else {
                 0
             };
             Ok(Reply::text(format!(
-                "Context: {tokens} / {budget} tokens ({pct}%)\n\
+                "Context: {} / {} tokens ({pct}%)\n\
                  Messages: {}\n\
-                 Budget: {}% of {}",
-                session.len(),
-                ctx.budget_percent,
-                ctx.max_tokens,
+                 Session: {}",
+                stats.token_estimate,
+                stats.budget,
+                stats.message_count,
+                engine.active_session(),
             )))
         }
         SlashCommand::Heartbeat => {
@@ -127,13 +120,13 @@ pub async fn execute<P: Provider>(
                 Ok(heartbeat::Prepared::Ready(prompt)) => {
                     let cancel = CancellationToken::new();
                     match agent::process_message(
-                        session_path,
+                        engine,
+                        summarize,
                         workspace,
                         &prompt,
                         provider,
                         tools,
                         max_iterations,
-                        ctx,
                         None,
                         &cancel,
                     )
@@ -155,8 +148,8 @@ pub async fn execute<P: Provider>(
             }
         }
         SlashCommand::New => {
-            session.clear();
-            if let Err(e) = session.save(session_path) {
+            engine.clear().await.map_err(|e| e.to_string())?;
+            if let Err(e) = engine.save().await {
                 error!("Failed to save session: {e}");
             }
             Ok(Reply::text("Session cleared.".into()))

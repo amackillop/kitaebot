@@ -127,6 +127,8 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use crate::config::ContextConfig;
+    use crate::engine::flat::FlatSession;
+    use crate::engine::make_summarize_fn;
     use crate::provider::MockProvider;
     use crate::tools::Tools;
     use crate::types::Response;
@@ -143,6 +145,19 @@ mod tests {
         (dir, Arc::new(ws))
     }
 
+    fn spawn_agent(ws: &Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
+        let engine = FlatSession::new(ws.session_path(), CTX).unwrap();
+        let summarize = make_summarize_fn(provider.clone());
+        AgentHandle::spawn(
+            ws.clone(),
+            provider,
+            Arc::new(Tools::default()),
+            1,
+            engine,
+            summarize,
+        )
+    }
+
     /// Socket path in a temp dir — avoids collisions and `/run` dependency.
     fn sock_path() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -155,13 +170,7 @@ mod tests {
         let (_dir, ws) = workspace();
         let (_sock_dir, sock_path) = sock_path();
         // No HEARTBEAT.md → skipped, but proves the tick fired.
-        let handle = AgentHandle::spawn(
-            ws.clone(),
-            Arc::new(MockProvider::new(vec![])),
-            Arc::new(Tools::default()),
-            1,
-            CTX,
-        );
+        let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
 
         run_with_shutdown(
             &ws,
@@ -189,13 +198,7 @@ mod tests {
 
         // Over-provision: we expect ~3 ticks but provide enough headroom.
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text("ok".into())); 10]));
-        let handle = AgentHandle::spawn(
-            ws.clone(),
-            provider.clone(),
-            Arc::new(Tools::default()),
-            1,
-            CTX,
-        );
+        let handle = spawn_agent(&ws, provider.clone());
 
         run_with_shutdown(
             &ws,
@@ -230,14 +233,11 @@ mod tests {
         std::fs::write(ws.heartbeat_path(), "- [ ] task\n").unwrap();
 
         // Provider returns an error — loop should survive.
-        let handle = AgentHandle::spawn(
-            ws.clone(),
+        let handle = spawn_agent(
+            &ws,
             Arc::new(MockProvider::new(vec![Err(ProviderError::Network(
                 "test".into(),
             ))])),
-            Arc::new(Tools::default()),
-            1,
-            CTX,
         );
 
         run_with_shutdown(

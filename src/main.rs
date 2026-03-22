@@ -3,7 +3,6 @@ mod agent;
 mod clients;
 mod commands;
 mod config;
-mod context;
 mod daemon;
 mod dispatch;
 mod engine;
@@ -72,12 +71,20 @@ async fn main() {
             );
 
             let workspace = Arc::new(workspace);
+            let provider = Arc::new(rt.provider);
+            let engine = engine::flat::FlatSession::new(workspace.session_path(), config.context)
+                .unwrap_or_else(|e| {
+                    error!("Failed to initialize session: {e}");
+                    std::process::exit(1);
+                });
+            let summarize = engine::make_summarize_fn(provider.clone());
             let handle = agent::AgentHandle::spawn(
                 workspace.clone(),
-                Arc::new(rt.provider),
+                provider,
                 Arc::new(rt.tools),
                 config.agent.max_iterations,
-                config.context,
+                engine,
+                summarize,
             );
 
             daemon::run(

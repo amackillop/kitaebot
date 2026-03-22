@@ -7,9 +7,6 @@
 //! - **Flat session** (`flat.rs`): wraps `Session` + `context.rs`. No `SQLite`.
 //! - **LCM** (future): hierarchical DAG of summaries over `SQLite`.
 
-// Consumed by the agent loop starting in commit 1.3.
-#![allow(dead_code)]
-
 pub mod flat;
 
 use std::future::Future;
@@ -34,9 +31,7 @@ pub type SummarizeFn = Box<
 
 /// Everything the agent loop needs for a provider call.
 pub struct AssembledContext {
-    /// System prompt, possibly augmented by the engine (e.g. LCM recall guidance).
-    pub system_prompt: String,
-    /// Ordered messages for the provider.
+    /// Ordered messages for the provider (system prompt included).
     pub messages: Vec<Message>,
 }
 
@@ -59,6 +54,7 @@ pub struct ContextStats {
 }
 
 /// Metadata about a session.
+#[allow(dead_code)] // Used by FlatSession::list_sessions, called in Phase 2.
 pub struct SessionInfo {
     pub name: String,
     pub message_count: usize,
@@ -69,6 +65,7 @@ pub struct SessionInfo {
 ///
 /// All methods are async (RPIT). The agent loop is generic over this trait,
 /// monomorphized at the call site. One engine per agent — generics, not dyn.
+#[allow(dead_code)] // tools, switch_session, list_sessions used in Phase 2.
 pub trait ContextEngine: Send + Sync {
     /// Append a message to the active session.
     fn push_message(

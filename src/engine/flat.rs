@@ -80,10 +80,7 @@ impl ContextEngine for FlatSession {
         });
         messages.extend(self.session.messages().iter().cloned());
 
-        Ok(AssembledContext {
-            system_prompt: system_prompt.to_string(),
-            messages,
-        })
+        Ok(AssembledContext { messages })
     }
 
     async fn compact_if_needed(
@@ -207,7 +204,6 @@ mod tests {
             matches!(&ctx.messages[0], Message::System { content } if content == "system prompt")
         );
         assert!(matches!(&ctx.messages[1], Message::User { content } if content == "hello"));
-        assert_eq!(ctx.system_prompt, "system prompt");
     }
 
     #[tokio::test]

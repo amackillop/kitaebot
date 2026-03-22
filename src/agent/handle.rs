@@ -10,8 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::activity::Activity;
-use crate::config::ContextConfig;
 use crate::dispatch::Reply;
+use crate::engine::{ContextEngine, SummarizeFn};
 use crate::provider::Provider;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
@@ -32,15 +32,24 @@ impl AgentHandle {
     /// Spawn the agent actor and return a handle to it.
     ///
     /// The actor task runs until all handles are dropped.
-    pub fn spawn<P: Provider + 'static>(
+    pub fn spawn<P: Provider + 'static, E: ContextEngine + 'static>(
         workspace: Arc<Workspace>,
         provider: Arc<P>,
         tools: Arc<Tools>,
         max_iterations: usize,
-        ctx: ContextConfig,
+        engine: E,
+        summarize: SummarizeFn,
     ) -> Self {
         let (tx, rx) = mpsc::channel(32);
-        let actor = Agent::new(rx, workspace, provider, tools, max_iterations, ctx);
+        let actor = Agent::new(
+            rx,
+            workspace,
+            provider,
+            tools,
+            max_iterations,
+            engine,
+            summarize,
+        );
         tokio::spawn(actor.run());
         Self { tx }
     }

@@ -11,7 +11,6 @@ mod handle;
 pub use handle::AgentHandle;
 
 use std::future::Future;
-use std::path::Path;
 
 use futures::future::join_all;
 use tokio::sync::mpsc;
@@ -19,12 +18,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use crate::activity::{self, Activity};
-use crate::config::ContextConfig;
-use crate::context;
+use crate::engine::{ContextEngine, SummarizeFn};
 use crate::error::{Error, ToolError};
 use crate::provider::Provider;
 use crate::safety;
-use crate::session::Session;
 use crate::tools::Tools;
 use crate::types::{Message, Response, ToolCall};
 use crate::workspace::Workspace;
@@ -57,57 +54,54 @@ fn policy_halt_msg(reasons: &[String]) -> String {
     msg
 }
 
-/// Load session, run a single turn, and save regardless of outcome.
+/// Run a single turn: compact if needed, push user message, loop until done.
 ///
 /// Shared by all channels (telegram, socket, heartbeat).
 #[allow(clippy::too_many_arguments)]
-pub async fn process_message<P: Provider>(
-    session_path: &Path,
+pub async fn process_message(
+    engine: &mut impl ContextEngine,
+    summarize: &SummarizeFn,
     workspace: &Workspace,
     user_message: &str,
-    provider: &P,
+    provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
-    ctx: ContextConfig,
     activity_tx: Option<&mpsc::Sender<Activity>>,
     cancel: &CancellationToken,
 ) -> Result<String, Error> {
-    let mut session = Session::load(session_path)?;
     let system_prompt = workspace.system_prompt();
-    let result = run_turn(
-        &mut session,
+    run_turn(
+        engine,
+        summarize,
         &system_prompt,
         user_message,
         provider,
         tools,
         max_iterations,
-        ctx,
         activity_tx,
         cancel,
     )
-    .await;
-    session.save(session_path)?;
-    result
+    .await
 }
 
 /// Run a single turn of the agent loop.
 ///
 /// Pushes the user message onto the session, sends the history (with system
 /// prompt prepended) to the provider, and appends assistant/tool messages.
-/// The system prompt is prepended per provider call but not stored in the
-/// session, so edits to SOUL.md take effect without a restart.
+/// The system prompt is assembled per provider call via `engine.assemble()`,
+/// so edits to SOUL.md take effect without a restart.
 ///
 /// # Errors
 /// Returns error if max iterations reached or provider fails
-#[allow(clippy::too_many_arguments)]
-async fn run_turn<P: Provider>(
-    session: &mut Session,
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_turn(
+    engine: &mut impl ContextEngine,
+    summarize: &SummarizeFn,
     system_prompt: &str,
     user_message: &str,
-    provider: &P,
+    provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
-    ctx: ContextConfig,
     activity_tx: Option<&mpsc::Sender<Activity>>,
     cancel: &CancellationToken,
 ) -> Result<String, Error> {
@@ -116,19 +110,23 @@ async fn run_turn<P: Provider>(
         return Err(Error::Cancelled);
     }
 
-    let before = context::session_tokens(session, system_prompt.len());
-    let compact_fut = context::compact_if_needed(session, system_prompt, provider, ctx);
-    let compacted = cancellable(compact_fut, cancel, activity_tx)
-        .await?
-        .map_err(Error::Provider)?;
-    if compacted {
-        let after = context::session_tokens(session, system_prompt.len());
-        activity::emit(activity_tx, Activity::Compaction { before, after });
+    let before = engine.stats().token_estimate;
+    if let Some(event) = engine.compact_if_needed(summarize).await? {
+        activity::emit(
+            activity_tx,
+            Activity::Compaction {
+                before: event.before,
+                after: event.after,
+            },
+        );
+        let _ = before; // used only for the "did we compact?" check
     }
 
-    session.add_message(Message::User {
-        content: user_message.to_string(),
-    });
+    engine
+        .push_message(Message::User {
+            content: user_message.to_string(),
+        })
+        .await?;
 
     let tool_definitions = tools.definitions();
 
@@ -142,14 +140,10 @@ async fn run_turn<P: Provider>(
         }
 
         debug!(iteration, "Agent loop iteration");
-        // Prepend system prompt for each provider call (not stored in session)
-        let mut messages = vec![Message::System {
-            content: system_prompt.to_string(),
-        }];
-        messages.extend(session.messages().iter().cloned());
+        let assembled = engine.assemble(system_prompt).await?;
 
         let response = cancellable(
-            provider.chat(&messages, &tool_definitions),
+            provider.chat(&assembled.messages, &tool_definitions),
             cancel,
             activity_tx,
         )
@@ -158,16 +152,20 @@ async fn run_turn<P: Provider>(
 
         match response {
             Response::Text(content) => {
-                session.add_message(Message::Assistant {
-                    content: content.clone(),
-                });
+                engine
+                    .push_message(Message::Assistant {
+                        content: content.clone(),
+                    })
+                    .await?;
                 return Ok(content);
             }
             Response::ToolCalls { content, calls } => {
-                session.add_message(Message::ToolCalls {
-                    content,
-                    calls: calls.clone(),
-                });
+                engine
+                    .push_message(Message::ToolCalls {
+                        content,
+                        calls: calls.clone(),
+                    })
+                    .await?;
 
                 if repeats.record(&calls) {
                     warn!(
@@ -175,10 +173,12 @@ async fn run_turn<P: Provider>(
                         "Repeated tool calls detected, skipping execution"
                     );
                     for call in &calls {
-                        session.add_message(Message::Tool {
-                            call_id: call.id.clone(),
-                            content: REPEAT_ERROR.to_string(),
-                        });
+                        engine
+                            .push_message(Message::Tool {
+                                call_id: call.id.clone(),
+                                content: REPEAT_ERROR.to_string(),
+                            })
+                            .await?;
                     }
                     continue;
                 }
@@ -207,7 +207,7 @@ async fn run_turn<P: Provider>(
                     })
                     .collect();
 
-                record_tool_results(session, &calls, results, activity_tx);
+                record_tool_results(engine, &calls, results, activity_tx).await;
 
                 if !blocked_reasons.is_empty() {
                     policy_strikes += 1;
@@ -215,9 +215,11 @@ async fn run_turn<P: Provider>(
                         warn!("Policy strike limit reached, halting turn");
                         return Ok(policy_halt_msg(&blocked_reasons));
                     }
-                    session.add_message(Message::System {
-                        content: POLICY_STOP_DIRECTIVE.to_string(),
-                    });
+                    engine
+                        .push_message(Message::System {
+                            content: POLICY_STOP_DIRECTIVE.to_string(),
+                        })
+                        .await?;
                 }
             }
         }
@@ -284,9 +286,9 @@ async fn cancellable<T>(
     }
 }
 
-/// Process tool execution results: check safety, emit events, record to session.
-fn record_tool_results(
-    session: &mut Session,
+/// Process tool execution results: check safety, emit events, record to engine.
+async fn record_tool_results<E: ContextEngine>(
+    engine: &mut E,
     calls: &[ToolCall],
     results: Vec<Result<String, ToolError>>,
     activity_tx: Option<&mpsc::Sender<Activity>>,
@@ -315,10 +317,14 @@ fn record_tool_results(
             },
         );
 
-        session.add_message(Message::Tool {
-            call_id: call.id.clone(),
-            content,
-        });
+        // Ignore push_message errors in tool result recording -- the turn
+        // will fail on the next assemble() call if the engine is broken.
+        let _ = engine
+            .push_message(Message::Tool {
+                call_id: call.id.clone(),
+                content,
+            })
+            .await;
     }
 }
 
@@ -326,10 +332,13 @@ fn record_tool_results(
 mod tests {
     use super::*;
     use crate::config::ContextConfig;
+    use crate::engine::flat::FlatSession;
+    use crate::engine::make_summarize_fn;
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
     use crate::tools::{MockBlockedTool, MockTool};
     use crate::types::{ToolCall, ToolFunction};
+    use std::sync::Arc;
 
     fn noop_cancel() -> CancellationToken {
         CancellationToken::new()
@@ -362,51 +371,60 @@ mod tests {
 
     const SYSTEM: &str = "You are a test assistant.";
     const MAX_ITER: usize = 20;
-    const CTX: ContextConfig = ContextConfig {
-        max_tokens: 200_000,
-        budget_percent: 80,
-    };
+
+    fn test_engine() -> FlatSession {
+        let dir = tempfile::tempdir().unwrap();
+        #[allow(deprecated)]
+        let path = dir.into_path().join("session.json");
+        FlatSession::new(path, ContextConfig::default()).unwrap()
+    }
+
+    fn test_summarize(provider: &Arc<MockProvider>) -> SummarizeFn {
+        make_summarize_fn(provider.clone())
+    }
 
     #[tokio::test]
     async fn test_text_response() {
-        let provider = MockProvider::new(vec![Ok(text("Hello from LLM"))]);
+        let provider = Arc::new(MockProvider::new(vec![Ok(text("Hello from LLM"))]));
         let tools = Tools::default();
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Hello",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
         .await;
         assert_eq!(result.unwrap(), "Hello from LLM");
         // User + Assistant messages stored
-        assert_eq!(session.messages().len(), 2);
+        assert_eq!(engine.stats().message_count, 2);
     }
 
     #[tokio::test]
     async fn test_tool_call_execution() {
-        let provider = MockProvider::new(vec![
+        let provider = Arc::new(MockProvider::new(vec![
             Ok(mock_tool_calls(&["call-1"])),
             Ok(text("Tool result processed")),
-        ]);
+        ]));
         let tools = mock_tools("mock output");
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Use a tool",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
@@ -416,18 +434,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_iterations() {
-        let provider = MockProvider::new(vec![Ok(mock_tool_calls(&["call-infinite"])); MAX_ITER]);
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(mock_tool_calls(&[
+                "call-infinite"
+            ]));
+            MAX_ITER
+        ]));
         let tools = mock_tools("mock output");
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Infinite loop",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
@@ -437,39 +461,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_repeated_tool_calls_skipped() {
-        // Provider returns the same tool call 5 times, then text.
-        // With REPEAT_LIMIT=3, calls 1-2 execute normally, 3-5 are skipped.
-        let provider = MockProvider::new(vec![
+        let provider = Arc::new(MockProvider::new(vec![
             Ok(mock_tool_calls(&["c1"])),
             Ok(mock_tool_calls(&["c2"])),
             Ok(mock_tool_calls(&["c3"])),
             Ok(mock_tool_calls(&["c4"])),
             Ok(mock_tool_calls(&["c5"])),
             Ok(text("Gave up")),
-        ]);
+        ]));
         let tools = mock_tools("same output");
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
         let (tx, mut rx) = mpsc::channel(64);
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Loop test",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             Some(&tx),
             &noop_cancel(),
         )
         .await;
 
         assert_eq!(result.unwrap(), "Gave up");
-        // Provider called 6 times (5 tool-call responses + 1 text).
         assert_eq!(provider.call_count(), 6);
 
-        // Only iterations 1 and 2 should have emitted ToolStart/ToolEnd events.
-        // Iterations 3-5 are skipped (no execution, no activity events).
         drop(tx);
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -486,18 +506,20 @@ mod tests {
         assert_eq!(tool_starts, 2);
         assert_eq!(tool_ends, 2);
 
-        // Session should contain the repetition error message for skipped calls.
-        let repetition_msgs: Vec<_> = session
-            .messages()
+        // Assembled context should contain repetition error messages for skipped calls.
+        let ctx = engine.assemble(SYSTEM).await.unwrap();
+        let repetition_msgs: Vec<_> = ctx
+            .messages
             .iter()
-            .filter(|m| matches!(m, Message::Tool { content, .. } if content.starts_with("ERROR: You have called")))
+            .filter(|m| {
+                matches!(m, Message::Tool { content, .. } if content.starts_with("ERROR: You have called"))
+            })
             .collect();
         assert_eq!(repetition_msgs.len(), 3); // iterations 3, 4, 5
     }
 
     #[tokio::test]
     async fn test_different_tool_calls_not_flagged() {
-        // Different arguments each time — no repetition detected.
         let call_a = Response::ToolCalls {
             content: String::new(),
             calls: vec![ToolCall::new(
@@ -518,36 +540,43 @@ mod tests {
                 },
             )],
         };
-        let provider = MockProvider::new(vec![Ok(call_a), Ok(call_b), Ok(text("Done"))]);
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(call_a),
+            Ok(call_b),
+            Ok(text("Done")),
+        ]));
         let tools = mock_tools("output");
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "No repeat",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
         .await;
         assert_eq!(result.unwrap(), "Done");
 
-        // No repetition error messages.
-        let repetition_msgs: Vec<_> = session
-            .messages()
+        // No repetition error messages in assembled context.
+        let ctx = engine.assemble(SYSTEM).await.unwrap();
+        let repetition_msgs: Vec<_> = ctx
+            .messages
             .iter()
-            .filter(|m| matches!(m, Message::Tool { content, .. } if content.starts_with("ERROR: You have called")))
+            .filter(|m| {
+                matches!(m, Message::Tool { content, .. } if content.starts_with("ERROR: You have called"))
+            })
             .collect();
         assert!(repetition_msgs.is_empty());
     }
 
     #[tokio::test]
     async fn test_repeat_counter_resets_on_different_call() {
-        // A, A, B, B, B — only B triggers the limit, not A.
         let call_a = || Response::ToolCalls {
             content: String::new(),
             calls: vec![ToolCall::new(
@@ -568,33 +597,33 @@ mod tests {
                 },
             )],
         };
-        let provider = MockProvider::new(vec![
+        let provider = Arc::new(MockProvider::new(vec![
             Ok(call_a()),
-            Ok(call_a()), // repeat_count=2 for A
-            Ok(call_b()), // reset to 1 for B
-            Ok(call_b()), // repeat_count=2 for B
-            Ok(call_b()), // repeat_count=3 → skipped
+            Ok(call_a()),
+            Ok(call_b()),
+            Ok(call_b()),
+            Ok(call_b()),
             Ok(text("Done")),
-        ]);
+        ]));
         let tools = mock_tools("output");
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
         let (tx, mut rx) = mpsc::channel(64);
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Reset test",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             Some(&tx),
             &noop_cancel(),
         )
         .await;
         assert_eq!(result.unwrap(), "Done");
 
-        // 4 executed iterations (A, A, B, B) + 1 skipped (B) = 4 ToolStart events
         drop(tx);
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -609,19 +638,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_provider_error() {
-        let provider =
-            MockProvider::new(vec![Err(ProviderError::Network("Mock error".to_string()))]);
+        let provider = Arc::new(MockProvider::new(vec![Err(ProviderError::Network(
+            "Mock error".to_string(),
+        ))]));
         let tools = Tools::default();
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Error case",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
@@ -631,21 +662,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_parallel_tool_calls() {
-        let provider = MockProvider::new(vec![
+        let provider = Arc::new(MockProvider::new(vec![
             Ok(mock_tool_calls(&["call-1", "call-2"])),
             Ok(text("Multiple tools executed")),
-        ]);
+        ]));
         let tools = mock_tools("mock output");
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Parallel tools",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
@@ -655,30 +687,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_safety_blocks_leaked_secret() {
-        let provider = MockProvider::new(vec![
+        let provider = Arc::new(MockProvider::new(vec![
             Ok(mock_tool_calls(&["call-leak"])),
             Ok(text("Handled")),
-        ]);
+        ]));
         let tools = mock_tools("Here is your key: sk-proj-abc123def456ghi789jkl012");
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
-        let result = run_turn(
-            &mut session,
+        run_turn(
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Leak test",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
-        .await;
-        assert_eq!(result.unwrap(), "Handled");
+        .await
+        .unwrap();
 
-        // The tool message in session should contain the blocked message, not the secret
-        let tool_msg = session
-            .messages()
+        // Assemble to inspect messages (system prompt + session messages)
+        let ctx = engine.assemble("").await.unwrap();
+        let tool_msg = ctx
+            .messages
             .iter()
             .find(|m| matches!(m, Message::Tool { .. }))
             .expect("should have a tool message");
@@ -692,26 +726,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_clean_tool_output_wrapped() {
-        let provider = MockProvider::new(vec![Ok(mock_tool_calls(&["call-1"])), Ok(text("Done"))]);
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(mock_tool_calls(&["call-1"])),
+            Ok(text("Done")),
+        ]));
         let tools = mock_tools("mock output");
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
         run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Wrap test",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
         .await
         .unwrap();
 
-        let tool_msg = session
-            .messages()
+        let ctx = engine.assemble("").await.unwrap();
+        let tool_msg = ctx
+            .messages
             .iter()
             .find(|m| matches!(m, Message::Tool { .. }))
             .expect("should have a tool message");
@@ -724,22 +763,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_activity_tool_events() {
-        let provider = MockProvider::new(vec![
+        let provider = Arc::new(MockProvider::new(vec![
             Ok(mock_tool_calls(&["call-1", "call-2"])),
             Ok(text("Done")),
-        ]);
+        ]));
         let tools = mock_tools("mock output");
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
         let (tx, mut rx) = mpsc::channel(64);
 
         run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Activity test",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             Some(&tx),
             &noop_cancel(),
         )
@@ -752,7 +792,6 @@ mod tests {
             events.push(event);
         }
 
-        // 2 ToolStart + 2 ToolEnd = 4 events
         assert_eq!(events.len(), 4);
         assert!(matches!(&events[0], Activity::ToolStart { tool } if tool == "mock"));
         assert!(matches!(&events[1], Activity::ToolStart { tool } if tool == "mock"));
@@ -762,19 +801,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_activity_max_iterations() {
-        let provider = MockProvider::new(vec![Ok(mock_tool_calls(&["call-inf"])); MAX_ITER]);
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(mock_tool_calls(&["call-inf"]));
+            MAX_ITER
+        ]));
         let tools = mock_tools("mock output");
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
         let (tx, mut rx) = mpsc::channel(256);
 
         let _ = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Max iter activity",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             Some(&tx),
             &noop_cancel(),
         )
@@ -786,26 +829,26 @@ mod tests {
             events.push(event);
         }
 
-        // Last event should be MaxIterations
         assert!(matches!(events.last().unwrap(), Activity::MaxIterations));
     }
 
     #[tokio::test]
     async fn test_pre_cancelled_token_returns_cancelled() {
-        let provider = MockProvider::new(vec![]);
+        let provider = Arc::new(MockProvider::new(vec![]));
         let tools = Tools::default();
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
         let cancel = CancellationToken::new();
         cancel.cancel();
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Should not run",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &cancel,
         )
@@ -815,38 +858,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_message_saves_session_on_provider_error() {
-        use crate::workspace::Workspace;
-
+    async fn test_process_message_saves_on_provider_error() {
         let dir = tempfile::tempdir().unwrap();
-        let workspace = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        let workspace = crate::workspace::Workspace::init_at(dir.path().to_path_buf()).unwrap();
         let session_path = dir.path().join("sessions").join("test.json");
 
-        let provider = MockProvider::new(vec![Err(ProviderError::Network(
+        let provider = Arc::new(MockProvider::new(vec![Err(ProviderError::Network(
             "connection refused".into(),
-        ))]);
+        ))]));
         let tools = Tools::default();
+        let summarize = test_summarize(&provider);
+
+        let mut engine = FlatSession::new(session_path.clone(), ContextConfig::default()).unwrap();
 
         let result = process_message(
-            &session_path,
+            &mut engine,
+            &summarize,
             &workspace,
             "Hello?",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
         .await;
         assert!(result.is_err());
 
-        let saved = Session::load(&session_path).unwrap();
-        assert_eq!(saved.messages().len(), 1);
-        assert!(matches!(
-            &saved.messages()[0],
-            Message::User { content } if content == "Hello?"
-        ));
+        // The caller (actor) is responsible for saving. We verify the engine
+        // recorded the user message.
+        assert_eq!(engine.stats().message_count, 1);
     }
 
     // ── Policy violation gate ─────────────────────────────────────────
@@ -874,30 +915,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_first_blocked_injects_system_directive() {
-        // Provider: blocked tool call, then text response.
-        let provider = MockProvider::new(vec![
+        let provider = Arc::new(MockProvider::new(vec![
             Ok(blocked_tool_calls(&["b1"])),
             Ok(text("OK I'll stop")),
-        ]);
+        ]));
         let tools = blocked_tools();
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Try blocked",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
         .await;
         assert_eq!(result.unwrap(), "OK I'll stop");
 
-        // Session should contain a System message with the policy directive.
-        let has_directive = session.messages().iter().any(
+        let ctx = engine.assemble("").await.unwrap();
+        let has_directive = ctx.messages.iter().any(
             |m| matches!(m, Message::System { content } if content.contains("POLICY VIOLATION")),
         );
         assert!(has_directive, "expected POLICY VIOLATION system message");
@@ -905,22 +946,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_second_blocked_halts_turn() {
-        // Provider: two consecutive blocked tool calls.
-        let provider = MockProvider::new(vec![
+        let provider = Arc::new(MockProvider::new(vec![
             Ok(blocked_tool_calls(&["b1"])),
             Ok(blocked_tool_calls(&["b2"])),
-        ]);
+        ]));
         let tools = blocked_tools();
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
         let result = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Keep trying",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
@@ -939,27 +980,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_policy_strikes_reset_between_turns() {
-        // Two separate turns, each with one blocked call. Neither should halt
-        // because strikes reset per turn.
-        let provider = MockProvider::new(vec![
-            // Turn 1
+        let provider = Arc::new(MockProvider::new(vec![
             Ok(blocked_tool_calls(&["b1"])),
             Ok(text("Turn 1 done")),
-            // Turn 2
             Ok(blocked_tool_calls(&["b2"])),
             Ok(text("Turn 2 done")),
-        ]);
+        ]));
         let tools = blocked_tools();
-        let mut session = Session::new();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
 
         let r1 = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Turn 1",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )
@@ -967,13 +1005,13 @@ mod tests {
         assert_eq!(r1.unwrap(), "Turn 1 done");
 
         let r2 = run_turn(
-            &mut session,
+            &mut engine,
+            &summarize,
             SYSTEM,
             "Turn 2",
-            &provider,
+            &*provider,
             &tools,
             MAX_ITER,
-            CTX,
             None,
             &noop_cancel(),
         )

@@ -382,12 +382,17 @@ mod tests {
     ) -> (AgentHandle, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        let ws = Arc::new(ws);
+        let provider = Arc::new(MockProvider::new(responses));
+        let engine = crate::engine::flat::FlatSession::new(ws.session_path(), CTX).unwrap();
+        let summarize = crate::engine::make_summarize_fn(provider.clone());
         let handle = AgentHandle::spawn(
-            Arc::new(ws),
-            Arc::new(MockProvider::new(responses)),
+            ws,
+            provider,
             Arc::new(Tools::default()),
             1,
-            CTX,
+            engine,
+            summarize,
         );
         (handle, dir)
     }
