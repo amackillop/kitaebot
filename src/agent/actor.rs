@@ -141,6 +141,7 @@ mod tests {
                 ChannelSource::Socket,
                 "hello".into(),
                 None,
+                None,
                 CancellationToken::new(),
             )
             .await;
@@ -158,6 +159,7 @@ mod tests {
             .send_message(
                 ChannelSource::Socket,
                 "/new".into(),
+                None,
                 None,
                 CancellationToken::new(),
             )
@@ -177,6 +179,7 @@ mod tests {
                 ChannelSource::Socket,
                 "/bogus".into(),
                 None,
+                None,
                 CancellationToken::new(),
             )
             .await;
@@ -195,7 +198,7 @@ mod tests {
 
         let handle = spawn_agent(ws, provider);
         let result = handle
-            .send_message(ChannelSource::Socket, "hi".into(), None, cancel)
+            .send_message(ChannelSource::Socket, "hi".into(), None, None, cancel)
             .await;
 
         assert!(result.is_err());
@@ -216,6 +219,7 @@ mod tests {
                 ChannelSource::Telegram,
                 "msg1".into(),
                 None,
+                None,
                 CancellationToken::new(),
             )
             .await;
@@ -225,6 +229,7 @@ mod tests {
             .send_message(
                 ChannelSource::Telegram,
                 "msg2".into(),
+                None,
                 None,
                 CancellationToken::new(),
             )

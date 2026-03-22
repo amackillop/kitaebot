@@ -185,6 +185,7 @@ async fn handle_message(
         let reply_fut = handle.send_message(
             ChannelSource::Telegram,
             trimmed.to_string(),
+            None,
             Some(tx),
             cancel,
         );

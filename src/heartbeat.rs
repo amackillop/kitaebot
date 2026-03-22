@@ -59,7 +59,13 @@ pub async fn poll_loop(interval: Duration, handle: &AgentHandle) -> ! {
         tick.tick().await;
         let cancel = CancellationToken::new();
         match handle
-            .send_message(ChannelSource::Heartbeat, "/heartbeat".into(), None, cancel)
+            .send_message(
+                ChannelSource::Heartbeat,
+                "/heartbeat".into(),
+                None,
+                None,
+                cancel,
+            )
             .await
         {
             Ok(reply) => info!("Heartbeat: {}", reply.content),

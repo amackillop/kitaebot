@@ -19,7 +19,11 @@ use crate::dispatch::Reply;
 #[derive(Debug, Clone)]
 pub enum ChannelSource {
     Heartbeat,
-    GitHub { pr_number: u32 },
+    GitHub {
+        pr_number: u32,
+        #[allow(dead_code)] // Used in followup commit (GitHub session routing).
+        repo: String,
+    },
     Socket,
     Telegram,
 }
@@ -28,7 +32,7 @@ impl fmt::Display for ChannelSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Heartbeat => write!(f, "Heartbeat"),
-            Self::GitHub { pr_number } => write!(f, "GitHub PR #{pr_number}"),
+            Self::GitHub { pr_number, .. } => write!(f, "GitHub PR #{pr_number}"),
             Self::Socket => write!(f, "Socket"),
             Self::Telegram => write!(f, "Telegram"),
         }
@@ -39,6 +43,9 @@ impl fmt::Display for ChannelSource {
 pub(super) struct Envelope {
     pub source: ChannelSource,
     pub input: String,
+    /// Target session override. `None` means use the active session.
+    #[allow(dead_code)] // Used in followup commit (actor ephemeral switching).
+    pub session_hint: Option<String>,
     pub reply_tx: oneshot::Sender<Result<Reply, String>>,
     pub activity_tx: Option<mpsc::Sender<Activity>>,
     pub cancel: CancellationToken,
@@ -55,7 +62,10 @@ mod tests {
 
     #[test]
     fn display_github() {
-        let src = ChannelSource::GitHub { pr_number: 42 };
+        let src = ChannelSource::GitHub {
+            pr_number: 42,
+            repo: "owner/repo".into(),
+        };
         assert_eq!(src.to_string(), "GitHub PR #42");
     }
 

@@ -61,10 +61,14 @@ impl AgentHandle {
     }
 
     /// Send a message to the agent and await the reply.
+    ///
+    /// `session_hint` overrides the active session for this envelope.
+    /// Pass `None` to use whatever session is currently active.
     pub async fn send_message(
         &self,
         source: ChannelSource,
         input: String,
+        session_hint: Option<String>,
         activity_tx: Option<mpsc::Sender<Activity>>,
         cancel: CancellationToken,
     ) -> Result<Reply, String> {
@@ -72,6 +76,7 @@ impl AgentHandle {
         let envelope = Envelope {
             source,
             input,
+            session_hint,
             reply_tx,
             activity_tx,
             cancel,
@@ -100,6 +105,7 @@ mod tests {
                 ChannelSource::Socket,
                 "hello".into(),
                 None,
+                None,
                 CancellationToken::new(),
             )
             .await;
@@ -115,6 +121,7 @@ mod tests {
         let reply_fut = handle.send_message(
             ChannelSource::Telegram,
             "ping".into(),
+            None,
             None,
             CancellationToken::new(),
         );

@@ -126,7 +126,7 @@ async fn serve(
 
         let result = {
             let reply_fut =
-                handle.send_message(ChannelSource::Socket, input, Some(tx), cancel.clone());
+                handle.send_message(ChannelSource::Socket, input, None, Some(tx), cancel.clone());
             tokio::pin!(reply_fut);
 
             // Drain activity events while dispatch runs. Monitor the

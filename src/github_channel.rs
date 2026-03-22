@@ -169,7 +169,7 @@ async fn poll_once(
                 );
                 continue;
             }
-            send(handle, pr.number, format_review(pr, nwo, review)).await;
+            send(handle, pr.number, nwo, format_review(pr, nwo, review)).await;
             count += 1;
         }
 
@@ -187,7 +187,7 @@ async fn poll_once(
                 );
                 continue;
             }
-            send(handle, pr.number, format_comment(pr, nwo, comment)).await;
+            send(handle, pr.number, nwo, format_comment(pr, nwo, comment)).await;
             count += 1;
         }
 
@@ -205,7 +205,7 @@ async fn poll_once(
                 );
                 continue;
             }
-            send(handle, pr.number, format_diff_comment(pr, nwo, dc)).await;
+            send(handle, pr.number, nwo, format_diff_comment(pr, nwo, dc)).await;
             count += 1;
         }
     }
@@ -213,10 +213,14 @@ async fn poll_once(
     Ok(count)
 }
 
-async fn send(handle: &AgentHandle, pr_number: u32, message: String) {
+async fn send(handle: &AgentHandle, pr_number: u32, repo: &str, message: String) {
     let cancel = CancellationToken::new();
+    let source = ChannelSource::GitHub {
+        pr_number,
+        repo: repo.to_string(),
+    };
     match handle
-        .send_message(ChannelSource::GitHub { pr_number }, message, None, cancel)
+        .send_message(source, message, None, None, cancel)
         .await
     {
         Ok(reply) => info!(pr_number, "GitHub PR #{pr_number}: {}", reply.content),
