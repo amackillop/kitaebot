@@ -10,6 +10,10 @@ use thiserror::Error;
 /// Top-level agent error.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Context engine error.
+    #[error("Engine error: {0}")]
+    Engine(#[from] EngineError),
+
     /// Heartbeat execution error.
     #[error("Heartbeat error: {0}")]
     Heartbeat(#[from] HeartbeatError),
@@ -40,6 +44,23 @@ pub enum Error {
     /// Tool execution error.
     #[error("Tool error: {0}")]
     Tool(#[from] ToolError),
+}
+
+/// Context engine errors.
+#[derive(Debug, Error)]
+pub enum EngineError {
+    /// LLM provider error during compaction summarization.
+    #[error("Provider error: {0}")]
+    Provider(#[from] ProviderError),
+
+    /// Session persistence failure (I/O, parse, serialize).
+    #[error("Session error: {0}")]
+    Session(#[from] SessionError),
+
+    /// `SQLite` or other storage backend failure.
+    #[error("Storage error: {0}")]
+    #[allow(dead_code)] // Used by LCM engine (Phase 3).
+    Storage(String),
 }
 
 /// LLM provider errors.

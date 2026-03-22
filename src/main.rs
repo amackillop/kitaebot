@@ -6,6 +6,7 @@ mod config;
 mod context;
 mod daemon;
 mod dispatch;
+mod engine;
 mod error;
 mod github_channel;
 mod heartbeat;
