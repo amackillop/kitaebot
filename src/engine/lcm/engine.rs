@@ -159,29 +159,57 @@ impl ContextEngine for LcmEngine {
 
         let before = self.stats().token_estimate;
 
+        // Leaf pass: collapse oldest raw messages outside the
+        // protected tail into depth-0 summaries.
         let conn = Arc::clone(&self.conn);
-        let chunks = run_blocking(conn, move |c| {
+        let leaf_chunks = run_blocking(conn, move |c| {
             compaction::load_leaf_chunks(c, conversation_id)
         })
         .await?;
 
-        if chunks.is_empty() {
-            return Ok(CompactionEvent {
-                before,
-                after: before,
-            });
+        if !leaf_chunks.is_empty() {
+            info!(
+                chunk_count = leaf_chunks.len(),
+                "running leaf-pass compaction"
+            );
+            for chunk in leaf_chunks {
+                let messages = chunk.messages();
+                let outcome = summarize_with_escalation(&messages, summarize).await;
+                let conn = Arc::clone(&self.conn);
+                run_blocking(conn, move |c| {
+                    compaction::write_leaf_summary(c, conversation_id, &chunk, &outcome)
+                })
+                .await?;
+            }
         }
 
-        info!(chunk_count = chunks.len(), "running leaf-pass compaction");
-
-        for chunk in chunks {
-            let messages = chunk.messages();
-            let outcome = summarize_with_escalation(&messages, summarize).await;
+        // Condensed pass: iterate the depth ladder. Each iteration
+        // collapses contiguous same-depth runs of summaries with
+        // fanout >= 2 into a depth+1 summary. Each step strictly
+        // reduces the number of summary items in `context_items`, so
+        // the loop is guaranteed to terminate.
+        loop {
             let conn = Arc::clone(&self.conn);
-            run_blocking(conn, move |c| {
-                compaction::write_leaf_summary(c, conversation_id, &chunk, &outcome)
+            let chunks = run_blocking(conn, move |c| {
+                compaction::load_condensed_chunks(c, conversation_id)
             })
             .await?;
+            if chunks.is_empty() {
+                break;
+            }
+            info!(
+                chunk_count = chunks.len(),
+                "running condensed-pass compaction"
+            );
+            for chunk in chunks {
+                let messages = chunk.messages();
+                let outcome = summarize_with_escalation(&messages, summarize).await;
+                let conn = Arc::clone(&self.conn);
+                run_blocking(conn, move |c| {
+                    compaction::write_condensed_summary(c, conversation_id, &chunk, &outcome)
+                })
+                .await?;
+            }
         }
 
         let after = self.stats().token_estimate;
@@ -1293,5 +1321,114 @@ mod tests {
             }
             other => panic!("expected system, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn force_compact_runs_condensed_pass_when_multiple_leaves() {
+        let (mut engine, _dir) = temp_engine();
+        // Each message carries ~1000 tokens (4000 chars / 4). 25
+        // eligible messages exceed LEAF_CHUNK_TOKENS = 20_000, forcing
+        // two leaf chunks. The two resulting depth-0 summaries form a
+        // contiguous run with fanout 2 so the condensed pass kicks in.
+        let big = "x".repeat(4000);
+        for i in 0..(32 + 25) {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i} {big}"),
+                })
+                .await
+                .unwrap();
+        }
+
+        engine.force_compact(&canned_summarize("c")).await.unwrap();
+
+        let conn = engine.conn.lock().unwrap();
+
+        let leaf_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM summaries WHERE kind = 'leaf'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaf_count, 2);
+
+        let condensed_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM summaries WHERE kind = 'condensed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(condensed_count, 1);
+
+        let condensed_depth: i64 = conn
+            .query_row(
+                "SELECT depth FROM summaries WHERE kind = 'condensed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(condensed_depth, 1);
+
+        let parent_edges: i64 = conn
+            .query_row("SELECT COUNT(*) FROM summary_parents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(parent_edges, 2);
+
+        // The condensed summary aggregates descendants from both leaves.
+        let (descendant_count, source_msg_tokens): (i64, i64) = conn
+            .query_row(
+                "SELECT descendant_count, source_message_token_count \
+                 FROM summaries WHERE kind = 'condensed'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(descendant_count, 25, "should sum the 25 source messages");
+        assert!(source_msg_tokens > 0);
+
+        // Active context: the condensed summary + 32 protected messages.
+        let item_counts: (i64, i64) = conn
+            .query_row(
+                "SELECT \
+                    SUM(CASE WHEN item_type = 'message' THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN item_type = 'summary' THEN 1 ELSE 0 END) \
+                 FROM context_items",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(item_counts, (32, 1));
+    }
+
+    #[tokio::test]
+    async fn condensed_pass_skips_singleton_runs() {
+        // 32 protected + 3 eligible -> 1 leaf chunk -> 1 leaf summary.
+        // The condensed pass sees a single depth-0 item, which fails
+        // the fanout >= 2 check, so no condensed summary is created.
+        let (mut engine, _dir) = temp_engine();
+        let filler = "x".repeat(200);
+        for i in 0..35 {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i} {filler}"),
+                })
+                .await
+                .unwrap();
+        }
+        engine.force_compact(&canned_summarize("c")).await.unwrap();
+
+        let condensed: i64 = engine
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM summaries WHERE kind = 'condensed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(condensed, 0);
     }
 }
