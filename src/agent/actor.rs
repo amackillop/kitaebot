@@ -123,7 +123,9 @@ mod tests {
 
     fn spawn_agent(ws: Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
         let tools = Arc::new(Tools::default());
-        let engine = FlatSession::new(ws.session_path(), ContextConfig::default()).unwrap();
+        let sessions_dir = ws.path().join("sessions");
+        let memory_dir = ws.path().join("memory");
+        let engine = FlatSession::new(sessions_dir, memory_dir, ContextConfig::default()).unwrap();
         let summarize = make_summarize_fn(provider.clone());
         AgentHandle::spawn(ws, provider, tools, 1, engine, summarize)
     }

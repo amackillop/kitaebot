@@ -53,11 +53,6 @@ impl Workspace {
         &self.0
     }
 
-    /// Path to the unified agent session file.
-    pub fn session_path(&self) -> PathBuf {
-        self.0.join("sessions/session.json")
-    }
-
     /// Path to the heartbeat task file.
     pub fn heartbeat_path(&self) -> PathBuf {
         self.0.join("HEARTBEAT.md")

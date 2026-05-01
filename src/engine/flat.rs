@@ -1,9 +1,11 @@
 //! Flat session implementation of [`ContextEngine`].
 //!
-//! Wraps `Session` + the compaction logic from `context.rs` behind the
-//! trait. Single-session only ("general"). Multi-session comes in Phase 2.
+//! Each session is a separate JSON file under `sessions/<name>.json`.
+//! The active session name is persisted to `memory/active_session` so
+//! it survives daemon restarts.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use tracing::info;
 
@@ -17,18 +19,35 @@ use super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
 };
 
-/// Flat session engine -- preserves the pre-engine behavior exactly.
+/// Flat session engine with per-name JSON files.
 pub struct FlatSession {
     session: Session,
-    path: PathBuf,
+    active_name: String,
+    sessions_dir: PathBuf,
+    memory_dir: PathBuf,
     ctx: ContextConfig,
 }
 
 impl FlatSession {
-    /// Load (or create) a flat session from `path`.
-    pub fn new(path: PathBuf, ctx: ContextConfig) -> Result<Self, EngineError> {
+    /// Open the flat session engine.
+    ///
+    /// Reads `memory/active_session` to restore the last active session.
+    /// Falls back to `"general"` if the file is missing or unreadable.
+    pub fn new(
+        sessions_dir: PathBuf,
+        memory_dir: PathBuf,
+        ctx: ContextConfig,
+    ) -> Result<Self, EngineError> {
+        let active_name = read_active_session(&memory_dir).unwrap_or_else(|| "general".into());
+        let path = session_path(&sessions_dir, &active_name);
         let session = Session::load(&path)?;
-        Ok(Self { session, path, ctx })
+        Ok(Self {
+            session,
+            active_name,
+            sessions_dir,
+            memory_dir,
+            ctx,
+        })
     }
 
     /// Estimated tokens for the current session content plus a system prompt.
@@ -64,6 +83,11 @@ impl FlatSession {
         let after = self.token_estimate(0);
 
         Ok(Some(CompactionEvent { before, after }))
+    }
+
+    /// Path to the JSON file for a given session name.
+    fn path_for(&self, name: &str) -> PathBuf {
+        session_path(&self.sessions_dir, name)
     }
 }
 
@@ -122,7 +146,7 @@ impl ContextEngine for FlatSession {
     }
 
     async fn save(&mut self) -> Result<(), EngineError> {
-        self.session.save(&self.path)?;
+        self.session.save(&self.path_for(&self.active_name))?;
         Ok(())
     }
 
@@ -138,22 +162,113 @@ impl ContextEngine for FlatSession {
         Vec::new()
     }
 
-    #[allow(clippy::unnecessary_literal_bound)] // Trait requires &str tied to &self.
     fn active_session(&self) -> &str {
-        "general"
+        &self.active_name
     }
 
-    async fn switch_session(&mut self, _name: &str) -> Result<(), EngineError> {
-        // Single-session stub. Multi-session in Phase 2.
+    async fn switch_session(&mut self, name: &str) -> Result<(), EngineError> {
+        let sanitized = sanitize_name(name);
+        if sanitized == self.active_name {
+            return Ok(());
+        }
+
+        // Save the current session before switching.
+        self.save().await?;
+
+        // Load (or create) the target session.
+        let path = self.path_for(&sanitized);
+        self.session = Session::load(&path)?;
+        self.active_name = sanitized;
+        persist_active_session(&self.memory_dir, &self.active_name);
         Ok(())
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionInfo>, EngineError> {
-        Ok(vec![SessionInfo {
-            name: "general".to_string(),
-            message_count: self.session.len(),
-            estimated_tokens: self.token_estimate(0),
-        }])
+        let mut sessions = Vec::new();
+
+        let entries = fs::read_dir(&self.sessions_dir)
+            .map_err(|e| EngineError::Storage(format!("read sessions dir: {e}")))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| EngineError::Storage(format!("read dir entry: {e}")))?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let name = desanitize_name(stem);
+
+            // For the active session, use the in-memory state (avoids re-reading).
+            if name == self.active_name {
+                sessions.push(SessionInfo {
+                    name,
+                    message_count: self.session.len(),
+                    estimated_tokens: self.token_estimate(0),
+                });
+            } else if let Ok(s) = Session::load(&path) {
+                let chars: usize = s.messages().iter().map(Message::char_count).sum();
+                sessions.push(SessionInfo {
+                    name,
+                    message_count: s.len(),
+                    estimated_tokens: chars / 4,
+                });
+            }
+        }
+
+        // If no file exists for the active session yet (new, never saved),
+        // make sure it still shows up.
+        if !sessions.iter().any(|s| s.name == self.active_name) {
+            sessions.push(SessionInfo {
+                name: self.active_name.clone(),
+                message_count: self.session.len(),
+                estimated_tokens: self.token_estimate(0),
+            });
+        }
+
+        sessions.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(sessions)
+    }
+}
+
+// ── Name sanitization ───────────────────────────────────────────────
+
+/// Sanitize a session name for use as a filename.
+///
+/// `/` becomes `--` so repo-style names like `owner/repo` map to
+/// `owner--repo.json`. Null bytes and `..` are stripped entirely.
+fn sanitize_name(name: &str) -> String {
+    name.replace('\0', "").replace("..", "").replace('/', "--")
+}
+
+/// Reverse the sanitization to recover the original name.
+fn desanitize_name(stem: &str) -> String {
+    stem.replace("--", "/")
+}
+
+// ── Active session persistence ──────────────────────────────────────
+
+fn session_path(sessions_dir: &Path, name: &str) -> PathBuf {
+    let sanitized = sanitize_name(name);
+    sessions_dir.join(format!("{sanitized}.json"))
+}
+
+/// Read the active session name from `memory/active_session`.
+fn read_active_session(memory_dir: &Path) -> Option<String> {
+    let path = memory_dir.join("active_session");
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Persist the active session name atomically.
+fn persist_active_session(memory_dir: &Path, name: &str) {
+    let path = memory_dir.join("active_session");
+    let tmp = memory_dir.join("active_session.tmp");
+    if fs::write(&tmp, name).is_ok() {
+        let _ = fs::rename(&tmp, &path);
     }
 }
 
@@ -182,9 +297,23 @@ mod tests {
 
     fn temp_engine(ctx: ContextConfig) -> FlatSession {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.keep().join("session.json");
-        FlatSession::new(path, ctx).unwrap()
+        let base = dir.keep();
+        let sessions_dir = base.join("sessions");
+        let memory_dir = base.join("memory");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::create_dir_all(&memory_dir).unwrap();
+        FlatSession::new(sessions_dir, memory_dir, ctx).unwrap()
     }
+
+    fn temp_engine_at(base: &Path, ctx: ContextConfig) -> FlatSession {
+        let sessions_dir = base.join("sessions");
+        let memory_dir = base.join("memory");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::create_dir_all(&memory_dir).unwrap();
+        FlatSession::new(sessions_dir, memory_dir, ctx).unwrap()
+    }
+
+    // ── Basic operations (unchanged from Phase 1) ───────────────────
 
     #[tokio::test]
     async fn push_and_assemble_roundtrip() {
@@ -239,7 +368,6 @@ mod tests {
     #[tokio::test]
     async fn compaction_triggers_over_budget() {
         let mut engine = temp_engine(tiny_config());
-        // 200 chars = 50 tokens each. Two = 100 tokens. Budget = 50.
         engine
             .push_message(Message::User {
                 content: "a".repeat(200),
@@ -310,11 +438,10 @@ mod tests {
     #[tokio::test]
     async fn save_and_reload() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.json");
         let ctx = ContextConfig::default();
 
         {
-            let mut engine = FlatSession::new(path.clone(), ctx).unwrap();
+            let mut engine = temp_engine_at(dir.path(), ctx);
             engine
                 .push_message(Message::User {
                     content: "persisted".to_string(),
@@ -324,7 +451,7 @@ mod tests {
             engine.save().await.unwrap();
         }
 
-        let engine = FlatSession::new(path, ctx).unwrap();
+        let engine = temp_engine_at(dir.path(), ctx);
         assert_eq!(engine.stats().message_count, 1);
     }
 
@@ -338,16 +465,160 @@ mod tests {
     }
 
     #[test]
-    fn active_session_is_general() {
+    fn active_session_defaults_to_general() {
         let engine = temp_engine(ContextConfig::default());
         assert_eq!(engine.active_session(), "general");
     }
 
+    // ── Multi-session tests ─────────────────────────────────────────
+
     #[tokio::test]
-    async fn list_sessions_returns_single() {
-        let engine = temp_engine(ContextConfig::default());
+    async fn switch_session_roundtrip() {
+        let mut engine = temp_engine(ContextConfig::default());
+
+        // Add a message to "general".
+        engine
+            .push_message(Message::User {
+                content: "in general".into(),
+            })
+            .await
+            .unwrap();
+        engine.save().await.unwrap();
+
+        // Switch to "project-a" and add a message there.
+        engine.switch_session("project-a").await.unwrap();
+        assert_eq!(engine.active_session(), "project-a");
+        assert_eq!(engine.stats().message_count, 0);
+
+        engine
+            .push_message(Message::User {
+                content: "in project-a".into(),
+            })
+            .await
+            .unwrap();
+        engine.save().await.unwrap();
+
+        // Switch back to "general".
+        engine.switch_session("general").await.unwrap();
+        assert_eq!(engine.active_session(), "general");
+        assert_eq!(engine.stats().message_count, 1);
+    }
+
+    #[tokio::test]
+    async fn switch_session_is_idempotent() {
+        let mut engine = temp_engine(ContextConfig::default());
+        engine
+            .push_message(Message::User {
+                content: "msg".into(),
+            })
+            .await
+            .unwrap();
+
+        // Switching to the already-active session should be a no-op.
+        engine.switch_session("general").await.unwrap();
+        assert_eq!(engine.stats().message_count, 1);
+    }
+
+    #[tokio::test]
+    async fn sessions_are_isolated() {
+        let mut engine = temp_engine(ContextConfig::default());
+
+        engine
+            .push_message(Message::User {
+                content: "general msg".into(),
+            })
+            .await
+            .unwrap();
+        engine.save().await.unwrap();
+
+        engine.switch_session("other").await.unwrap();
+        engine
+            .push_message(Message::User {
+                content: "other msg".into(),
+            })
+            .await
+            .unwrap();
+        engine.save().await.unwrap();
+
+        // Each session has exactly one message.
+        assert_eq!(engine.stats().message_count, 1);
+        engine.switch_session("general").await.unwrap();
+        assert_eq!(engine.stats().message_count, 1);
+
+        // And the content is correct.
+        let ctx = engine.assemble("sys").await.unwrap();
+        assert!(matches!(&ctx.messages[1], Message::User { content } if content == "general msg"));
+    }
+
+    #[tokio::test]
+    async fn active_session_persists_across_recreation() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ContextConfig::default();
+
+        {
+            let mut engine = temp_engine_at(dir.path(), ctx);
+            engine.switch_session("my-project").await.unwrap();
+            engine.save().await.unwrap();
+        }
+
+        let engine = temp_engine_at(dir.path(), ctx);
+        assert_eq!(engine.active_session(), "my-project");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_enumerates_all() {
+        let mut engine = temp_engine(ContextConfig::default());
+
+        engine
+            .push_message(Message::User {
+                content: "a".into(),
+            })
+            .await
+            .unwrap();
+        engine.save().await.unwrap();
+
+        engine.switch_session("beta").await.unwrap();
+        engine.save().await.unwrap();
+
         let sessions = engine.list_sessions().await.unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].name, "general");
+        let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"general"));
+        assert!(names.contains(&"beta"));
+    }
+
+    // ── Name sanitization tests ─────────────────────────────────────
+
+    #[test]
+    fn sanitize_slashes() {
+        assert_eq!(sanitize_name("owner/repo"), "owner--repo");
+    }
+
+    #[test]
+    fn sanitize_double_dots() {
+        // `..` stripped, then `/` becomes `--`.
+        assert_eq!(sanitize_name("../evil"), "--evil");
+        // "a/../b" -> strip ".." -> "a//b" -> replace "/" -> "a----b"
+        assert_eq!(sanitize_name("a/../b"), "a----b");
+    }
+
+    #[test]
+    fn sanitize_null_bytes() {
+        assert_eq!(sanitize_name("foo\0bar"), "foobar");
+    }
+
+    #[test]
+    fn desanitize_reverses_slashes() {
+        assert_eq!(desanitize_name("owner--repo"), "owner/repo");
+    }
+
+    #[test]
+    fn sanitize_roundtrip() {
+        let name = "owner/repo";
+        assert_eq!(desanitize_name(&sanitize_name(name)), name);
+    }
+
+    #[test]
+    fn sanitize_plain_name_unchanged() {
+        assert_eq!(sanitize_name("general"), "general");
     }
 }

@@ -95,8 +95,9 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         }
     };
 
-    let session_path = workspace.session_path();
-    let socket_loop = socket::listen(socket_path, &session_path, handle);
+    let sessions_dir = workspace.path().join("sessions");
+    let memory_dir = workspace.path().join("memory");
+    let socket_loop = socket::listen(socket_path, &sessions_dir, &memory_dir, handle);
 
     tokio::select! {
         () = heartbeat_loop => unreachable!("heartbeat loop never exits"),
@@ -146,7 +147,9 @@ mod tests {
     }
 
     fn spawn_agent(ws: &Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
-        let engine = FlatSession::new(ws.session_path(), CTX).unwrap();
+        let sessions_dir = ws.path().join("sessions");
+        let memory_dir = ws.path().join("memory");
+        let engine = FlatSession::new(sessions_dir, memory_dir, CTX).unwrap();
         let summarize = make_summarize_fn(provider.clone());
         AgentHandle::spawn(
             ws.clone(),

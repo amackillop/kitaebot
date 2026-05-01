@@ -375,8 +375,12 @@ mod tests {
     fn test_engine() -> FlatSession {
         let dir = tempfile::tempdir().unwrap();
         #[allow(deprecated)]
-        let path = dir.into_path().join("session.json");
-        FlatSession::new(path, ContextConfig::default()).unwrap()
+        let base = dir.into_path();
+        let sessions = base.join("sessions");
+        let memory = base.join("memory");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&memory).unwrap();
+        FlatSession::new(sessions, memory, ContextConfig::default()).unwrap()
     }
 
     fn test_summarize(provider: &Arc<MockProvider>) -> SummarizeFn {
@@ -861,7 +865,6 @@ mod tests {
     async fn test_process_message_saves_on_provider_error() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = crate::workspace::Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        let session_path = dir.path().join("sessions").join("test.json");
 
         let provider = Arc::new(MockProvider::new(vec![Err(ProviderError::Network(
             "connection refused".into(),
@@ -869,7 +872,10 @@ mod tests {
         let tools = Tools::default();
         let summarize = test_summarize(&provider);
 
-        let mut engine = FlatSession::new(session_path.clone(), ContextConfig::default()).unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        let memory_dir = dir.path().join("memory");
+        let mut engine =
+            FlatSession::new(sessions_dir, memory_dir, ContextConfig::default()).unwrap();
 
         let result = process_message(
             &mut engine,

@@ -72,7 +72,9 @@ async fn main() {
 
             let workspace = Arc::new(workspace);
             let provider = Arc::new(rt.provider);
-            let engine = engine::flat::FlatSession::new(workspace.session_path(), config.context)
+            let sessions_dir = workspace.path().join("sessions");
+            let memory_dir = workspace.path().join("memory");
+            let engine = engine::flat::FlatSession::new(sessions_dir, memory_dir, config.context)
                 .unwrap_or_else(|e| {
                     error!("Failed to initialize session: {e}");
                     std::process::exit(1);

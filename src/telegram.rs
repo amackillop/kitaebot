@@ -385,7 +385,9 @@ mod tests {
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
         let ws = Arc::new(ws);
         let provider = Arc::new(MockProvider::new(responses));
-        let engine = crate::engine::flat::FlatSession::new(ws.session_path(), CTX).unwrap();
+        let sessions_dir = ws.path().join("sessions");
+        let memory_dir = ws.path().join("memory");
+        let engine = crate::engine::flat::FlatSession::new(sessions_dir, memory_dir, CTX).unwrap();
         let summarize = crate::engine::make_summarize_fn(provider.clone());
         let handle = AgentHandle::spawn(
             ws,

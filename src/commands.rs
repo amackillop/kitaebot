@@ -54,10 +54,23 @@ impl FromStr for SlashCommand {
 
 /// Format the session greeting shown on connect/startup.
 ///
-/// Loads the session from disk to count messages. Returns "New session"
-/// if the file is missing or empty.
-pub fn greeting(session_path: &Path) -> String {
-    let count = Session::load(session_path).map_or(0, |s| s.messages().len());
+/// Reads the active session name from `memory/active_session`, then loads
+/// the corresponding session file. Returns "New session" if missing or empty.
+pub fn greeting(sessions_dir: &Path, memory_dir: &Path) -> String {
+    let active = std::fs::read_to_string(memory_dir.join("active_session"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "general".into());
+
+    // Sanitize the same way FlatSession does (/ -> --).
+    let sanitized = active
+        .replace('\0', "")
+        .replace("..", "")
+        .replace('/', "--");
+    let path = sessions_dir.join(format!("{sanitized}.json"));
+    let count = Session::load(&path).map_or(0, |s| s.messages().len());
+
     if count == 0 {
         "New session".to_string()
     } else {
@@ -179,14 +192,20 @@ mod tests {
     #[test]
     fn greeting_new_session() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.json");
-        assert_eq!(greeting(&path), "New session");
+        let sessions = dir.path().join("sessions");
+        let memory = dir.path().join("memory");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&memory).unwrap();
+        assert_eq!(greeting(&sessions, &memory), "New session");
     }
 
     #[test]
     fn greeting_resumed_session() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.json");
+        let sessions = dir.path().join("sessions");
+        let memory = dir.path().join("memory");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&memory).unwrap();
 
         let mut session = Session::new();
         for i in 0..5 {
@@ -194,8 +213,9 @@ mod tests {
                 content: format!("msg {i}"),
             });
         }
-        session.save(&path).unwrap();
+        // Save as "general.json" (the default session).
+        session.save(&sessions.join("general.json")).unwrap();
 
-        assert_eq!(greeting(&path), "Resumed session (5 messages)");
+        assert_eq!(greeting(&sessions, &memory), "Resumed session (5 messages)");
     }
 }
