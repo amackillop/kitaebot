@@ -55,7 +55,7 @@ pub struct ContextStats {
 }
 
 /// Metadata about a session.
-#[allow(dead_code)] // Used by FlatSession::list_sessions, called in Phase 2.
+#[allow(dead_code)] // Used by FlatSession::list_sessions.
 pub struct SessionInfo {
     pub name: String,
     pub message_count: usize,
@@ -66,7 +66,7 @@ pub struct SessionInfo {
 ///
 /// All methods are async (RPIT). The agent loop is generic over this trait,
 /// monomorphized at the call site. One engine per agent — generics, not dyn.
-#[allow(dead_code)] // tools, switch_session, list_sessions used in Phase 2.
+#[allow(dead_code)] // tools() has no caller yet.
 pub trait ContextEngine: Send + Sync {
     /// Append a message to the active session.
     fn push_message(

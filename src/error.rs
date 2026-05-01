@@ -59,7 +59,7 @@ pub enum EngineError {
 
     /// `SQLite` or other storage backend failure.
     #[error("Storage error: {0}")]
-    #[allow(dead_code)] // Used by LCM engine (Phase 3).
+    #[allow(dead_code)] // Used by the LCM engine.
     Storage(String),
 }
 

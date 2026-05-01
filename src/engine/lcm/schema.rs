@@ -114,7 +114,7 @@ fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<(), Engine
 /// is free to cache it across rows.
 ///
 /// The pattern is recompiled per call. Optimizing this with rusqlite's
-/// `auxdata` is a 3.5+ concern once `lcm_grep` is in heavy use.
+/// `auxdata` is a follow-up once `lcm_grep` is in heavy use.
 fn register_regexp(conn: &Connection) -> Result<(), EngineError> {
     conn.create_scalar_function(
         "regexp",

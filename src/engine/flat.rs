@@ -313,7 +313,7 @@ mod tests {
         FlatSession::new(sessions_dir, memory_dir, ctx).unwrap()
     }
 
-    // ── Basic operations (unchanged from Phase 1) ───────────────────
+    // ── Basic operations ────────────────────────────────────────────
 
     #[tokio::test]
     async fn push_and_assemble_roundtrip() {
