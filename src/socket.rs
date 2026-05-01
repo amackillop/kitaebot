@@ -248,7 +248,7 @@ async fn send(writer: &mut OwnedWriteHalf, msg: &ServerMsg) -> Result<(), std::i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ContextConfig, EngineKind};
+    use crate::config::ContextConfig;
     use crate::provider::MockProvider;
     use crate::tools::Tools;
     use crate::types::Response;
@@ -257,11 +257,9 @@ mod tests {
     use tokio::io::BufReader as TokioBufReader;
     use tokio::net::unix::OwnedWriteHalf as ClientWriteHalf;
 
-    const CTX: ContextConfig = ContextConfig {
-        engine: EngineKind::Flat,
-        max_tokens: 200_000,
-        budget_percent: 80,
-    };
+    fn ctx() -> ContextConfig {
+        ContextConfig::default()
+    }
 
     // ── Test harness ────────────────────────────────────────────────
 
@@ -331,7 +329,8 @@ mod tests {
         let provider = Arc::new(MockProvider::new(responses));
         let sessions_dir = ws.path().join("sessions");
         let memory_dir = ws.path().join("memory");
-        let engine = crate::engine::flat::FlatSession::new(sessions_dir, memory_dir, CTX).unwrap();
+        let engine =
+            crate::engine::flat::FlatSession::new(sessions_dir, memory_dir, ctx()).unwrap();
         let summarize = crate::engine::make_summarize_fn(provider.clone());
         let handle = AgentHandle::spawn(
             ws.clone(),

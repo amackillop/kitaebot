@@ -39,17 +39,6 @@ use super::compaction;
 use super::schema;
 use super::tools::{LcmDescribe, LcmExpand, LcmGrep};
 
-/// Percent of `ContextConfig::max_tokens` at which compaction begins
-/// running asynchronously in the background. Chosen below the hard
-/// threshold so the model has room to keep talking while the spawn
-/// makes progress. Hardcoded for now; moves to `LcmConfig` later.
-const SOFT_BUDGET_PERCENT: usize = 70;
-
-/// Percent of `ContextConfig::max_tokens` at which compaction must
-/// complete before the next provider call. Crossing this number
-/// blocks the actor until the compaction transaction commits.
-const HARD_BUDGET_PERCENT: usize = 90;
-
 /// The connection lives behind `Arc<Mutex<_>>` for two reasons:
 ///
 /// 1. `rusqlite::Connection` is `!Sync`, but [`ContextEngine`]
@@ -81,7 +70,7 @@ pub struct LcmEngine {
     memory_dir: PathBuf,
     ctx: ContextConfig,
     /// Async compaction in flight (soft-threshold path). Set when a
-    /// turn crosses [`SOFT_BUDGET_PERCENT`] without crossing the hard
+    /// turn crosses the soft threshold without crossing the hard
     /// threshold; drained at the start of the next compaction call.
     pending_compaction: Option<JoinHandle<Result<CompactionEvent, EngineError>>>,
 }
@@ -122,13 +111,13 @@ impl LcmEngine {
     /// in [`ContextStats`] because that field's semantic is "at this
     /// point we begin compacting".
     fn soft_threshold(&self) -> usize {
-        self.ctx.max_tokens as usize * SOFT_BUDGET_PERCENT / 100
+        self.ctx.max_tokens as usize * self.ctx.lcm.soft_budget_percent as usize / 100
     }
 
     /// Hard compaction trigger: percent of `max_tokens` at which the
     /// engine must compact synchronously before the next provider call.
     fn hard_threshold(&self) -> usize {
-        self.ctx.max_tokens as usize * HARD_BUDGET_PERCENT / 100
+        self.ctx.max_tokens as usize * self.ctx.lcm.hard_budget_percent as usize / 100
     }
 
     /// Drain any background compaction task and return its event.
@@ -208,9 +197,13 @@ impl ContextEngine for LcmEngine {
                 tokens,
                 "hard threshold reached; running blocking compaction"
             );
-            let event =
-                compaction::run_compaction(Arc::clone(&self.conn), self.conversation_id, summarize)
-                    .await?;
+            let event = compaction::run_compaction(
+                Arc::clone(&self.conn),
+                self.conversation_id,
+                self.ctx.lcm,
+                summarize,
+            )
+            .await?;
             return Ok(Some(event));
         }
 
@@ -221,11 +214,12 @@ impl ContextEngine for LcmEngine {
             );
             let db_path = self.db_path.clone();
             let conversation_id = self.conversation_id;
+            let cfg = self.ctx.lcm;
             let summarize = Arc::clone(summarize);
             self.pending_compaction = Some(tokio::spawn(async move {
                 let conn = schema::open(&db_path)?;
                 let conn = Arc::new(Mutex::new(conn));
-                compaction::run_compaction(conn, conversation_id, &summarize).await
+                compaction::run_compaction(conn, conversation_id, cfg, &summarize).await
             }));
         }
 
@@ -239,7 +233,13 @@ impl ContextEngine for LcmEngine {
         // Drop a half-finished background pass before issuing fresh
         // writes; otherwise the two would race for the same chunks.
         let _ = self.drain_pending().await;
-        compaction::run_compaction(Arc::clone(&self.conn), self.conversation_id, summarize).await
+        compaction::run_compaction(
+            Arc::clone(&self.conn),
+            self.conversation_id,
+            self.ctx.lcm,
+            summarize,
+        )
+        .await
     }
 
     async fn clear(&mut self) -> Result<(), EngineError> {
@@ -1445,7 +1445,7 @@ mod tests {
     async fn force_compact_runs_condensed_pass_when_multiple_leaves() {
         let (mut engine, _dir) = temp_engine();
         // Each message carries ~1000 tokens (4000 chars / 4). 25
-        // eligible messages exceed LEAF_CHUNK_TOKENS = 20_000, forcing
+        // eligible messages exceed leaf_chunk_tokens = 20_000, forcing
         // two leaf chunks. The two resulting depth-0 summaries form a
         // contiguous run with fanout 2 so the condensed pass kicks in.
         let big = "x".repeat(4000);

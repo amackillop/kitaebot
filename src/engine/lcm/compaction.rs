@@ -17,22 +17,10 @@ use tracing::info;
 
 use super::engine::{reconstruct_message, run_blocking, storage_err};
 use super::summarize::{EscalationOutcome, summarize_with_escalation};
+use crate::config::LcmConfig;
 use crate::engine::{CompactionEvent, SummarizeFn};
 use crate::error::EngineError;
 use crate::types::Message;
-
-/// Protected tail size: most recent N message items are never
-/// compacted. Hard-coded; moves to `LcmConfig` once the rest of the
-/// compaction config lands.
-pub(super) const FRESH_TAIL_COUNT: usize = 32;
-
-/// Maximum tokens per leaf chunk. Hard-coded for now.
-pub(super) const LEAF_CHUNK_TOKENS: i64 = 20_000;
-
-/// Minimum number of child summaries required to form a condensed
-/// summary. A run of 1 cannot compress further; matches the paper's
-/// fanout >= 2 invariant.
-pub(super) const MIN_CONDENSED_FANOUT: usize = 2;
 
 /// One eligible row from `context_items` joined with `messages`.
 pub(super) struct ChunkRow {
@@ -59,15 +47,19 @@ impl LeafChunk {
 /// Load every leaf-eligible chunk for `conversation_id`.
 ///
 /// Eligible = `'message'` items whose ordinal falls outside the last
-/// [`FRESH_TAIL_COUNT`] message items. Returns an empty vec when there
-/// are too few messages to pull anything out of the protected tail.
+/// `cfg.fresh_tail_count` message items. Returns an empty vec when
+/// there are too few messages to pull anything out of the protected
+/// tail.
 ///
 /// The result is a list of contiguous chunks each summing to no more
-/// than [`LEAF_CHUNK_TOKENS`] tokens. The last chunk may be smaller.
+/// than `cfg.leaf_chunk_tokens` tokens. The last chunk may be smaller.
 pub(super) fn load_leaf_chunks(
     conn: &Connection,
     conversation_id: i64,
+    cfg: LcmConfig,
 ) -> Result<Vec<LeafChunk>, EngineError> {
+    let fresh_tail = cfg.fresh_tail_count as usize;
+    let leaf_budget = i64::from(cfg.leaf_chunk_tokens);
     let mut stmt = conn
         .prepare(
             "SELECT ci.ordinal, m.message_id, m.role, m.content, \
@@ -94,11 +86,11 @@ pub(super) fn load_leaf_chunks(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| storage_err(&e))?;
 
-    if raw.len() <= FRESH_TAIL_COUNT {
+    if raw.len() <= fresh_tail {
         return Ok(Vec::new());
     }
 
-    let eligible_count = raw.len() - FRESH_TAIL_COUNT;
+    let eligible_count = raw.len() - fresh_tail;
 
     let mut chunks: Vec<LeafChunk> = Vec::new();
     let mut current = LeafChunk { rows: Vec::new() };
@@ -108,7 +100,7 @@ pub(super) fn load_leaf_chunks(
         raw.into_iter().take(eligible_count)
     {
         let message = reconstruct_message(conn, message_id, &role, content)?;
-        if !current.rows.is_empty() && current_tokens + token_count > LEAF_CHUNK_TOKENS {
+        if !current.rows.is_empty() && current_tokens + token_count > leaf_budget {
             chunks.push(std::mem::replace(
                 &mut current,
                 LeafChunk { rows: Vec::new() },
@@ -258,9 +250,9 @@ impl CondensedChunk {
 ///
 /// Walks `context_items` in order and emits one chunk per maximal
 /// contiguous run of same-depth summary items where the run has at
-/// least [`MIN_CONDENSED_FANOUT`] members and fits in
-/// [`LEAF_CHUNK_TOKENS`]. Runs interrupted by a `'message'` item or a
-/// depth change are split. Runs that exceed the token budget are
+/// least `cfg.min_condensed_fanout` members and fits in
+/// `cfg.leaf_chunk_tokens`. Runs interrupted by a `'message'` item or
+/// a depth change are split. Runs that exceed the token budget are
 /// skipped (sub-chunking lands later).
 ///
 /// Returns an empty vec when nothing is eligible, which is also the
@@ -268,7 +260,10 @@ impl CondensedChunk {
 pub(super) fn load_condensed_chunks(
     conn: &Connection,
     conversation_id: i64,
+    cfg: LcmConfig,
 ) -> Result<Vec<CondensedChunk>, EngineError> {
+    let min_fanout = cfg.min_condensed_fanout as usize;
+    let leaf_budget = i64::from(cfg.leaf_chunk_tokens);
     let mut stmt = conn
         .prepare(
             "SELECT ci.ordinal, ci.item_type, \
@@ -318,7 +313,7 @@ pub(super) fn load_condensed_chunks(
                  depth: &mut Option<i64>,
                  tokens: &mut i64,
                  out: &mut Vec<CondensedChunk>| {
-        if rows.len() >= MIN_CONDENSED_FANOUT && *tokens <= LEAF_CHUNK_TOKENS {
+        if rows.len() >= min_fanout && *tokens <= leaf_budget {
             out.push(CondensedChunk {
                 rows: std::mem::take(rows),
                 depth: depth.expect("depth set when rows non-empty"),
@@ -515,6 +510,7 @@ fn derive_summary_id_inner<K: AsRef<[u8]>>(
 pub(super) async fn run_compaction(
     conn: Arc<Mutex<Connection>>,
     conversation_id: i64,
+    cfg: LcmConfig,
     summarize: &SummarizeFn,
 ) -> Result<CompactionEvent, EngineError> {
     let before = run_blocking(Arc::clone(&conn), move |c| {
@@ -525,7 +521,7 @@ pub(super) async fn run_compaction(
     // Leaf pass: collapse oldest raw messages outside the protected
     // tail into depth-0 summaries.
     let leaf_chunks = run_blocking(Arc::clone(&conn), move |c| {
-        load_leaf_chunks(c, conversation_id)
+        load_leaf_chunks(c, conversation_id, cfg)
     })
     .await?;
 
@@ -551,7 +547,8 @@ pub(super) async fn run_compaction(
     // summary items in `context_items`, so the loop terminates.
     loop {
         let c = Arc::clone(&conn);
-        let chunks = run_blocking(c, move |c| load_condensed_chunks(c, conversation_id)).await?;
+        let chunks =
+            run_blocking(c, move |c| load_condensed_chunks(c, conversation_id, cfg)).await?;
         if chunks.is_empty() {
             break;
         }

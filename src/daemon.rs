@@ -125,7 +125,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ContextConfig, EngineKind};
+    use crate::config::ContextConfig;
     use crate::engine::flat::FlatSession;
     use crate::engine::make_summarize_fn;
     use crate::provider::MockProvider;
@@ -133,11 +133,9 @@ mod tests {
     use crate::types::Response;
     use std::sync::Arc;
 
-    const CTX: ContextConfig = ContextConfig {
-        engine: EngineKind::Flat,
-        max_tokens: 200_000,
-        budget_percent: 80,
-    };
+    fn ctx() -> ContextConfig {
+        ContextConfig::default()
+    }
 
     fn workspace() -> (tempfile::TempDir, Arc<Workspace>) {
         let dir = tempfile::tempdir().unwrap();
@@ -148,7 +146,7 @@ mod tests {
     fn spawn_agent(ws: &Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
         let sessions_dir = ws.path().join("sessions");
         let memory_dir = ws.path().join("memory");
-        let engine = FlatSession::new(sessions_dir, memory_dir, CTX).unwrap();
+        let engine = FlatSession::new(sessions_dir, memory_dir, ctx()).unwrap();
         let summarize = make_summarize_fn(provider.clone());
         AgentHandle::spawn(
             ws.clone(),

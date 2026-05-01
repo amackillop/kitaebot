@@ -232,7 +232,7 @@ mod tests {
     use super::*;
     use crate::clients::RawResponse;
     use crate::clients::telegram::{ApiResponse, Chat, TelegramClient, TgMessage, Update};
-    use crate::config::{ContextConfig, EngineKind};
+    use crate::config::ContextConfig;
     use crate::provider::MockProvider;
     use crate::tools::Tools;
     use crate::types::Response as AgentResponse;
@@ -369,11 +369,9 @@ mod tests {
 
     const CHAT_ID: i64 = 42;
 
-    const CTX: ContextConfig = ContextConfig {
-        engine: EngineKind::Flat,
-        max_tokens: 200_000,
-        budget_percent: 80,
-    };
+    fn ctx() -> ContextConfig {
+        ContextConfig::default()
+    }
 
     fn channel(state: &Arc<FakeTelegram>) -> TelegramChannel {
         TelegramChannel::new(fake_client(state), CHAT_ID)
@@ -388,7 +386,8 @@ mod tests {
         let provider = Arc::new(MockProvider::new(responses));
         let sessions_dir = ws.path().join("sessions");
         let memory_dir = ws.path().join("memory");
-        let engine = crate::engine::flat::FlatSession::new(sessions_dir, memory_dir, CTX).unwrap();
+        let engine =
+            crate::engine::flat::FlatSession::new(sessions_dir, memory_dir, ctx()).unwrap();
         let summarize = crate::engine::make_summarize_fn(provider.clone());
         let handle = AgentHandle::spawn(
             ws,

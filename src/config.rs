@@ -153,8 +153,32 @@ pub struct ContextConfig {
     pub engine: EngineKind,
     /// Maximum context window size in tokens.
     pub max_tokens: u32,
-    /// Percentage of `max_tokens` at which compaction triggers (1–100).
+    /// Percentage of `max_tokens` at which compaction triggers (1..=100).
+    /// Used by the flat engine; ignored by LCM (see [`LcmConfig`]).
     pub budget_percent: u8,
+    /// LCM-specific tuning. Ignored when `engine = "flat"`.
+    pub lcm: LcmConfig,
+}
+
+/// LCM compaction tuning. The defaults match the constants we shipped
+/// hardcoded; these knobs exist mostly so tests and benchmarks can
+/// trip thresholds without pumping hundreds of thousands of tokens.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LcmConfig {
+    /// Newest N message context items are never compacted. Must be > 0.
+    pub fresh_tail_count: u32,
+    /// Maximum tokens per leaf or condensed chunk. Runs that exceed
+    /// this are skipped until sub-chunking lands.
+    pub leaf_chunk_tokens: u32,
+    /// Minimum children to form a condensed summary. Must be >= 2.
+    pub min_condensed_fanout: u32,
+    /// Percent of `max_tokens` at which background compaction starts.
+    /// Must be 1..=100 and strictly less than `hard_budget_percent`.
+    pub soft_budget_percent: u8,
+    /// Percent of `max_tokens` at which compaction blocks the actor.
+    /// Must be 1..=100 and strictly greater than `soft_budget_percent`.
+    pub hard_budget_percent: u8,
 }
 
 /// Selects the [`ContextEngine`](crate::engine::ContextEngine)
@@ -216,7 +240,56 @@ impl Default for ContextConfig {
             engine: EngineKind::default(),
             max_tokens: 200_000,
             budget_percent: 80,
+            lcm: LcmConfig::default(),
         }
+    }
+}
+
+impl Default for LcmConfig {
+    fn default() -> Self {
+        Self {
+            fresh_tail_count: 32,
+            leaf_chunk_tokens: 20_000,
+            min_condensed_fanout: 2,
+            soft_budget_percent: 70,
+            hard_budget_percent: 90,
+        }
+    }
+}
+
+impl LcmConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.fresh_tail_count == 0 {
+            return Err(ConfigError::Invalid(
+                "context.lcm fresh_tail_count must be > 0".into(),
+            ));
+        }
+        if self.leaf_chunk_tokens == 0 {
+            return Err(ConfigError::Invalid(
+                "context.lcm leaf_chunk_tokens must be > 0".into(),
+            ));
+        }
+        if self.min_condensed_fanout < 2 {
+            return Err(ConfigError::Invalid(
+                "context.lcm min_condensed_fanout must be >= 2".into(),
+            ));
+        }
+        if self.soft_budget_percent == 0 || self.soft_budget_percent > 100 {
+            return Err(ConfigError::Invalid(
+                "context.lcm soft_budget_percent must be 1..=100".into(),
+            ));
+        }
+        if self.hard_budget_percent == 0 || self.hard_budget_percent > 100 {
+            return Err(ConfigError::Invalid(
+                "context.lcm hard_budget_percent must be 1..=100".into(),
+            ));
+        }
+        if self.soft_budget_percent >= self.hard_budget_percent {
+            return Err(ConfigError::Invalid(
+                "context.lcm soft_budget_percent must be < hard_budget_percent".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -332,6 +405,7 @@ impl Config {
                 "context budget_percent must be 1..=100".into(),
             ));
         }
+        self.context.lcm.validate()?;
         if self.heartbeat.interval_secs == 0 {
             return Err(ConfigError::Invalid(
                 "heartbeat interval_secs must be > 0".into(),
