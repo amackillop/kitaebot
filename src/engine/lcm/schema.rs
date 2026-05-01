@@ -12,9 +12,11 @@
 //! interleave migrations — the loser of the lock race wakes up to a
 //! no-op once the winner has bumped the version past its slice.
 //!
-//! Adding a migration: append the new SQL string to [`MIGRATIONS`].
-//! Never reorder, edit, or remove an existing entry — that breaks
-//! every database that already advanced past it.
+//! Adding a migration: drop a new `NNNN_*.sql` file in `migrations/`
+//! and append it to [`MIGRATIONS`]. Never reorder, edit, or remove an
+//! existing entry — that breaks every database that already advanced
+//! past it. The pre-commit hook enforces append-only on the files in
+//! that directory.
 
 use std::path::Path;
 
@@ -43,7 +45,7 @@ PRAGMA temp_store = MEMORY;
 /// Entry `i` brings the database from version `i` to version `i + 1`.
 /// The first entry is the v1 baseline. Append new migrations; do not
 /// reorder, edit, or remove existing entries.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_baseline.sql")];
 
 /// Open or create the LCM database at `path`.
 ///

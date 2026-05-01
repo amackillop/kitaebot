@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Migration files under src/engine/lcm/migrations/ are append-only.
+# Once a migration is committed it has been applied to user databases,
+# so editing or deleting it would silently desync those copies. New
+# migrations land as new files; existing ones are immutable.
+mig_changes=$(git diff --cached --name-status -- 'src/engine/lcm/migrations/*.sql' \
+    | awk '$1 == "M" || $1 == "D" || $1 ~ /^R/ {print $0}')
+if [ -n "$mig_changes" ]; then
+    echo "error: migrations are append-only. rejected:" >&2
+    echo "$mig_changes" >&2
+    exit 1
+fi
+
 just check
