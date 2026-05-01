@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::config::ContextConfig;
 use crate::error::EngineError;
@@ -34,7 +34,9 @@ use crate::types::{Message, ToolCall, ToolFunction};
 use super::super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
 };
+use super::compaction;
 use super::schema;
+use super::summarize::summarize_with_escalation;
 use super::tools::{LcmDescribe, LcmExpand, LcmGrep};
 
 /// The connection lives behind `Arc<Mutex<_>>` for two reasons:
@@ -144,18 +146,46 @@ impl ContextEngine for LcmEngine {
         &mut self,
         _summarize: &SummarizeFn,
     ) -> Result<Option<CompactionEvent>, EngineError> {
-        Err(EngineError::Storage(
-            "lcm compact_if_needed: not implemented".into(),
-        ))
+        // Dual-threshold control loop lands separately. For now this
+        // is a no-op so the agent loop can call it without erroring.
+        Ok(None)
     }
 
     async fn force_compact(
         &mut self,
-        _summarize: &SummarizeFn,
+        summarize: &SummarizeFn,
     ) -> Result<CompactionEvent, EngineError> {
-        Err(EngineError::Storage(
-            "lcm force_compact: not implemented".into(),
-        ))
+        let conversation_id = self.conversation_id;
+
+        let before = self.stats().token_estimate;
+
+        let conn = Arc::clone(&self.conn);
+        let chunks = run_blocking(conn, move |c| {
+            compaction::load_leaf_chunks(c, conversation_id)
+        })
+        .await?;
+
+        if chunks.is_empty() {
+            return Ok(CompactionEvent {
+                before,
+                after: before,
+            });
+        }
+
+        info!(chunk_count = chunks.len(), "running leaf-pass compaction");
+
+        for chunk in chunks {
+            let messages = chunk.messages();
+            let outcome = summarize_with_escalation(&messages, summarize).await;
+            let conn = Arc::clone(&self.conn);
+            run_blocking(conn, move |c| {
+                compaction::write_leaf_summary(c, conversation_id, &chunk, &outcome)
+            })
+            .await?;
+        }
+
+        let after = self.stats().token_estimate;
+        Ok(CompactionEvent { before, after })
     }
 
     async fn clear(&mut self) -> Result<(), EngineError> {
@@ -363,10 +393,27 @@ fn list_sessions_sync(conn: &mut Connection) -> Result<Vec<SessionInfo>, EngineE
     Ok(out)
 }
 
-/// Walk `context_items` in order, rehydrate each `'message'` row back
-/// into a `Message`. Prepends the system prompt. `'summary'` rows are
-/// ignored — once compaction lands they will produce a synthetic
-/// system message with the summary content + recall guidance.
+/// Walk `context_items` in order, rebuild messages, and inject one
+/// synthetic [`Message::System`] per summary item. The system prompt
+/// is prepended, augmented with recall guidance whenever any summary
+/// is present so the model knows it can drill back into the DAG via
+/// the LCM tools.
+enum AssembleRow {
+    Message {
+        id: i64,
+        role: String,
+        content: String,
+    },
+    Summary {
+        id: String,
+        kind: String,
+        depth: i64,
+        content: String,
+        earliest_at: String,
+        latest_at: String,
+    },
+}
+
 fn assemble_sync(
     conn: &Connection,
     conversation_id: i64,
@@ -374,37 +421,102 @@ fn assemble_sync(
 ) -> Result<AssembledContext, EngineError> {
     let mut stmt = conn
         .prepare(
-            "SELECT m.message_id, m.role, m.content \
+            "SELECT ci.item_type, \
+                    m.message_id, m.role, m.content, \
+                    s.summary_id, s.kind, s.depth, s.content, \
+                    s.earliest_at, s.latest_at \
              FROM context_items ci \
-             JOIN messages m ON ci.message_id = m.message_id \
-             WHERE ci.conversation_id = ?1 AND ci.item_type = 'message' \
+             LEFT JOIN messages  m ON ci.message_id = m.message_id \
+             LEFT JOIN summaries s ON ci.summary_id = s.summary_id \
+             WHERE ci.conversation_id = ?1 \
              ORDER BY ci.ordinal",
         )
         .map_err(|e| storage_err(&e))?;
 
-    let rows = stmt
+    let entries: Vec<AssembleRow> = stmt
         .query_map([conversation_id], |r| {
-            let id: i64 = r.get(0)?;
-            let role: String = r.get(1)?;
-            let content: String = r.get(2)?;
-            Ok((id, role, content))
+            let item_type: String = r.get(0)?;
+            if item_type == "message" {
+                Ok(AssembleRow::Message {
+                    id: r.get(1)?,
+                    role: r.get(2)?,
+                    content: r.get(3)?,
+                })
+            } else {
+                Ok(AssembleRow::Summary {
+                    id: r.get(4)?,
+                    kind: r.get(5)?,
+                    depth: r.get(6)?,
+                    content: r.get(7)?,
+                    earliest_at: r.get(8)?,
+                    latest_at: r.get(9)?,
+                })
+            }
         })
+        .map_err(|e| storage_err(&e))?
+        .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| storage_err(&e))?;
 
-    let mut entries: Vec<(i64, String, String)> = Vec::new();
-    for r in rows {
-        entries.push(r.map_err(|e| storage_err(&e))?);
-    }
+    let has_summary = entries
+        .iter()
+        .any(|r| matches!(r, AssembleRow::Summary { .. }));
 
     let mut messages = Vec::with_capacity(entries.len() + 1);
+    let system_content = if has_summary {
+        format!("{system_prompt}\n\n{RECALL_GUIDANCE}")
+    } else {
+        system_prompt.to_string()
+    };
     messages.push(Message::System {
-        content: system_prompt.to_string(),
+        content: system_content,
     });
-    for (message_id, role, content) in entries {
-        messages.push(reconstruct_message(conn, message_id, &role, content)?);
+
+    for row in entries {
+        match row {
+            AssembleRow::Message { id, role, content } => {
+                messages.push(reconstruct_message(conn, id, &role, content)?);
+            }
+            AssembleRow::Summary {
+                id,
+                kind,
+                depth,
+                content,
+                earliest_at,
+                latest_at,
+            } => {
+                messages.push(Message::System {
+                    content: format!(
+                        "<summary id=\"{id}\" kind=\"{kind}\" depth=\"{depth}\" \
+                         earliest_at=\"{earliest_at}\" latest_at=\"{latest_at}\">\n\
+                         {content}\n\
+                         </summary>"
+                    ),
+                });
+            }
+        }
     }
     Ok(AssembledContext { messages })
 }
+
+/// Recall guidance appended to the system prompt whenever the assembled
+/// context contains any summary item. Mirrors spec 14 §"Context
+/// Assembly".
+const RECALL_GUIDANCE: &str = "\
+## Compacted History
+
+Summaries above are compressed context: maps to details, not the \
+details themselves. Use retrieval tools before asserting specifics \
+from summaries.
+
+Tool escalation:
+1. lcm_grep: search by keyword or regex
+2. lcm_describe: inspect a specific summary's metadata and lineage
+3. lcm_expand: drill into a summary to retrieve children or source \
+messages (sub-agent only)
+
+Do not guess exact values (commands, paths, SHAs, config) from \
+condensed summaries. Use lcm_grep to search, or delegate expansion \
+to a sub-agent.";
 
 /// Rebuild a `Message` from its row plus its `message_parts`.
 ///
@@ -414,7 +526,7 @@ fn assemble_sync(
 /// single `tool_output` part. `assistant` is split: if the message has
 /// any `tool_call` parts it becomes [`Message::ToolCalls`], otherwise
 /// a plain [`Message::Assistant`].
-fn reconstruct_message(
+pub(super) fn reconstruct_message(
     conn: &Connection,
     message_id: i64,
     role: &str,
@@ -564,7 +676,7 @@ fn ensure_conversation(conn: &Connection, name: &str) -> Result<i64, EngineError
     .map_err(|e| storage_err(&e))
 }
 
-fn storage_err(e: &rusqlite::Error) -> EngineError {
+pub(super) fn storage_err(e: &rusqlite::Error) -> EngineError {
     EngineError::Storage(e.to_string())
 }
 
@@ -1027,10 +1139,159 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_methods_return_not_implemented() {
+    async fn compact_if_needed_is_no_op_until_thresholds_land() {
         let (mut engine, _dir) = temp_engine();
         let summarize: SummarizeFn = Box::new(|_, _| Box::pin(async { Ok(String::new()) }));
-        assert!(engine.compact_if_needed(&summarize).await.is_err());
-        assert!(engine.force_compact(&summarize).await.is_err());
+        assert!(
+            engine
+                .compact_if_needed(&summarize)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Build a `SummarizeFn` that always returns the given canned
+    /// summary, regardless of input. Used for `force_compact` tests.
+    fn canned_summarize(summary: &'static str) -> SummarizeFn {
+        Box::new(move |_prompt, _messages| Box::pin(async move { Ok(summary.to_string()) }))
+    }
+
+    #[tokio::test]
+    async fn force_compact_no_op_when_below_protected_tail() {
+        let (mut engine, _dir) = temp_engine();
+        for i in 0..5 {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i}"),
+                })
+                .await
+                .unwrap();
+        }
+
+        let event = engine.force_compact(&canned_summarize("s")).await.unwrap();
+        assert_eq!(event.before, event.after);
+
+        let summary_count: i64 = engine
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(summary_count, 0);
+    }
+
+    #[tokio::test]
+    async fn force_compact_creates_leaf_summary_for_eligible_messages() {
+        let (mut engine, _dir) = temp_engine();
+        // 32 protected + 3 eligible = 35 messages, one chunk. Each
+        // message must be long enough that the escalator's level-1
+        // shrink check passes ("compact" is 1 token).
+        let filler = "x".repeat(200);
+        for i in 0..35 {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i} {filler}"),
+                })
+                .await
+                .unwrap();
+        }
+
+        let event = engine
+            .force_compact(&canned_summarize("compact"))
+            .await
+            .unwrap();
+        assert!(event.before > 0);
+
+        let conn = engine.conn.lock().unwrap();
+        let summary_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(summary_count, 1);
+
+        let edge_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM summary_messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(edge_count, 3); // three eligible messages
+
+        // Active context now has 1 summary + 32 protected messages.
+        let item_counts: (i64, i64) = conn
+            .query_row(
+                "SELECT \
+                    SUM(CASE WHEN item_type = 'message' THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN item_type = 'summary' THEN 1 ELSE 0 END) \
+                 FROM context_items",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(item_counts, (32, 1));
+
+        // Raw messages are still in the immutable store.
+        let raw: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw, 35);
+    }
+
+    #[tokio::test]
+    async fn assemble_after_compaction_includes_summary_and_recall_guidance() {
+        let (mut engine, _dir) = temp_engine();
+        let filler = "x".repeat(200);
+        for i in 0..35 {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i} {filler}"),
+                })
+                .await
+                .unwrap();
+        }
+        engine
+            .force_compact(&canned_summarize("compact"))
+            .await
+            .unwrap();
+
+        let ctx = engine.assemble("SYS").await.unwrap();
+        // System(prompt + recall) + 1 summary system message + 32 protected users.
+        assert_eq!(ctx.messages.len(), 1 + 1 + 32);
+
+        match &ctx.messages[0] {
+            Message::System { content } => {
+                assert!(content.starts_with("SYS"));
+                assert!(content.contains("Compacted History"));
+                assert!(content.contains("lcm_grep"));
+            }
+            other => panic!("expected system, got {other:?}"),
+        }
+        match &ctx.messages[1] {
+            Message::System { content } => {
+                assert!(content.starts_with("<summary id=\"sum_"));
+                assert!(content.contains("kind=\"leaf\""));
+                assert!(content.contains("depth=\"0\""));
+                assert!(content.contains("compact"));
+                assert!(content.ends_with("</summary>"));
+            }
+            other => panic!("expected summary system message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assemble_without_compaction_omits_recall_guidance() {
+        let (mut engine, _dir) = temp_engine();
+        engine
+            .push_message(Message::User {
+                content: "u".into(),
+            })
+            .await
+            .unwrap();
+
+        let ctx = engine.assemble("SYS").await.unwrap();
+        match &ctx.messages[0] {
+            Message::System { content } => {
+                assert_eq!(content, "SYS");
+                assert!(!content.contains("Compacted History"));
+            }
+            other => panic!("expected system, got {other:?}"),
+        }
     }
 }
