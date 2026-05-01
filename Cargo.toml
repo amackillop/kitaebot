@@ -49,6 +49,7 @@ landlock = "0.4"
 grep = "0.4.1"
 ignore = "0.4"
 regex = "1"
+rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 shlex = "1"
 toml = "0.9.8"
 tracing = "0.1"

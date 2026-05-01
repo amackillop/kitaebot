@@ -8,6 +8,7 @@
 //! - **LCM** (future): hierarchical DAG of summaries over `SQLite`.
 
 pub mod flat;
+pub mod lcm;
 
 use std::future::Future;
 use std::pin::Pin;

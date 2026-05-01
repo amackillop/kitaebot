@@ -35,7 +35,18 @@
 
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
-        src = craneLib.cleanCargoSource ./.;
+        # Source filter composed from per-kind predicates. Crane's
+        # default keeps Rust artifacts only; we also need `.sql` files
+        # so `include_str!("schema.sql")` resolves inside the sandbox.
+        cargoSrcFilter = path: type: craneLib.filterCargoSources path type;
+        sqlSrcFilter = path: _type: builtins.match ".*\\.sql$" path != null;
+        srcFilter = path: type: (cargoSrcFilter path type) || (sqlSrcFilter path type);
+
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = srcFilter;
+          name = "source";
+        };
 
         commonArgs = {
           inherit src;
