@@ -21,7 +21,7 @@ pub enum ChannelSource {
     Heartbeat,
     GitHub {
         pr_number: u32,
-        #[allow(dead_code)] // Used in followup commit (GitHub session routing).
+        #[allow(dead_code)] // Routed via session_hint, not consumed by actor.
         repo: String,
     },
     Socket,
@@ -44,7 +44,6 @@ pub(super) struct Envelope {
     pub source: ChannelSource,
     pub input: String,
     /// Target session override. `None` means use the active session.
-    #[allow(dead_code)] // Used in followup commit (actor ephemeral switching).
     pub session_hint: Option<String>,
     pub reply_tx: oneshot::Sender<Result<Reply, String>>,
     pub activity_tx: Option<mpsc::Sender<Activity>>,

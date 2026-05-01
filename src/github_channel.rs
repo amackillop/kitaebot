@@ -219,8 +219,9 @@ async fn send(handle: &AgentHandle, pr_number: u32, repo: &str, message: String)
         pr_number,
         repo: repo.to_string(),
     };
+    // Route per-repo: actor switches to this session for the turn.
     match handle
-        .send_message(source, message, None, None, cancel)
+        .send_message(source, message, Some(repo.to_string()), None, cancel)
         .await
     {
         Ok(reply) => info!(pr_number, "GitHub PR #{pr_number}: {}", reply.content),
