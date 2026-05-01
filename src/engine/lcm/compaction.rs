@@ -9,12 +9,15 @@
 //! See spec 14 §"Two-Phase Compaction".
 
 use std::fmt::Write as _;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
+use tracing::info;
 
-use super::engine::{reconstruct_message, storage_err};
-use super::summarize::EscalationOutcome;
+use super::engine::{reconstruct_message, run_blocking, storage_err};
+use super::summarize::{EscalationOutcome, summarize_with_escalation};
+use crate::engine::{CompactionEvent, SummarizeFn};
 use crate::error::EngineError;
 use crate::types::Message;
 
@@ -501,6 +504,91 @@ fn derive_summary_id_inner<K: AsRef<[u8]>>(
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+/// Execute one full compaction cycle (leaf pass plus condensed-pass
+/// loop) against `conn`, return the before/after token count.
+///
+/// The blocking path threads the engine's main connection in; the
+/// soft-threshold spawn opens a fresh writer connection so the actor's
+/// reads on the main mutex proceed unimpeded while this writes.
+pub(super) async fn run_compaction(
+    conn: Arc<Mutex<Connection>>,
+    conversation_id: i64,
+    summarize: &SummarizeFn,
+) -> Result<CompactionEvent, EngineError> {
+    let before = run_blocking(Arc::clone(&conn), move |c| {
+        Ok(token_estimate_sync(c, conversation_id))
+    })
+    .await?;
+
+    // Leaf pass: collapse oldest raw messages outside the protected
+    // tail into depth-0 summaries.
+    let leaf_chunks = run_blocking(Arc::clone(&conn), move |c| {
+        load_leaf_chunks(c, conversation_id)
+    })
+    .await?;
+
+    if !leaf_chunks.is_empty() {
+        info!(
+            chunk_count = leaf_chunks.len(),
+            "running leaf-pass compaction"
+        );
+        for chunk in leaf_chunks {
+            let messages = chunk.messages();
+            let outcome = summarize_with_escalation(&messages, summarize).await;
+            let c = Arc::clone(&conn);
+            run_blocking(c, move |c| {
+                write_leaf_summary(c, conversation_id, &chunk, &outcome)
+            })
+            .await?;
+        }
+    }
+
+    // Condensed pass: walk the depth ladder. Each iteration collapses
+    // contiguous same-depth runs of summaries with fanout >= 2 into a
+    // depth+1 summary. Each step strictly reduces the number of
+    // summary items in `context_items`, so the loop terminates.
+    loop {
+        let c = Arc::clone(&conn);
+        let chunks = run_blocking(c, move |c| load_condensed_chunks(c, conversation_id)).await?;
+        if chunks.is_empty() {
+            break;
+        }
+        info!(
+            chunk_count = chunks.len(),
+            "running condensed-pass compaction"
+        );
+        for chunk in chunks {
+            let messages = chunk.messages();
+            let outcome = summarize_with_escalation(&messages, summarize).await;
+            let c = Arc::clone(&conn);
+            run_blocking(c, move |c| {
+                write_condensed_summary(c, conversation_id, &chunk, &outcome)
+            })
+            .await?;
+        }
+    }
+
+    let after = run_blocking(conn, move |c| Ok(token_estimate_sync(c, conversation_id))).await?;
+
+    Ok(CompactionEvent { before, after })
+}
+
+/// Sum `token_count` across `context_items` for `conversation_id`,
+/// joining both `messages` and `summaries` so the answer covers any
+/// mix.
+fn token_estimate_sync(conn: &Connection, conversation_id: i64) -> usize {
+    let row: rusqlite::Result<i64> = conn.query_row(
+        "SELECT COALESCE(SUM(m.token_count), 0) + COALESCE(SUM(s.token_count), 0) \
+         FROM context_items ci \
+         LEFT JOIN messages  m ON ci.message_id = m.message_id \
+         LEFT JOIN summaries s ON ci.summary_id = s.summary_id \
+         WHERE ci.conversation_id = ?1",
+        [conversation_id],
+        |r| r.get(0),
+    );
+    usize::try_from(row.unwrap_or(0)).unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
+use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use crate::config::ContextConfig;
@@ -36,8 +37,18 @@ use super::super::{
 };
 use super::compaction;
 use super::schema;
-use super::summarize::summarize_with_escalation;
 use super::tools::{LcmDescribe, LcmExpand, LcmGrep};
+
+/// Percent of `ContextConfig::max_tokens` at which compaction begins
+/// running asynchronously in the background. Chosen below the hard
+/// threshold so the model has room to keep talking while the spawn
+/// makes progress. Hardcoded for now; moves to `LcmConfig` later.
+const SOFT_BUDGET_PERCENT: usize = 70;
+
+/// Percent of `ContextConfig::max_tokens` at which compaction must
+/// complete before the next provider call. Crossing this number
+/// blocks the actor until the compaction transaction commits.
+const HARD_BUDGET_PERCENT: usize = 90;
 
 /// The connection lives behind `Arc<Mutex<_>>` for two reasons:
 ///
@@ -54,6 +65,10 @@ use super::tools::{LcmDescribe, LcmExpand, LcmGrep};
 /// Contention on the mutex is near-zero: there is at most one async
 /// task per engine, and it always awaits the blocking task before
 /// issuing the next call.
+///
+/// Background compaction (the soft-threshold path) opens its own
+/// `Connection` rather than sharing this mutex, so concurrent reads
+/// from the actor go through unimpeded; WAL handles isolation.
 pub struct LcmEngine {
     conn: Arc<Mutex<Connection>>,
     db_path: PathBuf,
@@ -65,6 +80,10 @@ pub struct LcmEngine {
     active_id: Arc<AtomicI64>,
     memory_dir: PathBuf,
     ctx: ContextConfig,
+    /// Async compaction in flight (soft-threshold path). Set when a
+    /// turn crosses [`SOFT_BUDGET_PERCENT`] without crossing the hard
+    /// threshold; drained at the start of the next compaction call.
+    pending_compaction: Option<JoinHandle<Result<CompactionEvent, EngineError>>>,
 }
 
 impl LcmEngine {
@@ -94,11 +113,42 @@ impl LcmEngine {
             active_id: Arc::new(AtomicI64::new(conversation_id)),
             memory_dir,
             ctx,
+            pending_compaction: None,
         })
     }
 
-    fn budget(&self) -> usize {
-        self.ctx.max_tokens as usize * usize::from(self.ctx.budget_percent) / 100
+    /// Soft compaction trigger: percent of `max_tokens` at which the
+    /// engine starts a background compaction. Reported as `budget`
+    /// in [`ContextStats`] because that field's semantic is "at this
+    /// point we begin compacting".
+    fn soft_threshold(&self) -> usize {
+        self.ctx.max_tokens as usize * SOFT_BUDGET_PERCENT / 100
+    }
+
+    /// Hard compaction trigger: percent of `max_tokens` at which the
+    /// engine must compact synchronously before the next provider call.
+    fn hard_threshold(&self) -> usize {
+        self.ctx.max_tokens as usize * HARD_BUDGET_PERCENT / 100
+    }
+
+    /// Drain any background compaction task and return its event.
+    /// Errors from the spawn are logged and swallowed so a failed
+    /// background pass does not poison the engine; the next
+    /// `compact_if_needed` call will see the same elevated state and
+    /// try again.
+    async fn drain_pending(&mut self) -> Option<CompactionEvent> {
+        let handle = self.pending_compaction.take()?;
+        match handle.await {
+            Ok(Ok(event)) => Some(event),
+            Ok(Err(e)) => {
+                error!("background compaction failed: {e}");
+                None
+            }
+            Err(e) => {
+                error!("background compaction task panicked: {e}");
+                None
+            }
+        }
     }
 
     /// Count and summed token estimate of items in the active context.
@@ -144,76 +194,52 @@ impl ContextEngine for LcmEngine {
 
     async fn compact_if_needed(
         &mut self,
-        _summarize: &SummarizeFn,
+        summarize: &SummarizeFn,
     ) -> Result<Option<CompactionEvent>, EngineError> {
-        // Dual-threshold control loop lands separately. For now this
-        // is a no-op so the agent loop can call it without erroring.
-        Ok(None)
+        // A background compaction kicked off on a previous turn may
+        // have completed in the meantime. Drain it first so its event
+        // is reported to the caller and so we do not double-spawn on
+        // top of a still-running task.
+        let drained = self.drain_pending().await;
+
+        let tokens = self.stats().token_estimate;
+        if tokens >= self.hard_threshold() {
+            info!(
+                tokens,
+                "hard threshold reached; running blocking compaction"
+            );
+            let event =
+                compaction::run_compaction(Arc::clone(&self.conn), self.conversation_id, summarize)
+                    .await?;
+            return Ok(Some(event));
+        }
+
+        if tokens >= self.soft_threshold() {
+            info!(
+                tokens,
+                "soft threshold reached; spawning background compaction"
+            );
+            let db_path = self.db_path.clone();
+            let conversation_id = self.conversation_id;
+            let summarize = Arc::clone(summarize);
+            self.pending_compaction = Some(tokio::spawn(async move {
+                let conn = schema::open(&db_path)?;
+                let conn = Arc::new(Mutex::new(conn));
+                compaction::run_compaction(conn, conversation_id, &summarize).await
+            }));
+        }
+
+        Ok(drained)
     }
 
     async fn force_compact(
         &mut self,
         summarize: &SummarizeFn,
     ) -> Result<CompactionEvent, EngineError> {
-        let conversation_id = self.conversation_id;
-
-        let before = self.stats().token_estimate;
-
-        // Leaf pass: collapse oldest raw messages outside the
-        // protected tail into depth-0 summaries.
-        let conn = Arc::clone(&self.conn);
-        let leaf_chunks = run_blocking(conn, move |c| {
-            compaction::load_leaf_chunks(c, conversation_id)
-        })
-        .await?;
-
-        if !leaf_chunks.is_empty() {
-            info!(
-                chunk_count = leaf_chunks.len(),
-                "running leaf-pass compaction"
-            );
-            for chunk in leaf_chunks {
-                let messages = chunk.messages();
-                let outcome = summarize_with_escalation(&messages, summarize).await;
-                let conn = Arc::clone(&self.conn);
-                run_blocking(conn, move |c| {
-                    compaction::write_leaf_summary(c, conversation_id, &chunk, &outcome)
-                })
-                .await?;
-            }
-        }
-
-        // Condensed pass: iterate the depth ladder. Each iteration
-        // collapses contiguous same-depth runs of summaries with
-        // fanout >= 2 into a depth+1 summary. Each step strictly
-        // reduces the number of summary items in `context_items`, so
-        // the loop is guaranteed to terminate.
-        loop {
-            let conn = Arc::clone(&self.conn);
-            let chunks = run_blocking(conn, move |c| {
-                compaction::load_condensed_chunks(c, conversation_id)
-            })
-            .await?;
-            if chunks.is_empty() {
-                break;
-            }
-            info!(
-                chunk_count = chunks.len(),
-                "running condensed-pass compaction"
-            );
-            for chunk in chunks {
-                let messages = chunk.messages();
-                let outcome = summarize_with_escalation(&messages, summarize).await;
-                let conn = Arc::clone(&self.conn);
-                run_blocking(conn, move |c| {
-                    compaction::write_condensed_summary(c, conversation_id, &chunk, &outcome)
-                })
-                .await?;
-            }
-        }
-
-        let after = self.stats().token_estimate;
-        Ok(CompactionEvent { before, after })
+        // Drop a half-finished background pass before issuing fresh
+        // writes; otherwise the two would race for the same chunks.
+        let _ = self.drain_pending().await;
+        compaction::run_compaction(Arc::clone(&self.conn), self.conversation_id, summarize).await
     }
 
     async fn clear(&mut self) -> Result<(), EngineError> {
@@ -244,7 +270,10 @@ impl ContextEngine for LcmEngine {
         ContextStats {
             message_count: usize::try_from(count).unwrap_or(0),
             token_estimate: usize::try_from(tokens).unwrap_or(0),
-            budget: self.budget(),
+            // Reported budget is the soft threshold: the level at which
+            // compaction first kicks in. The hard threshold above it
+            // exists to bound the worst case but isn't user-facing.
+            budget: self.soft_threshold(),
         }
     }
 
@@ -307,7 +336,7 @@ impl ContextEngine for LcmEngine {
 /// through here. The closure receives `&mut Connection` (locked from
 /// the shared mutex) and returns a `Result<T, EngineError>`. A
 /// `JoinError` from `spawn_blocking` is reported as `Storage`.
-async fn run_blocking<F, T>(conn: Arc<Mutex<Connection>>, f: F) -> Result<T, EngineError>
+pub(super) async fn run_blocking<F, T>(conn: Arc<Mutex<Connection>>, f: F) -> Result<T, EngineError>
 where
     F: FnOnce(&mut Connection) -> Result<T, EngineError> + Send + 'static,
     T: Send + 'static,
@@ -747,11 +776,22 @@ mod tests {
     use crate::types::{ToolCall, ToolFunction};
 
     fn temp_engine() -> (LcmEngine, tempfile::TempDir) {
+        temp_engine_with_max_tokens(ContextConfig::default().max_tokens)
+    }
+
+    /// Build a temp engine with a custom `max_tokens` budget so tests
+    /// can trip the soft and hard thresholds without pumping hundreds
+    /// of thousands of tokens through `push_message`.
+    fn temp_engine_with_max_tokens(max_tokens: u32) -> (LcmEngine, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("lcm.db");
         let memory_dir = dir.path().join("memory");
         fs::create_dir_all(&memory_dir).unwrap();
-        let engine = LcmEngine::new(&db_path, memory_dir, ContextConfig::default()).unwrap();
+        let ctx = ContextConfig {
+            max_tokens,
+            ..ContextConfig::default()
+        };
+        let engine = LcmEngine::new(&db_path, memory_dir, ctx).unwrap();
         (engine, dir)
     }
 
@@ -1169,16 +1209,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_if_needed_is_no_op_until_thresholds_land() {
-        let (mut engine, _dir) = temp_engine();
-        let summarize: SummarizeFn = Arc::new(|_, _| Box::pin(async { Ok(String::new()) }));
-        assert!(
+    async fn compact_if_needed_no_op_below_soft_threshold() {
+        // max_tokens=1000 → soft=700, hard=900. A handful of tiny
+        // messages stay well below 700.
+        let (mut engine, _dir) = temp_engine_with_max_tokens(1000);
+        for i in 0..5 {
             engine
-                .compact_if_needed(&summarize)
+                .push_message(Message::User {
+                    content: format!("m{i}"),
+                })
                 .await
-                .unwrap()
-                .is_none()
-        );
+                .unwrap();
+        }
+        let result = engine
+            .compact_if_needed(&canned_summarize("s"))
+            .await
+            .unwrap();
+        assert!(result.is_none());
+        assert!(engine.pending_compaction.is_none());
+    }
+
+    #[tokio::test]
+    async fn compact_if_needed_blocks_above_hard_threshold() {
+        // max_tokens=1000 → hard=900. 35 messages × ~51 tokens =
+        // ~1785, comfortably above hard.
+        let (mut engine, _dir) = temp_engine_with_max_tokens(1000);
+        let filler = "x".repeat(200);
+        for i in 0..35 {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i} {filler}"),
+                })
+                .await
+                .unwrap();
+        }
+        let event = engine
+            .compact_if_needed(&canned_summarize(
+                "compact summary that is long enough to pass the level-1 shrink test",
+            ))
+            .await
+            .unwrap()
+            .expect("hard threshold must produce an event");
+        assert!(event.before > 0);
+        assert!(event.after <= event.before);
+        // Hard path runs synchronously; nothing pending afterwards.
+        assert!(engine.pending_compaction.is_none());
+        let summary_count: i64 = engine
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))
+            .unwrap();
+        assert!(summary_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn compact_if_needed_spawns_at_soft_threshold_then_drains() {
+        // max_tokens=1000 → soft=700, hard=900. 35 messages × ~21
+        // tokens = ~735, sits between the two.
+        let (mut engine, _dir) = temp_engine_with_max_tokens(1000);
+        let filler = "x".repeat(80);
+        for i in 0..35 {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i} {filler}"),
+                })
+                .await
+                .unwrap();
+        }
+        let summarize =
+            canned_summarize("compact summary that is long enough to pass the level-1 shrink test");
+
+        // First call: spawn background compaction, return None.
+        let first = engine.compact_if_needed(&summarize).await.unwrap();
+        assert!(first.is_none(), "soft path returns None on the spawn turn");
+        assert!(engine.pending_compaction.is_some());
+
+        // Second call: drain the completed handle and surface its
+        // event. Below-soft now, so no fresh spawn.
+        let second = engine
+            .compact_if_needed(&summarize)
+            .await
+            .unwrap()
+            .expect("drained background event");
+        assert!(second.before > 0);
+        assert!(second.after <= second.before);
+        assert!(engine.pending_compaction.is_none());
     }
 
     /// Build a `SummarizeFn` that always returns the given canned
