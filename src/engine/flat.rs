@@ -292,6 +292,7 @@ mod tests {
         ContextConfig {
             max_tokens: 100,
             budget_percent: 50,
+            ..ContextConfig::default()
         }
     }
 

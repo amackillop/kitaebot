@@ -125,7 +125,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ContextConfig;
+    use crate::config::{ContextConfig, EngineKind};
     use crate::engine::flat::FlatSession;
     use crate::engine::make_summarize_fn;
     use crate::provider::MockProvider;
@@ -134,6 +134,7 @@ mod tests {
     use std::sync::Arc;
 
     const CTX: ContextConfig = ContextConfig {
+        engine: EngineKind::Flat,
         max_tokens: 200_000,
         budget_percent: 80,
     };

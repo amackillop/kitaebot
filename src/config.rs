@@ -149,10 +149,24 @@ pub struct SocketConfig {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ContextConfig {
+    /// Which context engine implementation to use.
+    pub engine: EngineKind,
     /// Maximum context window size in tokens.
     pub max_tokens: u32,
     /// Percentage of `max_tokens` at which compaction triggers (1–100).
     pub budget_percent: u8,
+}
+
+/// Selects the [`ContextEngine`](crate::engine::ContextEngine)
+/// implementation. The flat session keeps each conversation in a
+/// per-name JSON file; LCM stores everything in `SQLite` with a DAG
+/// of summaries on top of raw messages.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EngineKind {
+    #[default]
+    Flat,
+    Lcm,
 }
 
 /// Git settings.
@@ -199,6 +213,7 @@ impl Default for AgentConfig {
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
+            engine: EngineKind::default(),
             max_tokens: 200_000,
             budget_percent: 80,
         }
@@ -555,6 +570,19 @@ max_output_bytes = 20480
         let cfg = load_toml("").unwrap();
         assert_eq!(cfg.context.max_tokens, 200_000);
         assert_eq!(cfg.context.budget_percent, 80);
+        assert_eq!(cfg.context.engine, EngineKind::Flat);
+    }
+
+    #[test]
+    fn context_engine_parse_lcm() {
+        let cfg = load_toml("[context]\nengine = \"lcm\"\n").unwrap();
+        assert_eq!(cfg.context.engine, EngineKind::Lcm);
+    }
+
+    #[test]
+    fn context_engine_reject_unknown_value() {
+        let result = load_toml("[context]\nengine = \"hierarchical\"\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 
     #[test]

@@ -232,7 +232,7 @@ mod tests {
     use super::*;
     use crate::clients::RawResponse;
     use crate::clients::telegram::{ApiResponse, Chat, TelegramClient, TgMessage, Update};
-    use crate::config::ContextConfig;
+    use crate::config::{ContextConfig, EngineKind};
     use crate::provider::MockProvider;
     use crate::tools::Tools;
     use crate::types::Response as AgentResponse;
@@ -370,6 +370,7 @@ mod tests {
     const CHAT_ID: i64 = 42;
 
     const CTX: ContextConfig = ContextConfig {
+        engine: EngineKind::Flat,
         max_tokens: 200_000,
         budget_percent: 80,
     };

@@ -248,7 +248,7 @@ async fn send(writer: &mut OwnedWriteHalf, msg: &ServerMsg) -> Result<(), std::i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ContextConfig;
+    use crate::config::{ContextConfig, EngineKind};
     use crate::provider::MockProvider;
     use crate::tools::Tools;
     use crate::types::Response;
@@ -258,6 +258,7 @@ mod tests {
     use tokio::net::unix::OwnedWriteHalf as ClientWriteHalf;
 
     const CTX: ContextConfig = ContextConfig {
+        engine: EngineKind::Flat,
         max_tokens: 200_000,
         budget_percent: 80,
     };

@@ -26,7 +26,7 @@ mod workspace;
 use std::sync::Arc;
 use std::time::Duration;
 
-use config::Config;
+use config::{Config, EngineKind};
 use tracing::{error, info, warn};
 use workspace::Workspace;
 
@@ -72,22 +72,45 @@ async fn main() {
 
             let workspace = Arc::new(workspace);
             let provider = Arc::new(rt.provider);
-            let sessions_dir = workspace.path().join("sessions");
+            let tools = Arc::new(rt.tools);
             let memory_dir = workspace.path().join("memory");
-            let engine = engine::flat::FlatSession::new(sessions_dir, memory_dir, config.context)
-                .unwrap_or_else(|e| {
-                    error!("Failed to initialize session: {e}");
-                    std::process::exit(1);
-                });
             let summarize = engine::make_summarize_fn(provider.clone());
-            let handle = agent::AgentHandle::spawn(
-                workspace.clone(),
-                provider,
-                Arc::new(rt.tools),
-                config.agent.max_iterations,
-                engine,
-                summarize,
-            );
+
+            let handle = match config.context.engine {
+                EngineKind::Flat => {
+                    let sessions_dir = workspace.path().join("sessions");
+                    let engine =
+                        engine::flat::FlatSession::new(sessions_dir, memory_dir, config.context)
+                            .unwrap_or_else(|e| {
+                                error!("Failed to initialize flat session: {e}");
+                                std::process::exit(1);
+                            });
+                    agent::AgentHandle::spawn(
+                        workspace.clone(),
+                        provider,
+                        tools,
+                        config.agent.max_iterations,
+                        engine,
+                        summarize,
+                    )
+                }
+                EngineKind::Lcm => {
+                    let db_path = memory_dir.join("lcm.db");
+                    let engine = engine::lcm::LcmEngine::new(&db_path, memory_dir, config.context)
+                        .unwrap_or_else(|e| {
+                            error!("Failed to initialize LCM engine: {e}");
+                            std::process::exit(1);
+                        });
+                    agent::AgentHandle::spawn(
+                        workspace.clone(),
+                        provider,
+                        tools,
+                        config.agent.max_iterations,
+                        engine,
+                        summarize,
+                    )
+                }
+            };
 
             daemon::run(
                 &workspace,
