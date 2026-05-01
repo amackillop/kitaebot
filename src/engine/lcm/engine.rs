@@ -741,6 +741,8 @@ fn persist_active_session(memory_dir: &Path, name: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::types::{ToolCall, ToolFunction};
 
@@ -1169,7 +1171,7 @@ mod tests {
     #[tokio::test]
     async fn compact_if_needed_is_no_op_until_thresholds_land() {
         let (mut engine, _dir) = temp_engine();
-        let summarize: SummarizeFn = Box::new(|_, _| Box::pin(async { Ok(String::new()) }));
+        let summarize: SummarizeFn = Arc::new(|_, _| Box::pin(async { Ok(String::new()) }));
         assert!(
             engine
                 .compact_if_needed(&summarize)
@@ -1182,7 +1184,7 @@ mod tests {
     /// Build a `SummarizeFn` that always returns the given canned
     /// summary, regardless of input. Used for `force_compact` tests.
     fn canned_summarize(summary: &'static str) -> SummarizeFn {
-        Box::new(move |_prompt, _messages| Box::pin(async move { Ok(summary.to_string()) }))
+        Arc::new(move |_prompt, _messages| Box::pin(async move { Ok(summary.to_string()) }))
     }
 
     #[tokio::test]

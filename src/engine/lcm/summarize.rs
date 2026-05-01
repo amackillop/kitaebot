@@ -251,7 +251,7 @@ fn truncate_messages(messages: &[Message], max_tokens: usize, input_tokens: usiz
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::error::ProviderError;
@@ -267,11 +267,11 @@ mod tests {
     /// levels ran.
     fn programmable_summarize(
         responses: Vec<Result<String, ProviderError>>,
-    ) -> (SummarizeFn, std::sync::Arc<Mutex<Vec<String>>>) {
-        let log = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+    ) -> (SummarizeFn, Arc<Mutex<Vec<String>>>) {
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
         let log_inner = log.clone();
-        let responses = std::sync::Arc::new(Mutex::new(responses.into_iter()));
-        let f: SummarizeFn = Box::new(move |prompt: &str, _messages: &[Message]| {
+        let responses = Arc::new(Mutex::new(responses.into_iter()));
+        let f: SummarizeFn = Arc::new(move |prompt: &str, _messages: &[Message]| {
             log_inner.lock().unwrap().push(prompt.to_string());
             let next = responses.lock().unwrap().next();
             Box::pin(async move { next.unwrap_or(Err(ProviderError::RateLimited)) })

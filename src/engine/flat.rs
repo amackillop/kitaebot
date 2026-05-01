@@ -294,14 +294,14 @@ fn persist_active_session(memory_dir: &Path, name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::pin::Pin;
+    use std::{pin::Pin, sync::Arc};
 
     use super::*;
 
     /// Build a `SummarizeFn` that returns a canned response.
     fn mock_summarize(response: &str) -> SummarizeFn {
         let response = response.to_string();
-        Box::new(move |_prompt: &str, _messages: &[Message]| {
+        Arc::new(move |_prompt: &str, _messages: &[Message]| {
             let response = response.clone();
             Box::pin(async move { Ok(response) })
                 as Pin<Box<dyn Future<Output = Result<String, _>> + Send>>

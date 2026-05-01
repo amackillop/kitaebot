@@ -31,7 +31,7 @@ use crate::types::{Message, Response};
 /// turn is fixed — see `SUMMARIZER_ROLE_PROMPT`. The flat session
 /// uses one fixed instruction block; LCM's three-level escalator
 /// switches between distinct level-1 and level-2 instruction blocks.
-pub type SummarizeFn = Box<
+pub type SummarizeFn = Arc<
     dyn Fn(&str, &[Message]) -> Pin<Box<dyn Future<Output = Result<String, ProviderError>> + Send>>
         + Send
         + Sync,
@@ -142,7 +142,7 @@ plain text summary content only.";
 /// them with the instructions into a single user turn. The system
 /// turn is fixed.
 pub fn make_summarize_fn<P: Provider + 'static>(provider: Arc<P>) -> SummarizeFn {
-    Box::new(move |instructions: &str, messages: &[Message]| {
+    Arc::new(move |instructions: &str, messages: &[Message]| {
         let provider = provider.clone();
         let user_content = format!(
             "{instructions}\n\n<conversation_segment>\n{}\n</conversation_segment>",
