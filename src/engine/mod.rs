@@ -21,11 +21,18 @@ use crate::types::{Message, Response};
 
 /// Callback for LLM summarization during compaction.
 ///
-/// The engine does not own a provider — it borrows summarization capability
-/// via this closure. Constructed once at startup via [`make_summarize_fn`],
-/// then passed by reference into compaction methods.
+/// The engine does not own a provider; it borrows summarization
+/// capability via this closure. Constructed once at startup via
+/// [`make_summarize_fn`], then passed by reference into compaction
+/// methods.
+///
+/// The first argument is the per-call **instruction block**, placed
+/// in the user turn alongside the formatted conversation. The system
+/// turn is fixed — see `SUMMARIZER_ROLE_PROMPT`. The flat session
+/// uses one fixed instruction block; LCM's three-level escalator
+/// switches between distinct level-1 and level-2 instruction blocks.
 pub type SummarizeFn = Box<
-    dyn Fn(&[Message]) -> Pin<Box<dyn Future<Output = Result<String, ProviderError>> + Send>>
+    dyn Fn(&str, &[Message]) -> Pin<Box<dyn Future<Output = Result<String, ProviderError>> + Send>>
         + Send
         + Sync,
 >;
@@ -118,26 +125,35 @@ pub trait ContextEngine: Send + Sync {
     fn list_sessions(&self) -> impl Future<Output = Result<Vec<SessionInfo>, EngineError>> + Send;
 }
 
-// ── Summarize prompt ─────────────────────────────────────────────────
-
-const SUMMARIZE_PROMPT: &str = "\
-You are a conversation summarizer. Produce a concise summary of the \
-conversation below. Preserve all important facts, decisions, tool \
-results, and open questions. Omit pleasantries and filler. The summary \
-will replace the original messages, so nothing important should be lost.";
+/// Role-setting system prompt for every summarization call. The
+/// caller-supplied instructions go in the user turn alongside the
+/// formatted conversation. This split mirrors the reference
+/// implementation: keep the system prompt minimal and stable, vary
+/// instructions per call in the user message.
+const SUMMARIZER_ROLE_PROMPT: &str = "You are a context-compaction \
+summarization engine. Follow user instructions exactly and return \
+plain text summary content only.";
 
 /// Build a `SummarizeFn` that uses the given provider for LLM calls.
 ///
-/// The provider is captured by `Arc` — one heap allocation, paid once.
+/// The provider is captured by `Arc`: one heap allocation, paid once.
+/// Each call supplies an instruction block; the closure formats the
+/// messages, wraps them in `<conversation_segment>` tags, and combines
+/// them with the instructions into a single user turn. The system
+/// turn is fixed.
 pub fn make_summarize_fn<P: Provider + 'static>(provider: Arc<P>) -> SummarizeFn {
-    Box::new(move |messages: &[Message]| {
+    Box::new(move |instructions: &str, messages: &[Message]| {
         let provider = provider.clone();
+        let user_content = format!(
+            "{instructions}\n\n<conversation_segment>\n{}\n</conversation_segment>",
+            format_messages_for_summary(messages),
+        );
         let prompt_messages = vec![
             Message::System {
-                content: SUMMARIZE_PROMPT.to_string(),
+                content: SUMMARIZER_ROLE_PROMPT.to_string(),
             },
             Message::User {
-                content: format_messages_for_summary(messages),
+                content: user_content,
             },
         ];
 
@@ -151,7 +167,7 @@ pub fn make_summarize_fn<P: Provider + 'static>(provider: Arc<P>) -> SummarizeFn
     })
 }
 
-fn format_messages_for_summary(messages: &[Message]) -> String {
+pub(crate) fn format_messages_for_summary(messages: &[Message]) -> String {
     let mut out = String::new();
     for msg in messages {
         match msg {
@@ -212,7 +228,7 @@ mod tests {
             },
         ];
 
-        let result = summarize(&messages).await.unwrap();
+        let result = summarize("test prompt", &messages).await.unwrap();
         assert_eq!(result, "summary");
         assert_eq!(provider.call_count(), 1);
     }
@@ -225,7 +241,7 @@ mod tests {
         })]));
         let summarize = make_summarize_fn(provider);
 
-        let result = summarize(&[]).await.unwrap();
+        let result = summarize("p", &[]).await.unwrap();
         assert_eq!(result, "fallback text");
     }
 
@@ -234,7 +250,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![Err(ProviderError::RateLimited)]));
         let summarize = make_summarize_fn(provider);
 
-        let result = summarize(&[]).await;
+        let result = summarize("p", &[]).await;
         assert!(matches!(result, Err(ProviderError::RateLimited)));
     }
 

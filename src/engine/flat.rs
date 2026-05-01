@@ -19,6 +19,26 @@ use super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
 };
 
+/// Instruction block used when compacting a flat session into a
+/// single summary message. Sent in the user turn by `make_summarize_fn`;
+/// the role-setting system prompt lives there. LCM uses its own
+/// per-level instruction blocks; this one is flat-only and stays here.
+///
+/// No `Expand for details about: ...` trailer (flat has no DAG to
+/// expand into). The `Files:` line is kept because flat sessions
+/// still benefit from explicit file-operation tracking on read-back.
+const FLAT_SUMMARIZE_PROMPT: &str = "\
+Produce a concise summary of the conversation below. Preserve all \
+important facts, decisions, tool results, and open questions. Omit \
+pleasantries and filler. The summary will replace the original \
+messages, so nothing important should be lost.
+
+Output requirements:
+- Plain text only. No preamble, headings, or markdown formatting.
+- Track file operations (created, modified, deleted, renamed) with \
+file paths and current status.
+- If no file operations appear, include exactly: \"Files: none\".";
+
 /// Flat session engine with per-name JSON files.
 pub struct FlatSession {
     session: Session,
@@ -78,7 +98,7 @@ impl FlatSession {
         }
 
         let before = self.token_estimate(0);
-        let summary = summarize(self.session.messages()).await?;
+        let summary = summarize(FLAT_SUMMARIZE_PROMPT, self.session.messages()).await?;
         self.session.compact(Message::System { content: summary });
         let after = self.token_estimate(0);
 
@@ -281,7 +301,7 @@ mod tests {
     /// Build a `SummarizeFn` that returns a canned response.
     fn mock_summarize(response: &str) -> SummarizeFn {
         let response = response.to_string();
-        Box::new(move |_messages: &[Message]| {
+        Box::new(move |_prompt: &str, _messages: &[Message]| {
             let response = response.clone();
             Box::pin(async move { Ok(response) })
                 as Pin<Box<dyn Future<Output = Result<String, _>> + Send>>

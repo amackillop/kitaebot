@@ -4,6 +4,7 @@
 
 pub mod engine;
 pub mod schema;
+pub mod summarize;
 pub mod tools;
 
 pub use engine::LcmEngine;

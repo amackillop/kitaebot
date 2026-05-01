@@ -1029,7 +1029,7 @@ mod tests {
     #[tokio::test]
     async fn compact_methods_return_not_implemented() {
         let (mut engine, _dir) = temp_engine();
-        let summarize: SummarizeFn = Box::new(|_| Box::pin(async { Ok(String::new()) }));
+        let summarize: SummarizeFn = Box::new(|_, _| Box::pin(async { Ok(String::new()) }));
         assert!(engine.compact_if_needed(&summarize).await.is_err());
         assert!(engine.force_compact(&summarize).await.is_err());
     }
