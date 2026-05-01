@@ -20,7 +20,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 
@@ -34,13 +34,23 @@ use super::super::{
 };
 use super::schema;
 
-/// `rusqlite::Connection` is `!Sync`, but [`ContextEngine`] requires
-/// `Sync` so the actor task can hold an `&engine` across `.await`
-/// points. The mutex satisfies the bound at near-zero cost: every
-/// engine method already takes `&mut self`, so the lock is
-/// uncontended and we use it purely for the auto-trait derivation.
+/// The connection lives behind `Arc<Mutex<_>>` for two reasons:
+///
+/// 1. `rusqlite::Connection` is `!Sync`, but [`ContextEngine`]
+///    requires `Sync` so the actor task can hold an `&engine` across
+///    `.await` points. `Mutex<Connection>` is `Sync`.
+/// 2. Every async DB call moves the work onto Tokio's blocking pool
+///    via [`spawn_blocking`](tokio::task::spawn_blocking). That
+///    closure must be `'static`, so we clone the `Arc` into it
+///    rather than borrowing `&self`. `SQLite` is genuinely blocking;
+///    a multi-row transaction would otherwise stall the executor
+///    thread for the duration.
+///
+/// Contention on the mutex is near-zero: there is at most one async
+/// task per engine, and it always awaits the blocking task before
+/// issuing the next call.
 pub struct LcmEngine {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
     active_name: String,
     conversation_id: i64,
     memory_dir: PathBuf,
@@ -67,7 +77,7 @@ impl LcmEngine {
         let active_name = read_active_session(&memory_dir).unwrap_or_else(|| "general".into());
         let conversation_id = ensure_conversation(&conn, &active_name)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
             active_name,
             conversation_id,
             memory_dir,
@@ -84,6 +94,10 @@ impl LcmEngine {
     /// Joins `context_items` against both `messages` and `summaries`
     /// so the same query keeps working once compaction starts emitting
     /// summary items.
+    ///
+    /// Synchronous because [`ContextEngine::stats`] is. A single
+    /// `COUNT` under WAL is sub-millisecond; the `spawn_blocking`
+    /// overhead would dominate.
     fn context_stats_query(&self) -> rusqlite::Result<(i64, i64)> {
         let conn = self.conn.lock().expect("LCM connection mutex poisoned");
         conn.query_row(
@@ -101,63 +115,19 @@ impl LcmEngine {
 
 impl ContextEngine for LcmEngine {
     async fn push_message(&mut self, msg: Message) -> Result<(), EngineError> {
-        let role = role_str(&msg);
-        let content = msg.content().to_string();
-        let token_count = i64::try_from(msg.char_count() / 4).unwrap_or(i64::MAX);
-
-        let mut conn = self.conn.lock().expect("LCM connection mutex poisoned");
-        let tx = conn.transaction().map_err(|e| storage_err(&e))?;
-
-        let seq: i64 = tx
-            .query_row(
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages \
-                 WHERE conversation_id = ?1",
-                [self.conversation_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| storage_err(&e))?;
-
-        tx.execute(
-            "INSERT INTO messages \
-                 (conversation_id, seq, role, content, token_count, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
-            params![self.conversation_id, seq, role, content, token_count],
-        )
-        .map_err(|e| storage_err(&e))?;
-        let message_id = tx.last_insert_rowid();
-
-        insert_parts(&tx, message_id, &msg)?;
-
-        let next_ord: i64 = tx
-            .query_row(
-                "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM context_items \
-                 WHERE conversation_id = ?1",
-                [self.conversation_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| storage_err(&e))?;
-        tx.execute(
-            "INSERT INTO context_items \
-                 (conversation_id, ordinal, item_type, message_id) \
-             VALUES (?1, ?2, 'message', ?3)",
-            params![self.conversation_id, next_ord, message_id],
-        )
-        .map_err(|e| storage_err(&e))?;
-
-        tx.execute(
-            "UPDATE conversations SET updated_at = datetime('now') \
-             WHERE conversation_id = ?1",
-            [self.conversation_id],
-        )
-        .map_err(|e| storage_err(&e))?;
-
-        tx.commit().map_err(|e| storage_err(&e))?;
-        Ok(())
+        let conversation_id = self.conversation_id;
+        let conn = Arc::clone(&self.conn);
+        run_blocking(conn, move |c| push_message_sync(c, conversation_id, &msg)).await
     }
 
     async fn assemble(&self, system_prompt: &str) -> Result<AssembledContext, EngineError> {
-        let conn = self.conn.lock().expect("LCM connection mutex poisoned");
-        assemble_sync(&conn, self.conversation_id, system_prompt)
+        let conversation_id = self.conversation_id;
+        let conn = Arc::clone(&self.conn);
+        let system_prompt = system_prompt.to_string();
+        run_blocking(conn, move |c| {
+            assemble_sync(c, conversation_id, &system_prompt)
+        })
+        .await
     }
 
     async fn compact_if_needed(
@@ -182,13 +152,17 @@ impl ContextEngine for LcmEngine {
         // Drop the active context only. Raw messages and any summaries
         // stay in the store — that is the whole point of LCM. Recall
         // tools can still surface them after a clear.
-        let conn = self.conn.lock().expect("LCM connection mutex poisoned");
-        conn.execute(
-            "DELETE FROM context_items WHERE conversation_id = ?1",
-            [self.conversation_id],
-        )
-        .map_err(|e| storage_err(&e))?;
-        Ok(())
+        let conversation_id = self.conversation_id;
+        let conn = Arc::clone(&self.conn);
+        run_blocking(conn, move |c| {
+            c.execute(
+                "DELETE FROM context_items WHERE conversation_id = ?1",
+                [conversation_id],
+            )
+            .map_err(|e| storage_err(&e))?;
+            Ok(())
+        })
+        .await
     }
 
     async fn save(&mut self) -> Result<(), EngineError> {
@@ -219,9 +193,9 @@ impl ContextEngine for LcmEngine {
         if sanitized == self.active_name {
             return Ok(());
         }
-        let conn = self.conn.lock().expect("LCM connection mutex poisoned");
-        let id = ensure_conversation(&conn, &sanitized)?;
-        drop(conn);
+        let conn = Arc::clone(&self.conn);
+        let name_for_db = sanitized.clone();
+        let id = run_blocking(conn, move |c| ensure_conversation(c, &name_for_db)).await?;
         self.active_name = sanitized;
         self.conversation_id = id;
         persist_active_session(&self.memory_dir, &self.active_name);
@@ -229,45 +203,130 @@ impl ContextEngine for LcmEngine {
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionInfo>, EngineError> {
-        let conn = self.conn.lock().expect("LCM connection mutex poisoned");
-        let mut stmt = conn
-            .prepare(
-                "SELECT c.name, \
-                        (SELECT COUNT(*) FROM context_items \
-                         WHERE conversation_id = c.conversation_id), \
-                        (SELECT COALESCE(SUM(m.token_count), 0) \
-                              + COALESCE(SUM(s.token_count), 0) \
-                         FROM context_items ci \
-                         LEFT JOIN messages  m ON ci.message_id = m.message_id \
-                         LEFT JOIN summaries s ON ci.summary_id = s.summary_id \
-                         WHERE ci.conversation_id = c.conversation_id) \
-                 FROM conversations c \
-                 ORDER BY c.name",
-            )
-            .map_err(|e| storage_err(&e))?;
-
-        let rows = stmt
-            .query_map([], |row| {
-                let stem: String = row.get(0)?;
-                let count: i64 = row.get(1)?;
-                let tokens: i64 = row.get(2)?;
-                Ok(SessionInfo {
-                    name: desanitize_name(&stem),
-                    message_count: usize::try_from(count).unwrap_or(0),
-                    estimated_tokens: usize::try_from(tokens).unwrap_or(0),
-                })
-            })
-            .map_err(|e| storage_err(&e))?;
-
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(|e| storage_err(&e))?);
-        }
-        Ok(out)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(conn, list_sessions_sync).await
     }
 }
 
+/// Run a blocking DB closure on Tokio's blocking pool.
+///
+/// Every async [`ContextEngine`] method that touches `SQLite` funnels
+/// through here. The closure receives `&mut Connection` (locked from
+/// the shared mutex) and returns a `Result<T, EngineError>`. A
+/// `JoinError` from `spawn_blocking` is reported as `Storage`.
+async fn run_blocking<F, T>(conn: Arc<Mutex<Connection>>, f: F) -> Result<T, EngineError>
+where
+    F: FnOnce(&mut Connection) -> Result<T, EngineError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut guard = conn.lock().expect("LCM connection mutex poisoned");
+        f(&mut guard)
+    })
+    .await
+    .map_err(|e| EngineError::Storage(format!("blocking task failed: {e}")))?
+}
+
 // ── Internal helpers ────────────────────────────────────────────────
+
+/// Persist `msg` into `messages` + `message_parts` and append a
+/// `'message'` row to `context_items`. Wrapped in a single transaction
+/// so a partial failure cannot leave a half-decomposed message.
+fn push_message_sync(
+    conn: &mut Connection,
+    conversation_id: i64,
+    msg: &Message,
+) -> Result<(), EngineError> {
+    let role = role_str(msg);
+    let content = msg.content().to_string();
+    let token_count = i64::try_from(msg.char_count() / 4).unwrap_or(i64::MAX);
+
+    let tx = conn.transaction().map_err(|e| storage_err(&e))?;
+
+    let seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages \
+             WHERE conversation_id = ?1",
+            [conversation_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| storage_err(&e))?;
+
+    tx.execute(
+        "INSERT INTO messages \
+             (conversation_id, seq, role, content, token_count, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+        params![conversation_id, seq, role, content, token_count],
+    )
+    .map_err(|e| storage_err(&e))?;
+    let message_id = tx.last_insert_rowid();
+
+    insert_parts(&tx, message_id, msg)?;
+
+    let next_ord: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM context_items \
+             WHERE conversation_id = ?1",
+            [conversation_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| storage_err(&e))?;
+    tx.execute(
+        "INSERT INTO context_items \
+             (conversation_id, ordinal, item_type, message_id) \
+         VALUES (?1, ?2, 'message', ?3)",
+        params![conversation_id, next_ord, message_id],
+    )
+    .map_err(|e| storage_err(&e))?;
+
+    tx.execute(
+        "UPDATE conversations SET updated_at = datetime('now') \
+         WHERE conversation_id = ?1",
+        [conversation_id],
+    )
+    .map_err(|e| storage_err(&e))?;
+
+    tx.commit().map_err(|e| storage_err(&e))?;
+    Ok(())
+}
+
+/// Enumerate every conversation with computed message + token totals.
+fn list_sessions_sync(conn: &mut Connection) -> Result<Vec<SessionInfo>, EngineError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.name, \
+                    (SELECT COUNT(*) FROM context_items \
+                     WHERE conversation_id = c.conversation_id), \
+                    (SELECT COALESCE(SUM(m.token_count), 0) \
+                          + COALESCE(SUM(s.token_count), 0) \
+                     FROM context_items ci \
+                     LEFT JOIN messages  m ON ci.message_id = m.message_id \
+                     LEFT JOIN summaries s ON ci.summary_id = s.summary_id \
+                     WHERE ci.conversation_id = c.conversation_id) \
+             FROM conversations c \
+             ORDER BY c.name",
+        )
+        .map_err(|e| storage_err(&e))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let stem: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            let tokens: i64 = row.get(2)?;
+            Ok(SessionInfo {
+                name: desanitize_name(&stem),
+                message_count: usize::try_from(count).unwrap_or(0),
+                estimated_tokens: usize::try_from(tokens).unwrap_or(0),
+            })
+        })
+        .map_err(|e| storage_err(&e))?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| storage_err(&e))?);
+    }
+    Ok(out)
+}
 
 /// Walk `context_items` in order, rehydrate each `'message'` row back
 /// into a `Message`. Prepends the system prompt. `'summary'` rows are
