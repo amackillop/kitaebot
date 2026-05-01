@@ -40,7 +40,18 @@ impl fmt::Display for ChannelSource {
 }
 
 /// Internal message sent from [`AgentHandle`](super::AgentHandle) to the actor.
-pub(super) struct Envelope {
+///
+/// Two operations are multiplexed on the same channel: full input turns
+/// (commands or free text) and lightweight greeting requests for the
+/// socket greeting.
+pub(super) enum Envelope {
+    Input(InputEnvelope),
+    /// Request the actor to format a session greeting and reply with it.
+    Greeting(oneshot::Sender<String>),
+}
+
+/// Payload for a normal input turn.
+pub(super) struct InputEnvelope {
     pub source: ChannelSource,
     pub input: String,
     /// Target session override. `None` means use the active session.

@@ -18,7 +18,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::agent::AgentHandle;
 use crate::agent::envelope::ChannelSource;
-use crate::commands;
 
 // ── Protocol types ──────────────────────────────────────────────────
 
@@ -45,12 +44,7 @@ enum ServerMsg {
 /// If the socket directory does not exist (no `RuntimeDirectory`),
 /// logs an info message and parks forever so the daemon can still
 /// run without the socket channel.
-pub async fn listen(
-    socket_path: &Path,
-    sessions_dir: &Path,
-    memory_dir: &Path,
-    handle: &AgentHandle,
-) -> ! {
+pub async fn listen(socket_path: &Path, handle: &AgentHandle) -> ! {
     let path = socket_path;
 
     // Unlink stale socket left by a previous run.
@@ -73,7 +67,7 @@ pub async fn listen(
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                serve(&listener, stream, sessions_dir, memory_dir, handle).await;
+                serve(&listener, stream, handle).await;
             }
             Err(e) => error!("Socket accept error: {e}"),
         }
@@ -83,18 +77,12 @@ pub async fn listen(
 // ── Connection handling ─────────────────────────────────────────────
 
 /// Serve a single client, rejecting concurrent connections.
-async fn serve(
-    listener: &UnixListener,
-    stream: UnixStream,
-    sessions_dir: &Path,
-    memory_dir: &Path,
-    handle: &AgentHandle,
-) {
+async fn serve(listener: &UnixListener, stream: UnixStream, handle: &AgentHandle) {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
     // Greeting
-    let greeting = commands::greeting(sessions_dir, memory_dir);
+    let greeting = handle.greeting().await;
     if send(&mut writer, &ServerMsg::Greeting { content: greeting })
         .await
         .is_err()
@@ -342,9 +330,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(responses));
         let sessions_dir = ws.path().join("sessions");
         let memory_dir = ws.path().join("memory");
-        let engine =
-            crate::engine::flat::FlatSession::new(sessions_dir.clone(), memory_dir.clone(), CTX)
-                .unwrap();
+        let engine = crate::engine::flat::FlatSession::new(sessions_dir, memory_dir, CTX).unwrap();
         let summarize = crate::engine::make_summarize_fn(provider.clone());
         let handle = AgentHandle::spawn(
             ws.clone(),
@@ -360,7 +346,7 @@ mod tests {
 
         let path = sock_path.clone();
         let join = tokio::spawn(async move {
-            listen(&path, &sessions_dir, &memory_dir, &handle).await;
+            listen(&path, &handle).await;
         });
 
         let client = TestClient::connect(&sock_path).await;

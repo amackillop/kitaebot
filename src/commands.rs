@@ -4,7 +4,6 @@
 //! Input classification and routing lives in [`crate::dispatch`].
 
 use std::fmt::Write as _;
-use std::path::Path;
 use std::str::FromStr;
 
 use tracing::error;
@@ -14,7 +13,6 @@ use crate::dispatch::Reply;
 use crate::engine::{ContextEngine, SummarizeFn};
 use crate::heartbeat;
 use crate::provider::Provider;
-use crate::session::Session;
 use crate::stats;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
@@ -64,32 +62,6 @@ impl FromStr for SlashCommand {
             }),
             _ => Err(UnknownCommand),
         }
-    }
-}
-
-/// Format the session greeting shown on connect/startup.
-///
-/// Reads the active session name from `memory/active_session`, then loads
-/// the corresponding session file. Returns "New session" if missing or empty.
-pub fn greeting(sessions_dir: &Path, memory_dir: &Path) -> String {
-    let active = std::fs::read_to_string(memory_dir.join("active_session"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "general".into());
-
-    // Sanitize the same way FlatSession does (/ -> --).
-    let sanitized = active
-        .replace('\0', "")
-        .replace("..", "")
-        .replace('/', "--");
-    let path = sessions_dir.join(format!("{sanitized}.json"));
-    let count = Session::load(&path).map_or(0, |s| s.messages().len());
-
-    if count == 0 {
-        "New session".to_string()
-    } else {
-        format!("Resumed session ({count} messages)")
     }
 }
 
@@ -274,35 +246,5 @@ mod tests {
     fn parse_zero_arg_rejects_extras() {
         assert_eq!("/new junk".parse::<SlashCommand>(), Err(UnknownCommand));
         assert_eq!("/stats x".parse::<SlashCommand>(), Err(UnknownCommand));
-    }
-
-    #[test]
-    fn greeting_new_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = dir.path().join("sessions");
-        let memory = dir.path().join("memory");
-        std::fs::create_dir_all(&sessions).unwrap();
-        std::fs::create_dir_all(&memory).unwrap();
-        assert_eq!(greeting(&sessions, &memory), "New session");
-    }
-
-    #[test]
-    fn greeting_resumed_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = dir.path().join("sessions");
-        let memory = dir.path().join("memory");
-        std::fs::create_dir_all(&sessions).unwrap();
-        std::fs::create_dir_all(&memory).unwrap();
-
-        let mut session = Session::new();
-        for i in 0..5 {
-            session.add_message(crate::types::Message::User {
-                content: format!("msg {i}"),
-            });
-        }
-        // Save as "general.json" (the default session).
-        session.save(&sessions.join("general.json")).unwrap();
-
-        assert_eq!(greeting(&sessions, &memory), "Resumed session (5 messages)");
     }
 }

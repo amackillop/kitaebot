@@ -110,5 +110,5 @@ fn daemon_session_persists_across_clients() {
         .write_stdin("/exit\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Resumed session"));
+        .stdout(predicate::str::contains("Resumed:"));
 }

@@ -17,7 +17,7 @@ use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 use super::actor::Agent;
-use super::envelope::{ChannelSource, Envelope};
+use super::envelope::{ChannelSource, Envelope, InputEnvelope};
 
 /// Cloneable handle to the agent actor.
 ///
@@ -73,18 +73,30 @@ impl AgentHandle {
         cancel: CancellationToken,
     ) -> Result<Reply, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let envelope = Envelope {
+        let envelope = Envelope::Input(InputEnvelope {
             source,
             input,
             session_hint,
             reply_tx,
             activity_tx,
             cancel,
-        };
+        });
         let _ = self.tx.send(envelope).await;
         reply_rx
             .await
             .unwrap_or_else(|_| Err("Agent shut down".into()))
+    }
+
+    /// Ask the agent for a session greeting.
+    ///
+    /// The actor formats the greeting from its own engine state, so this
+    /// reflects whichever session is active right now.
+    pub async fn greeting(&self) -> String {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self.tx.send(Envelope::Greeting(reply_tx)).await;
+        reply_rx
+            .await
+            .unwrap_or_else(|_| "Agent unavailable".into())
     }
 }
 
@@ -129,9 +141,12 @@ mod tests {
         // Simulate actor: recv envelope and reply.
         let actor_fut = async {
             let envelope = rx.recv().await.unwrap();
-            assert_eq!(envelope.input, "ping");
-            assert!(matches!(envelope.source, ChannelSource::Telegram));
-            let _ = envelope.reply_tx.send(Ok(Reply::text("pong".into())));
+            let Envelope::Input(input) = envelope else {
+                panic!("expected Input envelope");
+            };
+            assert_eq!(input.input, "ping");
+            assert!(matches!(input.source, ChannelSource::Telegram));
+            let _ = input.reply_tx.send(Ok(Reply::text("pong".into())));
         };
 
         let (result, ()) = tokio::join!(reply_fut, actor_fut);

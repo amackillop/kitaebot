@@ -18,7 +18,7 @@ use crate::tools::Tools;
 use crate::workspace::Workspace;
 use tokio::sync::mpsc;
 
-use super::envelope::Envelope;
+use super::envelope::{Envelope, InputEnvelope};
 
 /// The actor that processes envelopes sequentially.
 ///
@@ -57,12 +57,30 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
     /// Consume envelopes until all handles are dropped.
     pub async fn run(mut self) {
         while let Some(envelope) = self.rx.recv().await {
-            let result = self.handle(&envelope).await;
-            let _ = envelope.reply_tx.send(result);
+            match envelope {
+                Envelope::Input(input) => {
+                    let result = self.handle(&input).await;
+                    let _ = input.reply_tx.send(result);
+                }
+                Envelope::Greeting(reply_tx) => {
+                    let _ = reply_tx.send(self.format_greeting());
+                }
+            }
         }
     }
 
-    async fn handle(&mut self, envelope: &Envelope) -> Result<Reply, String> {
+    /// Greeting derived from current engine state.
+    fn format_greeting(&self) -> String {
+        let active = self.engine.active_session();
+        let count = self.engine.stats().message_count;
+        if count == 0 {
+            format!("New session: {active}")
+        } else {
+            format!("Resumed: {active} ({count} messages)")
+        }
+    }
+
+    async fn handle(&mut self, envelope: &InputEnvelope) -> Result<Reply, String> {
         match Input::parse(&envelope.input) {
             Ok(Input::Command(cmd)) => {
                 commands::execute(
@@ -87,7 +105,11 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
     /// before processing and restore the original active session afterward.
     /// This is how GitHub PRs get routed to per-repo sessions while keeping
     /// Telegram/Socket on whatever the user's `/project` selection was.
-    async fn handle_message(&mut self, envelope: &Envelope, text: &str) -> Result<Reply, String> {
+    async fn handle_message(
+        &mut self,
+        envelope: &InputEnvelope,
+        text: &str,
+    ) -> Result<Reply, String> {
         let original = self.engine.active_session().to_string();
         let target = envelope.session_hint.as_deref().unwrap_or(&original);
         let switched = target != original;

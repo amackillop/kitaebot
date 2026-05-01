@@ -95,9 +95,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         }
     };
 
-    let sessions_dir = workspace.path().join("sessions");
-    let memory_dir = workspace.path().join("memory");
-    let socket_loop = socket::listen(socket_path, &sessions_dir, &memory_dir, handle);
+    let socket_loop = socket::listen(socket_path, handle);
 
     tokio::select! {
         () = heartbeat_loop => unreachable!("heartbeat loop never exits"),
