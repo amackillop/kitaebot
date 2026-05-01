@@ -2,10 +2,13 @@
 //!
 //! Every push persists a row in `messages` (decomposed into
 //! `message_parts`) and appends a `message`-kind item to
-//! `context_items`. The DAG plumbing (`summaries`, `summary_*`,
-//! `large_files`) exists in the schema but is not exercised yet —
-//! compaction comes later, and `assemble` / `compact_if_needed` /
-//! `force_compact` currently return errors.
+//! `context_items`. `assemble` walks `context_items` in order and
+//! rehydrates each row back into a `Message` from `messages` + parts.
+//! The DAG plumbing (`summaries`, `summary_*`, `large_files`) exists
+//! in the schema but is not exercised yet — compaction comes later,
+//! and `compact_if_needed` / `force_compact` currently return errors.
+//! `'summary'` rows in `context_items` are likewise unreachable until
+//! compaction lands; `assemble` skips them defensively.
 //!
 //! Active session persistence reuses `memory/active_session` — the
 //! same plain-text file flat sessions write to, so switching engines
@@ -24,7 +27,7 @@ use rusqlite::{Connection, params};
 use crate::config::ContextConfig;
 use crate::error::EngineError;
 use crate::tools::Tool;
-use crate::types::Message;
+use crate::types::{Message, ToolCall, ToolFunction};
 
 use super::super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
@@ -152,8 +155,9 @@ impl ContextEngine for LcmEngine {
         Ok(())
     }
 
-    async fn assemble(&self, _system_prompt: &str) -> Result<AssembledContext, EngineError> {
-        Err(EngineError::Storage("lcm assemble: not implemented".into()))
+    async fn assemble(&self, system_prompt: &str) -> Result<AssembledContext, EngineError> {
+        let conn = self.conn.lock().expect("LCM connection mutex poisoned");
+        assemble_sync(&conn, self.conversation_id, system_prompt)
     }
 
     async fn compact_if_needed(
@@ -264,6 +268,110 @@ impl ContextEngine for LcmEngine {
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
+
+/// Walk `context_items` in order, rehydrate each `'message'` row back
+/// into a `Message`. Prepends the system prompt. `'summary'` rows are
+/// ignored — once compaction lands they will produce a synthetic
+/// system message with the summary content + recall guidance.
+fn assemble_sync(
+    conn: &Connection,
+    conversation_id: i64,
+    system_prompt: &str,
+) -> Result<AssembledContext, EngineError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.message_id, m.role, m.content \
+             FROM context_items ci \
+             JOIN messages m ON ci.message_id = m.message_id \
+             WHERE ci.conversation_id = ?1 AND ci.item_type = 'message' \
+             ORDER BY ci.ordinal",
+        )
+        .map_err(|e| storage_err(&e))?;
+
+    let rows = stmt
+        .query_map([conversation_id], |r| {
+            let id: i64 = r.get(0)?;
+            let role: String = r.get(1)?;
+            let content: String = r.get(2)?;
+            Ok((id, role, content))
+        })
+        .map_err(|e| storage_err(&e))?;
+
+    let mut entries: Vec<(i64, String, String)> = Vec::new();
+    for r in rows {
+        entries.push(r.map_err(|e| storage_err(&e))?);
+    }
+
+    let mut messages = Vec::with_capacity(entries.len() + 1);
+    messages.push(Message::System {
+        content: system_prompt.to_string(),
+    });
+    for (message_id, role, content) in entries {
+        messages.push(reconstruct_message(conn, message_id, &role, content)?);
+    }
+    Ok(AssembledContext { messages })
+}
+
+/// Rebuild a `Message` from its row plus its `message_parts`.
+///
+/// `messages.content` already stores the canonical text payload (the
+/// flattened `Message::content()` value), so for `user`/`system`
+/// variants it's a direct wrap. `tool` looks up its `call_id` from the
+/// single `tool_output` part. `assistant` is split: if the message has
+/// any `tool_call` parts it becomes [`Message::ToolCalls`], otherwise
+/// a plain [`Message::Assistant`].
+fn reconstruct_message(
+    conn: &Connection,
+    message_id: i64,
+    role: &str,
+    content: String,
+) -> Result<Message, EngineError> {
+    match role {
+        "user" => Ok(Message::User { content }),
+        "system" => Ok(Message::System { content }),
+        "tool" => {
+            let call_id: String = conn
+                .query_row(
+                    "SELECT tool_call_id FROM message_parts \
+                     WHERE message_id = ?1 AND part_type = 'tool_output'",
+                    [message_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| storage_err(&e))?;
+            Ok(Message::Tool { call_id, content })
+        }
+        "assistant" => {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT tool_call_id, tool_name, tool_input \
+                     FROM message_parts \
+                     WHERE message_id = ?1 AND part_type = 'tool_call' \
+                     ORDER BY ordinal",
+                )
+                .map_err(|e| storage_err(&e))?;
+
+            let calls: Vec<ToolCall> = stmt
+                .query_map([message_id], |r| {
+                    let id: String = r.get(0)?;
+                    let name: String = r.get(1)?;
+                    let arguments: String = r.get(2)?;
+                    Ok(ToolCall::new(id, ToolFunction { name, arguments }))
+                })
+                .map_err(|e| storage_err(&e))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| storage_err(&e))?;
+
+            if calls.is_empty() {
+                Ok(Message::Assistant { content })
+            } else {
+                Ok(Message::ToolCalls { content, calls })
+            }
+        }
+        other => Err(EngineError::Storage(format!(
+            "unknown message role: {other}"
+        ))),
+    }
+}
 
 fn role_str(msg: &Message) -> &'static str {
     match msg {
@@ -684,10 +792,144 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assemble_returns_not_implemented() {
-        let (engine, _dir) = temp_engine();
-        let result = engine.assemble("system").await;
-        assert!(matches!(result, Err(EngineError::Storage(_))));
+    async fn assemble_prepends_system_and_preserves_order() {
+        let (mut engine, _dir) = temp_engine();
+        engine
+            .push_message(Message::User {
+                content: "u1".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::Assistant {
+                content: "a1".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::User {
+                content: "u2".into(),
+            })
+            .await
+            .unwrap();
+
+        let ctx = engine.assemble("SYS").await.unwrap();
+        assert_eq!(ctx.messages.len(), 4);
+        match &ctx.messages[0] {
+            Message::System { content } => assert_eq!(content, "SYS"),
+            other => panic!("expected system, got {other:?}"),
+        }
+        match &ctx.messages[1] {
+            Message::User { content } => assert_eq!(content, "u1"),
+            other => panic!("expected user, got {other:?}"),
+        }
+        match &ctx.messages[2] {
+            Message::Assistant { content } => assert_eq!(content, "a1"),
+            other => panic!("expected assistant, got {other:?}"),
+        }
+        match &ctx.messages[3] {
+            Message::User { content } => assert_eq!(content, "u2"),
+            other => panic!("expected user, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assemble_roundtrips_tool_call_messages() {
+        let (mut engine, _dir) = temp_engine();
+        let calls = vec![
+            ToolCall::new(
+                "c1".into(),
+                ToolFunction {
+                    name: "exec".into(),
+                    arguments: r#"{"cmd":"ls"}"#.into(),
+                },
+            ),
+            ToolCall::new(
+                "c2".into(),
+                ToolFunction {
+                    name: "read".into(),
+                    arguments: r#"{"path":"a"}"#.into(),
+                },
+            ),
+        ];
+        engine
+            .push_message(Message::ToolCalls {
+                content: "thinking".into(),
+                calls: calls.clone(),
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::Tool {
+                call_id: "c1".into(),
+                content: "ls output".into(),
+            })
+            .await
+            .unwrap();
+
+        let ctx = engine.assemble("SYS").await.unwrap();
+        match &ctx.messages[1] {
+            Message::ToolCalls {
+                content,
+                calls: round,
+            } => {
+                assert_eq!(content, "thinking");
+                assert_eq!(round.len(), 2);
+                assert_eq!(round[0].id, "c1");
+                assert_eq!(round[0].function.name, "exec");
+                assert_eq!(round[0].function.arguments, r#"{"cmd":"ls"}"#);
+                assert_eq!(round[1].id, "c2");
+                assert_eq!(round[1].function.name, "read");
+            }
+            other => panic!("expected tool calls, got {other:?}"),
+        }
+        match &ctx.messages[2] {
+            Message::Tool { call_id, content } => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(content, "ls output");
+            }
+            other => panic!("expected tool, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assemble_after_clear_only_has_system() {
+        let (mut engine, _dir) = temp_engine();
+        engine
+            .push_message(Message::User {
+                content: "kept".into(),
+            })
+            .await
+            .unwrap();
+        engine.clear().await.unwrap();
+        let ctx = engine.assemble("SYS").await.unwrap();
+        assert_eq!(ctx.messages.len(), 1);
+        assert!(matches!(&ctx.messages[0], Message::System { .. }));
+    }
+
+    #[tokio::test]
+    async fn assemble_isolates_per_session() {
+        let (mut engine, _dir) = temp_engine();
+        engine
+            .push_message(Message::User {
+                content: "in general".into(),
+            })
+            .await
+            .unwrap();
+        engine.switch_session("other").await.unwrap();
+        engine
+            .push_message(Message::User {
+                content: "in other".into(),
+            })
+            .await
+            .unwrap();
+
+        let ctx = engine.assemble("SYS").await.unwrap();
+        assert_eq!(ctx.messages.len(), 2);
+        match &ctx.messages[1] {
+            Message::User { content } => assert_eq!(content, "in other"),
+            other => panic!("expected user, got {other:?}"),
+        }
     }
 
     #[tokio::test]
