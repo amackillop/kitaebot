@@ -3,6 +3,7 @@
 //! Execution logic lives here so every channel behaves identically.
 //! Input classification and routing lives in [`crate::dispatch`].
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -19,7 +20,7 @@ use crate::tools::Tools;
 use crate::workspace::Workspace;
 
 /// A recognized slash command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCommand {
     /// Force context compaction.
     Compact,
@@ -29,6 +30,8 @@ pub enum SlashCommand {
     Heartbeat,
     /// Clear session and start fresh.
     New,
+    /// List sessions or switch to a named one.
+    Project { name: Option<String> },
     /// Show session tool usage statistics.
     Stats,
 }
@@ -41,12 +44,24 @@ impl FromStr for SlashCommand {
     type Err = UnknownCommand;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
-            "/compact" => Ok(Self::Compact),
-            "/context" => Ok(Self::Context),
-            "/heartbeat" => Ok(Self::Heartbeat),
-            "/new" => Ok(Self::New),
-            "/stats" => Ok(Self::Stats),
+        // Tokenize: at most two whitespace-separated parts. More is an error.
+        let mut parts = input.split_whitespace();
+        let head = parts.next().ok_or(UnknownCommand)?;
+        let arg = parts.next().unwrap_or("");
+        if parts.next().is_some() {
+            return Err(UnknownCommand);
+        }
+
+        match (head, arg) {
+            ("/compact", "") => Ok(Self::Compact),
+            ("/context", "") => Ok(Self::Context),
+            ("/heartbeat", "") => Ok(Self::Heartbeat),
+            ("/new", "") => Ok(Self::New),
+            ("/stats", "") => Ok(Self::Stats),
+            ("/project", "") => Ok(Self::Project { name: None }),
+            ("/project", name) => Ok(Self::Project {
+                name: Some(name.to_string()),
+            }),
             _ => Err(UnknownCommand),
         }
     }
@@ -167,8 +182,51 @@ pub async fn execute(
             }
             Ok(Reply::text("Session cleared.".into()))
         }
+        SlashCommand::Project { name } => project(engine, name).await,
         SlashCommand::Stats => Ok(Reply::pre(stats::run(workspace.path()))),
     }
+}
+
+/// Dispatch `/project` with or without a name argument.
+async fn project(engine: &mut impl ContextEngine, name: Option<String>) -> Result<Reply, String> {
+    match name {
+        None => list_projects(engine).await,
+        Some(raw) => switch_project(engine, &raw).await,
+    }
+}
+
+async fn list_projects(engine: &mut impl ContextEngine) -> Result<Reply, String> {
+    let sessions = engine.list_sessions().await.map_err(|e| e.to_string())?;
+    let active = engine.active_session();
+    let mut out = String::new();
+    for s in &sessions {
+        let marker = if s.name == active { "* " } else { "  " };
+        let _ = writeln!(
+            out,
+            "{marker}{} ({} messages, ~{} tokens)",
+            s.name, s.message_count, s.estimated_tokens,
+        );
+    }
+    if out.is_empty() {
+        out.push_str("No sessions.\n");
+    }
+    Ok(Reply::pre(out))
+}
+
+async fn switch_project(engine: &mut impl ContextEngine, name: &str) -> Result<Reply, String> {
+    // Filename sanitization (`/`, `..`, null bytes) is the engine's job.
+    engine
+        .switch_session(name)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = engine.save().await {
+        error!("Failed to save session: {e}");
+    }
+    Ok(Reply::text(format!(
+        "Switched to '{}' ({} messages)",
+        engine.active_session(),
+        engine.stats().message_count,
+    )))
 }
 
 #[cfg(test)]
@@ -187,6 +245,35 @@ mod tests {
     #[test]
     fn parse_unknown_command() {
         assert_eq!("/adsjhfbakj".parse::<SlashCommand>(), Err(UnknownCommand));
+    }
+
+    #[test]
+    fn parse_project_no_arg() {
+        assert_eq!("/project".parse(), Ok(SlashCommand::Project { name: None }));
+    }
+
+    #[test]
+    fn parse_project_with_name() {
+        assert_eq!(
+            "/project foo".parse(),
+            Ok(SlashCommand::Project {
+                name: Some("foo".into())
+            }),
+        );
+    }
+
+    #[test]
+    fn parse_project_rejects_multi_token_name() {
+        assert_eq!(
+            "/project foo bar".parse::<SlashCommand>(),
+            Err(UnknownCommand),
+        );
+    }
+
+    #[test]
+    fn parse_zero_arg_rejects_extras() {
+        assert_eq!("/new junk".parse::<SlashCommand>(), Err(UnknownCommand));
+        assert_eq!("/stats x".parse::<SlashCommand>(), Err(UnknownCommand));
     }
 
     #[test]
