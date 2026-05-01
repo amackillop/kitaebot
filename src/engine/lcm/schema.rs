@@ -1,13 +1,20 @@
 //! `SQLite` connection bootstrap for the LCM engine.
 //!
 //! [`open`] opens (or creates) the database at the given path, applies
-//! the production-tuned PRAGMA set, runs the schema DDL inside a single
-//! `BEGIN EXCLUSIVE` transaction, and registers the `REGEXP` user
-//! function backed by the `regex` crate.
+//! the tuned PRAGMA set, runs any pending migrations, and registers the
+//! `REGEXP` user function backed by the `regex` crate.
 //!
-//! The schema lives in `schema.sql` next to this file. The DDL is
-//! idempotent (every `CREATE` uses `IF NOT EXISTS`), so re-opening an
-//! existing database is a no-op.
+//! Migrations are tracked via `PRAGMA user_version`. [`MIGRATIONS`] is
+//! an ordered slice — entry `i` brings the schema from version `i` to
+//! `i + 1`. Each entry runs inside its own `BEGIN EXCLUSIVE` block
+//! together with the matching `PRAGMA user_version = i + 1` so a
+//! failure rolls the version back. Concurrent processes cannot
+//! interleave migrations — the loser of the lock race wakes up to a
+//! no-op once the winner has bumped the version past its slice.
+//!
+//! Adding a migration: append the new SQL string to [`MIGRATIONS`].
+//! Never reorder, edit, or remove an existing entry — that breaks
+//! every database that already advanced past it.
 
 use std::path::Path;
 
@@ -31,25 +38,29 @@ PRAGMA synchronous = NORMAL;
 PRAGMA temp_store = MEMORY;
 ";
 
-/// Schema DDL applied inside a single exclusive transaction.
-const SCHEMA_DDL: &str = include_str!("schema.sql");
+/// Ordered list of schema migrations.
+///
+/// Entry `i` brings the database from version `i` to version `i + 1`.
+/// The first entry is the v1 baseline. Append new migrations; do not
+/// reorder, edit, or remove existing entries.
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
 
 /// Open or create the LCM database at `path`.
 ///
-/// Applies PRAGMAs, runs schema DDL inside one exclusive transaction,
-/// and registers the `REGEXP` user function. Idempotent.
+/// Applies PRAGMAs, runs any pending migrations, and registers the
+/// `REGEXP` user function. Idempotent.
 ///
 /// # Errors
 ///
-/// Returns [`EngineError::Storage`] if the file cannot be opened, the
-/// schema cannot be applied, or the user function cannot be registered.
+/// Returns [`EngineError::Storage`] if the file cannot be opened, a
+/// migration fails, or the user function cannot be registered.
 pub fn open(path: &Path) -> Result<Connection, EngineError> {
     let conn = Connection::open(path).map_err(|e| storage_err(&e))?;
     init(&conn)?;
     Ok(conn)
 }
 
-/// Apply pragmas, schema, and user functions to an open connection.
+/// Apply pragmas, migrations, and user functions to an open connection.
 ///
 /// Exposed separately so tests can use `:memory:` connections without
 /// needing a temp file on disk.
@@ -59,20 +70,37 @@ pub fn open(path: &Path) -> Result<Connection, EngineError> {
 /// Returns [`EngineError::Storage`] on any underlying `SQLite` failure.
 pub fn init(conn: &Connection) -> Result<(), EngineError> {
     conn.execute_batch(PRAGMAS).map_err(|e| storage_err(&e))?;
-    apply_schema(conn)?;
+    apply_migrations(conn, MIGRATIONS)?;
     register_regexp(conn)?;
     Ok(())
 }
 
-/// Wrap the schema DDL in a single exclusive transaction.
+/// Apply pending migrations from `migrations`, advancing
+/// `PRAGMA user_version` after each one.
 ///
-/// Concurrent processes opening the same DB cannot interleave their
-/// migrations — only one acquires the exclusive lock at a time. The
-/// other waits up to `busy_timeout` and then sees the schema already
-/// in place (every `CREATE` is `IF NOT EXISTS`).
-fn apply_schema(conn: &Connection) -> Result<(), EngineError> {
-    let sql = format!("BEGIN EXCLUSIVE;\n{SCHEMA_DDL}\nCOMMIT;");
-    conn.execute_batch(&sql).map_err(|e| storage_err(&e))
+/// Each migration runs inside its own `BEGIN EXCLUSIVE; ...; COMMIT;`
+/// block paired with `PRAGMA user_version = N`, so a partial failure
+/// rolls back atomically and leaves the version at its previous value.
+fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<(), EngineError> {
+    let current: i32 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| storage_err(&e))?;
+    let start = usize::try_from(current).unwrap_or(0);
+
+    for (i, sql) in migrations.iter().enumerate().skip(start) {
+        let target = i + 1;
+        let stmt = format!("BEGIN EXCLUSIVE;\n{sql}\nPRAGMA user_version = {target};\nCOMMIT;");
+        if let Err(e) = conn.execute_batch(&stmt) {
+            // SQLite does not implicitly rollback on a statement-level
+            // error mid-transaction; the BEGIN above stays open and any
+            // DDL run before the failure remains visible to this
+            // connection. Force the rollback so partial migrations do
+            // not leak into subsequent attempts.
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(storage_err(&e));
+        }
+    }
+    Ok(())
 }
 
 /// Register `REGEXP(pattern, text) -> bool` on the connection.
@@ -262,5 +290,73 @@ mod tests {
         let conn = fresh();
         let result: Result<bool, _> = conn.query_row("SELECT 'x' REGEXP '['", [], |row| row.get(0));
         assert!(result.is_err());
+    }
+
+    fn user_version(conn: &Connection) -> i32 {
+        conn.pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap()
+    }
+
+    /// `init` advances `user_version` to the number of bundled
+    /// migrations.
+    #[test]
+    fn init_sets_user_version() {
+        let conn = fresh();
+        assert_eq!(
+            user_version(&conn),
+            i32::try_from(MIGRATIONS.len()).unwrap()
+        );
+    }
+
+    /// `apply_migrations` skips entries already applied — running with
+    /// the production slice on an in-memory DB twice does not re-run
+    /// the v1 baseline.
+    #[test]
+    fn apply_migrations_skips_already_applied() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(PRAGMAS).unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+
+        // A second pass with a stub follow-up migration should run only
+        // the stub and bump the version by exactly one.
+        let stub = "CREATE TABLE migration_probe (id INTEGER PRIMARY KEY);";
+        let extended: Vec<&str> = MIGRATIONS
+            .iter()
+            .copied()
+            .chain(std::iter::once(stub))
+            .collect();
+        apply_migrations(&conn, &extended).unwrap();
+
+        assert_eq!(user_version(&conn), i32::try_from(extended.len()).unwrap());
+        let probe_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'migration_probe'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(probe_count, 1);
+    }
+
+    /// A failing migration rolls back atomically — the version stays
+    /// at the previous value and partial DDL does not leak.
+    #[test]
+    fn apply_migrations_rolls_back_on_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(PRAGMAS).unwrap();
+
+        let broken = "CREATE TABLE leftover (id INTEGER); INSERT INTO no_such_table VALUES (1);";
+        let result = apply_migrations(&conn, &[broken]);
+        assert!(result.is_err());
+
+        assert_eq!(user_version(&conn), 0);
+        let leftover_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'leftover'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover_count, 0, "partial DDL should have rolled back");
     }
 }
