@@ -133,6 +133,18 @@ impl Tools {
         ))
     }
 
+    /// Append additional tools, applying the same `disabled` filter
+    /// used at construction. Engine-contributed tools are merged in
+    /// after `Tools::new` because the engine is built later in
+    /// startup than the static tool registry.
+    pub fn extend_with(&mut self, more: Vec<Box<dyn Tool>>, disabled: &[String]) {
+        for tool in more {
+            if !disabled.iter().any(|d| d == tool.name()) {
+                self.0.push(tool);
+            }
+        }
+    }
+
     /// Build the set of local (non-network) tools.
     pub fn local(
         workspace: &Workspace,

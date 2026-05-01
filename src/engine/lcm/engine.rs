@@ -20,9 +20,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
+use tracing::error;
 
 use crate::config::ContextConfig;
 use crate::error::EngineError;
@@ -33,6 +35,7 @@ use super::super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
 };
 use super::schema;
+use super::tools::{LcmDescribe, LcmExpand, LcmGrep};
 
 /// The connection lives behind `Arc<Mutex<_>>` for two reasons:
 ///
@@ -51,8 +54,13 @@ use super::schema;
 /// issuing the next call.
 pub struct LcmEngine {
     conn: Arc<Mutex<Connection>>,
+    db_path: PathBuf,
     active_name: String,
     conversation_id: i64,
+    /// Shared with retrieval tools so they can target the current
+    /// session without holding a reference to the engine. Updated
+    /// atomically on every successful [`switch_session`] call.
+    active_id: Arc<AtomicI64>,
     memory_dir: PathBuf,
     ctx: ContextConfig,
 }
@@ -78,8 +86,10 @@ impl LcmEngine {
         let conversation_id = ensure_conversation(&conn, &active_name)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            db_path: db_path.to_path_buf(),
             active_name,
             conversation_id,
+            active_id: Arc::new(AtomicI64::new(conversation_id)),
             memory_dir,
             ctx,
         })
@@ -181,7 +191,31 @@ impl ContextEngine for LcmEngine {
     }
 
     fn tools(&self) -> Vec<Box<dyn Tool>> {
-        Vec::new()
+        // Open three independent read-only connections — one per tool.
+        // WAL lets these readers run concurrently with the engine's
+        // writer. If a connection fails to open, log and skip that
+        // tool: a missing retrieval tool degrades gracefully (the
+        // model still has the active context), whereas panicking here
+        // would take down the daemon for a non-essential feature.
+        let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+        let open = |label: &'static str| -> Option<Connection> {
+            schema::open_readonly(&self.db_path)
+                .map_err(|e| error!(tool = label, "failed to open LCM tool connection: {e}"))
+                .ok()
+        };
+        if let Some(conn) = open("lcm_grep") {
+            tools.push(Box::new(LcmGrep::new(conn, Arc::clone(&self.active_id))));
+        }
+        if let Some(conn) = open("lcm_describe") {
+            tools.push(Box::new(LcmDescribe::new(
+                conn,
+                Arc::clone(&self.active_id),
+            )));
+        }
+        if let Some(conn) = open("lcm_expand") {
+            tools.push(Box::new(LcmExpand::new(conn, Arc::clone(&self.active_id))));
+        }
+        tools
     }
 
     fn active_session(&self) -> &str {
@@ -198,6 +232,7 @@ impl ContextEngine for LcmEngine {
         let id = run_blocking(conn, move |c| ensure_conversation(c, &name_for_db)).await?;
         self.active_name = sanitized;
         self.conversation_id = id;
+        self.active_id.store(id, Ordering::Release);
         persist_active_session(&self.memory_dir, &self.active_name);
         Ok(())
     }

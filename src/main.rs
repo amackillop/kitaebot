@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use config::{Config, EngineKind};
+use engine::ContextEngine;
 use tracing::{error, info, warn};
 use workspace::Workspace;
 
@@ -72,7 +73,7 @@ async fn main() {
 
             let workspace = Arc::new(workspace);
             let provider = Arc::new(rt.provider);
-            let tools = Arc::new(rt.tools);
+            let mut tools = rt.tools;
             let memory_dir = workspace.path().join("memory");
             let summarize = engine::make_summarize_fn(provider.clone());
 
@@ -85,10 +86,11 @@ async fn main() {
                                 error!("Failed to initialize flat session: {e}");
                                 std::process::exit(1);
                             });
+                    tools.extend_with(engine.tools(), &config.tools.disabled);
                     agent::AgentHandle::spawn(
                         workspace.clone(),
                         provider,
-                        tools,
+                        Arc::new(tools),
                         config.agent.max_iterations,
                         engine,
                         summarize,
@@ -101,10 +103,11 @@ async fn main() {
                             error!("Failed to initialize LCM engine: {e}");
                             std::process::exit(1);
                         });
+                    tools.extend_with(engine.tools(), &config.tools.disabled);
                     agent::AgentHandle::spawn(
                         workspace.clone(),
                         provider,
-                        tools,
+                        Arc::new(tools),
                         config.agent.max_iterations,
                         engine,
                         summarize,

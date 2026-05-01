@@ -21,8 +21,8 @@
 use std::path::Path;
 
 use regex::Regex;
-use rusqlite::Connection;
 use rusqlite::functions::FunctionFlags;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::error::EngineError;
 
@@ -59,6 +59,32 @@ const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_baseline.sql")];
 pub fn open(path: &Path) -> Result<Connection, EngineError> {
     let conn = Connection::open(path).map_err(|e| storage_err(&e))?;
     init(&conn)?;
+    Ok(conn)
+}
+
+/// Open a read-only connection at `path`.
+///
+/// Used by retrieval tools so they can query concurrently with the
+/// engine's writer (WAL allows multiple readers + one writer). The
+/// connection skips migrations — those are the writer's job — and only
+/// applies the read-relevant subset of pragmas. The `REGEXP` user
+/// function is registered per connection, so it must be installed here
+/// too for `lcm_grep` to use it.
+///
+/// # Errors
+///
+/// Returns [`EngineError::Storage`] if the file cannot be opened or
+/// the function cannot be registered.
+pub fn open_readonly(path: &Path) -> Result<Connection, EngineError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags).map_err(|e| storage_err(&e))?;
+    conn.execute_batch(
+        "PRAGMA busy_timeout = 30000;\
+         PRAGMA cache_size = -65536;\
+         PRAGMA temp_store = MEMORY;",
+    )
+    .map_err(|e| storage_err(&e))?;
+    register_regexp(&conn)?;
     Ok(conn)
 }
 
