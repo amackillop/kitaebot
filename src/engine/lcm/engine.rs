@@ -247,9 +247,14 @@ impl LcmEngine {
             .await
             .map_err(|e| EngineError::Storage(format!("payload write: {e}")))?;
 
-        let kind = explore::detect_kind(path_hint.as_deref(), content);
+        // The payload on disk stays a verbatim copy of the tool
+        // result, but detection and exploration see the underlying
+        // file content: `file_read` line numbering would otherwise
+        // break every structured parser.
+        let unframed = explore::strip_tool_framing(content);
+        let kind = explore::detect_kind(path_hint.as_deref(), &unframed);
         let summary = explore::exploration_summary(
-            content,
+            &unframed,
             path_hint.as_deref(),
             &self.summarize,
             self.ctx.lcm.large_file_summary_tokens,
@@ -1106,6 +1111,60 @@ mod tests {
         };
         assert_eq!(path, "data/big.json");
         assert_eq!(mime, "application/json");
+    }
+
+    #[tokio::test]
+    async fn framed_tool_result_is_explored_as_json() {
+        use std::fmt::Write as _;
+
+        let (mut engine, dir) = temp_engine_small_threshold();
+        engine
+            .push_message(Message::ToolCalls {
+                content: String::new(),
+                calls: vec![ToolCall::new(
+                    "c1".into(),
+                    ToolFunction {
+                        name: "file_read".into(),
+                        arguments: r#"{"path":"data/big.json"}"#.into(),
+                    },
+                )],
+            })
+            .await
+            .unwrap();
+
+        // file_read output: line-numbered JSON plus the stats trailer.
+        let mut body = String::new();
+        for i in 0..30u32 {
+            writeln!(body, "{}\t    {},", i + 3, i).unwrap();
+        }
+        let framed = format!(
+            "1\t{{\n2\t  \"users\": [\n{body}33\t    99\n34\t  ]\n35\t}}\n\n\
+             (35 lines shown, 35 total, 300 bytes)"
+        );
+
+        engine
+            .push_message(Message::Tool {
+                call_id: "c1".into(),
+                content: framed.clone(),
+            })
+            .await
+            .unwrap();
+
+        let content = stored_content(&engine, 1);
+        assert!(content.contains("Structured summary (JSON)"));
+        assert!(content.contains("users: array"));
+
+        // The disk copy stays verbatim, framing intact.
+        let file_id = explore::file_id(&framed);
+        let on_disk = fs::read_to_string(
+            dir.path()
+                .join("memory")
+                .join("lcm")
+                .join("payloads")
+                .join(&file_id),
+        )
+        .unwrap();
+        assert_eq!(on_disk, framed);
     }
 
     #[tokio::test]

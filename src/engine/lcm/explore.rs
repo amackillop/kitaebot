@@ -97,6 +97,53 @@ pub fn format_file_reference(
     )
 }
 
+static FILE_READ_TRAILER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\(\d+ lines shown, \d+ total, \d+ bytes\)$").expect("valid regex")
+});
+
+/// Undo `file_read` output framing so dispatchers see the underlying
+/// file content: `N\t<line>` rows followed by a
+/// `(N lines shown, M total, B bytes)` trailer. Without this, every
+/// structured payload read through `file_read` fails to parse (a
+/// line-numbered JSON file starts with `1\t{`, not `{`).
+///
+/// The strip only fires on an exact match of the framing: the stats
+/// trailer must be present and every line must carry a sequential
+/// number, so data that merely has a numeric first column passes
+/// through untouched. Content that doesn't match is returned as-is.
+pub fn strip_tool_framing(content: &str) -> std::borrow::Cow<'_, str> {
+    let mut lines: Vec<&str> = content.lines().collect();
+    if !lines
+        .last()
+        .is_some_and(|l| FILE_READ_TRAILER_RE.is_match(l))
+    {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    lines.pop();
+    while lines.last() == Some(&"") {
+        lines.pop();
+    }
+    let mut expected: Option<u64> = None;
+    let mut stripped: Vec<&str> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let Some((num, rest)) = line.split_once('\t') else {
+            return std::borrow::Cow::Borrowed(content);
+        };
+        let Ok(n) = num.parse::<u64>() else {
+            return std::borrow::Cow::Borrowed(content);
+        };
+        if expected.is_some_and(|e| n != e) {
+            return std::borrow::Cow::Borrowed(content);
+        }
+        expected = Some(n + 1);
+        stripped.push(rest);
+    }
+    if stripped.is_empty() {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    std::borrow::Cow::Owned(stripped.join("\n"))
+}
+
 /// Classify a payload from its path extension, falling back to
 /// content sniffing when no path is known.
 pub fn detect_kind(path: Option<&str>, content: &str) -> FileKind {
@@ -132,7 +179,14 @@ pub async fn exploration_summary(
     summary_token_bound: u32,
 ) -> String {
     match detect_kind(path, content) {
-        FileKind::Json => explore_json(content),
+        FileKind::Json => match explore_json(content) {
+            Some(summary) => summary,
+            // Not valid JSON despite the .json path, which is normal
+            // for a partial read: the head of a JSON file rarely
+            // parses on its own. Text exploration still summarizes
+            // whatever structure is there.
+            None => explore_text(content, path, summarize, summary_token_bound).await,
+        },
         FileKind::Csv => explore_delimited(content, ',', "CSV"),
         FileKind::Tsv => explore_delimited(content, '\t', "TSV"),
         FileKind::Yaml => explore_yaml(content),
@@ -211,10 +265,10 @@ fn unique_ordered(values: impl IntoIterator<Item = String>) -> Vec<String> {
 
 // ── deterministic dispatchers ─────────────────────────────────────
 
-fn explore_json(content: &str) -> String {
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) else {
-        return "Structured summary (JSON): failed to parse as valid JSON.".to_string();
-    };
+/// `None` when the payload is not valid JSON; the caller falls back
+/// to text exploration.
+fn explore_json(content: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(content).ok()?;
     let top_level = match &parsed {
         serde_json::Value::Array(_) => "array",
         serde_json::Value::Object(_) => "object",
@@ -223,10 +277,10 @@ fn explore_json(content: &str) -> String {
         serde_json::Value::Number(_) => "number",
         serde_json::Value::String(_) => "string",
     };
-    format!(
+    Some(format!(
         "Structured summary (JSON):\nTop-level type: {top_level}.\nShape: {}.",
         describe_json(&parsed, 0)
-    )
+    ))
 }
 
 fn describe_json(value: &serde_json::Value, depth: u8) -> String {
@@ -581,6 +635,40 @@ mod tests {
         assert_eq!(extract_file_ids(content), Vec::<String>::new());
     }
 
+    // ── tool framing ──────────────────────────────────────────────
+
+    #[test]
+    fn strip_tool_framing_recovers_file_content() {
+        let framed = "1\t{\n2\t  \"a\": 1\n3\t}\n\n(3 lines shown, 3 total, 20 bytes)";
+        assert_eq!(strip_tool_framing(framed), "{\n  \"a\": 1\n}");
+    }
+
+    #[test]
+    fn strip_tool_framing_preserves_offset_reads() {
+        let framed = "500\tfoo\n501\tbar\n\n(2 lines shown, 900 total, 9000 bytes)";
+        assert_eq!(strip_tool_framing(framed), "foo\nbar");
+    }
+
+    #[test]
+    fn strip_tool_framing_is_noop_without_trailer() {
+        let content = "1\t{\n2\t}";
+        assert_eq!(strip_tool_framing(content), content);
+    }
+
+    #[test]
+    fn strip_tool_framing_is_noop_on_nonsequential_numbers() {
+        // Numeric-first-column data that happens to end with a
+        // trailer-shaped line must pass through untouched.
+        let content = "1\ta\n5\tb\n\n(2 lines shown, 2 total, 8 bytes)";
+        assert_eq!(strip_tool_framing(content), content);
+    }
+
+    #[test]
+    fn strip_tool_framing_is_noop_on_unnumbered_lines() {
+        let content = "plain text\n(1 lines shown, 1 total, 11 bytes)";
+        assert_eq!(strip_tool_framing(content), content);
+    }
+
     // ── kind detection ────────────────────────────────────────────
 
     #[test]
@@ -619,7 +707,7 @@ mod tests {
 
     #[test]
     fn json_shape() {
-        let s = explore_json(r#"{"users": [{"id": 1}, {"id": 2}], "total": 2}"#);
+        let s = explore_json(r#"{"users": [{"id": 1}, {"id": 2}], "total": 2}"#).unwrap();
         assert!(s.contains("Top-level type: object"));
         assert!(s.contains("keys=2"));
         assert!(s.contains("users: array(len=2"));
@@ -628,8 +716,7 @@ mod tests {
 
     #[test]
     fn json_parse_failure() {
-        let s = explore_json("{not json");
-        assert!(s.contains("failed to parse"));
+        assert_eq!(explore_json("{not json"), None);
     }
 
     #[test]
@@ -701,6 +788,21 @@ mod tests {
         assert!(s.contains("Text exploration summary"));
         assert!(s.contains("# Ducks"));
         assert!(s.contains("Opening excerpt: # Ducks Ducks are great.."));
+    }
+
+    #[tokio::test]
+    async fn invalid_json_falls_back_to_text_exploration() {
+        // A truncated partial read of a JSON file: extension says
+        // JSON, content doesn't parse.
+        let summarize = canned("Partial JSON dump of user records.");
+        let s = exploration_summary(
+            "{\"users\": [{\"id\": 1}, {\"id\":",
+            Some("big-data.json"),
+            &summarize,
+            400,
+        )
+        .await;
+        assert_eq!(s, "Partial JSON dump of user records.");
     }
 
     #[tokio::test]

@@ -325,6 +325,7 @@ impl Tool for LcmDescribe {
         Box::pin(async move {
             let args: DescribeArgs = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+            debug!(id = %args.id, "lcm_describe");
             let id = args.id.clone();
             run_blocking(conn, move |c| {
                 if id.starts_with("sum_") {
@@ -594,6 +595,13 @@ impl Tool for LcmExpand {
                 .token_cap
                 .unwrap_or(DEFAULT_EXPAND_TOKEN_CAP)
                 .min(MAX_EXPAND_TOKEN_CAP);
+            debug!(
+                summary_id = %args.summary_id,
+                depth,
+                include_messages,
+                token_cap,
+                "lcm_expand"
+            );
             let summary_id = args.summary_id.clone();
             run_blocking(conn, move |c| {
                 expand(
@@ -772,6 +780,11 @@ fn append_payload(
             return PayloadAppend::Fit(0);
         }
     };
+    debug!(
+        file_id,
+        bytes = payload.len(),
+        "recovered externalized payload"
+    );
     let remaining_chars = cap.saturating_sub(tokens_used as usize).saturating_mul(4);
     if payload.len() <= remaining_chars {
         let tokens = u32::try_from(payload.len() / 4).unwrap_or(u32::MAX);
