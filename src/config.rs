@@ -179,6 +179,12 @@ pub struct LcmConfig {
     /// Percent of `max_tokens` at which compaction blocks the actor.
     /// Must be 1..=100 and strictly greater than `soft_budget_percent`.
     pub hard_budget_percent: u8,
+    /// Message content above this many estimated tokens is stored on
+    /// disk and replaced by a `<file>` reference at ingest. Must be > 0.
+    pub large_file_threshold: u32,
+    /// Token bound on LLM-generated exploration summaries for
+    /// externalized plain-text payloads. Must be > 0.
+    pub large_file_summary_tokens: u32,
 }
 
 /// Selects the [`ContextEngine`](crate::engine::ContextEngine)
@@ -253,6 +259,8 @@ impl Default for LcmConfig {
             min_condensed_fanout: 2,
             soft_budget_percent: 70,
             hard_budget_percent: 90,
+            large_file_threshold: 25_000,
+            large_file_summary_tokens: 400,
         }
     }
 }
@@ -287,6 +295,16 @@ impl LcmConfig {
         if self.soft_budget_percent >= self.hard_budget_percent {
             return Err(ConfigError::Invalid(
                 "context.lcm soft_budget_percent must be < hard_budget_percent".into(),
+            ));
+        }
+        if self.large_file_threshold == 0 {
+            return Err(ConfigError::Invalid(
+                "context.lcm large_file_threshold must be > 0".into(),
+            ));
+        }
+        if self.large_file_summary_tokens == 0 {
+            return Err(ConfigError::Invalid(
+                "context.lcm large_file_summary_tokens must be > 0".into(),
             ));
         }
         Ok(())
@@ -687,6 +705,35 @@ max_output_bytes = 20480
     #[test]
     fn context_reject_budget_percent_over_100() {
         let result = load_toml("[context]\nbudget_percent = 101\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn lcm_large_file_defaults() {
+        let cfg = load_toml("").unwrap();
+        assert_eq!(cfg.context.lcm.large_file_threshold, 25_000);
+        assert_eq!(cfg.context.lcm.large_file_summary_tokens, 400);
+    }
+
+    #[test]
+    fn lcm_large_file_parse() {
+        let cfg = load_toml(
+            "[context.lcm]\nlarge_file_threshold = 10000\nlarge_file_summary_tokens = 200\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.context.lcm.large_file_threshold, 10_000);
+        assert_eq!(cfg.context.lcm.large_file_summary_tokens, 200);
+    }
+
+    #[test]
+    fn lcm_reject_zero_large_file_threshold() {
+        let result = load_toml("[context.lcm]\nlarge_file_threshold = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn lcm_reject_zero_large_file_summary_tokens() {
+        let result = load_toml("[context.lcm]\nlarge_file_summary_tokens = 0\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 
