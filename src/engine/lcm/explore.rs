@@ -69,6 +69,19 @@ pub fn file_id(content: &str) -> String {
     format!("file_{:016x}", u64::from_be_bytes(prefix))
 }
 
+static FILE_ID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bfile_[a-fA-F0-9]{16}\b").expect("file id regex"));
+
+/// Extract every `file_xxx` id referenced in `content`, deduplicated
+/// in order of first appearance and normalized to lowercase.
+pub fn extract_file_ids(content: &str) -> Vec<String> {
+    unique_ordered(
+        FILE_ID_RE
+            .find_iter(content)
+            .map(|m| m.as_str().to_ascii_lowercase()),
+    )
+}
+
 /// Render the `<file>` reference stored in `messages.content` in
 /// place of the raw payload.
 pub fn format_file_reference(
@@ -549,6 +562,23 @@ mod tests {
     fn file_reference_omits_missing_path() {
         let r = format_file_reference("file_0123456789abcdef", None, 7, "sum");
         assert!(r.starts_with("<file id=\"file_0123456789abcdef\" tokens=\"7\">"));
+    }
+
+    #[test]
+    fn extract_file_ids_dedupes_and_normalizes() {
+        let content = "see file_0123456789ABCDEF and <file id=\"file_00000000000000aa\">x</file> \
+                       plus file_0123456789abcdef again";
+        assert_eq!(
+            extract_file_ids(content),
+            vec!["file_0123456789abcdef", "file_00000000000000aa"],
+        );
+    }
+
+    #[test]
+    fn extract_file_ids_rejects_malformed_ids() {
+        // Too short, too long, and non-hex must not match.
+        let content = "file_0123456789abcde file_0123456789abcdef0 file_0123456789abcdeg";
+        assert_eq!(extract_file_ids(content), Vec::<String>::new());
     }
 
     // ── kind detection ────────────────────────────────────────────

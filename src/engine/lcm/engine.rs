@@ -224,6 +224,11 @@ impl LcmEngine {
         .flatten()
     }
 
+    /// Directory holding externalized payloads.
+    fn payloads_dir(&self) -> PathBuf {
+        self.memory_dir.join("lcm").join("payloads")
+    }
+
     /// Write `content` to `memory/lcm/payloads/<file_id>`, generate
     /// its exploration summary, and return the `<file>` reference
     /// plus the metadata row for `large_files`.
@@ -233,7 +238,7 @@ impl LcmEngine {
         path_hint: Option<String>,
     ) -> Result<(String, LargeFileRow), EngineError> {
         let file_id = explore::file_id(content);
-        let payload_dir = self.memory_dir.join("lcm").join("payloads");
+        let payload_dir = self.payloads_dir();
         tokio::fs::create_dir_all(&payload_dir)
             .await
             .map_err(|e| EngineError::Storage(format!("payload dir: {e}")))?;
@@ -426,7 +431,11 @@ impl ContextEngine for LcmEngine {
             )));
         }
         if let Some(conn) = open("lcm_expand") {
-            tools.push(Box::new(LcmExpand::new(conn, Arc::clone(&self.active_id))));
+            tools.push(Box::new(LcmExpand::new(
+                conn,
+                Arc::clone(&self.active_id),
+                self.payloads_dir(),
+            )));
         }
         tools
     }

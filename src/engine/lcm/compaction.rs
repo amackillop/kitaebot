@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use super::engine::{reconstruct_message, run_blocking, storage_err};
+use super::explore::extract_file_ids;
 use super::summarize::{EscalationOutcome, summarize_with_escalation};
 use crate::config::LcmConfig;
 use crate::engine::{CompactionEvent, SummarizeFn};
@@ -125,10 +126,12 @@ pub(super) fn load_leaf_chunks(
 /// Persist the result of summarizing a single chunk.
 ///
 /// Inserts the leaf row in `summaries`, links each source message via
-/// `summary_messages`, then replaces the chunk's `context_items`
-/// range with one `'summary'` item placed at the chunk's first
-/// ordinal. The whole thing runs in a single transaction so a partial
-/// failure cannot leave a half-applied summary.
+/// `summary_messages`, records any `<file>` ids found in the source
+/// messages via `summary_files`, then replaces the chunk's
+/// `context_items` range with one `'summary'` item placed at the
+/// chunk's first ordinal. The whole thing runs in a single
+/// transaction so a partial failure cannot leave a half-applied
+/// summary.
 pub(super) fn write_leaf_summary(
     conn: &mut Connection,
     conversation_id: i64,
@@ -187,6 +190,27 @@ pub(super) fn write_leaf_summary(
         for row in &chunk.rows {
             ins.execute(params![summary_id, row.message_id])
                 .map_err(|e| storage_err(&e))?;
+        }
+    }
+
+    // Carry `<file>` associations from the source messages onto the
+    // summary. INSERT OR IGNORE: several messages in the chunk may
+    // reference the same file, and (summary_id, file_id) is the PK.
+    // The SELECT filters to ids actually present in `large_files`,
+    // since content can mention file-shaped ids that were never
+    // externalized and a bare INSERT would abort on the FK.
+    {
+        let mut ins = tx
+            .prepare(
+                "INSERT OR IGNORE INTO summary_files (summary_id, file_id) \
+                 SELECT ?1, file_id FROM large_files WHERE file_id = ?2",
+            )
+            .map_err(|e| storage_err(&e))?;
+        for row in &chunk.rows {
+            for file_id in extract_file_ids(row.message.content()) {
+                ins.execute(params![summary_id, file_id])
+                    .map_err(|e| storage_err(&e))?;
+            }
         }
     }
 
@@ -365,11 +389,12 @@ pub(super) fn load_condensed_chunks(
 /// Persist the result of summarizing a condensed chunk.
 ///
 /// Inserts the new summary at `depth + 1`, links each child via
-/// `summary_parents`, then replaces the chunk's `context_items`
-/// range with one `'summary'` item placed at the chunk's first
-/// ordinal. Aggregated descendant counts roll up from children so
-/// `lcm_describe` can report total source coverage without walking
-/// the DAG.
+/// `summary_parents`, copies the children's `summary_files`
+/// associations up to the new node, then replaces the chunk's
+/// `context_items` range with one `'summary'` item placed at the
+/// chunk's first ordinal. Aggregated descendant counts roll up from
+/// children so `lcm_describe` can report total source coverage
+/// without walking the DAG.
 pub(super) fn write_condensed_summary(
     conn: &mut Connection,
     conversation_id: i64,
@@ -437,6 +462,23 @@ pub(super) fn write_condensed_summary(
             .map_err(|e| storage_err(&e))?;
         for row in &chunk.rows {
             ins.execute(params![row.summary_id, summary_id])
+                .map_err(|e| storage_err(&e))?;
+        }
+    }
+
+    // Propagate file associations up the DAG: the new summary covers
+    // every file its children covered. Copying rows (rather than
+    // re-extracting ids from summary text) keeps the association
+    // even if a lossy summarization pass dropped a `<file>` tag.
+    {
+        let mut ins = tx
+            .prepare(
+                "INSERT OR IGNORE INTO summary_files (summary_id, file_id) \
+                 SELECT ?1, file_id FROM summary_files WHERE summary_id = ?2",
+            )
+            .map_err(|e| storage_err(&e))?;
+        for row in &chunk.rows {
+            ins.execute(params![summary_id, row.summary_id])
                 .map_err(|e| storage_err(&e))?;
         }
     }
@@ -591,6 +633,194 @@ fn token_estimate_sync(conn: &Connection, conversation_id: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::lcm::schema;
+    use crate::engine::lcm::summarize::EscalationLevel;
+
+    fn fresh_conn() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = schema::open(&dir.path().join("lcm.db")).unwrap();
+        conn.execute(
+            "INSERT INTO conversations(name, created_at, updated_at) \
+             VALUES ('general', '2025-01-01', '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        (dir, conn)
+    }
+
+    fn insert_message(conn: &Connection, seq: i64, content: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO messages(conversation_id, seq, role, content, token_count, created_at) \
+             VALUES (1, ?1, 'user', ?2, ?3, '2025-01-01')",
+            params![seq, content, i64::try_from(content.len() / 4).unwrap()],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_context_message(conn: &Connection, ordinal: i64, message_id: i64) {
+        conn.execute(
+            "INSERT INTO context_items(conversation_id, ordinal, item_type, message_id) \
+             VALUES (1, ?1, 'message', ?2)",
+            params![ordinal, message_id],
+        )
+        .unwrap();
+    }
+
+    fn insert_large_file(conn: &Connection, file_id: &str) {
+        conn.execute(
+            "INSERT INTO large_files(file_id, conversation_id, path, mime_type, byte_size, \
+                                     token_count, exploration_summary, created_at) \
+             VALUES (?1, 1, 'p', 'text/plain', 4, 1, 'sum', '2025-01-01')",
+            [file_id],
+        )
+        .unwrap();
+    }
+
+    fn outcome(content: &str) -> EscalationOutcome {
+        EscalationOutcome {
+            content: content.to_string(),
+            level: EscalationLevel::Normal,
+            input_tokens: 100,
+            output_tokens: content.len() / 4,
+        }
+    }
+
+    fn chunk_row(ordinal: i64, message_id: i64, content: &str) -> ChunkRow {
+        ChunkRow {
+            ordinal,
+            message_id,
+            token_count: i64::try_from(content.len() / 4).unwrap(),
+            created_at: "2025-01-01".into(),
+            message: Message::User {
+                content: content.into(),
+            },
+        }
+    }
+
+    fn summary_file_pairs(conn: &Connection) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare("SELECT summary_id, file_id FROM summary_files ORDER BY summary_id, file_id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn leaf_summary_records_referenced_files() {
+        let (_dir, mut conn) = fresh_conn();
+        insert_large_file(&conn, "file_00000000000000aa");
+
+        // One message references a known file, one references an id
+        // that was never externalized: only the known one may land in
+        // summary_files (a bare insert would trip the FK).
+        let known = "see <file id=\"file_00000000000000aa\" tokens=\"1\">sum</file>";
+        let unknown = "mentions file_ffffffffffffffff in passing";
+        let m1 = insert_message(&conn, 0, known);
+        let m2 = insert_message(&conn, 1, unknown);
+        insert_context_message(&conn, 0, m1);
+        insert_context_message(&conn, 1, m2);
+
+        let chunk = LeafChunk {
+            rows: vec![chunk_row(0, m1, known), chunk_row(1, m2, unknown)],
+        };
+        write_leaf_summary(&mut conn, 1, &chunk, &outcome("leaf summary")).unwrap();
+
+        let pairs = summary_file_pairs(&conn);
+        assert_eq!(pairs.len(), 1, "pairs: {pairs:?}");
+        assert_eq!(pairs[0].1, "file_00000000000000aa");
+    }
+
+    #[test]
+    fn condensed_summary_inherits_child_file_associations() {
+        let (_dir, mut conn) = fresh_conn();
+        insert_large_file(&conn, "file_00000000000000aa");
+        insert_large_file(&conn, "file_00000000000000bb");
+
+        let a = "ref <file id=\"file_00000000000000aa\" tokens=\"1\">s</file>";
+        let b = "ref <file id=\"file_00000000000000bb\" tokens=\"1\">s</file>";
+        let m1 = insert_message(&conn, 0, a);
+        let m2 = insert_message(&conn, 1, b);
+        insert_context_message(&conn, 0, m1);
+        insert_context_message(&conn, 1, m2);
+
+        write_leaf_summary(
+            &mut conn,
+            1,
+            &LeafChunk {
+                rows: vec![chunk_row(0, m1, a)],
+            },
+            &outcome("leaf a"),
+        )
+        .unwrap();
+        write_leaf_summary(
+            &mut conn,
+            1,
+            &LeafChunk {
+                rows: vec![chunk_row(1, m2, b)],
+            },
+            &outcome("leaf b"),
+        )
+        .unwrap();
+
+        // Rebuild the two leaves as a condensed chunk.
+        let leaves: Vec<(i64, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT ci.ordinal, s.summary_id, s.content \
+                     FROM context_items ci JOIN summaries s ON ci.summary_id = s.summary_id \
+                     ORDER BY ci.ordinal",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(leaves.len(), 2);
+        let chunk = CondensedChunk {
+            rows: leaves
+                .into_iter()
+                .map(|(ordinal, summary_id, content)| CondensedRow {
+                    ordinal,
+                    summary_id,
+                    depth: 0,
+                    token_count: 2,
+                    earliest_at: "2025-01-01".into(),
+                    latest_at: "2025-01-01".into(),
+                    descendant_count: 1,
+                    descendant_token_count: 2,
+                    source_message_token_count: 2,
+                    content,
+                })
+                .collect(),
+            depth: 0,
+        };
+        write_condensed_summary(&mut conn, 1, &chunk, &outcome("condensed")).unwrap();
+
+        let condensed_id: String = conn
+            .query_row(
+                "SELECT summary_id FROM summaries WHERE depth = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let files: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT file_id FROM summary_files WHERE summary_id = ?1 ORDER BY file_id")
+                .unwrap();
+            stmt.query_map([&condensed_id], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(
+            files,
+            vec!["file_00000000000000aa", "file_00000000000000bb"],
+        );
+    }
 
     #[test]
     fn summary_id_is_deterministic_and_includes_source_ids() {

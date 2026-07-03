@@ -11,27 +11,10 @@
 //! is read once at the start of each call so a switch mid-call (which
 //! cannot happen — the actor is single-threaded — but is permitted by
 //! the type) does not split a single query across two conversations.
-//!
-//! ## Coverage of the spec at this stage
-//!
-//! Compaction has not yet landed (spec 14 §"Compaction" is in flight),
-//! so `summaries`, `summary_messages`, `summary_parents`, and
-//! `large_files` are all empty in practice. The tools still issue the
-//! correct queries against those tables and return empty results
-//! gracefully:
-//!
-//! - `lcm_grep` matches messages today; the summaries branch returns
-//!   no rows but the SQL is in place.
-//! - `lcm_describe` answers "no summary/file with that id" until the
-//!   relevant tables are populated.
-//! - `lcm_expand` walks the DAG once summaries exist; until then it
-//!   reports the summary as missing.
-//!
-//! When 3.7 wires compaction in, these tools start returning real
-//! data without further changes.
 
 use std::fmt::Write as _;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,6 +24,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tracing::debug;
 
+use super::explore::extract_file_ids;
 use crate::error::ToolError;
 use crate::tools::Tool;
 
@@ -562,13 +546,18 @@ struct ExpandArgs {
 pub struct LcmExpand {
     conn: Arc<Mutex<Connection>>,
     active_id: Arc<AtomicI64>,
+    /// Directory holding externalized payloads
+    /// (`memory/lcm/payloads`). Raw messages store `<file>`
+    /// references; expansion reads the original bytes back from here.
+    payloads_dir: PathBuf,
 }
 
 impl LcmExpand {
-    pub fn new(conn: Connection, active_id: Arc<AtomicI64>) -> Self {
+    pub fn new(conn: Connection, active_id: Arc<AtomicI64>, payloads_dir: PathBuf) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
             active_id,
+            payloads_dir,
         }
     }
 }
@@ -595,6 +584,7 @@ impl Tool for LcmExpand {
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         let conn = Arc::clone(&self.conn);
         let conversation_id = self.active_id.load(Ordering::Acquire);
+        let payloads_dir = self.payloads_dir.clone();
         Box::pin(async move {
             let args: ExpandArgs = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
@@ -613,6 +603,7 @@ impl Tool for LcmExpand {
                     depth,
                     include_messages,
                     token_cap,
+                    &payloads_dir,
                 )
             })
             .await
@@ -628,10 +619,10 @@ fn expand(
     depth: u32,
     include_messages: bool,
     token_cap: u32,
+    payloads_dir: &std::path::Path,
 ) -> Result<String, ToolError> {
-    // Confirm the root summary exists in this conversation. If it
-    // does not — the only path users hit today, since compaction is
-    // not yet wired — report cleanly rather than walking the DAG.
+    // Confirm the root summary exists in this conversation before
+    // walking the DAG, so a bad id reports cleanly.
     let exists: bool = conn
         .query_row(
             "SELECT 1 FROM summaries \
@@ -718,6 +709,16 @@ fn expand(
                     }
                     out.push_str(&block);
                     tokens_used += u32::try_from(mc.len() / 4).unwrap_or(u32::MAX);
+
+                    // Externalized payloads: the message stores a
+                    // `<file>` reference; the original bytes live on
+                    // disk. Recover them under the same token cap.
+                    for file_id in extract_file_ids(&mc) {
+                        match append_payload(&mut out, tokens_used, cap, payloads_dir, &file_id) {
+                            PayloadAppend::Fit(tokens) => tokens_used += tokens,
+                            PayloadAppend::CapReached => return Ok(out),
+                        }
+                    }
                 }
             }
         } else {
@@ -742,6 +743,54 @@ fn expand(
     }
 
     Ok(out)
+}
+
+/// Result of appending one externalized payload to the expand output.
+enum PayloadAppend {
+    /// Payload (or an unavailability note) written; caller adds the
+    /// consumed tokens.
+    Fit(u32),
+    /// Token cap hit mid-payload; a truncated prefix and cap notice
+    /// were written and expansion must stop.
+    CapReached,
+}
+
+/// Append the on-disk payload for `file_id` to `out`, bounded by the
+/// remaining token budget. Payloads that don't fit are cut at a char
+/// boundary so the model still sees the head of the file.
+fn append_payload(
+    out: &mut String,
+    tokens_used: u32,
+    cap: usize,
+    payloads_dir: &std::path::Path,
+    file_id: &str,
+) -> PayloadAppend {
+    let payload = match std::fs::read_to_string(payloads_dir.join(file_id)) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(out, "### {file_id}: payload unavailable ({e})\n");
+            return PayloadAppend::Fit(0);
+        }
+    };
+    let remaining_chars = cap.saturating_sub(tokens_used as usize).saturating_mul(4);
+    if payload.len() <= remaining_chars {
+        let tokens = u32::try_from(payload.len() / 4).unwrap_or(u32::MAX);
+        let _ = write!(out, "### {file_id} (externalized payload)\n{payload}\n\n");
+        PayloadAppend::Fit(tokens)
+    } else {
+        let mut cut = remaining_chars;
+        while !payload.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let _ = write!(
+            out,
+            "### {file_id} (externalized payload, first {cut} of {} bytes)\n{}\n",
+            payload.len(),
+            &payload[..cut],
+        );
+        let _ = writeln!(out, "[truncated at token_cap={cap}]");
+        PayloadAppend::CapReached
+    }
 }
 
 #[cfg(test)]
@@ -908,10 +957,20 @@ mod tests {
         assert!(matches!(err, ToolError::InvalidArguments(_)));
     }
 
+    fn payloads_dir(dir: &tempfile::TempDir) -> PathBuf {
+        let p = dir.path().join("payloads");
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
     #[tokio::test]
     async fn lcm_expand_unknown_summary() {
-        let (_dir, db) = fresh_db();
-        let tool = LcmExpand::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let (dir, db) = fresh_db();
+        let tool = LcmExpand::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            payloads_dir(&dir),
+        );
         let out = tool
             .execute(serde_json::json!({"summary_id": "sum_missing"}))
             .await
@@ -921,7 +980,7 @@ mod tests {
 
     #[tokio::test]
     async fn lcm_expand_returns_existing_leaf_content() {
-        let (_dir, db) = fresh_db();
+        let (dir, db) = fresh_db();
         let writer = schema::open(&db).unwrap();
         let mid = insert_message(&writer, 1, "user", "raw raw raw");
         writer.execute(
@@ -940,7 +999,11 @@ mod tests {
             )
             .unwrap();
 
-        let tool = LcmExpand::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let tool = LcmExpand::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            payloads_dir(&dir),
+        );
         let out = tool
             .execute(serde_json::json!({
                 "summary_id": "sum_test",
@@ -950,6 +1013,109 @@ mod tests {
             .unwrap();
         assert!(out.contains("leaf summary text"), "out was: {out}");
         assert!(out.contains("raw raw raw"), "missing raw msg: {out}");
+    }
+
+    /// Seed a leaf summary over one message whose content is a
+    /// `<file>` reference to `file_id`, mirroring an externalized
+    /// tool result after compaction.
+    fn seed_leaf_with_file_ref(writer: &Connection, file_id: &str) {
+        let content = format!("<file id=\"{file_id}\" tokens=\"100\">explored</file>");
+        let mid = insert_message(writer, 1, "tool", &content);
+        writer.execute(
+            "INSERT INTO summaries(summary_id, conversation_id, kind, depth, content, token_count, \
+                                   earliest_at, latest_at, descendant_count, descendant_token_count, \
+                                   source_message_token_count, model, created_at) \
+             VALUES ('sum_test', 1, 'leaf', 0, 'covers a big file', 5, \
+                     '2025-01-01', '2025-01-01', 1, 100, 100, 'mock', '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        writer
+            .execute(
+                "INSERT INTO summary_messages(summary_id, message_id) VALUES ('sum_test', ?1)",
+                [mid],
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lcm_expand_recovers_externalized_payload_from_disk() {
+        let (dir, db) = fresh_db();
+        let writer = schema::open(&db).unwrap();
+        let file_id = "file_00000000000000aa";
+        seed_leaf_with_file_ref(&writer, file_id);
+        let payloads = payloads_dir(&dir);
+        std::fs::write(payloads.join(file_id), "the original payload bytes").unwrap();
+
+        let tool = LcmExpand::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            payloads,
+        );
+        let out = tool
+            .execute(serde_json::json!({
+                "summary_id": "sum_test",
+                "include_messages": true,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            out.contains("the original payload bytes"),
+            "payload missing: {out}"
+        );
+        assert!(out.contains(file_id), "file header missing: {out}");
+    }
+
+    #[tokio::test]
+    async fn lcm_expand_truncates_oversized_payload_at_token_cap() {
+        let (dir, db) = fresh_db();
+        let writer = schema::open(&db).unwrap();
+        let file_id = "file_00000000000000bb";
+        seed_leaf_with_file_ref(&writer, file_id);
+        let payloads = payloads_dir(&dir);
+        // Way past the default 5000-token cap (20k chars).
+        std::fs::write(payloads.join(file_id), "y".repeat(100_000)).unwrap();
+
+        let tool = LcmExpand::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            payloads,
+        );
+        let out = tool
+            .execute(serde_json::json!({
+                "summary_id": "sum_test",
+                "include_messages": true,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            out.contains("truncated at token_cap"),
+            "no cap notice: {out}"
+        );
+        assert!(out.contains("yyyy"), "payload head missing: {out}");
+        assert!(out.len() < 100_000, "cap not applied: len={}", out.len());
+    }
+
+    #[tokio::test]
+    async fn lcm_expand_reports_missing_payload() {
+        let (dir, db) = fresh_db();
+        let writer = schema::open(&db).unwrap();
+        let file_id = "file_00000000000000cc";
+        seed_leaf_with_file_ref(&writer, file_id);
+
+        let tool = LcmExpand::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            payloads_dir(&dir),
+        );
+        let out = tool
+            .execute(serde_json::json!({
+                "summary_id": "sum_test",
+                "include_messages": true,
+            }))
+            .await
+            .unwrap();
+        assert!(out.contains("payload unavailable"), "out was: {out}");
     }
 
     #[test]
