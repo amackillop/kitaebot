@@ -4,8 +4,6 @@
 
 pub mod compaction;
 pub mod engine;
-// Not yet wired into push_message.
-#[allow(dead_code)]
 pub mod explore;
 pub mod schema;
 pub mod summarize;

@@ -44,6 +44,22 @@ pub enum FileKind {
     Binary,
 }
 
+/// Best-effort MIME type for a detected payload kind, for the
+/// `large_files.mime_type` column.
+pub fn mime_hint(kind: FileKind) -> &'static str {
+    match kind {
+        FileKind::Json => "application/json",
+        FileKind::Csv => "text/csv",
+        FileKind::Tsv => "text/tab-separated-values",
+        FileKind::Yaml => "application/yaml",
+        FileKind::Xml => "application/xml",
+        FileKind::Sql => "application/sql",
+        FileKind::Code => "text/x-source-code",
+        FileKind::Text => "text/plain",
+        FileKind::Binary => "application/octet-stream",
+    }
+}
+
 /// Derive a stable file id from payload content: `file_` plus the
 /// first 16 hex chars of SHA-256. Content-addressed, so identical
 /// payloads dedupe to the same id.

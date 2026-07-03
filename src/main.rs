@@ -98,11 +98,16 @@ async fn main() {
                 }
                 EngineKind::Lcm => {
                     let db_path = memory_dir.join("lcm.db");
-                    let engine = engine::lcm::LcmEngine::new(&db_path, memory_dir, config.context)
-                        .unwrap_or_else(|e| {
-                            error!("Failed to initialize LCM engine: {e}");
-                            std::process::exit(1);
-                        });
+                    let engine = engine::lcm::LcmEngine::new(
+                        &db_path,
+                        memory_dir,
+                        config.context,
+                        summarize.clone(),
+                    )
+                    .unwrap_or_else(|e| {
+                        error!("Failed to initialize LCM engine: {e}");
+                        std::process::exit(1);
+                    });
                     tools.extend_with(engine.tools(), &config.tools.disabled);
                     agent::AgentHandle::spawn(
                         workspace.clone(),

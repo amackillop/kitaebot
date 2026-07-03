@@ -4,11 +4,16 @@
 //! `message_parts`) and appends a `message`-kind item to
 //! `context_items`. `assemble` walks `context_items` in order and
 //! rehydrates each row back into a `Message` from `messages` + parts.
-//! The DAG plumbing (`summaries`, `summary_*`, `large_files`) exists
-//! in the schema but is not exercised yet — compaction comes later,
-//! and `compact_if_needed` / `force_compact` currently return errors.
-//! `'summary'` rows in `context_items` are likewise unreachable until
-//! compaction lands; `assemble` skips them defensively.
+//! Compaction (`compaction.rs`) folds old context items into
+//! `summaries` rows; `assemble` renders those as synthetic system
+//! messages with recall guidance.
+//!
+//! Oversized user and tool messages are intercepted at ingest: the
+//! raw payload goes to `memory/lcm/payloads/<file_id>` on disk, a
+//! `large_files` row records its metadata, and `messages.content`
+//! stores a compact `<file>` reference with an exploration summary
+//! (see `explore.rs`). The reference plus the on-disk payload
+//! together remain the source of truth.
 //!
 //! Active session persistence reuses `memory/active_session` — the
 //! same plain-text file flat sessions write to, so switching engines
@@ -36,6 +41,7 @@ use super::super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
 };
 use super::compaction;
+use super::explore;
 use super::schema;
 use super::tools::{LcmDescribe, LcmExpand, LcmGrep};
 
@@ -73,6 +79,10 @@ pub struct LcmEngine {
     /// turn crosses the soft threshold without crossing the hard
     /// threshold; drained at the start of the next compaction call.
     pending_compaction: Option<JoinHandle<Result<CompactionEvent, EngineError>>>,
+    /// Summarizer for exploration summaries of externalized
+    /// plain-text payloads. Injected at construction; compaction
+    /// receives its own via method arguments.
+    summarize: SummarizeFn,
 }
 
 impl LcmEngine {
@@ -90,6 +100,7 @@ impl LcmEngine {
         db_path: &Path,
         memory_dir: PathBuf,
         ctx: ContextConfig,
+        summarize: SummarizeFn,
     ) -> Result<Self, EngineError> {
         let conn = schema::open(db_path)?;
         let active_name = read_active_session(&memory_dir).unwrap_or_else(|| "general".into());
@@ -103,6 +114,7 @@ impl LcmEngine {
             memory_dir,
             ctx,
             pending_compaction: None,
+            summarize,
         })
     }
 
@@ -162,13 +174,127 @@ impl LcmEngine {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
     }
+
+    /// Intercept oversized user and tool payloads before storage.
+    ///
+    /// User and tool messages whose content exceeds
+    /// `large_file_threshold` estimated tokens are externalized: the
+    /// message comes back with its content replaced by a `<file>`
+    /// reference, alongside the `large_files` row to insert with it.
+    /// Everything else passes through untouched.
+    async fn intercept_large(
+        &mut self,
+        msg: Message,
+    ) -> Result<(Message, Option<LargeFileRow>), EngineError> {
+        let threshold = self.ctx.lcm.large_file_threshold as usize;
+        match msg {
+            Message::User { content } if content.len() / 4 > threshold => {
+                let (reference, row) = self.externalize(&content, None).await?;
+                Ok((Message::User { content: reference }, Some(row)))
+            }
+            Message::Tool { call_id, content } if content.len() / 4 > threshold => {
+                let hint = self.file_read_path_hint(&call_id).await;
+                let (reference, row) = self.externalize(&content, hint).await?;
+                Ok((
+                    Message::Tool {
+                        call_id,
+                        content: reference,
+                    },
+                    Some(row),
+                ))
+            }
+            other => Ok((other, None)),
+        }
+    }
+
+    /// Path argument of the `file_read` call this tool result answers,
+    /// if that is what produced it. The originating assistant message
+    /// is already persisted as a `tool_call` part linked by `call_id`,
+    /// so the hint comes from the store rather than from state carried
+    /// between pushes. Only consulted for over-threshold tool results.
+    async fn file_read_path_hint(&self, call_id: &str) -> Option<String> {
+        let conn = Arc::clone(&self.conn);
+        let conversation_id = self.conversation_id;
+        let call_id = call_id.to_string();
+        run_blocking(conn, move |c| {
+            Ok(lookup_file_read_path(c, conversation_id, &call_id))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Write `content` to `memory/lcm/payloads/<file_id>`, generate
+    /// its exploration summary, and return the `<file>` reference
+    /// plus the metadata row for `large_files`.
+    async fn externalize(
+        &self,
+        content: &str,
+        path_hint: Option<String>,
+    ) -> Result<(String, LargeFileRow), EngineError> {
+        let file_id = explore::file_id(content);
+        let payload_dir = self.memory_dir.join("lcm").join("payloads");
+        tokio::fs::create_dir_all(&payload_dir)
+            .await
+            .map_err(|e| EngineError::Storage(format!("payload dir: {e}")))?;
+        let payload_path = payload_dir.join(&file_id);
+        tokio::fs::write(&payload_path, content)
+            .await
+            .map_err(|e| EngineError::Storage(format!("payload write: {e}")))?;
+
+        let kind = explore::detect_kind(path_hint.as_deref(), content);
+        let summary = explore::exploration_summary(
+            content,
+            path_hint.as_deref(),
+            &self.summarize,
+            self.ctx.lcm.large_file_summary_tokens,
+        )
+        .await;
+
+        let token_count = content.len() / 4;
+        info!(
+            file_id,
+            tokens = token_count,
+            kind = ?kind,
+            path = path_hint.as_deref().unwrap_or("(none)"),
+            "externalizing oversized payload"
+        );
+        let reference =
+            explore::format_file_reference(&file_id, path_hint.as_deref(), token_count, &summary);
+        let row = LargeFileRow {
+            file_id,
+            // With no original path, record where the payload lives.
+            path: path_hint.unwrap_or_else(|| payload_path.to_string_lossy().into_owned()),
+            mime_type: explore::mime_hint(kind).to_string(),
+            byte_size: i64::try_from(content.len()).unwrap_or(i64::MAX),
+            token_count: i64::try_from(token_count).unwrap_or(i64::MAX),
+            exploration_summary: summary,
+        };
+        Ok((reference, row))
+    }
+}
+
+/// Metadata for a `large_files` insert, produced by
+/// [`LcmEngine::externalize`] and written in the same transaction as
+/// its message.
+struct LargeFileRow {
+    file_id: String,
+    path: String,
+    mime_type: String,
+    byte_size: i64,
+    token_count: i64,
+    exploration_summary: String,
 }
 
 impl ContextEngine for LcmEngine {
     async fn push_message(&mut self, msg: Message) -> Result<(), EngineError> {
+        let (msg, large_file) = self.intercept_large(msg).await?;
         let conversation_id = self.conversation_id;
         let conn = Arc::clone(&self.conn);
-        run_blocking(conn, move |c| push_message_sync(c, conversation_id, &msg)).await
+        run_blocking(conn, move |c| {
+            push_message_sync(c, conversation_id, &msg, large_file.as_ref())
+        })
+        .await
     }
 
     async fn assemble(&self, system_prompt: &str) -> Result<AssembledContext, EngineError> {
@@ -352,12 +478,14 @@ where
 // ── Internal helpers ────────────────────────────────────────────────
 
 /// Persist `msg` into `messages` + `message_parts` and append a
-/// `'message'` row to `context_items`. Wrapped in a single transaction
-/// so a partial failure cannot leave a half-decomposed message.
+/// `'message'` row to `context_items`. When the message carries an
+/// externalized payload, its `large_files` row lands in the same
+/// transaction so a reference can never exist without its metadata.
 fn push_message_sync(
     conn: &mut Connection,
     conversation_id: i64,
     msg: &Message,
+    large_file: Option<&LargeFileRow>,
 ) -> Result<(), EngineError> {
     let role = role_str(msg);
     let content = msg.content().to_string();
@@ -384,6 +512,29 @@ fn push_message_sync(
     let message_id = tx.last_insert_rowid();
 
     insert_parts(&tx, message_id, msg)?;
+
+    // Content-addressed file ids repeat when the same payload is seen
+    // twice; keep the first row (and its first_seen_message_id).
+    if let Some(f) = large_file {
+        tx.execute(
+            "INSERT OR IGNORE INTO large_files \
+                 (file_id, conversation_id, path, mime_type, byte_size, \
+                  token_count, exploration_summary, first_seen_message_id, \
+                  created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))",
+            params![
+                f.file_id,
+                conversation_id,
+                f.path,
+                f.mime_type,
+                f.byte_size,
+                f.token_count,
+                f.exploration_summary,
+                message_id,
+            ],
+        )
+        .map_err(|e| storage_err(&e))?;
+    }
 
     let next_ord: i64 = tx
         .query_row(
@@ -717,6 +868,26 @@ fn part_id(message_id: i64, ordinal: i64) -> String {
     format!("part_{message_id}_{ordinal}")
 }
 
+/// Find the `path` argument of the `file_read` tool call with the
+/// given `call_id` in this conversation. `None` when the result came
+/// from a different tool, the call is not stored, or the arguments
+/// do not parse.
+fn lookup_file_read_path(conn: &Connection, conversation_id: i64, call_id: &str) -> Option<String> {
+    let tool_input: String = conn
+        .query_row(
+            "SELECT p.tool_input FROM message_parts p \
+             JOIN messages m ON p.message_id = m.message_id \
+             WHERE p.tool_call_id = ?1 AND p.part_type = 'tool_call' \
+               AND p.tool_name = 'file_read' AND m.conversation_id = ?2 \
+             ORDER BY p.message_id DESC LIMIT 1",
+            params![call_id, conversation_id],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let args: serde_json::Value = serde_json::from_str(&tool_input).ok()?;
+    Some(args.get("path")?.as_str()?.to_string())
+}
+
 /// Look up (or create) a conversation by name. Returns its id.
 fn ensure_conversation(conn: &Connection, name: &str) -> Result<i64, EngineError> {
     conn.execute(
@@ -776,23 +947,170 @@ mod tests {
     use crate::types::{ToolCall, ToolFunction};
 
     fn temp_engine() -> (LcmEngine, tempfile::TempDir) {
-        temp_engine_with_max_tokens(ContextConfig::default().max_tokens)
+        temp_engine_with_ctx(ContextConfig::default())
     }
 
     /// Build a temp engine with a custom `max_tokens` budget so tests
     /// can trip the soft and hard thresholds without pumping hundreds
     /// of thousands of tokens through `push_message`.
     fn temp_engine_with_max_tokens(max_tokens: u32) -> (LcmEngine, tempfile::TempDir) {
+        temp_engine_with_ctx(ContextConfig {
+            max_tokens,
+            ..ContextConfig::default()
+        })
+    }
+
+    fn temp_engine_with_ctx(ctx: ContextConfig) -> (LcmEngine, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("lcm.db");
         let memory_dir = dir.path().join("memory");
         fs::create_dir_all(&memory_dir).unwrap();
-        let ctx = ContextConfig {
-            max_tokens,
-            ..ContextConfig::default()
-        };
-        let engine = LcmEngine::new(&db_path, memory_dir, ctx).unwrap();
+        let engine =
+            LcmEngine::new(&db_path, memory_dir, ctx, canned_summarize("summary")).unwrap();
         (engine, dir)
+    }
+
+    /// Engine whose `large_file_threshold` is 10 tokens (40 bytes),
+    /// so tests can trigger externalization with small payloads.
+    fn temp_engine_small_threshold() -> (LcmEngine, tempfile::TempDir) {
+        let mut ctx = ContextConfig::default();
+        ctx.lcm.large_file_threshold = 10;
+        temp_engine_with_ctx(ctx)
+    }
+
+    fn stored_content(engine: &LcmEngine, seq: i64) -> String {
+        let conn = engine.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT content FROM messages WHERE conversation_id = ?1 AND seq = ?2",
+            params![engine.conversation_id, seq],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    // ── large payload interception ──────────────────────────────────
+
+    #[tokio::test]
+    async fn oversized_user_message_is_externalized() {
+        let (mut engine, dir) = temp_engine_small_threshold();
+        let payload = "z".repeat(100);
+        engine
+            .push_message(Message::User {
+                content: payload.clone(),
+            })
+            .await
+            .unwrap();
+
+        let content = stored_content(&engine, 0);
+        assert!(content.starts_with("<file id=\"file_"));
+        assert!(content.ends_with("</file>"));
+        assert!(content.contains("summary"));
+        assert!(!content.contains(&payload));
+
+        let (file_id, byte_size, token_count): (String, i64, i64) = {
+            let conn = engine.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT file_id, byte_size, token_count FROM large_files",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(byte_size, 100);
+        assert_eq!(token_count, 25);
+
+        // Raw payload is on disk, lossless.
+        let on_disk = fs::read_to_string(
+            dir.path()
+                .join("memory")
+                .join("lcm")
+                .join("payloads")
+                .join(&file_id),
+        )
+        .unwrap();
+        assert_eq!(on_disk, payload);
+
+        // Stored message token count reflects the reference, not the
+        // original payload.
+        let msg_tokens: i64 = {
+            let conn = engine.conn.lock().unwrap();
+            conn.query_row("SELECT token_count FROM messages", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert!(msg_tokens < token_count);
+    }
+
+    #[tokio::test]
+    async fn sub_threshold_message_stored_verbatim() {
+        let (mut engine, _dir) = temp_engine_small_threshold();
+        engine
+            .push_message(Message::User {
+                content: "short".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(stored_content(&engine, 0), "short");
+        let count: i64 = {
+            let conn = engine.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM large_files", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn tool_result_uses_file_read_path_hint() {
+        let (mut engine, _dir) = temp_engine_small_threshold();
+        engine
+            .push_message(Message::ToolCalls {
+                content: String::new(),
+                calls: vec![ToolCall::new(
+                    "c1".into(),
+                    ToolFunction {
+                        name: "file_read".into(),
+                        arguments: r#"{"path":"data/big.json"}"#.into(),
+                    },
+                )],
+            })
+            .await
+            .unwrap();
+
+        let payload = format!("[{}]", "1,".repeat(50));
+        engine
+            .push_message(Message::Tool {
+                call_id: "c1".into(),
+                content: payload,
+            })
+            .await
+            .unwrap();
+
+        let content = stored_content(&engine, 1);
+        assert!(content.contains("path=\"data/big.json\""));
+
+        let (path, mime): (String, String) = {
+            let conn = engine.conn.lock().unwrap();
+            conn.query_row("SELECT path, mime_type FROM large_files", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+        };
+        assert_eq!(path, "data/big.json");
+        assert_eq!(mime, "application/json");
+    }
+
+    #[tokio::test]
+    async fn oversized_assistant_message_not_intercepted() {
+        let (mut engine, _dir) = temp_engine_small_threshold();
+        let payload = "a".repeat(100);
+        engine
+            .push_message(Message::Assistant {
+                content: payload.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(stored_content(&engine, 0), payload);
     }
 
     #[tokio::test]
@@ -1002,12 +1320,23 @@ mod tests {
         fs::create_dir_all(&memory_dir).unwrap();
 
         {
-            let mut engine =
-                LcmEngine::new(&db_path, memory_dir.clone(), ContextConfig::default()).unwrap();
+            let mut engine = LcmEngine::new(
+                &db_path,
+                memory_dir.clone(),
+                ContextConfig::default(),
+                canned_summarize("summary"),
+            )
+            .unwrap();
             engine.switch_session("kitaebot").await.unwrap();
         }
 
-        let engine = LcmEngine::new(&db_path, memory_dir, ContextConfig::default()).unwrap();
+        let engine = LcmEngine::new(
+            &db_path,
+            memory_dir,
+            ContextConfig::default(),
+            canned_summarize("summary"),
+        )
+        .unwrap();
         assert_eq!(engine.active_session(), "kitaebot");
     }
 
@@ -1298,7 +1627,7 @@ mod tests {
     }
 
     /// Build a `SummarizeFn` that always returns the given canned
-    /// summary, regardless of input. Used for `force_compact` tests.
+    /// summary, regardless of input.
     fn canned_summarize(summary: &'static str) -> SummarizeFn {
         Arc::new(move |_prompt, _messages| Box::pin(async move { Ok(summary.to_string()) }))
     }
