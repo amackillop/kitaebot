@@ -119,13 +119,10 @@ vm-ssh *flags: (vm-run flags)
 vm-shell *flags: (vm-run flags)
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} -t root@localhost su -s /bin/sh - kitaebot
 
-# Tail kitaebot logs from the VM
+# Tail daemon, tinyproxy (refused CONNECTs), and kernel (egress drops) logs
 vm-logs:
-    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost journalctl --output cat -xfu kitaebot
-
-# Tail tinyproxy (egress filter) logs — shows refused CONNECT attempts
-vm-logs-proxy:
-    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost journalctl --output cat -xfu tinyproxy
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost \
+        journalctl --output cat -f _SYSTEMD_UNIT=kitaebot.service + _SYSTEMD_UNIT=tinyproxy.service + _TRANSPORT=kernel
 
 # Chat with the daemon via SSH socket forwarding
 chat *flags: (vm-run flags)
