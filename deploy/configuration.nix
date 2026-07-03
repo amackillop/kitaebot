@@ -45,6 +45,8 @@ in
         model = "moonshotai/kimi-k2.5";
       };
 
+      context.engine = "lcm";
+
       telegram = {
         enabled = true;
         chat_id = 7658696350;
