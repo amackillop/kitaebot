@@ -3,6 +3,10 @@
 //! Connects to a socket, prints the greeting, and enters a REPL.
 //! All input is sent as `{"content": "..."}` — the server handles
 //! slash command parsing. Exits on EOF or `/exit`.
+//!
+//! With a message argument (`kchat <socket> <message>`) it runs
+//! one-shot: sends the single message, prints the reply to stdout,
+//! and exits with the server's status. This is the scripting path.
 
 use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixStream;
@@ -29,7 +33,7 @@ enum ServerMsg {
 // ── Main ────────────────────────────────────────────────────────────
 
 fn main() {
-    let path = parse_args();
+    let (path, message) = parse_args();
 
     let stream = UnixStream::connect(&path).unwrap_or_else(|e| {
         eprintln!("Failed to connect to {}: {e}", path.display());
@@ -42,13 +46,36 @@ fn main() {
     }));
     let mut writer = stream;
 
-    // Read and print greeting.
+    // The server always opens with a greeting. In the REPL it heads
+    // the session; one-shot mode routes it to stderr so stdout carries
+    // only the reply.
     match recv(&mut reader) {
-        ServerMsg::Greeting { content } => println!("{content}\n"),
-        other => print_response(&other),
+        ServerMsg::Greeting { content } if message.is_none() => println!("{content}\n"),
+        ServerMsg::Greeting { content } => eprintln!("{content}"),
+        other => std::process::exit(print_final(&other)),
     }
 
-    // REPL loop.
+    if let Some(content) = message {
+        std::process::exit(exchange(&mut reader, &mut writer, &content));
+    }
+
+    repl(&mut reader, &mut writer);
+}
+
+/// Send one message and drain server frames until the final reply.
+/// Activity frames stream to stderr; the reply's exit code is
+/// returned (0 for a response, 1 for an error).
+fn exchange(reader: &mut io::BufReader<UnixStream>, writer: &mut UnixStream, content: &str) -> i32 {
+    send(writer, &ClientMsg { content });
+    loop {
+        match recv(reader) {
+            ServerMsg::Activity { content } => eprintln!("  ~ {content}"),
+            other => return print_final(&other),
+        }
+    }
+}
+
+fn repl(reader: &mut io::BufReader<UnixStream>, writer: &mut UnixStream) {
     let mut input = String::new();
     loop {
         print!("> ");
@@ -64,40 +91,28 @@ fn main() {
         if trimmed.is_empty() {
             continue;
         }
-
         if trimmed == "/exit" {
             break;
         }
 
-        send(&mut writer, &ClientMsg { content: trimmed });
-
-        // Read responses, printing activity lines to stderr until we
-        // get the final Response or Error.
-        loop {
-            let msg = recv(&mut reader);
-            match msg {
-                ServerMsg::Activity { content } => {
-                    eprintln!("  ~ {content}");
-                }
-                other => {
-                    print_response(&other);
-                    break;
-                }
-            }
-        }
+        exchange(reader, writer, trimmed);
     }
 }
 
-fn print_response(msg: &ServerMsg) {
+/// Print a terminal server frame and yield its exit code.
+fn print_final(msg: &ServerMsg) -> i32 {
     match msg {
         ServerMsg::Response { content } | ServerMsg::Greeting { content } => {
-            println!("{content}\n");
+            println!("{content}");
+            0
         }
         ServerMsg::Error { content } => {
-            eprintln!("{content}\n");
+            eprintln!("{content}");
+            1
         }
         ServerMsg::Activity { content } => {
             eprintln!("  ~ {content}");
+            0
         }
     }
 }
@@ -131,12 +146,12 @@ fn recv(reader: &mut io::BufReader<UnixStream>) -> ServerMsg {
     }
 }
 
-fn parse_args() -> PathBuf {
+fn parse_args() -> (PathBuf, Option<String>) {
     let mut args = std::env::args_os().skip(1);
-    if let Some(path) = args.next() {
-        PathBuf::from(path)
-    } else {
-        eprintln!("Usage: kchat <socket-path>");
+    let Some(path) = args.next() else {
+        eprintln!("Usage: kchat <socket-path> [message]");
         std::process::exit(1);
-    }
+    };
+    let message = args.next().map(|m| m.to_string_lossy().into_owned());
+    (PathBuf::from(path), message)
 }

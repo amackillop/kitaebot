@@ -59,11 +59,18 @@ fix:
 SSH_OPTS := "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
 # Build the VM (uses Determinate Nix binary cache)
+#
+# The deploy flake locks the parent kitaebot input (path:..) by content
+# hash, so changes to vm/ or src/ are invisible without re-locking. Update
+# the kitaebot input ahead of every build so vm-build always reflects the
+# current working tree.
 vm-build:
+    nix flake update kitaebot --flake ./deploy
     nix build ./deploy --option extra-substituters https://install.determinate.systems --option extra-trusted-public-keys cache.flakehub.com-3:hJuILl5sVK4iKm86JzgdXW12Y2Hwd5G07qKtHTOcDCM=
 
-# Build and start the VM if not already running, wait for SSH (--rebuild: restart VM, --fresh: wipe state)
-vm-run *flags: vm-build
+# Build and start the VM if not already running, wait for SSH
+# (--rebuild: rebuild image and restart, --fresh: wipe qcow2 state; combinable)
+vm-run *flags:
     #!/usr/bin/env bash
     set -euo pipefail
     FRESH=false
@@ -75,14 +82,21 @@ vm-run *flags: vm-build
             *) echo "Unknown flag: $flag" >&2; exit 1 ;;
         esac
     done
+    # If neither flag is set and the VM already responds, do nothing.
+    if ! $FRESH && ! $REBUILD; then
+        if ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=1 {{SSH_OPTS}} root@localhost exit 2>/dev/null; then
+            echo "VM already running"
+            exit 0
+        fi
+    fi
+    if $REBUILD; then
+        just vm-build
+    fi
+    if $FRESH || $REBUILD; then
+        pkill -f 'qemu-system.*-name kitaebot' 2>/dev/null && sleep 1 || true
+    fi
     if $FRESH; then
-        pkill -f 'qemu-system.*-name kitaebot' 2>/dev/null && sleep 1 || true
         rm -f kitaebot.qcow2
-    elif $REBUILD; then
-        pkill -f 'qemu-system.*-name kitaebot' 2>/dev/null && sleep 1 || true
-    elif ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=1 {{SSH_OPTS}} root@localhost exit 2>/dev/null; then
-        echo "VM already running"
-        exit 0
     fi
     echo "Starting VM in background..."
     BOOT_START=$SECONDS
@@ -126,3 +140,17 @@ chat *flags: (vm-run flags)
         [ -S "$SOCK" ] && break || sleep 0.1
     done
     cargo run --bin kchat -- "$SOCK"
+
+# Send one message to the daemon and print its reply, then exit
+ask message: (vm-run)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SOCK=$(mktemp -d)/chat.sock
+    trap 'kill $SSH_PID 2>/dev/null || true; rm -rf "$(dirname "$SOCK")"' EXIT
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} \
+        -L "$SOCK":/run/kitaebot/chat.sock -N root@localhost &
+    SSH_PID=$!
+    for i in {1..30}; do
+        [ -S "$SOCK" ] && break || sleep 0.1
+    done
+    cargo run --bin kchat -- "$SOCK" "{{message}}"
