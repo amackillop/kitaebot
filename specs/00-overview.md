@@ -81,15 +81,18 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [05](05-workspace.md) | Workspace | Directory structure and prompt assembly |
 | [06](06-system-prompt.md) | System Prompt | Prompt files, assembly, and injection |
 | [07](07-heartbeat.md) | Heartbeat | Periodic awareness checks |
-| [08](08-cli.md) | Binaries | Daemon lifecycle and socket client |
+| [08](08-binaries.md) | Binaries | Daemon lifecycle and socket client |
 | [09](09-vm.md) | NixOS VM | Deployment and system configuration |
 | [10](10-channels.md) | Channels | External messaging interfaces (Telegram, Unix socket, GitHub) |
 | [11](11-safety.md) | Safety | Leak detection and output wrapping |
 | [12](12-context.md) | Context | Token budget and compaction |
 | [13](13-credentials.md) | Credentials | Secret loading and isolation |
-| [14](14-memory.md) | Memory | Long-term recall (not yet implemented) |
+| [14](14-context-engine.md) | Context Engine | Pluggable context management (LCM DAG, sessions) |
 | [15](15-sandbox.md) | Sandbox | Landlock filesystem confinement |
 | [16](16-activity.md) | Activity | Structured turn events for channel observability |
+| [17](17-notify.md) | Notify | Push notifications to user (not yet implemented) |
+| [18](18-egress-filter.md) | Egress Filter | Domain-allowlisted outbound proxy |
+| [19](19-sub-agents.md) | Sub-Agents | Task delegation with isolated child contexts |
 
 ## Data Flow
 
