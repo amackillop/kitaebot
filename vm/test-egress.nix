@@ -1,25 +1,25 @@
 # NixOS VM test for egress filtering (spec 18)
 #
 # Verifies:
-#   - dnsmasq resolves allowlisted domains, NXDOMAIN for the rest
-#   - nftables drops direct-IP connections from kitaebot uid
-#   - nftables allows HTTPS to resolved IPs from kitaebot uid
-#   - nftset is populated by dnsmasq after upstream resolution
+#   - tinyproxy allows CONNECT to allowlisted domains
+#   - tinyproxy refuses (and logs) CONNECT to anything else,
+#     including allowlisted names used as a spoofed suffix
+#   - nftables drops (and logs) direct egress from the kitaebot uid
 #   - root (non-kitaebot uid) is unrestricted
-#   - Service ordering: nftables → dnsmasq → kitaebot
 #
 # Test topology:
 #   server (192.168.1.2):
 #     - nginx on 443 (self-signed TLS, returns "ok")
-#     - dnsmasq on 53 (authoritative for api.github.com → 192.168.1.2)
 #   kitaebot (192.168.1.1):
-#     - egress-filtering dnsmasq on 127.0.0.2 (upstream → server:53)
+#     - tinyproxy CONNECT allowlist on 127.0.0.1:8888
 #     - nftables kitaebot-egress table
+#     - /etc/hosts maps the test domains to the server, so the proxy
+#       can resolve them without external DNS
 #
 # Run:
 #   nix build .#nixosTests.x86_64-linux.egress --print-build-logs
 #   # or
-#   just check-egress
+#   just test-nixos-one egress
 {
   pkgs,
   self,
@@ -29,11 +29,7 @@ pkgs.testers.nixosTest {
   name = "kitaebot-egress-filter";
 
   nodes.server = _: {
-    networking.firewall.allowedTCPPorts = [
-      53
-      443
-    ];
-    networking.firewall.allowedUDPPorts = [ 53 ];
+    networking.firewall.allowedTCPPorts = [ 443 ];
 
     # HTTPS endpoint for connectivity testing.
     services.nginx = {
@@ -43,23 +39,6 @@ pkgs.testers.nixosTest {
         sslCertificate = ./test-fixtures/server.crt;
         sslCertificateKey = ./test-fixtures/server.key;
         locations."/".return = "200 'ok'";
-      };
-    };
-
-    # Authoritative DNS: api.github.com → this server's test VLAN IP.
-    # kitaebot's dnsmasq forwards allowlisted queries here, which
-    # triggers nftset population with the resolved IP.
-    services.dnsmasq = {
-      enable = true;
-      settings = {
-        listen-address = "0.0.0.0";
-        bind-interfaces = true;
-        no-resolv = true;
-        no-poll = true;
-        # Answer api.github.com with the server's static VLAN address.
-        address = "/api.github.com/192.168.1.2";
-        # Reject everything else.
-        local = "/#/";
       };
     };
   };
@@ -76,12 +55,18 @@ pkgs.testers.nixosTest {
         '';
         secretsDir = "/tmp/fake-secrets";
         sshKeys = [ ];
-        # Forward allowlisted queries to the server's DNS.
-        dnsUpstream = "192.168.1.2";
       };
 
       # Don't run the real daemon (no credential files in the test VM).
       systemd.services.kitaebot.enable = false;
+
+      # Both names resolve to the server: the allowlisted domain must
+      # get through the proxy, the spoofed suffix must be refused by
+      # name even though it resolves fine.
+      networking.hosts."192.168.1.2" = [
+        "api.github.com"
+        "api.github.com.evil.test"
+      ];
 
       virtualisation = {
         memorySize = lib.mkForce 1024;
@@ -89,7 +74,6 @@ pkgs.testers.nixosTest {
       };
 
       environment.systemPackages = with pkgs; [
-        dig
         curl
         iproute2
       ];
@@ -97,65 +81,52 @@ pkgs.testers.nixosTest {
 
   testScript = ''
     server.wait_for_unit("nginx.service")
-    server.wait_for_unit("dnsmasq.service")
 
     kitaebot.wait_for_unit("nftables.service")
-    kitaebot.wait_for_unit("dnsmasq.service")
+    kitaebot.wait_for_unit("tinyproxy.service")
+    kitaebot.wait_for_open_port(8888)
 
-    # ── Service ordering ──────────────────────────────────────────────
-    with subtest("dnsmasq starts after nftables"):
-        nft_start = kitaebot.succeed(
-            "systemctl show -p ActiveEnterTimestampMonotonic nftables.service | cut -d= -f2"
-        ).strip()
-        dns_start = kitaebot.succeed(
-            "systemctl show -p ActiveEnterTimestampMonotonic dnsmasq.service | cut -d= -f2"
-        ).strip()
-        assert int(nft_start) <= int(dns_start), \
-            f"nftables ({nft_start}) should start before dnsmasq ({dns_start})"
+    proxy = "--proxy http://127.0.0.1:8888"
 
-    # ── nftables rules loaded ─────────────────────────────────────────
-    with subtest("nftables sets and chains exist"):
-        kitaebot.succeed("nft list set inet kitaebot-egress allowed_v4")
-        kitaebot.succeed("nft list set inet kitaebot-egress allowed_v6")
-        kitaebot.succeed("nft list chain inet kitaebot-egress output")
-        kitaebot.succeed("nft list chain inet kitaebot-egress nat_output")
-
-    # ── DNS filtering ─────────────────────────────────────────────────
-    with subtest("allowlisted domain resolves for kitaebot uid"):
-        result = kitaebot.succeed(
-            "sudo -u kitaebot dig +short +timeout=5 api.github.com @127.0.0.2"
+    # ── Proxy allowlist ───────────────────────────────────────────────
+    with subtest("kitaebot uid reaches allowlisted domain via proxy"):
+        out = kitaebot.succeed(
+            f"sudo -u kitaebot curl -sk {proxy} --max-time 10 https://api.github.com/"
         )
-        assert result.strip() != "", "Expected IP, got empty result"
-        assert "192.168.1.2" in result, f"Expected 192.168.1.2, got: {result}"
+        assert "ok" in out, f"Expected 'ok' from nginx, got: {out}"
 
-    with subtest("blocked domain returns NXDOMAIN for kitaebot uid"):
-        result = kitaebot.succeed(
-            "sudo -u kitaebot dig +timeout=5 evil.example.com @127.0.0.2 || true"
-        )
-        assert "NXDOMAIN" in result, f"Expected NXDOMAIN, got: {result}"
-
-    # ── nftset populated by dnsmasq ───────────────────────────────────
-    with subtest("nft set contains resolved IP after DNS lookup"):
-        output = kitaebot.succeed("nft list set inet kitaebot-egress allowed_v4")
-        assert "192.168.1.2" in output, \
-            f"Expected 192.168.1.2 in allowed_v4 set, got: {output}"
-
-    # ── nftables IP enforcement ───────────────────────────────────────
-    with subtest("kitaebot uid can reach allowlisted HTTPS endpoint"):
-        kitaebot.succeed(
-            "sudo -u kitaebot curl -sk --max-time 10 https://192.168.1.2/"
-        )
-
-    with subtest("kitaebot uid cannot connect to IP not in nft set"):
-        # 192.0.2.1 is TEST-NET-1 (RFC 5737), guaranteed non-routable
+    with subtest("proxy refuses non-allowlisted domain"):
         kitaebot.fail(
-            "sudo -u kitaebot curl -sk --max-time 3 --connect-timeout 2 https://192.0.2.1/"
+            f"sudo -u kitaebot curl -sk {proxy} --max-time 10 https://evil.example.com/"
         )
 
-    with subtest("nftables drop counter increments"):
-        output = kitaebot.succeed("nft list chain inet kitaebot-egress output")
-        assert "counter packets 0" not in output, \
-            f"Expected drop counter > 0, got: {output}"
+    with subtest("proxy refuses allowlisted name as spoofed suffix"):
+        # api.github.com.evil.test resolves (to the server, even), but
+        # the anchored filter regex must not match it.
+        kitaebot.fail(
+            f"sudo -u kitaebot curl -sk {proxy} --max-time 10 https://api.github.com.evil.test/"
+        )
+
+    with subtest("proxy refuses CONNECT to non-443 ports"):
+        kitaebot.fail(
+            f"sudo -u kitaebot curl -sk {proxy} --max-time 10 https://api.github.com:8443/"
+        )
+
+    with subtest("proxy logs the refusals"):
+        kitaebot.succeed(
+            "journalctl -u tinyproxy --no-pager | grep -i 'filtered domain'"
+        )
+
+    # ── nftables direct-egress lockdown ───────────────────────────────
+    with subtest("kitaebot uid cannot bypass the proxy"):
+        kitaebot.fail(
+            "sudo -u kitaebot curl -sk --max-time 3 --connect-timeout 2 https://192.168.1.2/"
+        )
+
+    with subtest("nftables drop counter increments and drops are logged"):
+        out = kitaebot.succeed("nft list chain inet kitaebot-egress output")
+        assert "counter packets 0" not in out, f"Expected drop counter > 0, got: {out}"
+        kitaebot.succeed("journalctl -k --no-pager | grep 'kitaebot-egress-drop'")
 
     # ── Root is unrestricted ──────────────────────────────────────────
     with subtest("root can connect to the server directly"):

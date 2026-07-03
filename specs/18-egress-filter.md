@@ -2,7 +2,7 @@
 
 ## Motivation
 
-Restrict outbound network access from the `kitaebot` uid to a DNS-based domain
+Restrict outbound network access from the `kitaebot` uid to a domain
 allowlist. Prevents prompt-injection-driven exfiltration — a compromised agent
 cannot reach attacker-controlled infrastructure.
 
@@ -12,16 +12,22 @@ cannot reach attacker-controlled infrastructure.
 
 Two enforcement layers, each sufficient independently:
 
-**Layer 1 — DNS filtering (dnsmasq).** Local DNS proxy on `127.0.0.2` resolves
-only allowlisted domains. All DNS queries from the kitaebot uid are redirected
-via nftables DNAT. Unlisted domains return NXDOMAIN.
+**Layer 1 — forward proxy (tinyproxy).** Listens on `127.0.0.1:8888`. The
+kitaebot service carries `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (and
+lowercase) env vars; the subprocess env scrubber (`SAFE_ENV_VARS` in
+`src/tools/mod.rs`) forwards them to every exec-tool and CLI child.
+`NO_PROXY=localhost,127.0.0.1` keeps loopback traffic (local dev servers)
+out of the proxy filter. HTTPS clients send the target hostname in
+the CONNECT request, so the proxy filters by *name* — no DNS interception, no
+IP sets, no staleness. CONNECT is allowed only to allowlisted domains on port
+443; everything else is refused with HTTP 403 and logged.
 
-**Layer 2 — IP enforcement (nftables).** Output chain matches `meta skuid 900`
-(static UID). Only allows TCP 443 to IPs that dnsmasq resolved and injected
-into nftables sets via the `nftset` directive. Direct-IP connections are
-dropped.
+**Layer 2 — uid lockdown (nftables).** Output chain matches `meta skuid 900`
+(static UID) and permits loopback only. Any attempt to bypass the proxy —
+direct TCP, DNS (a tunneling vector), anything — is dropped and logged.
 
-Together: DNS prevents resolution, nftables prevents direct-IP bypass.
+Together: the proxy decides what is reachable, nftables guarantees the proxy
+is the only path out.
 
 ### Default Allowlist
 
@@ -35,89 +41,96 @@ Together: DNS prevents resolution, nftables prevents direct-IP bypass.
 | `flakehub.com` | FlakeHub Nix registry |
 | `api.perplexity.ai` | Web search tool |
 
-dnsmasq's `server=/domain/` matches the domain and all subdomains.
+Each domain matches itself and all subdomains.
 
-### dnsmasq Configuration
+### tinyproxy Configuration
 
-Generated from `egressAllowlist` and `dnsUpstream`:
+Generated from `egressAllowlist`:
 
-- `listen-address=127.0.0.2`, `bind-dynamic` (allows late binding after
-  nftables)
-- `no-resolv`, `no-poll` (no external resolv.conf)
-- `local=/#/` (NXDOMAIN for all non-forwarded domains)
-- `server=/<domain>/<upstream>` per allowlisted domain
-- `nftset=/<domain>/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6`
-  per domain (injects resolved IPs into nft sets)
-- `log-queries=true` (operational visibility)
-- `resolveLocalQueries = false` (prevents dnsmasq from becoming the system
-  resolver — root and nix-daemon must not be filtered)
+- `Listen 127.0.0.1`, `Port 8888`, `Allow 127.0.0.1` — loopback only
+- `ConnectPort 443` — HTTPS tunnels only, no other CONNECT ports
+- `Filter` file with one anchored extended regex per domain:
+  `^(.*\.)?domain\.tld$`. Anchoring is load-bearing: an unanchored
+  `api\.github\.com` would also match `api.github.com.evil.net`
+- `FilterType ere`, `FilterDefaultDeny yes` — deny anything unmatched
+- `LogLevel Notice` — refused CONNECTs are logged
+  ("Proxying refused on filtered domain") without per-request noise
+
+tinyproxy runs in the foreground under systemd, so its log lands in the
+journal (`journalctl -u tinyproxy`, or `just vm-logs-proxy` from the host).
 
 ### nftables Table
 
 ```nft
 table inet kitaebot-egress {
-  set allowed_v4 { type ipv4_addr; flags timeout; timeout 1h }
-  set allowed_v6 { type ipv6_addr; flags timeout; timeout 1h }
-
   chain output {
     type filter hook output priority 0; policy accept;
     meta skuid != 900 accept              # only restrict kitaebot uid
-    oifname "lo" accept                   # loopback always allowed
-    ct state established,related accept   # response traffic
-    meta l4proto { tcp, udp } th dport 53 ip daddr 127.0.0.2 accept  # DNS to proxy
-    tcp dport 443 ip daddr @allowed_v4 accept   # HTTPS to resolved IPs
-    tcp dport 443 ip6 daddr @allowed_v6 accept
+    oifname "lo" accept                   # Unix sockets, forward proxy
+    ct state established,related accept   # socketless kernel packets
     log prefix "kitaebot-egress-drop: " counter drop  # everything else
-  }
-
-  chain nat_output {
-    type nat hook output priority -100; policy accept;
-    meta skuid 900 meta l4proto { tcp, udp } th dport 53 dnat ip to 127.0.0.2
   }
 }
 ```
 
-The nat chain (priority -100) rewrites DNS before the filter chain (priority 0)
-evaluates the packet.
+The `ct state` rule exists because `meta skuid` is undefined for packets
+with no owning socket (kernel-generated RSTs for closed sockets, TIME_WAIT
+ACKs): the `skuid != 900` match cannot exclude them, so without it they
+fall through to the drop rule and spam the log. It opens nothing — the
+kitaebot uid can never establish a non-loopback flow, since the initial
+SYN is dropped.
+
+Dropped packets appear in the kernel log (`journalctl -k`) with the
+`kitaebot-egress-drop:` prefix, so surprising failures are always visible.
+
+### IPv6
+
+`networking.enableIPv6 = false` guest-wide. QEMU user-mode networking does
+not forward IPv6, and with no v6 route the proxy's `connect()` to an AAAA
+address fails instantly instead of stalling before the v4 fallback.
 
 ### Service Ordering
 
 ```
-nftables.service → dnsmasq.service → kitaebot.service
+tinyproxy.service → kitaebot.service
 ```
 
-nft sets must exist before dnsmasq writes to them. DNS must be available before
-kitaebot connects.
+The proxy must accept connections before the daemon starts.
 
 ### Module Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `egressAllowlist` | list of str | (7 domains above) | Domains the kitaebot process may connect to |
-| `dnsUpstream` | str | `"9.9.9.9"` | Upstream DNS resolver (Quad9) |
 
 ### Side Effects
 
 - **`web_fetch` tool**: restricted to allowlisted domains only
-- **Nix operations**: unaffected (nix daemon runs as root, not kitaebot uid).
-  If kitaebot invokes nix commands that do HTTP in-process, those would be
-  blocked. Add `cache.nixos.org` to `egressAllowlist` if needed.
-- **Git**: `github.com` and `api.github.com` are allowlisted. HTTPS
-  clone/push works. SSH git (port 22) is not allowed.
+- **DNS**: the kitaebot uid has no DNS at all. Proxy-aware clients don't
+  need it (the hostname travels in CONNECT); anything that resolves first
+  fails fast and the drop is logged
+- **Nix operations**: nix-daemon (root) is unaffected. Client-side fetches
+  (flake inputs) run as the kitaebot uid and honor `https_proxy`
+- **Git**: HTTPS clone/push works via the proxy. SSH git (port 22) is not
+  possible — the proxy only tunnels to port 443
+- **Plain HTTP**: proxied GETs to allowlisted domains work; everything else
+  is refused
 - **Other system services**: unaffected (only uid 900 is filtered)
 
 ## Boundaries
 
 ### Owns
 
-- nftables table definition (sets, chains, rules)
-- dnsmasq configuration for DNS-based filtering
-- Domain allowlist and upstream DNS config
+- tinyproxy configuration and the generated filter file
+- nftables table definition
+- Domain allowlist
+- Proxy env vars on the kitaebot service
 - Service ordering constraints
 
 ### Does Not Own
 
-- The kitaebot binary — it is unaware of egress filtering
+- The kitaebot binary — it is unaware of egress filtering beyond honoring
+  standard proxy env vars via its HTTP client
 - systemd hardening — complements `RestrictAddressFamilies` but is independent
 - VM-level networking — orthogonal to guest-level filtering
 
@@ -125,48 +138,52 @@ kitaebot connects.
 
 | Failure | Behavior |
 |---------|----------|
-| nftables fails to load | dnsmasq and kitaebot don't start (ordering dependency) |
-| dnsmasq fails to start | kitaebot doesn't start (ordering dependency) |
-| Allowlisted domain unreachable | Normal DNS/connection failure |
-| nft set entry expires (1h TTL) | Next DNS lookup re-populates the set |
+| nftables fails to load | Firewall inactive; proxy still filters by domain |
+| tinyproxy fails to start | kitaebot starts but every request fails (connection refused to 127.0.0.1:8888); nftables still blocks direct egress |
+| Blocked domain requested | HTTP 403 from proxy, refusal logged in tinyproxy journal |
+| Direct egress attempted | Packet dropped, logged in kernel journal |
+| Allowlisted domain unreachable | Normal upstream connection failure, surfaced through the proxy |
 
 ## Constraints
 
 - Static UID 900 required (nftables matches by numeric UID, no NSS lookup)
-- `nftset` directive requires dnsmasq >= 2.87
+- `FilterType` requires tinyproxy >= 1.11
 - All allowlisted traffic must use HTTPS (port 443) — no other ports allowed
-- nft set entries expire after 1 hour
+- Clients must honor proxy env vars; anything that doesn't is blocked by
+  nftables (fail closed, logged)
 
 ## Verification
 
 Automated NixOS VM test in `vm/test-egress.nix` (run via
 `just test-nixos-one egress`). Two QEMU VMs on a shared VLAN:
 
-- **server** — nginx on 443 (self-signed TLS) + dnsmasq on 53 (authoritative
-  for test domain)
-- **kitaebot** — full egress filter stack
+- **server** — nginx on 443 (self-signed TLS)
+- **kitaebot** — full egress filter stack, test domains mapped to the
+  server via `/etc/hosts`
 
 Test coverage:
 
 | Subtest | Validates |
 |---------|-----------|
-| Service ordering | nftables starts before dnsmasq |
-| Sets and chains exist | nft table structure loaded |
-| Allowlisted domain resolves | dnsmasq forwards, returns IP |
-| Blocked domain NXDOMAIN | `local=/#/` returns NXDOMAIN |
-| nft set populated | `nftset` injects resolved IP |
-| Allowlisted HTTPS reachable | curl to resolved IP succeeds |
-| Blocked IP dropped | curl to non-allowlisted IP fails |
-| Drop counter increments | Drop rule is hit |
+| Allowlisted CONNECT succeeds | Proxy tunnels to allowlisted domain |
+| Blocked domain refused | `FilterDefaultDeny` rejects unlisted hosts |
+| Spoofed suffix refused | Anchored regex rejects `api.github.com.evil.test` |
+| Non-443 CONNECT refused | `ConnectPort` restriction holds |
+| Refusals logged | tinyproxy journal contains the filter refusal |
+| Direct egress dropped | nftables blocks proxy bypass from uid 900 |
+| Drop counter + kernel log | Drops are counted and logged |
 | Root unrestricted | Non-kitaebot uid bypasses all rules |
 
 ## Known Limitations
 
-1. **Shared IP ranges** — if an allowlisted domain shares a CDN IP with a
-   malicious service, that service becomes reachable on port 443
-2. **No per-domain port granularity** — all allowlisted IPs share port 443
-3. **DNS-over-HTTPS bypass** — mitigated by nftables IP enforcement (DoH
-   resolver IP won't be in the allowed set)
+1. **No TLS inspection** — the proxy sees only the CONNECT hostname. A
+   compromised agent can exfiltrate *to allowlisted domains* (e.g. a GitHub
+   repo it can write to). Rate limiting is a possible future mitigation
+   (see FUTURE.md)
+2. **Hostname is client-asserted** — the proxy connects to whatever the
+   allowlisted name resolves to; it does not verify the TLS SNI matches.
+   Irrelevant here since DNS resolution happens in the proxy, outside the
+   kitaebot uid's control
 
 ## Open Questions
 

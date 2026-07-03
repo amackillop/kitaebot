@@ -123,9 +123,9 @@ vm-shell *flags: (vm-run flags)
 vm-logs:
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost journalctl --output cat -xfu kitaebot
 
-# Tail dnsmasq (egress filter) logs — shows allowed/blocked DNS queries
-vm-logs-dns:
-    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost journalctl --output cat -xfu dnsmasq
+# Tail tinyproxy (egress filter) logs — shows refused CONNECT attempts
+vm-logs-proxy:
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost journalctl --output cat -xfu tinyproxy
 
 # Chat with the daemon via SSH socket forwarding
 chat *flags: (vm-run flags)

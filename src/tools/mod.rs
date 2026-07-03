@@ -69,6 +69,14 @@ const SAFE_ENV_VARS: &[&str] = &[
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "CURL_CA_BUNDLE",
+    // Egress proxy (spec 18) — children must inherit the proxy or the
+    // firewall drops their traffic. Both cases: tooling disagrees.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
     // Workspace
     "KITAEBOT_WORKSPACE",
     // GPG

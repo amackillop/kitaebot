@@ -15,7 +15,6 @@
 #   kitaebot.promptsDir - Directory of .md prompt files symlinked into the workspace
 #   kitaebot.vm              - VM resource options: { memorySize, cores, diskSize } (all in MB except cores)
 #   kitaebot.egressAllowlist - Domains the kitaebot uid may connect to (all others blocked)
-#   kitaebot.dnsUpstream     - Upstream DNS resolver for allowlisted domains (default: Quad9)
 #
 # For local development, see deploy/configuration.nix
 {
@@ -36,8 +35,19 @@ let
   # depending on user-creation ordering.
   kitaebotUid = 900;
 
-  # Egress filter — loopback address for the filtering DNS proxy.
-  egressDnsAddr = "127.0.0.2";
+  # Egress filter — the daemon reaches the network only through a
+  # local forward proxy that allowlists CONNECT hosts by name.
+  egressProxyPort = 8888;
+  egressProxyUrl = "http://127.0.0.1:${toString egressProxyPort}";
+
+  # One anchored ERE per allowlisted domain, matching the domain and
+  # its subdomains. Anchoring matters: an unanchored `api\.github\.com`
+  # would also match `api.github.com.evil.net`.
+  egressFilterFile = pkgs.writeText "kitaebot-egress-filter" (
+    lib.concatMapStrings (
+      d: "^(.*\\.)?${lib.replaceStrings [ "." ] [ "\\." ] d}$\n"
+    ) cfg.egressAllowlist
+  );
 
   gitEnabled = cfg.settings.git.enabled or false;
   githubEnabled = cfg.settings.github.enabled or false;
@@ -168,12 +178,6 @@ in
       ];
       description = "Domains the kitaebot process may connect to. All others blocked.";
     };
-
-    dnsUpstream = lib.mkOption {
-      type = lib.types.str;
-      default = "9.9.9.9";
-      description = "Upstream DNS resolver for allowlisted domains (Quad9)";
-    };
   };
 
   config = {
@@ -183,56 +187,39 @@ in
       hostName = "kitaebot";
       firewall.allowedTCPPorts = [ 22 ];
 
-      # ── Egress filter: nftables IP enforcement (spec 18) ────────────
+      # QEMU user-mode networking has no IPv6 egress. With no v6 route
+      # the proxy's connect() to AAAA records fails instantly instead of
+      # stalling before the v4 fallback.
+      enableIPv6 = false;
+
+      # ── Egress filter: nftables lockdown (spec 18) ──────────────────
       #
-      # Output chain scoped to kitaebot uid. Only allows TCP 443 to IPs
-      # that dnsmasq resolved and injected into the nft set via `nftset`.
-      # Direct-IP connections (bypassing DNS) are dropped.
+      # The kitaebot uid may only talk to loopback — everything it needs
+      # goes through the tinyproxy allowlist. Any direct egress attempt
+      # (including DNS, a tunneling vector) is dropped and logged.
       nftables = {
         enable = true;
         tables."kitaebot-egress" = {
           family = "inet";
           content = ''
-            set allowed_v4 {
-              type ipv4_addr
-              flags timeout
-              timeout 1h
-            }
-
-            set allowed_v6 {
-              type ipv6_addr
-              flags timeout
-              timeout 1h
-            }
-
             chain output {
               type filter hook output priority 0; policy accept;
 
               # Only restrict kitaebot uid — root, sshd, nix-daemon unaffected
               meta skuid != ${toString kitaebotUid} accept
 
-              # Loopback always allowed (Unix sockets, DNS proxy)
+              # Loopback only (Unix sockets, forward proxy)
               oifname "lo" accept
 
-              # Established connections (responses to allowed requests)
+              # Kernel-generated packets (RSTs for closed sockets,
+              # TIME_WAIT ACKs) have no owning socket, so the skuid
+              # match above cannot exclude them. Let tracked flows
+              # finish; kitaebot can't abuse this because it can never
+              # establish a non-loopback flow (the SYN is dropped).
               ct state established,related accept
-
-              # DNS to local filtering proxy only
-              meta l4proto { tcp, udp } th dport 53 ip daddr ${egressDnsAddr} accept
-
-              # HTTPS to IPs resolved from allowlisted domains
-              tcp dport 443 ip daddr @allowed_v4 accept
-              tcp dport 443 ip6 daddr @allowed_v6 accept
 
               # Everything else from kitaebot uid is dropped
               log prefix "kitaebot-egress-drop: " counter drop
-            }
-
-            chain nat_output {
-              type nat hook output priority -100; policy accept;
-
-              # Redirect kitaebot DNS queries to the filtering proxy
-              meta skuid ${toString kitaebotUid} meta l4proto { tcp, udp } th dport 53 dnat ip to ${egressDnsAddr}
             }
           '';
         };
@@ -274,110 +261,118 @@ in
         "L+ /var/lib/kitaebot/.config/direnv/direnv.toml - - - - ${direnvConfig}"
       ];
 
-      # nft sets must exist before dnsmasq writes to them.
-      services.dnsmasq = {
-        after = [ "nftables.service" ];
-        wants = [ "nftables.service" ];
-      };
-
-      # Kitaebot daemon
-      services.kitaebot = {
-        description = "Kitaebot daemon";
-        wantedBy = [ "multi-user.target" ];
-        after = [
-          "network-online.target"
-          "dnsmasq.service"
-        ];
-        wants = [
-          "network-online.target"
-          "dnsmasq.service"
-        ];
-        serviceConfig = {
-          Type = "simple";
-          ExecStartPre = lib.optional signingEnabled (
-            let
-              gpgImport = pkgs.writeShellScript "kitaebot-gpg-import" ''
-                export GNUPGHOME=/var/lib/kitaebot/.gnupg
-                mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
-                ${pkgs.gnupg}/bin/gpg --batch --import "$CREDENTIALS_DIRECTORY/gpg-signing-key"
-              '';
-            in
-            "${gpgImport}"
-          );
-          ExecStart = "${config.kitaebot.package}/bin/kitaebot run";
-          Restart = "on-failure";
-          RestartSec = "10s";
-          User = "kitaebot";
-          Group = "kitaebot";
-          WorkingDirectory = "/var/lib/kitaebot";
-
-          # The exec tool spawns nix builds (evaluator + builders + fetchers)
-          # and arbitrary dev toolchains (Go, Rust, etc). Raise both the
-          # cgroup task limit and the per-UID process/thread limit — they
-          # are independent enforcement points and both default too low
-          # for nix build workloads in a small VM.
-          TasksMax = 4096;
-          LimitNPROC = 4096;
-
-          # Secrets as files, not env vars.
-          # systemd copies these to /run/credentials/kitaebot.service/
-          # with mode 0400 and sets CREDENTIALS_DIRECTORY automatically.
-          LoadCredential = [
-            "provider-api-key:${config.kitaebot.secretsDir}/provider-api-key"
-            "telegram-bot-token:${config.kitaebot.secretsDir}/telegram-bot-token"
-          ]
-          ++ lib.optional needsGithubToken "github-token:${config.kitaebot.secretsDir}/github-token"
-          ++ lib.optional signingEnabled "gpg-signing-key:${config.kitaebot.secretsDir}/gpg-signing-key";
-
-          # Process isolation
-          ProtectProc = "invisible";
-          ProcSubset = "pid";
-
-          # Filesystem
-          ProtectSystem = "strict";
-          ProtectHome = true;
-          ReadWritePaths = [ "/var/lib/kitaebot" ];
-          RuntimeDirectory = "kitaebot";
-          PrivateTmp = true;
-
-          # Privilege
-          NoNewPrivileges = true;
-          CapabilityBoundingSet = "";
-          AmbientCapabilities = "";
-
-          # Syscalls
-          SystemCallFilter = [
-            "@system-service"
-            "~@privileged"
+      services = {
+        # Kitaebot daemon
+        kitaebot = {
+          description = "Kitaebot daemon";
+          wantedBy = [ "multi-user.target" ];
+          after = [
+            "network-online.target"
+            "tinyproxy.service"
           ];
-          SystemCallArchitectures = "native";
-
-          # Network
-          RestrictAddressFamilies = [
-            "AF_INET"
-            "AF_INET6"
-            "AF_UNIX"
+          wants = [
+            "network-online.target"
+            "tinyproxy.service"
           ];
+          serviceConfig = {
+            Type = "simple";
+            ExecStartPre = lib.optional signingEnabled (
+              let
+                gpgImport = pkgs.writeShellScript "kitaebot-gpg-import" ''
+                  export GNUPGHOME=/var/lib/kitaebot/.gnupg
+                  mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
+                  ${pkgs.gnupg}/bin/gpg --batch --import "$CREDENTIALS_DIRECTORY/gpg-signing-key"
+                '';
+              in
+              "${gpgImport}"
+            );
+            ExecStart = "${config.kitaebot.package}/bin/kitaebot run";
+            Restart = "on-failure";
+            RestartSec = "10s";
+            User = "kitaebot";
+            Group = "kitaebot";
+            WorkingDirectory = "/var/lib/kitaebot";
 
-          # Kernel
-          ProtectKernelTunables = true;
-          ProtectKernelModules = true;
-          ProtectKernelLogs = true;
-          ProtectControlGroups = true;
-          ProtectClock = true;
-          LockPersonality = true;
-          RestrictNamespaces = true;
-          RestrictRealtime = true;
-          RestrictSUIDSGID = true;
-          MemoryDenyWriteExecute = true;
-        };
-        environment = {
-          KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
-          RUST_LOG = cfg.logLevel;
-          PATH = lib.mkForce toolPath;
-        }
-        // lib.optionalAttrs signingEnabled {
-          GNUPGHOME = "/var/lib/kitaebot/.gnupg";
+            # The exec tool spawns nix builds (evaluator + builders + fetchers)
+            # and arbitrary dev toolchains (Go, Rust, etc). Raise both the
+            # cgroup task limit and the per-UID process/thread limit — they
+            # are independent enforcement points and both default too low
+            # for nix build workloads in a small VM.
+            TasksMax = 4096;
+            LimitNPROC = 4096;
+
+            # Secrets as files, not env vars.
+            # systemd copies these to /run/credentials/kitaebot.service/
+            # with mode 0400 and sets CREDENTIALS_DIRECTORY automatically.
+            LoadCredential = [
+              "provider-api-key:${config.kitaebot.secretsDir}/provider-api-key"
+              "telegram-bot-token:${config.kitaebot.secretsDir}/telegram-bot-token"
+            ]
+            ++ lib.optional needsGithubToken "github-token:${config.kitaebot.secretsDir}/github-token"
+            ++ lib.optional signingEnabled "gpg-signing-key:${config.kitaebot.secretsDir}/gpg-signing-key";
+
+            # Process isolation
+            ProtectProc = "invisible";
+            ProcSubset = "pid";
+
+            # Filesystem
+            ProtectSystem = "strict";
+            ProtectHome = true;
+            ReadWritePaths = [ "/var/lib/kitaebot" ];
+            RuntimeDirectory = "kitaebot";
+            PrivateTmp = true;
+
+            # Privilege
+            NoNewPrivileges = true;
+            CapabilityBoundingSet = "";
+            AmbientCapabilities = "";
+
+            # Syscalls
+            SystemCallFilter = [
+              "@system-service"
+              "~@privileged"
+            ];
+            SystemCallArchitectures = "native";
+
+            # Network
+            RestrictAddressFamilies = [
+              "AF_INET"
+              "AF_INET6"
+              "AF_UNIX"
+            ];
+
+            # Kernel
+            ProtectKernelTunables = true;
+            ProtectKernelModules = true;
+            ProtectKernelLogs = true;
+            ProtectControlGroups = true;
+            ProtectClock = true;
+            LockPersonality = true;
+            RestrictNamespaces = true;
+            RestrictRealtime = true;
+            RestrictSUIDSGID = true;
+            MemoryDenyWriteExecute = true;
+          };
+          environment = {
+            KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
+            RUST_LOG = cfg.logLevel;
+            PATH = lib.mkForce toolPath;
+            # All egress via the allowlisting forward proxy. Both cases
+            # because tooling disagrees: reqwest/gh read the uppercase
+            # names, git/curl/nix read the lowercase ones. Inherited by
+            # exec tool children.
+            HTTP_PROXY = egressProxyUrl;
+            HTTPS_PROXY = egressProxyUrl;
+            http_proxy = egressProxyUrl;
+            https_proxy = egressProxyUrl;
+            # Loopback stays direct — local dev servers must not be
+            # routed into the proxy's domain filter.
+            NO_PROXY = "localhost,127.0.0.1";
+            no_proxy = "localhost,127.0.0.1";
+          }
+          // lib.optionalAttrs signingEnabled {
+            GNUPGHOME = "/var/lib/kitaebot/.gnupg";
+          };
         };
       };
     };
@@ -413,30 +408,27 @@ in
       };
     };
 
-    # ── Egress filter: DNS allowlist (spec 18) ────────────────────────
+    # ── Egress filter: forward proxy allowlist (spec 18) ──────────────
     #
-    # dnsmasq resolves only allowlisted domains (NXDOMAIN for the rest).
-    # All DNS from kitaebot uid is DNAT'd here via the nftables nat chain.
-    # Resolved IPs are injected into the nft set via dnsmasq `nftset`.
-    services.dnsmasq = {
+    # tinyproxy on loopback allows CONNECT only to allowlisted hostnames
+    # on port 443, refusing (and logging) everything else. The hostname
+    # travels in the CONNECT request, so filtering happens by name —
+    # no DNS/IP-set machinery, no stale-IP races, no CDN co-tenancy.
+    services.tinyproxy = {
       enable = true;
-      resolveLocalQueries = false;
-      settings =
-        let
-          inherit (cfg) egressAllowlist dnsUpstream;
-        in
-        {
-          listen-address = egressDnsAddr;
-          bind-dynamic = true;
-          no-resolv = true;
-          no-poll = true;
-          log-queries = true;
-          local = "/#/";
-          server = map (d: "/${d}/${dnsUpstream}") egressAllowlist;
-          nftset = map (
-            d: "/${d}/4#inet#kitaebot-egress#allowed_v4,6#inet#kitaebot-egress#allowed_v6"
-          ) egressAllowlist;
-        };
+      settings = {
+        Listen = "127.0.0.1";
+        Port = egressProxyPort;
+        Allow = "127.0.0.1";
+        # HTTPS only — no plaintext CONNECT targets.
+        ConnectPort = 443;
+        # Deny any host not matching the allowlist regexes. Refusals
+        # are logged at Notice ("Proxying refused on filtered domain").
+        Filter = egressFilterFile;
+        FilterType = "ere";
+        FilterDefaultDeny = true;
+        LogLevel = "Notice";
+      };
     };
 
     virtualisation = {
@@ -467,6 +459,7 @@ in
       pkgs.curl
       pkgs.dig
       pkgs.htop
+      pkgs.sqlite
     ];
   };
 }

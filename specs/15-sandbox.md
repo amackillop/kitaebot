@@ -84,7 +84,7 @@ fatal.
 ### Defense-in-Depth Stack
 
 1. VM isolation (QEMU)
-2. Egress filter (nftables + dnsmasq)
+2. Egress filter (tinyproxy + nftables)
 3. Unprivileged user (`kitaebot`)
 4. systemd hardening (`ProtectSystem`, `NoNewPrivileges`, seccomp)
 5. **Landlock filesystem confinement** (this spec)
