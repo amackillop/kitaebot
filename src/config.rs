@@ -29,6 +29,8 @@ pub struct Config {
     #[serde(default)]
     pub socket: SocketConfig,
     #[serde(default)]
+    pub sub_agents: SubAgentsConfig,
+    #[serde(default)]
     pub telegram: TelegramConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -38,6 +40,15 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
+    pub max_iterations: usize,
+}
+
+/// Sub-agent settings (spec 19).
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SubAgentsConfig {
+    /// Tool-loop iteration cap per sub-agent turn. Lower than the
+    /// parent's: a delegated task is narrower than a conversation.
     pub max_iterations: usize,
 }
 
@@ -240,6 +251,12 @@ impl Default for AgentConfig {
     }
 }
 
+impl Default for SubAgentsConfig {
+    fn default() -> Self {
+        Self { max_iterations: 30 }
+    }
+}
+
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
@@ -412,6 +429,11 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         if self.agent.max_iterations == 0 {
             return Err(ConfigError::Invalid("max_iterations must be > 0".into()));
+        }
+        if self.sub_agents.max_iterations == 0 {
+            return Err(ConfigError::Invalid(
+                "sub_agents max_iterations must be > 0".into(),
+            ));
         }
         if self.context.max_tokens == 0 {
             return Err(ConfigError::Invalid(
@@ -612,6 +634,30 @@ max_output_bytes = 20480
     fn heartbeat_reject_zero_interval() {
         let result = load_toml("[heartbeat]\ninterval_secs = 0\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn sub_agents_defaults() {
+        let cfg = load_toml("").unwrap();
+        assert_eq!(cfg.sub_agents.max_iterations, 30);
+    }
+
+    #[test]
+    fn sub_agents_parse() {
+        let cfg = load_toml("[sub_agents]\nmax_iterations = 5\n").unwrap();
+        assert_eq!(cfg.sub_agents.max_iterations, 5);
+    }
+
+    #[test]
+    fn sub_agents_reject_zero_max_iterations() {
+        let result = load_toml("[sub_agents]\nmax_iterations = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn sub_agents_reject_unknown_field() {
+        let result = load_toml("[sub_agents]\ntypo = 1\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 
     #[test]
