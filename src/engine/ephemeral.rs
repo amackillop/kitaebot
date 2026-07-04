@@ -22,13 +22,11 @@ use super::{
 /// (surfaced to the parent as tool error text), not quietly summarize
 /// away the work it was delegated.
 #[derive(Default)]
-#[allow(dead_code)] // First caller lands with the task tool (spec 19).
 pub struct EphemeralSession {
     messages: Vec<Message>,
 }
 
 impl EphemeralSession {
-    #[allow(dead_code)] // First caller lands with the task tool (spec 19).
     pub fn new() -> Self {
         Self::default()
     }

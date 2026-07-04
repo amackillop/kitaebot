@@ -7,6 +7,7 @@
 mod actor;
 pub(crate) mod envelope;
 mod handle;
+pub(crate) mod task;
 
 pub use handle::AgentHandle;
 

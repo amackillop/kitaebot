@@ -164,7 +164,6 @@ impl Tools {
     /// `tools.disabled` or because it was compiled out (mock-network).
     /// Typos in the hardcoded allowlists are caught by tests, not at
     /// runtime.
-    #[allow(dead_code)] // First caller lands with the task tool (spec 19).
     pub fn filtered(&self, allow: &[&str]) -> Self {
         Self(
             allow
