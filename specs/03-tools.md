@@ -44,8 +44,10 @@ Unknown names in the disabled list are rejected at startup.
 
 A registry can produce a second registry containing only allowlisted names
 (shared `Arc` instances, no reconstruction). Used by spec 19 to build
-per-agent-type tool sets at startup. An unknown name in an allowlist is a
-startup error, same as `tools.disabled`.
+per-agent-type tool sets at startup. Names with no matching tool are skipped:
+the tool may be disabled via `tools.disabled` or compiled out. Unlike
+`tools.disabled` (operator input, validated at startup), the allowlists are
+hardcoded, so typos are caught by tests instead.
 
 ### Shared Utilities
 

@@ -157,6 +157,23 @@ impl Tools {
         }
     }
 
+    /// Project this collection onto an allowlist of tool names.
+    ///
+    /// Names with no matching tool are skipped: an allowlisted tool
+    /// may be absent because the operator disabled it via
+    /// `tools.disabled` or because it was compiled out (mock-network).
+    /// Typos in the hardcoded allowlists are caught by tests, not at
+    /// runtime.
+    #[allow(dead_code)] // First caller lands with the task tool (spec 19).
+    pub fn filtered(&self, allow: &[&str]) -> Self {
+        Self(
+            allow
+                .iter()
+                .filter_map(|name| self.0.iter().find(|t| t.name() == *name).cloned())
+                .collect(),
+        )
+    }
+
     /// Build the set of local (non-network) tools.
     pub fn local(
         workspace: &Workspace,
@@ -309,6 +326,30 @@ mod tests {
             result.unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
+    }
+
+    #[test]
+    fn filtered_projects_allowlist_sharing_instances() {
+        let mock: Arc<dyn Tool> = Arc::new(MockTool::new("ok"));
+        let tools = Tools::new(vec![Arc::clone(&mock)], &[]).unwrap();
+        let subset = tools.filtered(&["mock"]);
+        assert_eq!(subset.definitions().len(), 1);
+        assert!(Arc::ptr_eq(&mock, &subset.0[0]));
+    }
+
+    #[test]
+    fn filtered_skips_missing_names() {
+        let tools = Tools::new(vec![Arc::new(MockTool::new("ok"))], &[]).unwrap();
+        let subset = tools.filtered(&["mock", "web_fetch"]);
+        let defs = subset.definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].function.name, "mock");
+    }
+
+    #[test]
+    fn filtered_empty_allowlist_is_empty() {
+        let tools = Tools::new(vec![Arc::new(MockTool::new("ok"))], &[]).unwrap();
+        assert!(tools.filtered(&[]).definitions().is_empty());
     }
 
     #[test]

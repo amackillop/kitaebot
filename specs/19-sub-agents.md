@@ -41,8 +41,11 @@ context and are invisible to the parent.
 
 Two built-in types. Each defines a system prompt and an explicit tool
 allowlist. Tool sets are built once at startup by filtering the parent's
-registry (see [Tool Sets](#tool-sets)); an unknown name in an allowlist is a
-startup error, same as `tools.disabled`.
+registry (see [Tool Sets](#tool-sets)). Names with no matching tool are
+skipped, not rejected: a tool may be legitimately absent because the operator
+disabled it via `tools.disabled` (the operator's intent propagates to
+sub-agents) or because it was compiled out. Typos in the hardcoded allowlists
+are caught by a unit test validating them against the tool catalog.
 
 **`explore`** — read-only research agent. Default type.
 
@@ -300,7 +303,7 @@ future extension — it requires constructing a second provider instance, and
 | Sub-agent tool error | Handled inside the child loop (same as parent) |
 | Parent cancelled | Child future dropped mid-await, context discarded |
 | Invalid `agent_type` | `ToolError::InvalidArguments` |
-| Unknown tool name in an allowlist | Startup error (config bug, fail fast) |
+| Allowlisted tool absent from registry | Skipped (disabled or compiled out); typos caught by tests |
 
 Sub-agent errors do **not** crash the parent. They are returned as tool error
 text, and the parent LLM decides how to proceed.
