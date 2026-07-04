@@ -47,15 +47,17 @@ pub use pr_reviews::PrReviews;
 // Re-export parent utility so tool files can `use super::Tool`.
 pub(crate) use super::Tool;
 
+use std::sync::Arc;
+
 /// Build the GitHub tools from a pre-constructed [`GhCli`].
-pub(crate) fn build(gh: GhCli) -> Vec<Box<dyn Tool>> {
+pub(crate) fn build(gh: GhCli) -> Vec<Arc<dyn Tool>> {
     vec![
-        Box::new(CiStatus(gh.clone())),
-        Box::new(Gh(gh.clone())),
-        Box::new(PrCreate(gh.clone())),
-        Box::new(PrDiffComments(gh.clone())),
-        Box::new(PrDiffReply(gh.clone())),
-        Box::new(PrList(gh.clone())),
-        Box::new(PrReviews(gh)),
+        Arc::new(CiStatus(gh.clone())),
+        Arc::new(Gh(gh.clone())),
+        Arc::new(PrCreate(gh.clone())),
+        Arc::new(PrDiffComments(gh.clone())),
+        Arc::new(PrDiffReply(gh.clone())),
+        Arc::new(PrList(gh.clone())),
+        Arc::new(PrReviews(gh)),
     ]
 }

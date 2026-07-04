@@ -33,6 +33,7 @@ use std::borrow::Cow;
 use std::ffi::OsString;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::error::{ConfigError, ToolError};
@@ -113,8 +114,11 @@ pub trait Tool: Send + Sync {
 /// Uses `Vec` with linear scan for lookup. For small tool counts (<50),
 /// this outperforms `HashMap` due to cache locality and no hashing overhead.
 /// Tool execution involves HTTP calls to an LLM (100ms+), so lookup time is noise.
-#[derive(Default)]
-pub struct Tools(Vec<Box<dyn Tool>>);
+///
+/// Tools are held via `Arc` so a single instance can appear in
+/// multiple sets (root agent, sub-agent allowlists).
+#[derive(Default, Clone)]
+pub struct Tools(Vec<Arc<dyn Tool>>);
 
 impl Tools {
     /// Create a tool collection, filtering out any tools whose name
@@ -122,7 +126,7 @@ impl Tools {
     ///
     /// Returns an error if `disabled` contains a name that doesn't
     /// match any tool — this catches typos in the config.
-    pub fn new(tools: Vec<Box<dyn Tool>>, disabled: &[String]) -> Result<Self, ConfigError> {
+    pub fn new(tools: Vec<Arc<dyn Tool>>, disabled: &[String]) -> Result<Self, ConfigError> {
         if disabled.is_empty() {
             return Ok(Self(tools));
         }
@@ -145,7 +149,7 @@ impl Tools {
     /// used at construction. Engine-contributed tools are merged in
     /// after `Tools::new` because the engine is built later in
     /// startup than the static tool registry.
-    pub fn extend_with(&mut self, more: Vec<Box<dyn Tool>>, disabled: &[String]) {
+    pub fn extend_with(&mut self, more: Vec<Arc<dyn Tool>>, disabled: &[String]) {
         for tool in more {
             if !disabled.iter().any(|d| d == tool.name()) {
                 self.0.push(tool);
@@ -158,16 +162,16 @@ impl Tools {
         workspace: &Workspace,
         config: &Config,
         direnv: DirenvCache,
-    ) -> Vec<Box<dyn Tool>> {
+    ) -> Vec<Arc<dyn Tool>> {
         let guard = path::PathGuard::new(workspace.path());
 
         vec![
-            Box::new(Exec::new(workspace.path(), &config.tools.exec, direnv)),
-            Box::new(FileRead::new(guard.clone())),
-            Box::new(FileWrite::new(guard.clone())),
-            Box::new(FileEdit::new(guard.clone())),
-            Box::new(GlobSearch::new(workspace.path())),
-            Box::new(Grep::new(guard)),
+            Arc::new(Exec::new(workspace.path(), &config.tools.exec, direnv)),
+            Arc::new(FileRead::new(guard.clone())),
+            Arc::new(FileWrite::new(guard.clone())),
+            Arc::new(FileEdit::new(guard.clone())),
+            Arc::new(GlobSearch::new(workspace.path())),
+            Arc::new(Grep::new(guard)),
         ]
     }
 
@@ -232,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_definitions() {
-        let tools = Tools::new(vec![Box::new(MockTool::new("ok"))], &[]).unwrap();
+        let tools = Tools::new(vec![Arc::new(MockTool::new("ok"))], &[]).unwrap();
         let defs = tools.definitions();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].function.name, "mock");
@@ -240,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute() {
-        let tools = Tools::new(vec![Box::new(MockTool::new("executed"))], &[]).unwrap();
+        let tools = Tools::new(vec![Arc::new(MockTool::new("executed"))], &[]).unwrap();
         let result = tools.execute(&mock_call("test-123")).await.unwrap();
         assert_eq!(result, "executed");
     }
@@ -292,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_arguments() {
-        let tools = Tools::new(vec![Box::new(MockTool::new("ok"))], &[]).unwrap();
+        let tools = Tools::new(vec![Arc::new(MockTool::new("ok"))], &[]).unwrap();
         let call = ToolCall::new(
             "test-123".to_string(),
             ToolFunction {
@@ -309,14 +313,14 @@ mod tests {
 
     #[test]
     fn disabled_tools_filtered() {
-        let tools = Tools::new(vec![Box::new(MockTool::new("ok"))], &["mock".to_string()]).unwrap();
+        let tools = Tools::new(vec![Arc::new(MockTool::new("ok"))], &["mock".to_string()]).unwrap();
         assert!(tools.definitions().is_empty());
     }
 
     #[test]
     fn disabled_unknown_name_rejected() {
         let result = Tools::new(
-            vec![Box::new(MockTool::new("ok"))],
+            vec![Arc::new(MockTool::new("ok"))],
             &["nonexistent".to_string()],
         );
         match result {

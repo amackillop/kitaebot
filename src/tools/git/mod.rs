@@ -18,6 +18,7 @@ pub use git_clone::GitClone;
 pub use push::Push;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::ToolError;
 use crate::secrets::Secret;
@@ -70,13 +71,13 @@ pub(crate) fn build(
     workspace: &Workspace,
     co_authors: Vec<String>,
     direnv: DirenvCache,
-) -> Vec<Box<dyn Tool>> {
+) -> Vec<Arc<dyn Tool>> {
     let git = GitCli::new(token, workspace.path(), direnv.clone());
 
     vec![
-        Box::new(Commit::new(git.clone(), co_authors)),
-        Box::new(Push(git.clone())),
-        Box::new(GitClone(git, direnv)),
+        Arc::new(Commit::new(git.clone(), co_authors)),
+        Arc::new(Push(git.clone())),
+        Arc::new(GitClone(git, direnv)),
     ]
 }
 

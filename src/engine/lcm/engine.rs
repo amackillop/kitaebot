@@ -413,30 +413,30 @@ impl ContextEngine for LcmEngine {
         }
     }
 
-    fn tools(&self) -> Vec<Box<dyn Tool>> {
+    fn tools(&self) -> Vec<Arc<dyn Tool>> {
         // Open three independent read-only connections — one per tool.
         // WAL lets these readers run concurrently with the engine's
         // writer. If a connection fails to open, log and skip that
         // tool: a missing retrieval tool degrades gracefully (the
         // model still has the active context), whereas panicking here
         // would take down the daemon for a non-essential feature.
-        let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+        let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let open = |label: &'static str| -> Option<Connection> {
             schema::open_readonly(&self.db_path)
                 .map_err(|e| error!(tool = label, "failed to open LCM tool connection: {e}"))
                 .ok()
         };
         if let Some(conn) = open("lcm_grep") {
-            tools.push(Box::new(LcmGrep::new(conn, Arc::clone(&self.active_id))));
+            tools.push(Arc::new(LcmGrep::new(conn, Arc::clone(&self.active_id))));
         }
         if let Some(conn) = open("lcm_describe") {
-            tools.push(Box::new(LcmDescribe::new(
+            tools.push(Arc::new(LcmDescribe::new(
                 conn,
                 Arc::clone(&self.active_id),
             )));
         }
         if let Some(conn) = open("lcm_expand") {
-            tools.push(Box::new(LcmExpand::new(
+            tools.push(Arc::new(LcmExpand::new(
                 conn,
                 Arc::clone(&self.active_id),
                 self.payloads_dir(),

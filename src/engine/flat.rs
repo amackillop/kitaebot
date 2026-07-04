@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tracing::info;
 
@@ -178,7 +179,7 @@ impl ContextEngine for FlatSession {
         }
     }
 
-    fn tools(&self) -> Vec<Box<dyn Tool>> {
+    fn tools(&self) -> Vec<Arc<dyn Tool>> {
         Vec::new()
     }
 

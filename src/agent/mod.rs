@@ -366,7 +366,7 @@ mod tests {
     }
 
     fn mock_tools(output: &str) -> Tools {
-        Tools::new(vec![Box::new(MockTool::new(output))], &[]).unwrap()
+        Tools::new(vec![Arc::new(MockTool::new(output))], &[]).unwrap()
     }
 
     const SYSTEM: &str = "You are a test assistant.";
@@ -916,7 +916,7 @@ mod tests {
     }
 
     fn blocked_tools() -> Tools {
-        Tools::new(vec![Box::new(MockBlockedTool::new("not allowed"))], &[]).unwrap()
+        Tools::new(vec![Arc::new(MockBlockedTool::new("not allowed"))], &[]).unwrap()
     }
 
     #[tokio::test]

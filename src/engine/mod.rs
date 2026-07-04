@@ -73,7 +73,6 @@ pub struct SessionInfo {
 ///
 /// All methods are async (RPIT). The agent loop is generic over this trait,
 /// monomorphized at the call site. One engine per agent — generics, not dyn.
-#[allow(dead_code)] // tools() has no caller yet.
 pub trait ContextEngine: Send + Sync {
     /// Append a message to the active session.
     fn push_message(
@@ -110,7 +109,10 @@ pub trait ContextEngine: Send + Sync {
     fn stats(&self) -> ContextStats;
 
     /// Tools contributed by this engine (empty for flat session).
-    fn tools(&self) -> Vec<Box<dyn Tool>>;
+    ///
+    /// Instances are `Arc` so one tool can appear in multiple filtered
+    /// sets (root agent, sub-agents) without duplication.
+    fn tools(&self) -> Vec<Arc<dyn Tool>>;
 
     /// Name of the active session.
     fn active_session(&self) -> &str;
