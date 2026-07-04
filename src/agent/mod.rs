@@ -93,8 +93,11 @@ pub async fn process_message(
 ///
 /// # Errors
 /// Returns error if max iterations reached or provider fails
+///
+/// Exposed crate-internally so sub-agents (spec 19) run the exact
+/// same loop against an ephemeral child context.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn run_turn(
+pub(crate) async fn run_turn(
     engine: &mut impl ContextEngine,
     summarize: &SummarizeFn,
     system_prompt: &str,

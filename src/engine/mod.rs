@@ -3,10 +3,12 @@
 //! All context management flows through the [`ContextEngine`] trait. The agent
 //! loop, actor, and channels interact exclusively with this interface.
 //!
-//! Two implementations exist:
+//! Three implementations exist:
 //! - **Flat session** (`flat.rs`): wraps `Session` + `context.rs`. No `SQLite`.
-//! - **LCM** (future): hierarchical DAG of summaries over `SQLite`.
+//! - **LCM** (`lcm/`): hierarchical DAG of summaries over `SQLite`.
+//! - **Ephemeral** (`ephemeral.rs`): in-memory, for sub-agent turns.
 
+pub mod ephemeral;
 pub mod flat;
 pub mod lcm;
 
