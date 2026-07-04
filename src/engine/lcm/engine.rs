@@ -1132,14 +1132,17 @@ mod tests {
             .await
             .unwrap();
 
-        // file_read output: line-numbered JSON plus the stats trailer.
+        // The exact live shape: the safety wrapper around file_read's
+        // line-numbered output and stats trailer.
         let mut body = String::new();
         for i in 0..30u32 {
             writeln!(body, "{}\t    {},", i + 3, i).unwrap();
         }
         let framed = format!(
-            "1\t{{\n2\t  \"users\": [\n{body}33\t    99\n34\t  ]\n35\t}}\n\n\
-             (35 lines shown, 35 total, 300 bytes)"
+            "<tool_output name=\"file_read\">\n\
+             1\t{{\n2\t  \"users\": [\n{body}33\t    99\n34\t  ]\n35\t}}\n\n\
+             (35 lines shown, 35 total, 300 bytes)\n\
+             </tool_output>"
         );
 
         engine

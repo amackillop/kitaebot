@@ -101,23 +101,54 @@ static FILE_READ_TRAILER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\(\d+ lines shown, \d+ total, \d+ bytes\)$").expect("valid regex")
 });
 
-/// Undo `file_read` output framing so dispatchers see the underlying
-/// file content: `N\t<line>` rows followed by a
-/// `(N lines shown, M total, B bytes)` trailer. Without this, every
-/// structured payload read through `file_read` fails to parse (a
-/// line-numbered JSON file starts with `1\t{`, not `{`).
+static TOOL_OUTPUT_OPEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^<tool_output name="[^"]+">$"#).expect("valid regex"));
+
+/// Undo tool result framing so dispatchers see the underlying file
+/// content. Tool results reach the engine wrapped in
+/// `<tool_output name="...">...</tool_output>` (see
+/// `safety::check_tool_output`), and `file_read` additionally
+/// prefixes every line with `N\t` and appends a
+/// `(N lines shown, M total, B bytes)` trailer. Without the strip,
+/// every structured payload read through `file_read` fails to parse
+/// (a line-numbered JSON file starts with `1\t{`, not `{`).
 ///
-/// The strip only fires on an exact match of the framing: the stats
-/// trailer must be present and every line must carry a sequential
-/// number, so data that merely has a numeric first column passes
-/// through untouched. Content that doesn't match is returned as-is.
+/// Each layer is only removed on an exact match: the wrapper needs
+/// both its open and close tags, and the line numbering needs the
+/// stats trailer plus a sequential number on every line, so data that
+/// merely has a numeric first column passes through untouched.
 pub fn strip_tool_framing(content: &str) -> std::borrow::Cow<'_, str> {
+    let unwrapped = strip_tool_output_wrapper(content);
+    match strip_line_numbering(unwrapped) {
+        Some(stripped) => std::borrow::Cow::Owned(stripped),
+        None => std::borrow::Cow::Borrowed(unwrapped),
+    }
+}
+
+/// Peel a `<tool_output name="...">` / `</tool_output>` envelope,
+/// returning the content unchanged when it isn't wrapped.
+fn strip_tool_output_wrapper(content: &str) -> &str {
+    let Some((first, rest)) = content.split_once('\n') else {
+        return content;
+    };
+    if !TOOL_OUTPUT_OPEN_RE.is_match(first) {
+        return content;
+    }
+    let Some(inner) = rest.trim_end().strip_suffix("</tool_output>") else {
+        return content;
+    };
+    inner.strip_suffix('\n').unwrap_or(inner)
+}
+
+/// Undo `file_read` line numbering, or `None` when `content` doesn't
+/// match the framing exactly.
+fn strip_line_numbering(content: &str) -> Option<String> {
     let mut lines: Vec<&str> = content.lines().collect();
     if !lines
         .last()
         .is_some_and(|l| FILE_READ_TRAILER_RE.is_match(l))
     {
-        return std::borrow::Cow::Borrowed(content);
+        return None;
     }
     lines.pop();
     while lines.last() == Some(&"") {
@@ -126,22 +157,18 @@ pub fn strip_tool_framing(content: &str) -> std::borrow::Cow<'_, str> {
     let mut expected: Option<u64> = None;
     let mut stripped: Vec<&str> = Vec::with_capacity(lines.len());
     for line in lines {
-        let Some((num, rest)) = line.split_once('\t') else {
-            return std::borrow::Cow::Borrowed(content);
-        };
-        let Ok(n) = num.parse::<u64>() else {
-            return std::borrow::Cow::Borrowed(content);
-        };
+        let (num, rest) = line.split_once('\t')?;
+        let n = num.parse::<u64>().ok()?;
         if expected.is_some_and(|e| n != e) {
-            return std::borrow::Cow::Borrowed(content);
+            return None;
         }
         expected = Some(n + 1);
         stripped.push(rest);
     }
     if stripped.is_empty() {
-        return std::borrow::Cow::Borrowed(content);
+        return None;
     }
-    std::borrow::Cow::Owned(stripped.join("\n"))
+    Some(stripped.join("\n"))
 }
 
 /// Classify a payload from its path extension, falling back to
@@ -666,6 +693,29 @@ mod tests {
     #[test]
     fn strip_tool_framing_is_noop_on_unnumbered_lines() {
         let content = "plain text\n(1 lines shown, 1 total, 11 bytes)";
+        assert_eq!(strip_tool_framing(content), content);
+    }
+
+    #[test]
+    fn strip_tool_framing_peels_wrapped_file_read_output() {
+        // The full live shape: safety wrapper around numbered lines.
+        let content = "<tool_output name=\"file_read\">\n\
+                       1\t{\n2\t  \"a\": 1\n3\t}\n\n\
+                       (3 lines shown, 3 total, 20 bytes)\n\
+                       </tool_output>";
+        assert_eq!(strip_tool_framing(content), "{\n  \"a\": 1\n}");
+    }
+
+    #[test]
+    fn strip_tool_framing_peels_wrapper_without_line_numbers() {
+        // e.g. an exec tool result: wrapper comes off, body stays.
+        let content = "<tool_output name=\"exec\">\n{\"a\": 1}\n</tool_output>";
+        assert_eq!(strip_tool_framing(content), "{\"a\": 1}");
+    }
+
+    #[test]
+    fn strip_tool_framing_keeps_unterminated_wrapper() {
+        let content = "<tool_output name=\"exec\">\ntruncated";
         assert_eq!(strip_tool_framing(content), content);
     }
 
