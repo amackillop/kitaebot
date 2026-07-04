@@ -78,6 +78,12 @@ The turn accepts a cancellation token. Cancellation is checked:
 When cancelled, the turn emits `Activity::Cancelled` and returns
 `Error::Cancelled`. Partial session state from the current turn is still saved.
 
+Racing tool execution against the token means losing futures are **dropped**.
+Sub-agents ([spec 19](19-sub-agents.md)) rely on this: a `task` tool call is
+itself a full child turn, and cancelling the parent drops it mid-await. Drop
+stops the loop, not necessarily side effects already in flight (spawned
+processes rely on kill-on-drop).
+
 ### Activity Events
 
 The turn accepts an optional activity sender. Events are emitted at:
@@ -99,6 +105,11 @@ channel is full.
 - The tool loop: iteration, repetition detection, policy gate, cancellation
 - Turn-level orchestration: compaction trigger, context assembly, provider call
 - Tool result recording and safety checking
+
+The loop is generic over the context engine and provider, and is exposed
+crate-internally so sub-agents ([spec 19](19-sub-agents.md)) run the exact
+same turn function against an ephemeral child context — repetition detection
+and the policy gate come along for free.
 
 ### Does Not Own
 

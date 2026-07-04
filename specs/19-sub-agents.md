@@ -39,14 +39,16 @@ context and are invisible to the parent.
 
 ### Agent Types
 
-Two built-in types. Each defines a system prompt and a tool allowlist.
+Two built-in types. Each defines a system prompt and an explicit tool
+allowlist. Tool sets are built once at startup by filtering the parent's
+registry (see [Tool Sets](#tool-sets)); an unknown name in an allowlist is a
+startup error, same as `tools.disabled`.
 
-**`explore`** — read-only research agent. Default type. Cheap model.
+**`explore`** — read-only research agent. Default type.
 
 | Property | Value |
 |----------|-------|
-| Model | `config.sub_agents.explore_model` (default: same as parent) |
-| Max iterations | `config.sub_agents.max_iterations` (default: 30) |
+| Max iterations | `sub_agents.max_iterations` (default: 30) |
 | Tools | `file_read`, `glob_search`, `grep`, `web_fetch`, `web_search` |
 | LCM tools | `lcm_grep`, `lcm_describe`, `lcm_expand` |
 | Cannot | Write files, execute commands, spawn sub-agents |
@@ -55,15 +57,23 @@ Two built-in types. Each defines a system prompt and a tool allowlist.
 
 | Property | Value |
 |----------|-------|
-| Model | Same as parent |
-| Max iterations | `config.sub_agents.max_iterations` (default: 30) |
-| Tools | All parent tools **except** `task` |
+| Max iterations | `sub_agents.max_iterations` (default: 30) |
+| Tools | explore's tools plus `file_write`, `file_edit`, `exec` |
 | LCM tools | `lcm_grep`, `lcm_describe`, `lcm_expand` |
-| Cannot | Spawn sub-agents |
+| Cannot | Spawn sub-agents, use git/GitHub tools |
+
+Both allowlists are explicit — the worker is **not** "everything except
+`task`". Outward-visible actions (pushing commits, creating PRs, replying to
+review comments) stay with the parent, which has the conversation context and
+the accountability. A sub-agent acting on a delegated one-line prompt should
+not be able to publish anything.
 
 Neither type receives the `task` tool. **No recursive spawning.** This is the
 structural termination guarantee — no depth limits needed because recursion is
 impossible.
+
+Both sub-agent loops run with the same repetition detection and policy strike
+gate as the parent (free, since the loop is shared).
 
 ### Context Isolation
 
@@ -74,31 +84,97 @@ prior tool results are not accessible to the child.
 The sub-agent receives its own system prompt (type-specific, see below) and
 the `prompt` as a user message.
 
-**LCM integration**: when the parent uses the LCM engine, the sub-agent
-shares the parent's **immutable store** (read-only SQLite connection) but has
-its own throwaway active context. This means `lcm_grep`, `lcm_describe`, and
-`lcm_expand` can search and drill into the parent's compacted history. The
-sub-agent's own messages are not persisted to the parent's store.
+**Child context**: an `EphemeralSession` — an in-memory `ContextEngine`
+implementation holding a `Vec<Message>`. `compact_if_needed` is a no-op,
+`assemble` concatenates, nothing touches disk. Created per `task` call,
+dropped when the call returns. There is deliberately no compaction: a
+sub-agent that outgrows the provider's context window gets a provider error
+back (see Failure Modes), which the parent sees as tool error text. Compacting
+a child that is supposed to return a summary would be treating the symptom.
 
-**Flat session**: the sub-agent gets an in-memory `Session` that is discarded
-after the task completes. No disk I/O.
+**LCM integration**: when the parent runs the LCM engine, the sub-agent's
+tool set includes the engine's retrieval tools (`lcm_grep`, `lcm_describe`,
+`lcm_expand`) as shared instances. These tools already carry
+`Arc<Mutex<Connection>>` and the active conversation id, so the child
+searches and drills into the **parent's** compacted history with no extra
+plumbing. All three are read-only against the store. The sub-agent's own
+messages live only in its `EphemeralSession` and are never persisted.
+
+The parent is blocked in the `task` tool call while the child runs, so there
+is no reader contention on the shared connection beyond parallel sub-agents,
+which serialize on the mutex per query.
+
+### Tool Sets
+
+Two registry changes make filtered tool sets possible:
+
+1. The registry holds `Arc<dyn Tool>` instead of `Box<dyn Tool>`, so the same
+   tool instance can appear in multiple sets ([spec 03](03-tools.md)).
+2. `ContextEngine::tools()` takes a scope argument: `ToolScope::Root` returns
+   the engine tools for the main agent (`lcm_grep`, `lcm_describe`),
+   `ToolScope::SubAgent` additionally includes `lcm_expand`. The flat engine
+   returns nothing for either scope. This closes spec 14's interim hatch: the
+   main agent loses `lcm_expand` when this spec lands.
+
+At startup the actor builds three tool sets from the same instances: the
+parent's (base tools + root engine tools + `task`), explore's, and worker's.
+The `task` tool is constructed with the two child sets prebuilt — no runtime
+filtering.
 
 ### Execution
 
-The `task` tool's `execute()` method:
+The `task` tool's `execute()`:
 
-1. Build a tool set based on `agent_type`.
-2. Create a fresh context (in-memory session or throwaway LCM conversation).
-3. Derive a child `CancellationToken` from the parent's token.
-4. Run `run_turn(engine, system_prompt, prompt, provider, tools,
-   max_iterations, cancel)` — the same function the parent uses.
-5. Return the final assistant text as the tool result.
+1. Parse `agent_type`, pick the prebuilt tool set and system prompt.
+2. Create a fresh `EphemeralSession`.
+3. Run the same `run_turn` the parent uses (exposed `pub(crate)` from the
+   agent module) with the child engine, the type's system prompt, `prompt` as
+   the user message, the shared provider, and `sub_agents.max_iterations`.
+4. Return the final assistant text as the tool result.
 
 The sub-agent runs **synchronously** from the parent's perspective. It is a
 tool call that blocks until completion, like any other tool. The parent's
 `join_all` over parallel tool calls means the LLM can launch multiple
-sub-agents concurrently by emitting multiple `task` tool calls in a single
+sub-agents concurrently by emitting multiple `task` calls in a single
 response.
+
+**Parallel sub-agents**: `execute()` takes `&self` and holds only shared
+immutable state; each invocation creates its own `EphemeralSession`, so
+concurrent children share nothing mutable. LCM queries serialize on the
+shared connection mutex; concurrent provider calls are ordinary HTTP
+concurrency; one parent cancellation drops every child at once. The only
+unguarded interaction is two parallel workers mutating the same workspace
+files — the same hazard as two parallel `exec` calls today. It is the
+model's responsibility not to issue conflicting parallel writes, and
+`file_edit`'s exact-match precondition makes lost updates fail loudly.
+
+### Cancellation
+
+There is no child `CancellationToken` — the `Tool` trait's `execute()`
+receives no token, and none is needed. The parent's loop races tool execution
+against its own token (`cancellable(join_all(...))`), so cancelling the
+parent **drops** the sub-agent's future mid-await. The child loop stops at
+its next await point; its in-memory context is discarded with it.
+
+The caveat is inherited from the parent's own cancellation semantics:
+drop-based cancellation stops the loop, not necessarily side effects already
+in flight (a spawned process under `exec` relies on kill-on-drop). This is
+the same contract the parent has today.
+
+The child's `run_turn` receives a never-cancelled token to satisfy the
+signature.
+
+### Activity and Observability
+
+The child runs with `activity_tx = None`. Sub-agent tool events do **not**
+appear in the parent's activity stream; the parent already emits
+`ToolStart { tool: "task" }` / `ToolEnd` around the whole delegation, which
+is the right granularity for a user watching the socket. The child's
+iterations remain visible in the daemon logs via `tracing`, same as the
+parent's.
+
+Tagged child activity (a source field on `Activity`) is a future extension —
+it touches every activity consumer for marginal benefit.
 
 ### System Prompts
 
@@ -124,14 +200,6 @@ relevant details. Your response will be read by another agent, not a human.
 Both prompts are appended with environment info (working directory, available
 tools) following the same pattern as the parent's system prompt assembly.
 
-### Cancellation
-
-The sub-agent's `CancellationToken` is a child of the parent's. When the user
-cancels the parent turn, all sub-agents are cancelled automatically via
-Tokio's token hierarchy. The sub-agent's `run_turn` checks cancellation at the
-same points as the parent (before compaction, around provider calls, around
-tool execution, at loop top).
-
 ### Tool Description
 
 The `task` tool's description tells the parent LLM when and how to use it:
@@ -148,56 +216,49 @@ The sub-agent cannot see your conversation history. Pack all necessary
 context into the prompt.
 
 agent_type "explore" (default): read-only research. Cannot modify files.
-agent_type "worker": can read, write, and execute. For self-contained tasks.
+agent_type "worker": can read, write, and execute commands. For
+self-contained tasks. Cannot use git or GitHub.
 ```
 
 ## Agent Loop Integration
 
-The `task` tool needs access to:
-- The `Provider` (to make LLM calls for the sub-agent)
-- The `Tools` registry (to build filtered tool sets)
-- The `Workspace` (for system prompt assembly)
-- The `ContextEngine` (for LCM read-only access, if applicable)
-
-This is more state than a typical tool holds. Two options:
-
-**Option A**: the `task` tool is constructed by the actor and holds `Arc`
-references to shared state. It implements the `Tool` trait like any other
-tool.
-
-**Option B**: the actor intercepts `task` tool calls specially (like a
-built-in command) rather than dispatching through the tool registry.
-
-**Decision: Option A.** The tool holds what it needs. The actor constructs it
-at startup and includes it in the tool registry. This keeps the agent loop
-generic — it doesn't need to know about sub-agents.
+The `task` tool holds `Arc` references to shared state and implements the
+`Tool` trait like any other tool (the actor constructs it at startup and adds
+it to the parent's registry — the agent loop stays generic and knows nothing
+about sub-agents):
 
 ```rust
-struct TaskTool {
+struct TaskTool<P: Provider> {
     provider: Arc<P>,
-    workspace: Arc<Workspace>,
-    base_tools: Arc<Tools>,
-    lcm_db_path: Option<PathBuf>,  // for LCM read-only connection
-    config: SubAgentConfig,
+    summarize: SummarizeFn,          // run_turn signature; child never compacts
+    explore: AgentType,              // system prompt + prebuilt Tools
+    worker: AgentType,
+    max_iterations: usize,
 }
 ```
 
-The `task` tool is added to the parent's tool set but **not** to any
-sub-agent's tool set. This is enforced by building the sub-agent's `Tools`
-from a filtered subset that excludes `task`.
+The alternative — the actor intercepting `task` calls like a built-in
+command — was rejected: it special-cases the loop and breaks the parallel
+`join_all` dispatch that makes concurrent sub-agents free.
+
+`TaskTool` is generic over the provider (the registry stores it as
+`Arc<dyn Tool>`, so the generic never escapes). The prebuilt `Tools` sets
+exclude `task` by construction, which is the recursion guard.
 
 ## Configuration
 
 ```toml
 [sub_agents]
 max_iterations = 30
-explore_model = ""    # empty = use parent's model
 ```
 
 | Config key | Default | Description |
 |------------|---------|-------------|
 | `sub_agents.max_iterations` | `30` | Max tool loop iterations per sub-agent |
-| `sub_agents.explore_model` | `""` | Model for explore agents (empty = parent's model) |
+
+Sub-agents use the parent's provider and model. Per-type model selection is a
+future extension — it requires constructing a second provider instance, and
+"same as parent" was the default anyway.
 
 ## Boundaries
 
@@ -205,54 +266,62 @@ explore_model = ""    # empty = use parent's model
 
 - The `task` tool definition and execution
 - Agent type definitions (system prompts, tool allowlists)
-- Sub-agent context lifecycle (create, run, discard)
-- Tool filtering per agent type
+- `EphemeralSession` and the sub-agent context lifecycle (create, run, discard)
+- The prebuilt per-type tool sets
 
 ### Does Not Own
 
 - The agent loop — reuses `run_turn` from spec 01
 - The provider — borrows via `Arc`
-- Tool definitions — filters the parent's registry
-- Context engine — borrows read-only access for LCM tools
-- Cancellation — inherits from parent via token hierarchy
+- Tool definitions — reuses shared instances from the parent's registry
+- Engine tool scoping — `ContextEngine::tools(scope)` lives in spec 14
+- Cancellation — inherited structurally via future drop
 
 ### Interactions
 
-- **Agent loop (spec 01)**: `run_turn` is called recursively (not in the
-  language sense — the sub-agent calls the same function, but in a separate
-  context with no way to call `task`).
-- **Context engine (spec 14)**: LCM sub-agents share the parent's immutable
-  store for retrieval tools. `lcm_expand` is moved from interim (available to
-  main agent) to sub-agent-only when this spec lands.
-- **Tool registry (spec 03)**: the `task` tool is registered like any other
-  tool. Sub-agent tool sets are built by filtering the parent's registry.
-- **Activity (spec 16)**: sub-agent tool events are emitted through the
-  parent's activity channel (the sub-agent receives the same
-  `activity_tx`). Events are tagged to distinguish parent from child.
+- **Agent loop (spec 01)**: `run_turn` becomes `pub(crate)` and is called by
+  the `task` tool with a child engine. Not recursion in the language sense —
+  the child context has no way to call `task`.
+- **Context engine (spec 14)**: `ContextEngine::tools()` gains the
+  `ToolScope` parameter. `lcm_expand` moves from interim (main agent,
+  conservative cap) to sub-agent-only. Sub-agent LCM tools are shared
+  instances bound to the parent's store and active conversation.
+- **Tool registry (spec 03)**: registry holds `Arc<dyn Tool>`; per-type sets
+  are built at startup from shared instances. The `task` tool registers like
+  any other tool.
+- **Activity (spec 16)**: no changes. The child receives no activity sender.
 
 ## Failure Modes
 
 | Failure | Behavior |
 |---------|----------|
-| Sub-agent hits max_iterations | Returns `Error::MaxIterationsReached` text as tool result |
-| Sub-agent provider error | Returns error text as tool result. Parent continues. |
-| Sub-agent tool error | Handled internally by sub-agent's loop (same as parent) |
-| Sub-agent cancelled | Returns `Error::Cancelled` — propagates to parent |
-| Invalid agent_type | Returns `ToolError::InvalidArguments` |
-| LCM DB not available | LCM tools excluded from sub-agent's tool set |
+| Sub-agent hits max_iterations | Error text returned as tool result. Parent continues. |
+| Sub-agent provider error (incl. context overflow) | Error text returned as tool result. Parent continues. |
+| Sub-agent tool error | Handled inside the child loop (same as parent) |
+| Parent cancelled | Child future dropped mid-await, context discarded |
+| Invalid `agent_type` | `ToolError::InvalidArguments` |
+| Unknown tool name in an allowlist | Startup error (config bug, fail fast) |
 
 Sub-agent errors do **not** crash the parent. They are returned as tool error
 text, and the parent LLM decides how to proceed.
 
 ## Constraints
 
-- No recursive spawning — `task` tool excluded from sub-agent tool sets
-- Sub-agent context is ephemeral — discarded after completion
-- Sub-agent messages are not persisted to the parent's store
-- One model per agent type (no per-invocation model selection initially)
-- Synchronous execution only (blocking tool call)
-- No sub-agent-specific compaction — sub-agents should finish within their
-  context budget. If they exceed it, they hit max_iterations.
+- No recursive spawning — `task` is absent from both child tool sets by
+  construction
+- Child context is ephemeral and in-memory — discarded after completion,
+  never persisted to the parent's store
+- Explicit tool allowlists per type — no "everything except" sets
+- No git/GitHub tools in any sub-agent — outward-visible actions belong to
+  the parent
+- One model for all agents (the parent's)
+- Synchronous execution only (blocking tool call); concurrency comes from the
+  parent emitting parallel `task` calls, bounded by the provider's rate
+  limits like any other parallel tool execution
+- No sub-agent compaction — context overflow surfaces as a provider error in
+  the tool result
+- Child token budget is the provider's context window; no separate
+  configurable budget
 
 ## Future Extensions
 
@@ -260,6 +329,10 @@ These are **not** in this spec but the architecture accommodates them:
 
 - **Custom agent types**: user-defined types via config or markdown files
   with system prompts, tool lists, and model selection.
+- **Per-type model selection** (`explore_model`): a cheaper model for
+  research agents. Requires a second provider instance.
+- **Tagged child activity**: a source field on `Activity` so channels can
+  render sub-agent progress distinctly.
 - **Background execution**: non-blocking sub-agents that run concurrently
   while the parent continues. Requires changing the tool result delivery
   mechanism.
@@ -271,19 +344,10 @@ These are **not** in this spec but the architecture accommodates them:
 - **Scope-reduction invariant**: when recursive spawning is enabled, require
   sub-agents to declare `delegated_scope` and `kept_work` to prevent
   infinite delegation.
-- **Per-invocation model selection**: let the parent choose the model per
-  task call.
 - **Cost tracking**: roll up sub-agent token usage to the parent session.
-- **Persistent sub-agent memory**: cross-session learning per agent type.
+- **Concurrency limit**: cap parallel sub-agents if provider rate limits
+  become a problem in practice.
 
 ## Open Questions
 
-1. **Activity events**: should sub-agent tool events appear in the parent's
-   activity stream (tagged as sub-agent), or should they be suppressed? The
-   former gives visibility; the latter reduces noise.
-2. **Token budget**: should sub-agents have their own configurable context
-   budget, or just inherit the parent's `max_tokens`? For explore agents
-   that should be short-lived, a smaller budget would enforce conciseness.
-3. **Parallel sub-agent concurrency**: the parent can emit multiple `task`
-   calls which `join_all` executes concurrently. Should there be a
-   concurrency limit to avoid hammering the provider API?
+None currently.

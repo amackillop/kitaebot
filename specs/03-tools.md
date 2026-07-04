@@ -13,9 +13,11 @@ If the LLM would repeatedly use `exec` for a task, that task should be a tool.
 ### Trait and Registry
 
 Tools implement a `Tool` trait with async execution. Each tool is a struct that
-owns its configuration. The registry holds `Box<dyn Tool>` in a `Vec` with
+owns its configuration. The registry holds `Arc<dyn Tool>` in a `Vec` with
 linear scan for lookup (fast enough for <50 tools, better cache locality than a
-map).
+map). `Arc` rather than `Box` so the same instance can appear in multiple
+tool sets — sub-agent sets ([spec 19](19-sub-agents.md)) are built by
+filtering the parent's registry without reconstructing tools.
 
 ```
 trait Tool: Send + Sync {
@@ -37,6 +39,13 @@ format) and passed to the provider on each call.
 
 Individual tools can be excluded by name via `tools.disabled` in config.
 Unknown names in the disabled list are rejected at startup.
+
+### Filtered Tool Sets
+
+A registry can produce a second registry containing only allowlisted names
+(shared `Arc` instances, no reconstruction). Used by spec 19 to build
+per-agent-type tool sets at startup. An unknown name in an allowlist is a
+startup error, same as `tools.disabled`.
 
 ### Shared Utilities
 
@@ -292,6 +301,13 @@ workspace root.
 | `github_pr_reviews` | Fetch reviews for a pull request. |
 | `github_pr_diff_comments` | Fetch inline diff comments on a PR. |
 | `github_pr_diff_reply` | Reply to an inline diff comment. |
+
+---
+
+### `task` — Sub-Agent Delegation
+
+Defined and owned by [spec 19](19-sub-agents.md). Registered in the parent's
+registry like any other tool; excluded from all sub-agent tool sets.
 
 ---
 

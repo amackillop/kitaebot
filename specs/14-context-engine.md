@@ -838,8 +838,9 @@ For LCM, an unknown name simply creates a new conversation row.
 - **Activity system**: compaction events are reported via `Activity::Compaction`.
 - **Sub-agents (spec 19)**: sub-agents receive `lcm_expand` in their tool set.
   The main agent does not. This is enforced by the engine's `tools()` method
-  accepting a context parameter indicating whether the caller is the root
-  agent or a sub-agent.
+  taking a `ToolScope` argument (`Root` | `SubAgent`). Sub-agent tool sets
+  hold the same tool instances (shared `Arc`s over the engine's connection
+  and active conversation id), so children query the parent's store directly.
 
 ## Failure Modes
 
@@ -898,8 +899,9 @@ until spec 19 lands.
 
 Specifically deferred to spec 19:
 
-- **`Task` and `Tasks` tools** for sequential and parallel sub-agent
-  spawning (paper Appendix C.3).
+- **The `task` tool** for sub-agent spawning (paper Appendix C.3 describes
+  `Task`/`Tasks`; spec 19 ships a single tool — parallelism comes from the
+  model emitting multiple `task` calls in one response).
 - **`llm_map` and `agentic_map`** for operator-level recursion over
   unbounded datasets (paper §3.1, Appendix C.2). These offload data
   parallelism from model-generated loops to deterministic engine
@@ -916,7 +918,7 @@ Specifically deferred to spec 19:
 
 Interfaces between this spec and spec 19:
 
-- `engine.tools()` accepts a context indicating root agent vs. sub-agent.
+- `engine.tools(scope)` with `ToolScope::Root | ToolScope::SubAgent`.
   Root agents do not receive `lcm_expand`; sub-agents do.
 - `SummarizeFn` is reused for `llm_map` per-item calls. The operator's
   worker pool, retry, and schema validation live in spec 19.
