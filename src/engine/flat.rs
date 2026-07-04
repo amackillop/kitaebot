@@ -18,6 +18,7 @@ use crate::types::Message;
 
 use super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
+    ToolScope,
 };
 
 /// Instruction block used when compacting a flat session into a
@@ -179,7 +180,7 @@ impl ContextEngine for FlatSession {
         }
     }
 
-    fn tools(&self) -> Vec<Arc<dyn Tool>> {
+    fn tools(&self, _scope: ToolScope) -> Vec<Arc<dyn Tool>> {
         Vec::new()
     }
 
@@ -336,6 +337,13 @@ mod tests {
     }
 
     // ── Basic operations ────────────────────────────────────────────
+
+    #[test]
+    fn contributes_no_tools_in_any_scope() {
+        let engine = temp_engine(ContextConfig::default());
+        assert!(engine.tools(ToolScope::Root).is_empty());
+        assert!(engine.tools(ToolScope::SubAgent).is_empty());
+    }
 
     #[tokio::test]
     async fn push_and_assemble_roundtrip() {

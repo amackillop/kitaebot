@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use config::{Config, EngineKind};
-use engine::ContextEngine;
+use engine::{ContextEngine, ToolScope};
 use tracing::{error, info, warn};
 use workspace::Workspace;
 
@@ -86,7 +86,7 @@ async fn main() {
                                 error!("Failed to initialize flat session: {e}");
                                 std::process::exit(1);
                             });
-                    tools.extend_with(engine.tools(), &config.tools.disabled);
+                    tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
                     agent::AgentHandle::spawn(
                         workspace.clone(),
                         provider,
@@ -108,7 +108,7 @@ async fn main() {
                         error!("Failed to initialize LCM engine: {e}");
                         std::process::exit(1);
                     });
-                    tools.extend_with(engine.tools(), &config.tools.disabled);
+                    tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
                     agent::AgentHandle::spawn(
                         workspace.clone(),
                         provider,

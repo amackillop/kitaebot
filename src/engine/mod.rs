@@ -37,6 +37,22 @@ pub type SummarizeFn = Arc<
         + Sync,
 >;
 
+/// Who a tool set is being assembled for.
+///
+/// Engines contribute different tools depending on the consumer:
+/// the root agent gets recall tools only, while sub-agents
+/// ([spec 19]) additionally get `lcm_expand` — bulk expansion goes
+/// through a child context so it never floods the parent's window.
+///
+/// [spec 19]: ../specs/19-sub-agents.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolScope {
+    /// The root agent's registry.
+    Root,
+    /// A sub-agent's per-type tool set.
+    SubAgent,
+}
+
 /// Everything the agent loop needs for a provider call.
 pub struct AssembledContext {
     /// Ordered messages for the provider (system prompt included).
@@ -112,7 +128,7 @@ pub trait ContextEngine: Send + Sync {
     ///
     /// Instances are `Arc` so one tool can appear in multiple filtered
     /// sets (root agent, sub-agents) without duplication.
-    fn tools(&self) -> Vec<Arc<dyn Tool>>;
+    fn tools(&self, scope: ToolScope) -> Vec<Arc<dyn Tool>>;
 
     /// Name of the active session.
     fn active_session(&self) -> &str;

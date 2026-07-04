@@ -39,6 +39,7 @@ use crate::types::{Message, ToolCall, ToolFunction};
 
 use super::super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
+    ToolScope,
 };
 use super::compaction;
 use super::explore;
@@ -413,8 +414,8 @@ impl ContextEngine for LcmEngine {
         }
     }
 
-    fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        // Open three independent read-only connections — one per tool.
+    fn tools(&self, scope: ToolScope) -> Vec<Arc<dyn Tool>> {
+        // Open independent read-only connections — one per tool.
         // WAL lets these readers run concurrently with the engine's
         // writer. If a connection fails to open, log and skip that
         // tool: a missing retrieval tool degrades gracefully (the
@@ -435,7 +436,12 @@ impl ContextEngine for LcmEngine {
                 Arc::clone(&self.active_id),
             )));
         }
-        if let Some(conn) = open("lcm_expand") {
+        // Bulk expansion is sub-agent-only: expanding a summary into
+        // the root context would flood the very window LCM manages.
+        // The parent delegates via the task tool instead (spec 19).
+        if scope == ToolScope::SubAgent
+            && let Some(conn) = open("lcm_expand")
+        {
             tools.push(Arc::new(LcmExpand::new(
                 conn,
                 Arc::clone(&self.active_id),
@@ -962,6 +968,19 @@ mod tests {
 
     fn temp_engine() -> (LcmEngine, tempfile::TempDir) {
         temp_engine_with_ctx(ContextConfig::default())
+    }
+
+    #[test]
+    fn tools_scope_gates_lcm_expand() {
+        let (engine, _dir) = temp_engine();
+        let names = |scope: ToolScope| -> Vec<&'static str> {
+            engine.tools(scope).iter().map(|t| t.name()).collect()
+        };
+        assert_eq!(names(ToolScope::Root), ["lcm_grep", "lcm_describe"]);
+        assert_eq!(
+            names(ToolScope::SubAgent),
+            ["lcm_grep", "lcm_describe", "lcm_expand"]
+        );
     }
 
     /// Build a temp engine with a custom `max_tokens` budget so tests
