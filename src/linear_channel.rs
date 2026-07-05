@@ -138,9 +138,11 @@ async fn dispatch(channel: &LinearChannel, handle: &AgentHandle, d: Dispatch) {
     let source = ChannelSource::Linear {
         issue: d.identifier.clone(),
     };
-    // Route per-issue: actor switches to this session for the turn.
+    // Route per-repo (the issue's owner/repo label): the actor switches
+    // to that session for the turn, so all of a repo's tickets — and its
+    // GitHub PRs, which use the same key — share one session.
     let body = match handle
-        .send_message(source, d.message, Some(d.identifier.clone()), None, cancel)
+        .send_message(source, d.message, Some(d.repo.clone()), None, cancel)
         .await
     {
         Ok(reply) => {
@@ -231,6 +233,10 @@ pub struct Dispatch {
     pub issue_id: String,
     /// Human-facing identifier, e.g. `MDK-123`.
     pub identifier: String,
+    /// The issue's `owner/repo` label — the session routing key,
+    /// shared with the GitHub channel so a repo's PRs and tickets
+    /// land in the same session.
+    pub repo: String,
     /// Message for the agent.
     pub message: String,
 }
@@ -263,6 +269,7 @@ pub fn decide_events(
             dispatches.push(Dispatch {
                 issue_id: issue.id.clone(),
                 identifier: issue.identifier.clone(),
+                repo: repo.to_string(),
                 message: format_new_issue(issue, repo),
             });
             announced.insert(issue.identifier.clone());
@@ -292,6 +299,7 @@ pub fn decide_events(
             dispatches.push(Dispatch {
                 issue_id: issue.id.clone(),
                 identifier: issue.identifier.clone(),
+                repo: repo.to_string(),
                 message: format_comment(issue, repo, &user.name, &user.email, &comment.body),
             });
         }
@@ -440,6 +448,7 @@ mod tests {
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0].identifier, "MDK-1");
         assert_eq!(dispatches[0].issue_id, "id-MDK-1");
+        assert_eq!(dispatches[0].repo, "owner/repo");
         assert!(dispatches[0].message.contains("assigned to you"));
         assert!(next.announced_issues.contains("MDK-1"));
         assert_eq!(next.last_poll, NOW);
@@ -505,6 +514,7 @@ mod tests {
 
         let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), NOW);
         assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].repo, "owner/repo");
         let msg = &dispatches[0].message;
         assert!(msg.contains("approved, go ahead"));
         assert!(msg.contains("kitaebot_mdk-1_<short-summary>"));
@@ -580,6 +590,7 @@ mod tests {
 
         let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), NOW);
         assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].repo, "owner/repo");
         assert!(dispatches[0].message.contains("repo: owner/repo"));
     }
 
@@ -732,6 +743,7 @@ mod tests {
             Dispatch {
                 issue_id: "i1".into(),
                 identifier: "MDK-1".into(),
+                repo: "owner/repo".into(),
                 message: "new issue".into(),
             },
         )
