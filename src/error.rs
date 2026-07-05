@@ -70,6 +70,10 @@ pub enum ProviderError {
     #[error("Authentication failed")]
     Authentication,
 
+    /// Provider returned success with no text and no tool calls.
+    #[error("Provider returned an empty response")]
+    EmptyResponse,
+
     /// Invalid response from provider (malformed JSON, missing fields, etc.).
     #[error("Invalid response: {0}")]
     InvalidResponse(String),

@@ -4,7 +4,7 @@
 //! `OpenAI` chat completions wire format.
 
 use serde::Serialize;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::clients::chat_completion::{ApiToolCall, ChatResponse, CompletionsClient};
 use crate::config::ProviderConfig;
@@ -47,6 +47,15 @@ impl CompletionsProvider {
             Some(calls) if !calls.is_empty() => {
                 let calls = calls.into_iter().map(into_tool_call).collect();
                 Ok(Response::ToolCalls { content, calls })
+            }
+            // A text response with nothing in it is a provider fault,
+            // not a reply.
+            _ if content.trim().is_empty() => {
+                warn!(
+                    reasoning_len = choice.message.reasoning.as_ref().map_or(0, String::len),
+                    "Provider returned empty content with no tool calls"
+                );
+                Err(ProviderError::EmptyResponse)
             }
             _ => Ok(Response::Text(content)),
         }
@@ -96,4 +105,87 @@ struct ChatRequest<'a> {
     tools: Option<&'a [ToolDefinition]>,
     max_tokens: u32,
     temperature: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clients::chat_completion::{ApiFunction, AssistantMessage, Choice};
+
+    fn response(msg: AssistantMessage) -> ChatResponse {
+        ChatResponse {
+            choices: vec![Choice { message: msg }],
+            citations: Vec::new(),
+        }
+    }
+
+    fn tool_call() -> ApiToolCall {
+        ApiToolCall {
+            id: "call-1".to_string(),
+            function: ApiFunction {
+                name: "exec".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn text_response_parses() {
+        let result = CompletionsProvider::parse_response(response(AssistantMessage {
+            content: Some("hello".to_string()),
+            tool_calls: None,
+            reasoning: None,
+        }));
+        assert!(matches!(result, Ok(Response::Text(t)) if t == "hello"));
+    }
+
+    #[test]
+    fn empty_text_is_empty_response_error() {
+        let result = CompletionsProvider::parse_response(response(AssistantMessage {
+            content: Some(String::new()),
+            tool_calls: None,
+            reasoning: None,
+        }));
+        assert!(matches!(result, Err(ProviderError::EmptyResponse)));
+    }
+
+    #[test]
+    fn whitespace_only_text_is_empty_response_error() {
+        let result = CompletionsProvider::parse_response(response(AssistantMessage {
+            content: Some("  \n".to_string()),
+            tool_calls: None,
+            reasoning: None,
+        }));
+        assert!(matches!(result, Err(ProviderError::EmptyResponse)));
+    }
+
+    #[test]
+    fn reasoning_without_content_is_empty_response_error() {
+        let result = CompletionsProvider::parse_response(response(AssistantMessage {
+            content: None,
+            tool_calls: None,
+            reasoning: Some("thinking...".to_string()),
+        }));
+        assert!(matches!(result, Err(ProviderError::EmptyResponse)));
+    }
+
+    #[test]
+    fn empty_content_with_tool_calls_is_valid() {
+        let result = CompletionsProvider::parse_response(response(AssistantMessage {
+            content: None,
+            tool_calls: Some(vec![tool_call()]),
+            reasoning: None,
+        }));
+        assert!(matches!(result, Ok(Response::ToolCalls { .. })));
+    }
+
+    #[test]
+    fn empty_tool_call_list_with_text_is_text() {
+        let result = CompletionsProvider::parse_response(response(AssistantMessage {
+            content: Some("done".to_string()),
+            tool_calls: Some(Vec::new()),
+            reasoning: None,
+        }));
+        assert!(matches!(result, Ok(Response::Text(t)) if t == "done"));
+    }
 }

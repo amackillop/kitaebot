@@ -85,6 +85,9 @@ impl Tool for WebSearch {
                         ProviderError::RateLimited => {
                             ToolError::ExecutionFailed("rate limited".into())
                         }
+                        ProviderError::EmptyResponse => {
+                            ToolError::ExecutionFailed("provider returned an empty response".into())
+                        }
                         ProviderError::InvalidResponse(msg) => {
                             ToolError::ExecutionFailed(format!("invalid response: {msg}"))
                         }

@@ -169,6 +169,8 @@ pub struct Choice {
 pub struct AssistantMessage {
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ApiToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -205,11 +207,22 @@ mod tests {
                 message: AssistantMessage {
                     content: Some(s.to_string()),
                     tool_calls: None,
+                    reasoning: None,
                 },
             }],
             citations: Vec::new(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn interpret_captures_reasoning() {
+        let body = r#"{"choices":[{"message":{"content":"","reasoning":"chain of thought"}}]}"#;
+        let resp = interpret_response(&raw(200, body)).unwrap();
+        assert_eq!(
+            resp.choices[0].message.reasoning.as_deref(),
+            Some("chain of thought")
+        );
     }
 
     #[test]
