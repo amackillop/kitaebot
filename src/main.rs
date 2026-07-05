@@ -73,7 +73,7 @@ async fn main() {
 
             let workspace = Arc::new(workspace);
             let provider = Arc::new(rt.provider);
-            let mut tools = rt.tools;
+            let tools = rt.tools;
             let memory_dir = workspace.path().join("memory");
             let summarize = engine::make_summarize_fn(provider.clone());
 
@@ -86,12 +86,11 @@ async fn main() {
                                 error!("Failed to initialize flat session: {e}");
                                 std::process::exit(1);
                             });
-                    tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
-                    agent::AgentHandle::spawn(
+                    spawn_with_engine(
                         workspace.clone(),
                         provider,
-                        Arc::new(tools),
-                        config.agent.max_iterations,
+                        tools,
+                        &config,
                         engine,
                         summarize,
                     )
@@ -108,12 +107,11 @@ async fn main() {
                         error!("Failed to initialize LCM engine: {e}");
                         std::process::exit(1);
                     });
-                    tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
-                    agent::AgentHandle::spawn(
+                    spawn_with_engine(
                         workspace.clone(),
                         provider,
-                        Arc::new(tools),
-                        config.agent.max_iterations,
+                        tools,
+                        &config,
                         engine,
                         summarize,
                     )
@@ -145,4 +143,40 @@ async fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Build the `task` tool, merge the engine's root tools, and spawn
+/// the agent actor.
+///
+/// Order matters: the child agent types are built from the base
+/// registry *before* root engine tools are merged. Sub-agents get
+/// their engine tools via `ToolScope::SubAgent` (includes
+/// `lcm_expand`); the root gets `ToolScope::Root` (does not).
+fn spawn_with_engine<E: ContextEngine + 'static>(
+    workspace: Arc<Workspace>,
+    provider: Arc<provider::CompletionsProvider>,
+    mut tools: tools::Tools,
+    config: &Config,
+    engine: E,
+    summarize: engine::SummarizeFn,
+) -> agent::AgentHandle {
+    let (explore, worker) =
+        agent::task::build_agent_types(&tools, engine.tools(ToolScope::SubAgent), workspace.path());
+    let task_tool: Arc<dyn tools::Tool> = Arc::new(agent::task::TaskTool::new(
+        provider.clone(),
+        summarize.clone(),
+        explore,
+        worker,
+        config.sub_agents.max_iterations,
+    ));
+    tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
+    tools.extend_with(vec![task_tool], &config.tools.disabled);
+    agent::AgentHandle::spawn(
+        workspace,
+        provider,
+        Arc::new(tools),
+        config.agent.max_iterations,
+        engine,
+        summarize,
+    )
 }

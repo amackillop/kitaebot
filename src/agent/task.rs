@@ -73,7 +73,6 @@ pub(crate) struct AgentType {
 /// base registry (post-`tools.disabled`) and the engine's sub-agent
 /// tools. Both children share the engine tool instances; neither can
 /// see `task`, so recursion is structurally impossible.
-#[allow(dead_code)] // Wired into main in the next commit (spec 19).
 pub(crate) fn build_agent_types(
     base: &Tools,
     engine_tools: Vec<Arc<dyn Tool>>,
@@ -142,7 +141,6 @@ pub(crate) struct TaskTool<P: Provider> {
 }
 
 impl<P: Provider> TaskTool<P> {
-    #[allow(dead_code)] // Wired into main in the next commit (spec 19).
     pub fn new(
         provider: Arc<P>,
         summarize: SummarizeFn,
