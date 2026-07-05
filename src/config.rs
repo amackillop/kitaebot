@@ -25,6 +25,8 @@ pub struct Config {
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
     #[serde(default)]
+    pub linear: LinearConfig,
+    #[serde(default)]
     pub provider: ProviderConfig,
     #[serde(default)]
     pub socket: SocketConfig,
@@ -241,6 +243,20 @@ pub struct GithubConfig {
     pub trusted_users: Vec<String>,
 }
 
+/// Linear channel settings.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LinearConfig {
+    /// Enable the Linear channel. Defaults to `false` so the daemon
+    /// can start without a Linear API key.
+    pub enabled: bool,
+    /// Seconds between issue polling cycles.
+    pub poll_interval_secs: u64,
+    /// Email addresses allowed to interact with the bot, matched
+    /// case-insensitively. Must be non-empty when enabled.
+    pub trusted_users: Vec<String>,
+}
+
 // --- Default impls ---
 
 impl Default for AgentConfig {
@@ -352,6 +368,16 @@ impl Default for HeartbeatConfig {
     fn default() -> Self {
         Self {
             interval_secs: 1800,
+        }
+    }
+}
+
+impl Default for LinearConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: 120,
+            trusted_users: Vec::new(),
         }
     }
 }
@@ -480,6 +506,18 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "github owner must be set when enabled".into(),
             ));
+        }
+        if self.linear.enabled {
+            if self.linear.poll_interval_secs == 0 {
+                return Err(ConfigError::Invalid(
+                    "linear poll_interval_secs must be > 0".into(),
+                ));
+            }
+            if self.linear.trusted_users.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "linear trusted_users must be non-empty when enabled".into(),
+                ));
+            }
         }
         if self.tools.exec.timeout_secs == 0 {
             return Err(ConfigError::Invalid("timeout_secs must be > 0".into()));
@@ -781,6 +819,53 @@ max_output_bytes = 20480
     fn lcm_reject_zero_large_file_summary_tokens() {
         let result = load_toml("[context.lcm]\nlarge_file_summary_tokens = 0\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    // ── linear ────────────────────────────────────────────────────────
+
+    #[test]
+    fn linear_defaults() {
+        let cfg = load_toml("").unwrap();
+        assert!(!cfg.linear.enabled);
+        assert_eq!(cfg.linear.poll_interval_secs, 120);
+        assert!(cfg.linear.trusted_users.is_empty());
+    }
+
+    #[test]
+    fn linear_parse() {
+        let cfg = load_toml(
+            "[linear]\nenabled = true\ntrusted_users = [\"me@example.com\"]\npoll_interval_secs = 60\n",
+        )
+        .unwrap();
+        assert!(cfg.linear.enabled);
+        assert_eq!(cfg.linear.poll_interval_secs, 60);
+        assert_eq!(cfg.linear.trusted_users, vec!["me@example.com"]);
+    }
+
+    #[test]
+    fn linear_reject_unknown_field() {
+        let result = load_toml("[linear]\ntypo = 1\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn linear_reject_zero_poll_interval_when_enabled() {
+        let result = load_toml(
+            "[linear]\nenabled = true\ntrusted_users = [\"me@example.com\"]\npoll_interval_secs = 0\n",
+        );
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn linear_reject_empty_trusted_users_when_enabled() {
+        let result = load_toml("[linear]\nenabled = true\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn linear_disabled_skips_validation() {
+        let cfg = load_toml("[linear]\nenabled = false\npoll_interval_secs = 0\n").unwrap();
+        assert!(!cfg.linear.enabled);
     }
 
     // ── git ───────────────────────────────────────────────────────────
