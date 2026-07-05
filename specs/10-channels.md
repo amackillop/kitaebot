@@ -3,8 +3,9 @@
 ## Motivation
 
 A channel translates external messages into agent turns and delivers responses
-back. Four channels drive the same agent core: Telegram (phone), Unix socket
-(computer), GitHub PR polling (code review), and heartbeat (periodic timer).
+back. Five channels drive the same agent core: Telegram (phone), Unix socket
+(computer), GitHub PR polling (code review), Linear issue polling (work
+items), and heartbeat (periodic timer).
 
 Each channel sends messages through `AgentHandle::send_message()` and awaits a
 reply. The actor classifies input as either a message (agent turn) or a slash
@@ -177,6 +178,101 @@ Requires the `github-token` secret.
 
 ---
 
+### Linear
+
+Polls Linear for issues assigned to the bot's Linear user. An assigned issue
+becomes a work item: the bot posts an implementation plan as a comment, and
+a trusted user's comment approving the plan triggers end-to-end execution
+(branch, implement, test, push, PR). Issue-state transitions are handled by
+external automation keyed off the ticket id in the branch name — the bot
+never mutates issue state.
+
+**Poll loop**: `tokio::time::interval` with `MissedTickBehavior::Skip`. Each
+tick:
+
+1. Fetch the viewer's assigned issues via GraphQL (states of type
+   `completed`/`canceled` filtered server-side), with description, labels,
+   and comments
+2. Compute events (pure core) against the persisted poll state
+3. Dispatch each event through the agent handle with
+   `ChannelSource::Linear { issue }` and the issue identifier as session
+   hint (per-issue sessions)
+4. Post the agent's reply as a comment on the issue
+5. Save the poll state
+
+**Bot identity**: resolved once at loop start via the `viewer` query.
+Comments authored by the viewer are skipped to prevent self-reply loops.
+
+**Events**:
+
+- *New issue* — an assigned issue whose identifier is not in the announced
+  set. The message carries identifier, title, target repo, description, and
+  pre-existing comments, plus an instruction to produce a review-ready
+  markdown plan and not implement anything yet. Issues announced in a tick
+  skip the comment pass for that tick (no double dispatch).
+- *New comment* — `createdAt > last_poll`, not authored by the viewer, from
+  a trusted user. The message carries identifier, repo, author, and body,
+  plus an instruction: if the comment approves the plan, execute
+  end-to-end — clone the repo, create a branch named
+  `kitaebot_<ticket-id>_<summary>` (the ticket id links the PR to the issue
+  automatically), implement, test, commit, push, open a PR, and reply with
+  a short completion note. Otherwise treat it as feedback and reply with a
+  revised plan.
+
+**Repo selection**: the target repository comes from a label on the issue —
+a label named like `owner/repo` (contains exactly one `/`). Issues without
+such a label, or with more than one, are logged and skipped entirely: not
+announced, not added to state, so they are picked up on a later tick once
+the labels are fixed.
+
+**Access control**: `linear.trusted_users` is a list of email addresses,
+matched case-insensitively against the comment author. Comments with no
+author (e.g. integrations) are untrusted. The bot's own email must not be
+listed.
+
+**State persistence**: `memory/linear_poll_state.json` via atomic write:
+
+```json
+{"last_poll": "2026-07-05T12:00:00Z", "announced_issues": ["MDK-123"]}
+```
+
+Missing or corrupt state defaults to `last_poll = now` with an empty
+announced set — assigned issues are announced fresh, old comments are not
+replayed. Announced identifiers absent from the fetched set (completed,
+cancelled, or unassigned) are pruned. `last_poll` only advances after a
+successful fetch.
+
+**API**: GraphQL over HTTPS POST to `https://api.linear.app/graphql`,
+authorized with a personal API key in the `Authorization` header (no
+`Bearer` prefix). Three operations: `viewer`, `assignedIssues`, and
+`commentCreate`. Raw query strings, no GraphQL client library. No
+pagination: first 50 assigned issues, first 100 comments per issue.
+
+**Send retries**: comment posting retries up to 3 times with exponential
+backoff (1s, 2s, 4s) for transient errors.
+
+**Activity events**: not forwarded (passes `None` for activity sender).
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `linear.enabled` | `false` | Enable the Linear channel |
+| `linear.poll_interval_secs` | `120` | Seconds between poll cycles |
+| `linear.trusted_users` | `[]` | Trusted email addresses (required when enabled) |
+
+Requires the `linear-api-key` secret.
+
+#### Error Handling
+
+| Error | Behavior |
+|-------|----------|
+| Viewer resolution fails | Log error, park forever (no polling) |
+| Issue fetch fails | Log error, retry next tick without advancing `last_poll` |
+| Agent turn fails | Post the error text as a comment |
+| Comment post fails after retries | Log error, continue with remaining events |
+| No/ambiguous repo label | Log warning, skip issue until labels are fixed |
+
+---
+
 ### Heartbeat
 
 Documented separately in [spec 07](07-heartbeat.md).
@@ -190,7 +286,7 @@ Documented separately in [spec 07](07-heartbeat.md).
 - Access control per channel
 - Verbose mode (socket and Telegram)
 - Send retries (Telegram)
-- State persistence (GitHub poll cursor)
+- State persistence (GitHub and Linear poll cursors)
 
 ### Does Not Own
 
@@ -209,7 +305,7 @@ forever.
 
 - Text only — no images, documents, or media
 - Single authorized user per channel (one Telegram chat_id, one socket client,
-  trusted GitHub users)
+  trusted GitHub users, trusted Linear emails)
 - No message queuing — the actor processes one envelope at a time
 - No typing indicators — the agent appears offline until the response is ready
   (activity events provide partial progress when verbose is on)

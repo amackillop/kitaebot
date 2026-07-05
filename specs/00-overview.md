@@ -2,7 +2,7 @@
 
 ## What Is Kitaebot?
 
-A personal AI agent that runs in a NixOS VM. You communicate with it via Telegram (phone), a Unix socket (computer), or GitHub PR comments (code review). It has a persistent personality ("soul"), maintains a unified conversation history shared across all channels, and can execute shell commands in its isolated workspace.
+A personal AI agent that runs in a NixOS VM. You communicate with it via Telegram (phone), a Unix socket (computer), GitHub PR comments (code review), or Linear issues (work items). It has a persistent personality ("soul"), maintains a unified conversation history shared across all channels, and can execute shell commands in its isolated workspace.
 
 ## Why Build This?
 
@@ -22,12 +22,10 @@ Existing solutions (nanobot, OpenClaw) are feature-rich but complex. Kitaebot pr
 │  ┌────────────────────────────────────────────────────┐  │
 │  │             kitaebot run  (daemon)                 │  │
 │  │                                                    │  │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ │  │
-│  │  │ Telegram │ │  Socket  │ │ GitHub   │ │Heartbt │ │  │
-│  │  │  poller  │ │ listener │ │ PR poll  │ │ timer  │ │  │
-│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └───┬────┘ │  │
-│  │       │            │            │           │      │  │
-│  │       └────────────┴────────────┴───────────┘      │  │
+│  │  ┌───────────────────────────────────────────────┐ │  │
+│  │  │Telegram · Socket · GitHub · Linear · Heartbeat│ │  │
+│  │  │ poller    listener  PR poll  issues    timer  │ │  │
+│  │  └─────────────────────┬─────────────────────────┘ │  │
 │  │                        │                           │  │
 │  │                        ▼                           │  │
 │  │              ┌──────────────────┐                  │  │
@@ -83,7 +81,7 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [07](07-heartbeat.md) | Heartbeat | Periodic awareness checks |
 | [08](08-binaries.md) | Binaries | Daemon lifecycle and socket client |
 | [09](09-vm.md) | NixOS VM | Deployment and system configuration |
-| [10](10-channels.md) | Channels | External messaging interfaces (Telegram, Unix socket, GitHub) |
+| [10](10-channels.md) | Channels | External messaging interfaces (Telegram, Unix socket, GitHub, Linear) |
 | [11](11-safety.md) | Safety | Leak detection and output wrapping |
 | [12](12-context.md) | Context | Token budget and compaction |
 | [13](13-credentials.md) | Credentials | Secret loading and isolation |
@@ -118,6 +116,12 @@ All channels follow the same pattern: construct a message, send it through `Agen
 2. For each PR, fetches reviews, comments, and inline diff comments newer than `last_poll`
 3. Each new item sent through `AgentHandle` with `ChannelSource::GitHub { pr_number }`
 4. Agent responds in context of the full unified session
+
+### Linear
+
+1. Poller fetches issues assigned to the bot's Linear user
+2. New issues and trusted comments sent through `AgentHandle` with `ChannelSource::Linear { issue }`
+3. Agent replies (plan, revision, or completion note) are posted back as issue comments
 
 ### Heartbeat
 
