@@ -5,6 +5,7 @@
 pub mod compaction;
 pub mod engine;
 pub mod explore;
+mod report;
 pub mod schema;
 pub mod summarize;
 pub mod tools;

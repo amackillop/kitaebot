@@ -13,7 +13,6 @@ use crate::dispatch::Reply;
 use crate::engine::{ContextEngine, SummarizeFn};
 use crate::heartbeat;
 use crate::provider::Provider;
-use crate::stats;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
 
@@ -149,7 +148,11 @@ pub async fn execute(
             Ok(Reply::text("Session cleared.".into()))
         }
         SlashCommand::Project { name } => project(engine, name).await,
-        SlashCommand::Stats => Ok(Reply::pre(stats::run(workspace.path()))),
+        SlashCommand::Stats => engine
+            .report()
+            .await
+            .map(Reply::pre)
+            .map_err(|e| e.to_string()),
     }
 }
 

@@ -451,6 +451,11 @@ impl ContextEngine for LcmEngine {
         tools
     }
 
+    async fn report(&self) -> Result<String, EngineError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(conn, |c| super::report::report_sync(c)).await
+    }
+
     fn active_session(&self) -> &str {
         &self.active_name
     }
@@ -937,7 +942,7 @@ fn sanitize_name(name: &str) -> String {
     name.replace('\0', "").replace("..", "").replace('/', "--")
 }
 
-fn desanitize_name(stem: &str) -> String {
+pub(super) fn desanitize_name(stem: &str) -> String {
     stem.replace("--", "/")
 }
 

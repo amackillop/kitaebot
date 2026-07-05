@@ -89,6 +89,11 @@ impl ContextEngine for EphemeralSession {
         Vec::new()
     }
 
+    async fn report(&self) -> Result<String, EngineError> {
+        // Unreachable in practice: children get no slash commands.
+        Ok(crate::stats::render(std::slice::from_ref(&self.messages)))
+    }
+
     // The trait ties the lifetime to &self; the literal is incidental.
     #[allow(clippy::unnecessary_literal_bound)]
     fn active_session(&self) -> &str {

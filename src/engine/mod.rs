@@ -132,6 +132,13 @@ pub trait ContextEngine: Send + Sync {
     /// sets (root agent, sub-agents) without duplication.
     fn tools(&self, scope: ToolScope) -> Vec<Arc<dyn Tool>>;
 
+    /// Rendered cross-session usage report for `/stats`.
+    ///
+    /// Engines feed their stored messages through `stats::render`
+    /// and may append engine-specific sections (LCM appends a
+    /// health section).
+    fn report(&self) -> impl Future<Output = Result<String, EngineError>> + Send;
+
     /// Name of the active session.
     fn active_session(&self) -> &str;
 

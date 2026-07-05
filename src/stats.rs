@@ -1,13 +1,15 @@
 //! Session statistics.
 //!
-//! Scans session files and reports which tools and exec commands consume
-//! the most output bytes, guiding optimization work.
+//! Pure analysis core for the `/stats` report: given per-session
+//! message lists, reports which tools and exec commands consume the
+//! most output bytes, guiding optimization work. Each context engine
+//! supplies its own messages via [`ContextEngine::report`].
+//!
+//! [`ContextEngine::report`]: crate::engine::ContextEngine::report
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
-use std::path::Path;
 
-use crate::session::Session;
 use crate::types::Message;
 
 use std::fmt;
@@ -78,23 +80,9 @@ struct CallInfo {
 
 // ── Public entry point ──────────────────────────────────────────────
 
-pub fn run(workspace: &Path) -> String {
-    let pattern = workspace.join("sessions/*.json");
-    let pattern = pattern.to_string_lossy();
-
-    let (sessions, errors): (Vec<_>, Vec<_>) = glob::glob(&pattern)
-        .expect("valid glob pattern")
-        .filter_map(|entry| entry.inspect_err(|e| eprintln!("glob error: {e}")).ok())
-        .map(|path| Session::load(&path).map_err(|e| (path, e)))
-        .partition(Result::is_ok);
-
-    for (path, err) in errors.into_iter().map(Result::unwrap_err) {
-        eprintln!("warning: skipping {}: {err}", path.display());
-    }
-
-    let sessions: Vec<_> = sessions.into_iter().map(Result::unwrap).collect();
-    let report = analyze(&sessions);
-    format_report(&report)
+/// Render the usage report for the given sessions' messages.
+pub(crate) fn render(sessions: &[Vec<Message>]) -> String {
+    format_report(&analyze(sessions))
 }
 
 // ── Analysis (pure, testable) ───────────────────────────────────────
@@ -119,43 +107,34 @@ type Acc = (
     HashMap<ToolErrorKey, u64>,
 );
 
-fn analyze(sessions: &[Session]) -> Report {
-    let (_, by_tool, by_exec_cmd, blocked_cmds, tool_errors) =
-        sessions.iter().flat_map(Session::messages).fold(
-            <Acc>::default(),
-            |(mut pending, mut by_tool, mut by_exec_cmd, mut blocked_cmds, mut tool_errors),
-             msg| {
-                match msg {
-                    Message::ToolCalls { calls, .. } => {
-                        let is_exec = |name: &str| name == "exec";
-                        let call_infos = calls.iter().map(|call| CallInfo {
-                            tool_name: call.function.name.clone(),
-                            exec_cmd: is_exec(&call.function.name)
-                                .then(|| extract_exec_command(&call.function.arguments)),
-                            exec_full_cmd: is_exec(&call.function.name)
-                                .then(|| extract_exec_full_command(&call.function.arguments)),
-                        });
-                        pending.extend(call_infos);
-                    }
-                    Message::Tool { content, .. } => {
-                        if let Some(info) = pending.pop_front() {
-                            let bytes = content.len() as u64;
-                            accumulate(&mut by_tool, info.tool_name.clone(), bytes);
-                            if let Some(ref cmd) = info.exec_cmd {
-                                accumulate(&mut by_exec_cmd, cmd.clone(), bytes);
-                            }
+fn analyze(sessions: &[Vec<Message>]) -> Report {
+    let (_, by_tool, by_exec_cmd, blocked_cmds, tool_errors) = sessions.iter().flatten().fold(
+        <Acc>::default(),
+        |(mut pending, mut by_tool, mut by_exec_cmd, mut blocked_cmds, mut tool_errors), msg| {
+            match msg {
+                Message::ToolCalls { calls, .. } => {
+                    let is_exec = |name: &str| name == "exec";
+                    let call_infos = calls.iter().map(|call| CallInfo {
+                        tool_name: call.function.name.clone(),
+                        exec_cmd: is_exec(&call.function.name)
+                            .then(|| extract_exec_command(&call.function.arguments)),
+                        exec_full_cmd: is_exec(&call.function.name)
+                            .then(|| extract_exec_full_command(&call.function.arguments)),
+                    });
+                    pending.extend(call_infos);
+                }
+                Message::Tool { content, .. } => {
+                    if let Some(info) = pending.pop_front() {
+                        let bytes = content.len() as u64;
+                        accumulate(&mut by_tool, info.tool_name.clone(), bytes);
+                        if let Some(ref cmd) = info.exec_cmd {
+                            accumulate(&mut by_exec_cmd, cmd.clone(), bytes);
+                        }
 
-                            if let Some(kind) = classify_failure(content) {
-                                if kind == FailureKind::Blocked {
-                                    if let Some(full_cmd) = info.exec_full_cmd {
-                                        *blocked_cmds.entry(full_cmd).or_default() += 1;
-                                    } else {
-                                        let key = ToolErrorKey {
-                                            tool: info.tool_name,
-                                            kind,
-                                        };
-                                        *tool_errors.entry(key).or_default() += 1;
-                                    }
+                        if let Some(kind) = classify_failure(content) {
+                            if kind == FailureKind::Blocked {
+                                if let Some(full_cmd) = info.exec_full_cmd {
+                                    *blocked_cmds.entry(full_cmd).or_default() += 1;
                                 } else {
                                     let key = ToolErrorKey {
                                         tool: info.tool_name,
@@ -163,14 +142,21 @@ fn analyze(sessions: &[Session]) -> Report {
                                     };
                                     *tool_errors.entry(key).or_default() += 1;
                                 }
+                            } else {
+                                let key = ToolErrorKey {
+                                    tool: info.tool_name,
+                                    kind,
+                                };
+                                *tool_errors.entry(key).or_default() += 1;
                             }
                         }
                     }
-                    _ => {}
                 }
-                (pending, by_tool, by_exec_cmd, blocked_cmds, tool_errors)
-            },
-        );
+                _ => {}
+            }
+            (pending, by_tool, by_exec_cmd, blocked_cmds, tool_errors)
+        },
+    );
 
     let sorted_stats = |map: HashMap<String, ToolStats>| {
         let mut v: Vec<_> = map.into_iter().collect();
@@ -276,7 +262,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 
 // ── Formatting ──────────────────────────────────────────────────────
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = 1024.0 * 1024.0;
 
@@ -473,14 +459,6 @@ mod tests {
 
     // ── analyze ─────────────────────────────────────────────────────
 
-    fn build_test_session(messages: Vec<Message>) -> Session {
-        let mut session = Session::new();
-        for msg in messages {
-            session.add_message(msg);
-        }
-        session
-    }
-
     #[test]
     fn analyze_empty_sessions() {
         let report = analyze(&[]);
@@ -491,12 +469,12 @@ mod tests {
 
     #[test]
     fn analyze_counts_tool_calls() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"git status"}"#)]),
             make_tool("c1", "on branch main\nnothing to commit"),
             make_assistant(vec![make_call("c2", "file_read", r#"{"path":"foo.rs"}"#)]),
             make_tool("c2", "fn main() {}"),
-        ]);
+        ];
 
         let report = analyze(&[session]);
 
@@ -520,14 +498,14 @@ mod tests {
 
     #[test]
     fn analyze_exec_breakdown() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"git status"}"#)]),
             make_tool("c1", "ok"),
             make_assistant(vec![make_call("c2", "exec", r#"{"command":"git status"}"#)]),
             make_tool("c2", "clean"),
             make_assistant(vec![make_call("c3", "exec", r#"{"command":"cargo test"}"#)]),
             make_tool("c3", "test result: ok. 5 passed"),
-        ]);
+        ];
 
         let report = analyze(&[session]);
 
@@ -556,14 +534,14 @@ mod tests {
 
     #[test]
     fn analyze_sorted_by_total_output_desc() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"git diff"}"#)]),
             make_tool("c1", &"x".repeat(1000)),
             make_assistant(vec![make_call("c2", "file_read", r#"{"path":"f"}"#)]),
             make_tool("c2", &"y".repeat(500)),
             make_assistant(vec![make_call("c3", "exec", r#"{"command":"ls"}"#)]),
             make_tool("c3", &"z".repeat(2000)),
-        ]);
+        ];
 
         let report = analyze(&[session]);
 
@@ -578,10 +556,7 @@ mod tests {
 
     #[test]
     fn analyze_orphaned_tool_message_ignored() {
-        let session = build_test_session(vec![make_tool(
-            "orphan",
-            "this has no matching assistant call",
-        )]);
+        let session = vec![make_tool("orphan", "this has no matching assistant call")];
 
         let report = analyze(&[session]);
         assert!(report.by_tool.is_empty());
@@ -590,9 +565,9 @@ mod tests {
     #[test]
     fn analyze_compacted_session() {
         // After compaction, session has a single System summary message.
-        let session = build_test_session(vec![Message::System {
+        let session = vec![Message::System {
             content: "Summary of previous conversation.".to_string(),
-        }]);
+        }];
 
         let report = analyze(&[session]);
         assert!(report.by_tool.is_empty());
@@ -611,12 +586,12 @@ mod tests {
 
     #[test]
     fn format_report_includes_tool_and_exec_sections() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"git status"}"#)]),
             make_tool("c1", &"x".repeat(2048)),
             make_assistant(vec![make_call("c2", "file_read", r#"{"path":"f"}"#)]),
             make_tool("c2", "short"),
-        ]);
+        ];
         let report = analyze(&[session]);
         let out = format_report(&report);
 
@@ -630,10 +605,10 @@ mod tests {
 
     #[test]
     fn format_report_no_exec_breakdown_without_exec_calls() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "file_read", r#"{"path":"f"}"#)]),
             make_tool("c1", "data"),
-        ]);
+        ];
         let report = analyze(&[session]);
         let out = format_report(&report);
 
@@ -643,14 +618,14 @@ mod tests {
 
     #[test]
     fn analyze_multiple_sessions() {
-        let s1 = build_test_session(vec![
+        let s1 = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"ls"}"#)]),
             make_tool("c1", "foo bar"),
-        ]);
-        let s2 = build_test_session(vec![
+        ];
+        let s2 = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"ls"}"#)]),
             make_tool("c1", "baz"),
-        ]);
+        ];
 
         let report = analyze(&[s1, s2]);
         assert_eq!(report.session_count, 2);
@@ -766,7 +741,7 @@ mod tests {
 
     #[test]
     fn analyze_blocked_exec_command() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call(
                 "c1",
                 "exec",
@@ -779,7 +754,7 @@ mod tests {
                 r#"{"command":"git push origin dev"}"#,
             )]),
             make_tool("c2", "Error: Tool blocked: use the git_push tool"),
-        ]);
+        ];
 
         let report = analyze(&[session]);
 
@@ -796,7 +771,7 @@ mod tests {
 
     #[test]
     fn analyze_blocked_exec_same_command_aggregates() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call(
                 "c1",
                 "exec",
@@ -809,7 +784,7 @@ mod tests {
                 r#"{"command":"git push origin main"}"#,
             )]),
             make_tool("c2", "Error: Tool blocked: use the git_push tool"),
-        ]);
+        ];
 
         let report = analyze(&[session]);
         assert_eq!(report.blocked_cmds.len(), 1);
@@ -819,10 +794,10 @@ mod tests {
 
     #[test]
     fn analyze_tool_error_timeout() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"sleep 999"}"#)]),
             make_tool("c1", "Error: Tool execution timed out"),
-        ]);
+        ];
 
         let report = analyze(&[session]);
         assert_eq!(report.tool_errors.len(), 1);
@@ -835,14 +810,14 @@ mod tests {
 
     #[test]
     fn analyze_non_exec_blocked_goes_to_tool_errors() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call(
                 "c1",
                 "file_read",
                 r#"{"path":"../../etc/passwd"}"#,
             )]),
             make_tool("c1", "Error: Tool blocked: path traversal detected"),
-        ]);
+        ];
 
         let report = analyze(&[session]);
         assert!(report.blocked_cmds.is_empty());
@@ -853,13 +828,13 @@ mod tests {
 
     #[test]
     fn analyze_safety_block() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"cat .env"}"#)]),
             make_tool(
                 "c1",
                 "Tool output blocked: Potential secret detected (pattern: OpenAI API key). Do not retry.",
             ),
-        ]);
+        ];
 
         let report = analyze(&[session]);
         assert!(report.blocked_cmds.is_empty());
@@ -869,13 +844,13 @@ mod tests {
 
     #[test]
     fn analyze_repeat_block() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"git status"}"#)]),
             make_tool(
                 "c1",
                 "ERROR: You have called this tool with identical arguments multiple times and received the same result.",
             ),
-        ]);
+        ];
 
         let report = analyze(&[session]);
         assert_eq!(report.tool_errors.len(), 1);
@@ -884,7 +859,7 @@ mod tests {
 
     #[test]
     fn analyze_mixed_success_and_failure() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"ls"}"#)]),
             make_tool("c1", "<tool_output name=\"exec\">\nfiles\n</tool_output>"),
             make_assistant(vec![make_call(
@@ -893,7 +868,7 @@ mod tests {
                 r#"{"command":"git push origin main"}"#,
             )]),
             make_tool("c2", "Error: Tool blocked: use the git_push tool"),
-        ]);
+        ];
 
         let report = analyze(&[session]);
 
@@ -908,14 +883,14 @@ mod tests {
 
     #[test]
     fn format_report_includes_blocked_section() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call(
                 "c1",
                 "exec",
                 r#"{"command":"git push origin main"}"#,
             )]),
             make_tool("c1", "Error: Tool blocked: use the git_push tool"),
-        ]);
+        ];
         let report = analyze(&[session]);
         let out = format_report(&report);
 
@@ -925,10 +900,10 @@ mod tests {
 
     #[test]
     fn format_report_includes_tool_errors_section() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"sleep 999"}"#)]),
             make_tool("c1", "Error: Tool execution timed out"),
-        ]);
+        ];
         let report = analyze(&[session]);
         let out = format_report(&report);
 
@@ -939,10 +914,10 @@ mod tests {
 
     #[test]
     fn format_report_no_failure_sections_when_all_succeed() {
-        let session = build_test_session(vec![
+        let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"ls"}"#)]),
             make_tool("c1", "<tool_output name=\"exec\">\nok\n</tool_output>"),
-        ]);
+        ];
         let report = analyze(&[session]);
         let out = format_report(&report);
 

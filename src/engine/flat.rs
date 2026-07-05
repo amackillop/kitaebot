@@ -184,6 +184,41 @@ impl ContextEngine for FlatSession {
         Vec::new()
     }
 
+    async fn report(&self) -> Result<String, EngineError> {
+        let mut sessions = Vec::new();
+        let mut saw_active = false;
+
+        let entries = fs::read_dir(&self.sessions_dir)
+            .map_err(|e| EngineError::Storage(format!("read sessions dir: {e}")))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| EngineError::Storage(format!("read dir entry: {e}")))?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+
+            // For the active session, use the in-memory state (avoids
+            // re-reading and sees unsaved messages).
+            if desanitize_name(stem) == self.active_name {
+                sessions.push(self.session.messages().to_vec());
+                saw_active = true;
+            } else if let Ok(s) = Session::load(&path) {
+                sessions.push(s.messages().to_vec());
+            }
+        }
+
+        // Active session with no file yet (new, never saved).
+        if !saw_active {
+            sessions.push(self.session.messages().to_vec());
+        }
+
+        Ok(crate::stats::render(&sessions))
+    }
+
     fn active_session(&self) -> &str {
         &self.active_name
     }
@@ -614,6 +649,67 @@ mod tests {
         let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"general"));
         assert!(names.contains(&"beta"));
+    }
+
+    // ── Report tests ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn report_covers_all_sessions() {
+        use crate::types::{ToolCall, ToolFunction};
+
+        let mut engine = temp_engine(ContextConfig::default());
+
+        // Tool call in "general", saved to disk.
+        engine
+            .push_message(Message::ToolCalls {
+                content: String::new(),
+                calls: vec![ToolCall::new(
+                    "c1".into(),
+                    ToolFunction {
+                        name: "exec".into(),
+                        arguments: r#"{"command":"git status"}"#.into(),
+                    },
+                )],
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::Tool {
+                call_id: "c1".into(),
+                content: "clean".into(),
+            })
+            .await
+            .unwrap();
+        engine.save().await.unwrap();
+
+        // Tool call in "other", unsaved (in-memory only).
+        engine.switch_session("other").await.unwrap();
+        engine
+            .push_message(Message::ToolCalls {
+                content: String::new(),
+                calls: vec![ToolCall::new(
+                    "c2".into(),
+                    ToolFunction {
+                        name: "file_read".into(),
+                        arguments: r#"{"path":"f"}"#.into(),
+                    },
+                )],
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::Tool {
+                call_id: "c2".into(),
+                content: "data".into(),
+            })
+            .await
+            .unwrap();
+
+        let report = engine.report().await.unwrap();
+        assert!(report.contains("Tool Usage (2 sessions)"));
+        assert!(report.contains("exec"));
+        assert!(report.contains("file_read"));
+        assert!(report.contains("git status"));
     }
 
     // ── Name sanitization tests ─────────────────────────────────────
