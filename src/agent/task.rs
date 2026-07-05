@@ -13,13 +13,12 @@ use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tokio_util::sync::CancellationToken;
 
 use crate::engine::SummarizeFn;
 use crate::engine::ephemeral::EphemeralSession;
 use crate::error::ToolError;
 use crate::provider::Provider;
-use crate::tools::{Tool, Tools};
+use crate::tools::{Tool, ToolCtx, Tools};
 
 use super::run_turn;
 
@@ -188,6 +187,7 @@ impl<P: Provider> Tool for TaskTool<P> {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
@@ -211,8 +211,7 @@ impl<P: Provider> Tool for TaskTool<P> {
                 &*self.provider,
                 &agent.tools,
                 self.max_iterations,
-                None,
-                &CancellationToken::new(),
+                &ToolCtx::default(),
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("sub-agent failed: {e}")))
@@ -307,7 +306,10 @@ mod tests {
             5,
         );
         let result = tool
-            .execute(serde_json::json!({"prompt": "do a thing"}))
+            .execute(
+                serde_json::json!({"prompt": "do a thing"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert_eq!(result, "child says done");
@@ -325,7 +327,10 @@ mod tests {
             5,
         );
         let result = tool
-            .execute(serde_json::json!({"prompt": "use a tool"}))
+            .execute(
+                serde_json::json!({"prompt": "use a tool"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert_eq!(result, "used the tool");
@@ -348,7 +353,10 @@ mod tests {
             5,
         );
         let result = tool
-            .execute(serde_json::json!({"prompt": "work", "agent_type": "worker"}))
+            .execute(
+                serde_json::json!({"prompt": "work", "agent_type": "worker"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert_eq!(result, "worker done");
@@ -364,7 +372,10 @@ mod tests {
             max,
         );
         let err = tool
-            .execute(serde_json::json!({"prompt": "loop forever"}))
+            .execute(
+                serde_json::json!({"prompt": "loop forever"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap_err();
         match err {
@@ -382,7 +393,7 @@ mod tests {
             5,
         );
         let err = tool
-            .execute(serde_json::json!({"prompt": "x"}))
+            .execute(serde_json::json!({"prompt": "x"}), ToolCtx::default())
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed(_)));
@@ -392,7 +403,10 @@ mod tests {
     async fn invalid_agent_type_rejected() {
         let tool = task_tool(vec![], Tools::default(), Tools::default(), 5);
         let err = tool
-            .execute(serde_json::json!({"prompt": "x", "agent_type": "manager"}))
+            .execute(
+                serde_json::json!({"prompt": "x", "agent_type": "manager"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
@@ -401,7 +415,10 @@ mod tests {
     #[tokio::test]
     async fn missing_prompt_rejected() {
         let tool = task_tool(vec![], Tools::default(), Tools::default(), 5);
-        let err = tool.execute(serde_json::json!({})).await.unwrap_err();
+        let err = tool
+            .execute(serde_json::json!({}), ToolCtx::default())
+            .await
+            .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
     }
 

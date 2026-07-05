@@ -26,7 +26,7 @@ use tracing::debug;
 
 use super::explore::extract_file_ids;
 use crate::error::ToolError;
-use crate::tools::Tool;
+use crate::tools::{Tool, ToolCtx};
 
 /// Default result limit for `lcm_grep`. Generous but capped so a
 /// pathological query cannot dump the whole conversation back to the
@@ -137,6 +137,7 @@ impl Tool for LcmGrep {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         let conn = Arc::clone(&self.conn);
         let conversation_id = self.active_id.load(Ordering::Acquire);
@@ -319,6 +320,7 @@ impl Tool for LcmDescribe {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         let conn = Arc::clone(&self.conn);
         let conversation_id = self.active_id.load(Ordering::Acquire);
@@ -582,6 +584,7 @@ impl Tool for LcmExpand {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         let conn = Arc::clone(&self.conn);
         let conversation_id = self.active_id.load(Ordering::Acquire);
@@ -863,7 +866,7 @@ mod tests {
 
         let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
         let out = tool
-            .execute(serde_json::json!({"pattern": "fox"}))
+            .execute(serde_json::json!({"pattern": "fox"}), ToolCtx::default())
             .await
             .unwrap();
         assert!(out.contains("brown fox"), "missing match in: {out}");
@@ -880,11 +883,14 @@ mod tests {
 
         let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
         let out = tool
-            .execute(serde_json::json!({
-                "pattern": r"\d{3}-\d{4}",
-                "mode": "regex",
-                "scope": "messages",
-            }))
+            .execute(
+                serde_json::json!({
+                    "pattern": r"\d{3}-\d{4}",
+                    "mode": "regex",
+                    "scope": "messages",
+                }),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(out.contains("555-1234"));
@@ -896,7 +902,10 @@ mod tests {
         let (_dir, db) = fresh_db();
         let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
         let out = tool
-            .execute(serde_json::json!({"pattern": "nothingmatches"}))
+            .execute(
+                serde_json::json!({"pattern": "nothingmatches"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(out.starts_with("No matches"));
@@ -907,7 +916,10 @@ mod tests {
         let (_dir, db) = fresh_db();
         let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
         let err = tool
-            .execute(serde_json::json!({"pattern": "x", "mode": "fuzzy"}))
+            .execute(
+                serde_json::json!({"pattern": "x", "mode": "fuzzy"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
@@ -930,7 +942,7 @@ mod tests {
         // Active id points at conversation 2 → only "other realm" hits.
         let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(2));
         let out = tool
-            .execute(serde_json::json!({"pattern": "realm"}))
+            .execute(serde_json::json!({"pattern": "realm"}), ToolCtx::default())
             .await
             .unwrap();
         assert!(out.contains("other realm"));
@@ -942,7 +954,7 @@ mod tests {
         let (_dir, db) = fresh_db();
         let tool = LcmDescribe::new(schema::open_readonly(&db).unwrap(), shared_active(1));
         let out = tool
-            .execute(serde_json::json!({"id": "sum_missing"}))
+            .execute(serde_json::json!({"id": "sum_missing"}), ToolCtx::default())
             .await
             .unwrap();
         assert!(out.contains("No summary"));
@@ -953,7 +965,10 @@ mod tests {
         let (_dir, db) = fresh_db();
         let tool = LcmDescribe::new(schema::open_readonly(&db).unwrap(), shared_active(1));
         let out = tool
-            .execute(serde_json::json!({"id": "file_missing"}))
+            .execute(
+                serde_json::json!({"id": "file_missing"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(out.contains("No file"));
@@ -964,7 +979,7 @@ mod tests {
         let (_dir, db) = fresh_db();
         let tool = LcmDescribe::new(schema::open_readonly(&db).unwrap(), shared_active(1));
         let err = tool
-            .execute(serde_json::json!({"id": "garbage"}))
+            .execute(serde_json::json!({"id": "garbage"}), ToolCtx::default())
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
@@ -985,7 +1000,10 @@ mod tests {
             payloads_dir(&dir),
         );
         let out = tool
-            .execute(serde_json::json!({"summary_id": "sum_missing"}))
+            .execute(
+                serde_json::json!({"summary_id": "sum_missing"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(out.contains("No summary"));
@@ -1018,10 +1036,13 @@ mod tests {
             payloads_dir(&dir),
         );
         let out = tool
-            .execute(serde_json::json!({
-                "summary_id": "sum_test",
-                "include_messages": true,
-            }))
+            .execute(
+                serde_json::json!({
+                    "summary_id": "sum_test",
+                    "include_messages": true,
+                }),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(out.contains("leaf summary text"), "out was: {out}");
@@ -1066,10 +1087,13 @@ mod tests {
             payloads,
         );
         let out = tool
-            .execute(serde_json::json!({
-                "summary_id": "sum_test",
-                "include_messages": true,
-            }))
+            .execute(
+                serde_json::json!({
+                    "summary_id": "sum_test",
+                    "include_messages": true,
+                }),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(
@@ -1095,10 +1119,13 @@ mod tests {
             payloads,
         );
         let out = tool
-            .execute(serde_json::json!({
-                "summary_id": "sum_test",
-                "include_messages": true,
-            }))
+            .execute(
+                serde_json::json!({
+                    "summary_id": "sum_test",
+                    "include_messages": true,
+                }),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(
@@ -1122,10 +1149,13 @@ mod tests {
             payloads_dir(&dir),
         );
         let out = tool
-            .execute(serde_json::json!({
-                "summary_id": "sum_test",
-                "include_messages": true,
-            }))
+            .execute(
+                serde_json::json!({
+                    "summary_id": "sum_test",
+                    "include_messages": true,
+                }),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(out.contains("payload unavailable"), "out was: {out}");

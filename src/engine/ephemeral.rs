@@ -109,8 +109,6 @@ impl ContextEngine for EphemeralSession {
 mod tests {
     use std::pin::Pin;
 
-    use tokio_util::sync::CancellationToken;
-
     use super::*;
     use crate::provider::MockProvider;
     use crate::tools::Tools;
@@ -174,8 +172,7 @@ mod tests {
             &provider,
             &Tools::default(),
             5,
-            None,
-            &CancellationToken::new(),
+            &crate::tools::ToolCtx::default(),
         )
         .await
         .unwrap();

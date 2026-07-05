@@ -14,7 +14,7 @@ use serde::Deserialize;
 use tokio::time::Duration;
 use tracing::{debug, warn};
 
-use super::Tool;
+use super::{Tool, ToolCtx};
 use crate::config::WebFetchConfig;
 use crate::error::ToolError;
 
@@ -57,6 +57,7 @@ impl Tool for WebFetch {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)

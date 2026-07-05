@@ -23,7 +23,7 @@ use crate::engine::{ContextEngine, SummarizeFn};
 use crate::error::{Error, ToolError};
 use crate::provider::Provider;
 use crate::safety;
-use crate::tools::{Tools, truncate_output};
+use crate::tools::{ToolCtx, Tools, truncate_output};
 use crate::types::{Message, Response, ToolCall};
 use crate::workspace::Workspace;
 
@@ -70,8 +70,7 @@ pub async fn process_message(
     provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
-    activity_tx: Option<&mpsc::Sender<Activity>>,
-    cancel: &CancellationToken,
+    ctx: &ToolCtx,
 ) -> Result<String, Error> {
     let system_prompt = workspace.system_prompt();
     run_turn(
@@ -82,8 +81,7 @@ pub async fn process_message(
         provider,
         tools,
         max_iterations,
-        activity_tx,
-        cancel,
+        ctx,
     )
     .await
 }
@@ -109,9 +107,10 @@ pub(crate) async fn run_turn(
     provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
-    activity_tx: Option<&mpsc::Sender<Activity>>,
-    cancel: &CancellationToken,
+    ctx: &ToolCtx,
 ) -> Result<String, Error> {
+    let activity_tx = ctx.activity.as_ref();
+    let cancel = &ctx.cancel;
     if cancel.is_cancelled() {
         activity::emit(activity_tx, Activity::Cancelled);
         return Err(Error::Cancelled);
@@ -202,7 +201,10 @@ pub(crate) async fn run_turn(
                 }
 
                 // Execute all tool calls in parallel
-                let futures: Vec<_> = calls.iter().map(|call| tools.execute(call)).collect();
+                let futures: Vec<_> = calls
+                    .iter()
+                    .map(|call| tools.execute(call, ctx.clone()))
+                    .collect();
                 let results = cancellable(join_all(futures), cancel, activity_tx).await?;
 
                 let blocked_reasons: Vec<String> = results
@@ -349,8 +351,11 @@ mod tests {
     use crate::types::{ToolCall, ToolFunction};
     use std::sync::Arc;
 
-    fn noop_cancel() -> CancellationToken {
-        CancellationToken::new()
+    fn tx_ctx(tx: &mpsc::Sender<Activity>) -> ToolCtx {
+        ToolCtx {
+            activity: Some(tx.clone()),
+            ..ToolCtx::default()
+        }
     }
 
     fn text(s: &str) -> Response {
@@ -411,8 +416,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
         assert_eq!(result.unwrap(), "Hello from LLM");
@@ -438,8 +442,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
         assert_eq!(result.unwrap(), "Tool result processed");
@@ -465,8 +468,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
@@ -495,8 +497,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            Some(&tx),
-            &noop_cancel(),
+            &tx_ctx(&tx),
         )
         .await;
 
@@ -570,8 +571,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
         assert_eq!(result.unwrap(), "Done");
@@ -631,8 +631,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            Some(&tx),
-            &noop_cancel(),
+            &tx_ctx(&tx),
         )
         .await;
         assert_eq!(result.unwrap(), "Done");
@@ -666,8 +665,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::Provider(_)));
@@ -691,8 +689,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
         assert_eq!(result.unwrap(), "Multiple tools executed");
@@ -716,8 +713,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await
         .unwrap();
@@ -755,8 +751,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await
         .unwrap();
@@ -793,8 +788,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            Some(&tx),
-            &noop_cancel(),
+            &tx_ctx(&tx),
         )
         .await
         .unwrap();
@@ -831,8 +825,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            Some(&tx),
-            &noop_cancel(),
+            &tx_ctx(&tx),
         )
         .await;
 
@@ -862,8 +855,10 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &cancel,
+            &ToolCtx {
+                activity: None,
+                cancel,
+            },
         )
         .await;
         assert!(matches!(result.unwrap_err(), Error::Cancelled));
@@ -894,8 +889,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
         assert!(result.is_err());
@@ -946,8 +940,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
         assert_eq!(result.unwrap(), "OK I'll stop");
@@ -977,8 +970,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
 
@@ -1013,8 +1005,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
         assert_eq!(r1.unwrap(), "Turn 1 done");
@@ -1027,8 +1018,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            None,
-            &noop_cancel(),
+            &ToolCtx::default(),
         )
         .await;
         assert_eq!(r2.unwrap(), "Turn 2 done");

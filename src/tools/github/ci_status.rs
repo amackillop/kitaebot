@@ -6,9 +6,9 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::Tool;
 use super::gh_cli::GhCli;
 use super::types::WorkflowRun;
+use super::{Tool, ToolCtx};
 use crate::error::ToolError;
 use crate::tools::cli_runner::{self, SubprocessCall};
 
@@ -39,6 +39,7 @@ impl Tool for CiStatus {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)

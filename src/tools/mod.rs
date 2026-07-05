@@ -35,6 +35,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use crate::activity::Activity;
 use crate::config::Config;
 use crate::error::{ConfigError, ToolError};
 use crate::types::{ToolCall, ToolDefinition};
@@ -98,6 +102,34 @@ pub(crate) fn safe_env() -> impl Iterator<Item = (OsString, OsString)> {
     std::env::vars_os().filter(|(key, _)| key.to_str().is_some_and(|k| SAFE_ENV_VARS.contains(&k)))
 }
 
+/// Per-turn context threaded into every tool execution.
+///
+/// Owned and cheap to clone (both fields are Arc-backed); the agent
+/// loop clones it once per tool call, and the clone moves into the
+/// tool's boxed future. Most tools ignore it — the `task` tool uses
+/// both fields to forward child activity and propagate cancellation.
+///
+/// Primary cancellation remains drop-based (the loop races `join_all`
+/// against the token); the token here is for tools that can react more
+/// gracefully than being dropped.
+#[derive(Clone)]
+pub struct ToolCtx {
+    /// Activity event sink; `None` when no observer is attached.
+    pub activity: Option<mpsc::Sender<Activity>>,
+    /// Cancelled when the client disconnects mid-turn.
+    pub cancel: CancellationToken,
+}
+
+impl Default for ToolCtx {
+    /// A context with no observer and a token that never fires.
+    fn default() -> Self {
+        Self {
+            activity: None,
+            cancel: CancellationToken::new(),
+        }
+    }
+}
+
 /// A tool the agent can invoke.
 pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
@@ -106,6 +138,7 @@ pub trait Tool: Send + Sync {
     fn execute(
         &self,
         args: serde_json::Value,
+        ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>>;
 }
 
@@ -204,7 +237,7 @@ impl Tools {
             .collect()
     }
 
-    pub async fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
+    pub async fn execute(&self, call: &ToolCall, ctx: ToolCtx) -> Result<String, ToolError> {
         let tool = self
             .0
             .iter()
@@ -214,7 +247,7 @@ impl Tools {
         let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
             .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        tool.execute(args).await
+        tool.execute(args, ctx).await
     }
 }
 
@@ -261,7 +294,10 @@ mod tests {
     #[tokio::test]
     async fn test_execute() {
         let tools = Tools::new(vec![Arc::new(MockTool::new("executed"))], &[]).unwrap();
-        let result = tools.execute(&mock_call("test-123")).await.unwrap();
+        let result = tools
+            .execute(&mock_call("test-123"), ToolCtx::default())
+            .await
+            .unwrap();
         assert_eq!(result, "executed");
     }
 
@@ -275,7 +311,7 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         );
-        let result = tools.execute(&call).await;
+        let result = tools.execute(&call, ToolCtx::default()).await;
         assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
     }
 
@@ -320,7 +356,7 @@ mod tests {
                 arguments: "invalid json".to_string(),
             },
         );
-        let result = tools.execute(&call).await;
+        let result = tools.execute(&call, ToolCtx::default()).await;
         assert!(matches!(
             result.unwrap_err(),
             ToolError::InvalidArguments(_)

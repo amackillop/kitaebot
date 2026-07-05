@@ -11,8 +11,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use super::Tool;
 use super::path::PathGuard;
+use super::{Tool, ToolCtx};
 use crate::error::ToolError;
 
 /// 10 MB — reject files larger than this to avoid flooding context.
@@ -58,6 +58,7 @@ impl Tool for FileRead {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
@@ -124,7 +125,7 @@ mod tests {
     async fn read_entire_file() {
         let (_dir, tool) = setup("line1\nline2\nline3\n");
         let result = tool
-            .execute(serde_json::json!({"path": "test.txt"}))
+            .execute(serde_json::json!({"path": "test.txt"}), ToolCtx::default())
             .await
             .unwrap();
         assert!(result.contains("1\tline1"));
@@ -137,7 +138,10 @@ mod tests {
     async fn read_with_offset() {
         let (_dir, tool) = setup("a\nb\nc\nd\n");
         let result = tool
-            .execute(serde_json::json!({"path": "test.txt", "offset": 3}))
+            .execute(
+                serde_json::json!({"path": "test.txt", "offset": 3}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(!result.contains("1\ta"));
@@ -151,7 +155,10 @@ mod tests {
     async fn read_with_limit() {
         let (_dir, tool) = setup("a\nb\nc\nd\n");
         let result = tool
-            .execute(serde_json::json!({"path": "test.txt", "limit": 2}))
+            .execute(
+                serde_json::json!({"path": "test.txt", "limit": 2}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(result.contains("1\ta"));
@@ -164,7 +171,10 @@ mod tests {
     async fn read_with_offset_and_limit() {
         let (_dir, tool) = setup("a\nb\nc\nd\ne\n");
         let result = tool
-            .execute(serde_json::json!({"path": "test.txt", "offset": 2, "limit": 2}))
+            .execute(
+                serde_json::json!({"path": "test.txt", "offset": 2, "limit": 2}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(!result.contains("1\ta"));
@@ -179,7 +189,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool = FileRead::new(PathGuard::new(dir.path()));
         let result = tool
-            .execute(serde_json::json!({"path": "missing.txt"}))
+            .execute(
+                serde_json::json!({"path": "missing.txt"}),
+                ToolCtx::default(),
+            )
             .await;
         assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
     }
@@ -188,7 +201,10 @@ mod tests {
     async fn path_traversal_blocked() {
         let (_dir, tool) = setup("secret");
         let result = tool
-            .execute(serde_json::json!({"path": "../etc/passwd"}))
+            .execute(
+                serde_json::json!({"path": "../etc/passwd"}),
+                ToolCtx::default(),
+            )
             .await;
         assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
@@ -197,7 +213,7 @@ mod tests {
     async fn empty_file() {
         let (_dir, tool) = setup("");
         let result = tool
-            .execute(serde_json::json!({"path": "test.txt"}))
+            .execute(serde_json::json!({"path": "test.txt"}), ToolCtx::default())
             .await
             .unwrap();
         assert!(result.contains("0 lines shown"));
@@ -212,7 +228,9 @@ mod tests {
         f.set_len(MAX_FILE_SIZE + 1).unwrap();
 
         let tool = FileRead::new(PathGuard::new(dir.path()));
-        let result = tool.execute(serde_json::json!({"path": "big.txt"})).await;
+        let result = tool
+            .execute(serde_json::json!({"path": "big.txt"}), ToolCtx::default())
+            .await;
         assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 }

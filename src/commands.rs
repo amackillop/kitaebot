@@ -113,40 +113,34 @@ pub async fn execute(
                 engine.active_session(),
             )))
         }
-        SlashCommand::Heartbeat => {
-            use tokio_util::sync::CancellationToken;
-
-            match heartbeat::prepare(workspace) {
-                Ok(heartbeat::Prepared::Ready(prompt)) => {
-                    let cancel = CancellationToken::new();
-                    match agent::process_message(
-                        engine,
-                        summarize,
-                        workspace,
-                        &prompt,
-                        provider,
-                        tools,
-                        max_iterations,
-                        None,
-                        &cancel,
-                    )
-                    .await
-                    {
-                        Ok(response) => {
-                            if let Err(e) = heartbeat::finish(workspace, &response) {
-                                error!("Failed to write heartbeat history: {e}");
-                            }
-                            Ok(Reply::text(response))
+        SlashCommand::Heartbeat => match heartbeat::prepare(workspace) {
+            Ok(heartbeat::Prepared::Ready(prompt)) => {
+                match agent::process_message(
+                    engine,
+                    summarize,
+                    workspace,
+                    &prompt,
+                    provider,
+                    tools,
+                    max_iterations,
+                    &crate::tools::ToolCtx::default(),
+                )
+                .await
+                {
+                    Ok(response) => {
+                        if let Err(e) = heartbeat::finish(workspace, &response) {
+                            error!("Failed to write heartbeat history: {e}");
                         }
-                        Err(e) => Err(format!("Heartbeat failed: {e}")),
+                        Ok(Reply::text(response))
                     }
+                    Err(e) => Err(format!("Heartbeat failed: {e}")),
                 }
-                Ok(heartbeat::Prepared::Skipped(reason)) => {
-                    Ok(Reply::text(format!("Skipped: {reason}")))
-                }
-                Err(e) => Err(format!("Heartbeat failed: {e}")),
             }
-        }
+            Ok(heartbeat::Prepared::Skipped(reason)) => {
+                Ok(Reply::text(format!("Skipped: {reason}")))
+            }
+            Err(e) => Err(format!("Heartbeat failed: {e}")),
+        },
         SlashCommand::New => {
             engine.clear().await.map_err(|e| e.to_string())?;
             if let Err(e) = engine.save().await {

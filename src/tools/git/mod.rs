@@ -26,7 +26,7 @@ use crate::tools::DirenvCache;
 use crate::workspace::Workspace;
 
 // Re-export parent utility so tool files can `use super::Tool`.
-pub(crate) use super::Tool;
+pub(crate) use super::{Tool, ToolCtx};
 
 /// Resolve and validate a repo directory within the workspace.
 ///

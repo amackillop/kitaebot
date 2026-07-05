@@ -10,8 +10,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tracing::debug;
 
-use super::Tool;
 use super::path::PathGuard;
+use super::{Tool, ToolCtx};
 use crate::error::ToolError;
 
 #[derive(Deserialize, JsonSchema)]
@@ -49,6 +49,7 @@ impl Tool for FileWrite {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
@@ -81,7 +82,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool = FileWrite::new(PathGuard::new(dir.path()));
         let result = tool
-            .execute(serde_json::json!({"path": "hello.txt", "content": "hello world"}))
+            .execute(
+                serde_json::json!({"path": "hello.txt", "content": "hello world"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(result.contains("11 bytes"));
@@ -96,9 +100,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "old").unwrap();
         let tool = FileWrite::new(PathGuard::new(dir.path()));
-        tool.execute(serde_json::json!({"path": "f.txt", "content": "new"}))
-            .await
-            .unwrap();
+        tool.execute(
+            serde_json::json!({"path": "f.txt", "content": "new"}),
+            ToolCtx::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
             "new"
@@ -109,9 +116,12 @@ mod tests {
     async fn auto_create_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let tool = FileWrite::new(PathGuard::new(dir.path()));
-        tool.execute(serde_json::json!({"path": "a/b/c.txt", "content": "deep"}))
-            .await
-            .unwrap();
+        tool.execute(
+            serde_json::json!({"path": "a/b/c.txt", "content": "deep"}),
+            ToolCtx::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a/b/c.txt")).unwrap(),
             "deep"
@@ -123,7 +133,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool = FileWrite::new(PathGuard::new(dir.path()));
         let result = tool
-            .execute(serde_json::json!({"path": "../escape.txt", "content": "bad"}))
+            .execute(
+                serde_json::json!({"path": "../escape.txt", "content": "bad"}),
+                ToolCtx::default(),
+            )
             .await;
         assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }

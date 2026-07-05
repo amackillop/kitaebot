@@ -6,7 +6,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::Tool;
+use super::{Tool, ToolCtx};
 use crate::error::ToolError;
 
 /// Arguments for mock tools (accepts anything).
@@ -42,6 +42,7 @@ impl Tool for MockTool {
     fn execute(
         &self,
         _args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         let output = self.output.clone();
         Box::pin(async move { Ok(output) })
@@ -77,6 +78,7 @@ impl Tool for MockBlockedTool {
     fn execute(
         &self,
         _args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         let guidance = self.guidance.clone();
         Box::pin(async move {

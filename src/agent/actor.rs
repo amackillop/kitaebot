@@ -130,8 +130,10 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             &*self.provider,
             &self.tools,
             self.max_iterations,
-            envelope.activity_tx.as_ref(),
-            &envelope.cancel,
+            &crate::tools::ToolCtx {
+                activity: envelope.activity_tx.clone(),
+                cancel: envelope.cancel.clone(),
+            },
         )
         .await
         .map(Reply::text)

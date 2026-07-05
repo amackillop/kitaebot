@@ -45,7 +45,7 @@ pub use pr_list::PrList;
 pub use pr_reviews::PrReviews;
 
 // Re-export parent utility so tool files can `use super::Tool`.
-pub(crate) use super::Tool;
+pub(crate) use super::{Tool, ToolCtx};
 
 use std::sync::Arc;
 

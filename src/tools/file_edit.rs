@@ -10,8 +10,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tracing::debug;
 
-use super::Tool;
 use super::path::PathGuard;
+use super::{Tool, ToolCtx};
 use crate::error::ToolError;
 
 #[derive(Deserialize, JsonSchema)]
@@ -51,6 +51,7 @@ impl Tool for FileEdit {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
@@ -178,11 +179,14 @@ mod tests {
     async fn single_replace() {
         let (dir, tool) = setup("hello world");
         let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "old_string": "world",
-                "new_string": "rust"
-            }))
+            .execute(
+                serde_json::json!({
+                    "path": "test.txt",
+                    "old_string": "world",
+                    "new_string": "rust"
+                }),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(result.contains("Edited"));
@@ -192,11 +196,14 @@ mod tests {
     #[tokio::test]
     async fn delete_via_empty_new_string() {
         let (dir, tool) = setup("hello cruel world");
-        tool.execute(serde_json::json!({
-            "path": "test.txt",
-            "old_string": "cruel ",
-            "new_string": ""
-        }))
+        tool.execute(
+            serde_json::json!({
+                "path": "test.txt",
+                "old_string": "cruel ",
+                "new_string": ""
+            }),
+            ToolCtx::default(),
+        )
         .await
         .unwrap();
         assert_eq!(read(&dir), "hello world");
@@ -206,11 +213,14 @@ mod tests {
     async fn multiple_matches_error() {
         let (_dir, tool) = setup("aaa");
         let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "old_string": "a",
-                "new_string": "b"
-            }))
+            .execute(
+                serde_json::json!({
+                    "path": "test.txt",
+                    "old_string": "a",
+                    "new_string": "b"
+                }),
+                ToolCtx::default(),
+            )
             .await;
         match result {
             Err(ToolError::ExecutionFailed(msg)) => assert!(msg.contains("3 matches")),
@@ -222,11 +232,14 @@ mod tests {
     async fn no_match_error() {
         let (_dir, tool) = setup("hello world");
         let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "old_string": "missing",
-                "new_string": "x"
-            }))
+            .execute(
+                serde_json::json!({
+                    "path": "test.txt",
+                    "old_string": "missing",
+                    "new_string": "x"
+                }),
+                ToolCtx::default(),
+            )
             .await;
         assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
     }
@@ -234,11 +247,14 @@ mod tests {
     #[tokio::test]
     async fn whitespace_flexible_match() {
         let (dir, tool) = setup("fn  main()  {\n    println!(\"hi\");\n}\n");
-        tool.execute(serde_json::json!({
-            "path": "test.txt",
-            "old_string": "fn main() {\n  println!(\"hi\");\n}",
-            "new_string": "fn main() {\n    println!(\"hello\");\n}"
-        }))
+        tool.execute(
+            serde_json::json!({
+                "path": "test.txt",
+                "old_string": "fn main() {\n  println!(\"hi\");\n}",
+                "new_string": "fn main() {\n    println!(\"hello\");\n}"
+            }),
+            ToolCtx::default(),
+        )
         .await
         .unwrap();
         let content = read(&dir);
@@ -250,11 +266,14 @@ mod tests {
     async fn empty_old_string_rejected() {
         let (_dir, tool) = setup("content");
         let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "old_string": "",
-                "new_string": "x"
-            }))
+            .execute(
+                serde_json::json!({
+                    "path": "test.txt",
+                    "old_string": "",
+                    "new_string": "x"
+                }),
+                ToolCtx::default(),
+            )
             .await;
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
     }

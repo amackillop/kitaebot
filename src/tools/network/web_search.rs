@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
 use tracing::{debug, warn};
 
-use super::Tool;
+use super::{Tool, ToolCtx};
 use crate::clients::chat_completion::CompletionsClient;
 use crate::config::WebSearchConfig;
 use crate::error::{ProviderError, ToolError};
@@ -58,6 +58,7 @@ impl Tool for WebSearch {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)

@@ -7,7 +7,7 @@ pub use web_fetch::WebFetch;
 pub use web_search::WebSearch;
 
 // Re-export parent utilities so child modules can use `super::`.
-pub(crate) use super::{Tool, truncate_output};
+pub(crate) use super::{Tool, ToolCtx, truncate_output};
 
 use std::sync::Arc;
 

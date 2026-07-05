@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tracing::debug;
 
-use super::Tool;
+use super::{Tool, ToolCtx};
 use crate::error::ToolError;
 
 /// Maximum number of results returned.
@@ -55,6 +55,7 @@ impl Tool for GlobSearch {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
@@ -122,7 +123,10 @@ mod tests {
     async fn match_rust_files() {
         let (_dir, tool) = setup();
         let result = tool
-            .execute(serde_json::json!({"pattern": "**/*.rs"}))
+            .execute(
+                serde_json::json!({"pattern": "**/*.rs"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(result.contains("src/main.rs"));
@@ -136,7 +140,10 @@ mod tests {
     async fn match_specific_file() {
         let (_dir, tool) = setup();
         let result = tool
-            .execute(serde_json::json!({"pattern": "README.md"}))
+            .execute(
+                serde_json::json!({"pattern": "README.md"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(result.contains("README.md"));
@@ -147,7 +154,10 @@ mod tests {
     async fn no_matches() {
         let (_dir, tool) = setup();
         let result = tool
-            .execute(serde_json::json!({"pattern": "**/*.py"}))
+            .execute(
+                serde_json::json!({"pattern": "**/*.py"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(result.contains("0 matches"));
@@ -157,7 +167,10 @@ mod tests {
     async fn traversal_rejected() {
         let (_dir, tool) = setup();
         let result = tool
-            .execute(serde_json::json!({"pattern": "../**/*"}))
+            .execute(
+                serde_json::json!({"pattern": "../**/*"}),
+                ToolCtx::default(),
+            )
             .await;
         assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
@@ -170,7 +183,7 @@ mod tests {
         }
         let tool = GlobSearch::new(dir.path());
         let result = tool
-            .execute(serde_json::json!({"pattern": "*.txt"}))
+            .execute(serde_json::json!({"pattern": "*.txt"}), ToolCtx::default())
             .await
             .unwrap();
         assert!(result.contains("truncated"));

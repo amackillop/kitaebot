@@ -16,8 +16,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tracing::debug;
 
-use super::Tool;
 use super::path::PathGuard;
+use super::{Tool, ToolCtx};
 use crate::error::ToolError;
 
 /// Max matches returned.
@@ -60,6 +60,7 @@ impl Tool for Grep {
     fn execute(
         &self,
         args: serde_json::Value,
+        _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
@@ -149,7 +150,10 @@ mod tests {
     async fn pattern_match() {
         let (_dir, tool) = setup();
         let result = tool
-            .execute(serde_json::json!({"pattern": "fn \\w+"}))
+            .execute(
+                serde_json::json!({"pattern": "fn \\w+"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(result.contains("main"));
@@ -160,7 +164,10 @@ mod tests {
     async fn include_filter() {
         let (_dir, tool) = setup();
         let result = tool
-            .execute(serde_json::json!({"pattern": "Hello", "include": "*.md"}))
+            .execute(
+                serde_json::json!({"pattern": "Hello", "include": "*.md"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(result.contains("Hello"));
@@ -171,7 +178,10 @@ mod tests {
     async fn no_matches() {
         let (_dir, tool) = setup();
         let result = tool
-            .execute(serde_json::json!({"pattern": "nonexistent_xyz"}))
+            .execute(
+                serde_json::json!({"pattern": "nonexistent_xyz"}),
+                ToolCtx::default(),
+            )
             .await
             .unwrap();
         assert!(result.contains("No matches"));
@@ -181,7 +191,10 @@ mod tests {
     async fn directory_traversal_blocked() {
         let (_dir, tool) = setup();
         let result = tool
-            .execute(serde_json::json!({"pattern": "secret", "path": "../etc"}))
+            .execute(
+                serde_json::json!({"pattern": "secret", "path": "../etc"}),
+                ToolCtx::default(),
+            )
             .await;
         assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
