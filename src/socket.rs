@@ -139,6 +139,11 @@ async fn serve(listener: &UnixListener, stream: UnixStream, handle: &AgentHandle
                             Ok(0) | Err(_) => {
                                 warn!("Client disconnected during dispatch, cancelling turn");
                                 cancel.cancel();
+                                // The reader is now permanently ready with
+                                // EOF; selecting on it again would starve
+                                // the reply future and spin. Just wait for
+                                // the cancelled turn to finish.
+                                break (&mut reply_fut).await;
                             }
                             Ok(_) => {
                                 // Client sent another line mid-dispatch; ignore it.
@@ -322,6 +327,18 @@ mod tests {
         tempfile::TempDir, // workspace dir
         tempfile::TempDir, // socket dir
     ) {
+        spawn_listener_with_tools(responses, Tools::default()).await
+    }
+
+    async fn spawn_listener_with_tools(
+        responses: Vec<Result<Response, crate::error::ProviderError>>,
+        tools: Tools,
+    ) -> (
+        TestClient,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
         let ws_dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(ws_dir.path().to_path_buf()).unwrap();
 
@@ -332,14 +349,8 @@ mod tests {
         let engine =
             crate::engine::flat::FlatSession::new(sessions_dir, memory_dir, ctx()).unwrap();
         let summarize = crate::engine::make_summarize_fn(provider.clone());
-        let handle = AgentHandle::spawn(
-            ws.clone(),
-            provider,
-            Arc::new(Tools::default()),
-            1,
-            engine,
-            summarize,
-        );
+        let handle =
+            AgentHandle::spawn(ws.clone(), provider, Arc::new(tools), 1, engine, summarize);
 
         let sock_dir = tempfile::tempdir().unwrap();
         let sock_path = sock_dir.path().join("test.sock");
@@ -387,6 +398,71 @@ mod tests {
         assert!(matches!(client2.recv().await, ServerMsg::Error { .. }));
 
         drop(client);
+        join.abort();
+    }
+
+    /// A tool that never finishes; keeps a dispatch in flight until the
+    /// turn is cancelled and the tool future is dropped.
+    struct SlowTool;
+
+    impl crate::tools::Tool for SlowTool {
+        fn name(&self) -> &'static str {
+            "slow"
+        }
+        fn description(&self) -> &'static str {
+            "hangs forever"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: crate::tools::ToolCtx,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<String, crate::error::ToolError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_mid_dispatch_frees_the_slot() {
+        use crate::types::{ToolCall, ToolFunction};
+
+        let calls = Response::ToolCalls {
+            content: String::new(),
+            calls: vec![ToolCall::new(
+                "c1".to_string(),
+                ToolFunction {
+                    name: "slow".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            )],
+        };
+        let tools = Tools::new(vec![Arc::new(SlowTool)], &[]).unwrap();
+        let (mut client, join, _ws, sock_dir) =
+            spawn_listener_with_tools(vec![Ok(calls)], tools).await;
+
+        client.recv().await; // greeting
+        client.send("go").await;
+        // Let the dispatch reach the hanging tool, then vanish.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(client);
+
+        // serve() must cancel the turn and return to the accept loop.
+        // Before the fix it spun on the EOF reader forever, so a new
+        // client never got a greeting.
+        let mut client2 = TestClient::connect(&sock_dir.path().join("test.sock")).await;
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), client2.recv())
+            .await
+            .expect("serve() did not free the client slot after disconnect");
+        assert!(matches!(msg, ServerMsg::Greeting { .. }));
+
         join.abort();
     }
 
