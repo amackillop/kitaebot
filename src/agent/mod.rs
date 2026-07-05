@@ -23,7 +23,7 @@ use crate::engine::{ContextEngine, SummarizeFn};
 use crate::error::{Error, ToolError};
 use crate::provider::Provider;
 use crate::safety;
-use crate::tools::Tools;
+use crate::tools::{Tools, truncate_output};
 use crate::types::{Message, Response, ToolCall};
 use crate::workspace::Workspace;
 
@@ -38,6 +38,9 @@ const REPEAT_ERROR: &str = "ERROR: You have called this tool with identical \
 
 /// Maximum policy violations (Blocked errors) before the turn is halted.
 const POLICY_STRIKE_LIMIT: usize = 2;
+
+/// Byte cap on message content in log lines.
+const LOG_CONTENT_MAX: usize = 500;
 
 const POLICY_STOP_DIRECTIVE: &str = "POLICY VIOLATION: A tool call was blocked. \
     Do NOT work around this. Report the situation to the user and await direction.";
@@ -126,6 +129,7 @@ pub(crate) async fn run_turn(
         let _ = before; // used only for the "did we compact?" check
     }
 
+    debug!(content = %truncate_output(user_message, LOG_CONTENT_MAX), "Turn started");
     engine
         .push_message(Message::User {
             content: user_message.to_string(),
@@ -156,6 +160,7 @@ pub(crate) async fn run_turn(
 
         match response {
             Response::Text(content) => {
+                debug!(content = %truncate_output(&content, LOG_CONTENT_MAX), "Turn finished");
                 engine
                     .push_message(Message::Assistant {
                         content: content.clone(),
