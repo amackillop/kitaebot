@@ -396,6 +396,7 @@ mod tests {
             1,
             engine,
             summarize,
+            None,
         );
         (handle, dir)
     }

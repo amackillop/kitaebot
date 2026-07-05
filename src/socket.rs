@@ -349,8 +349,15 @@ mod tests {
         let engine =
             crate::engine::flat::FlatSession::new(sessions_dir, memory_dir, ctx()).unwrap();
         let summarize = crate::engine::make_summarize_fn(provider.clone());
-        let handle =
-            AgentHandle::spawn(ws.clone(), provider, Arc::new(tools), 1, engine, summarize);
+        let handle = AgentHandle::spawn(
+            ws.clone(),
+            provider,
+            Arc::new(tools),
+            1,
+            engine,
+            summarize,
+            None,
+        );
 
         let sock_dir = tempfile::tempdir().unwrap();
         let sock_path = sock_dir.path().join("test.sock");

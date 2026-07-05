@@ -13,6 +13,7 @@ use tracing::error;
 use crate::commands;
 use crate::dispatch::{Input, Reply};
 use crate::engine::{ContextEngine, SummarizeFn};
+use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
@@ -31,9 +32,11 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     max_iterations: usize,
     engine: E,
     summarize: SummarizeFn,
+    notifier: Option<Arc<Notifier>>,
 }
 
 impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         rx: mpsc::Receiver<Envelope>,
         workspace: Arc<Workspace>,
@@ -42,6 +45,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         max_iterations: usize,
         engine: E,
         summarize: SummarizeFn,
+        notifier: Option<Arc<Notifier>>,
     ) -> Self {
         Self {
             rx,
@@ -51,6 +55,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             max_iterations,
             engine,
             summarize,
+            notifier,
         }
     }
 
@@ -121,6 +126,10 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             }
         }
 
+        if let Some(notifier) = &self.notifier {
+            notifier.begin_turn();
+        }
+
         let tagged = format!("[{}]: {text}", envelope.source);
         let result = super::process_message(
             &mut self.engine,
@@ -138,6 +147,12 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         .await
         .map(Reply::text)
         .map_err(|e| e.to_string());
+
+        // Deliver batched low-urgency notifications after every turn —
+        // success, error, and cancellation alike.
+        if let Some(notifier) = &self.notifier {
+            notifier.flush().await;
+        }
 
         if switched {
             // Restore. switch_session saves the target before loading original.
@@ -171,12 +186,29 @@ mod tests {
     }
 
     fn spawn_agent(ws: Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
-        let tools = Arc::new(Tools::default());
+        spawn_agent_with(ws, provider, Tools::default(), None, 1)
+    }
+
+    fn spawn_agent_with(
+        ws: Arc<Workspace>,
+        provider: Arc<MockProvider>,
+        tools: Tools,
+        notifier: Option<Arc<Notifier>>,
+        max_iterations: usize,
+    ) -> AgentHandle {
         let sessions_dir = ws.path().join("sessions");
         let memory_dir = ws.path().join("memory");
         let engine = FlatSession::new(sessions_dir, memory_dir, ContextConfig::default()).unwrap();
         let summarize = make_summarize_fn(provider.clone());
-        AgentHandle::spawn(ws, provider, tools, 1, engine, summarize)
+        AgentHandle::spawn(
+            ws,
+            provider,
+            Arc::new(tools),
+            max_iterations,
+            engine,
+            summarize,
+            notifier,
+        )
     }
 
     #[tokio::test]
@@ -333,6 +365,110 @@ mod tests {
         assert!(!general.contains("github msg"));
         assert!(github.contains("github msg"));
         assert!(!github.contains("socket msg"));
+    }
+
+    /// Notifier over a fake Telegram client that records sendMessage bodies.
+    fn fake_notifier(sent: &Arc<std::sync::Mutex<Vec<serde_json::Value>>>) -> Arc<Notifier> {
+        use crate::clients::RawResponse;
+        use crate::clients::telegram::TelegramClient;
+
+        let sent = sent.clone();
+        let client = TelegramClient::from_fn(move |_method, body| {
+            let sent = sent.clone();
+            async move {
+                sent.lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(&body).unwrap());
+                Ok(RawResponse {
+                    status: 200,
+                    body: br#"{"ok":true,"result":{"message_id":1,"chat":{"id":42},"text":null}}"#
+                        .to_vec(),
+                })
+            }
+        });
+        Arc::new(Notifier::new(client, 42))
+    }
+
+    fn notify_call() -> Response {
+        use crate::types::{ToolCall, ToolFunction};
+        Response::ToolCalls {
+            content: String::new(),
+            calls: vec![ToolCall::new(
+                "n1".to_string(),
+                ToolFunction {
+                    name: "notify".to_string(),
+                    arguments: r#"{"message":"ping"}"#.to_string(),
+                },
+            )],
+        }
+    }
+
+    #[tokio::test]
+    async fn batched_notification_delivered_after_turn() {
+        let (_dir, ws) = workspace();
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(notify_call()),
+            Ok(Response::Text("done".into())),
+        ]));
+
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let notifier = fake_notifier(&sent);
+        let tools = Tools::new(
+            vec![Arc::new(crate::notify::NotifyTool(notifier.clone()))],
+            &[],
+        )
+        .unwrap();
+
+        let handle = spawn_agent_with(ws, provider, tools, Some(notifier), 2);
+        let result = handle
+            .send_message(
+                ChannelSource::Socket,
+                "hi".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result.unwrap().content, "done");
+
+        let calls = sent.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["text"], "ping");
+        assert_eq!(calls[0]["chat_id"], 42);
+    }
+
+    #[tokio::test]
+    async fn batched_notification_delivered_when_turn_errors() {
+        let (_dir, ws) = workspace();
+        // The notification is buffered on iteration 1; iteration 2 fails.
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(notify_call()),
+            Err(crate::error::ProviderError::Network("boom".into())),
+        ]));
+
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let notifier = fake_notifier(&sent);
+        let tools = Tools::new(
+            vec![Arc::new(crate::notify::NotifyTool(notifier.clone()))],
+            &[],
+        )
+        .unwrap();
+
+        let handle = spawn_agent_with(ws, provider, tools, Some(notifier), 2);
+        let result = handle
+            .send_message(
+                ChannelSource::Socket,
+                "hi".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_err());
+
+        let calls = sent.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["text"], "ping");
     }
 
     #[tokio::test]

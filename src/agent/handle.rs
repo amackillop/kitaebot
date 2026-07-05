@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::activity::Activity;
 use crate::dispatch::Reply;
 use crate::engine::{ContextEngine, SummarizeFn};
+use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
@@ -39,6 +40,7 @@ impl AgentHandle {
         max_iterations: usize,
         engine: E,
         summarize: SummarizeFn,
+        notifier: Option<Arc<Notifier>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(32);
         let actor = Agent::new(
@@ -49,6 +51,7 @@ impl AgentHandle {
             max_iterations,
             engine,
             summarize,
+            notifier,
         );
         tokio::spawn(actor.run());
         Self { tx }

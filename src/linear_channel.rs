@@ -720,6 +720,7 @@ mod tests {
             1,
             engine,
             summarize,
+            None,
         );
 
         let sent = Arc::new(Mutex::new(Vec::new()));

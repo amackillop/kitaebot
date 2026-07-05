@@ -10,6 +10,7 @@ mod error;
 mod github_channel;
 mod heartbeat;
 mod linear_channel;
+mod notify;
 mod provider;
 mod runtime;
 mod safety;
@@ -94,6 +95,7 @@ async fn main() {
                         &config,
                         engine,
                         summarize,
+                        rt.notifier.clone(),
                     )
                 }
                 EngineKind::Lcm => {
@@ -115,6 +117,7 @@ async fn main() {
                         &config,
                         engine,
                         summarize,
+                        rt.notifier.clone(),
                     )
                 }
             };
@@ -161,6 +164,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     config: &Config,
     engine: E,
     summarize: engine::SummarizeFn,
+    notifier: Option<Arc<notify::Notifier>>,
 ) -> agent::AgentHandle {
     let (explore, worker) =
         agent::task::build_agent_types(&tools, engine.tools(ToolScope::SubAgent), workspace.path());
@@ -180,5 +184,6 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         config.agent.max_iterations,
         engine,
         summarize,
+        notifier,
     )
 }

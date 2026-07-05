@@ -3,10 +3,13 @@
 //! All `mock-network` conditional compilation for construction lives here,
 //! keeping the rest of the codebase cfg-free.
 
+use std::sync::Arc;
+
 use tracing::error;
 
 use crate::config::Config;
 use crate::linear_channel::LinearChannel;
+use crate::notify::Notifier;
 use crate::provider::CompletionsProvider;
 use crate::telegram::TelegramChannel;
 use crate::tools::Tools;
@@ -18,6 +21,7 @@ pub struct Runtime {
     pub provider: CompletionsProvider,
     pub tools: Tools,
     pub telegram: Option<TelegramChannel>,
+    pub notifier: Option<Arc<Notifier>>,
     pub gh_cli: Option<GhCli>,
     pub linear: Option<LinearChannel>,
 }
@@ -33,6 +37,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::chat_completion::CompletionsClient;
     use crate::clients::linear::LinearClient;
     use crate::clients::telegram::TelegramClient;
+    use crate::notify::NotifyTool;
     use crate::secrets::load_secret;
     use crate::tools::{DirenvCache, git, github, network};
 
@@ -94,13 +99,21 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
 
     tools.extend(network::build(config, client));
 
-    let telegram = telegram_token.map(|token| {
-        let tg_client = TelegramClient::new(
-            token,
-            Duration::from_secs(config.telegram.poll_timeout_secs + 10),
-        );
-        TelegramChannel::new(tg_client, config.telegram.chat_id)
-    });
+    let (telegram, notifier) = match telegram_token {
+        Some(token) => {
+            let tg_client = TelegramClient::new(
+                token,
+                Duration::from_secs(config.telegram.poll_timeout_secs + 10),
+            );
+            let notifier = Arc::new(Notifier::new(tg_client.clone(), config.telegram.chat_id));
+            tools.push(Arc::new(NotifyTool(notifier.clone())));
+            (
+                Some(TelegramChannel::new(tg_client, config.telegram.chat_id)),
+                Some(notifier),
+            )
+        }
+        None => (None, None),
+    };
 
     Runtime {
         provider,
@@ -109,6 +122,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             std::process::exit(1);
         }),
         telegram,
+        notifier,
         gh_cli,
         linear,
     }
@@ -125,6 +139,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::chat_completion::CompletionsClient;
     use crate::clients::linear::LinearClient;
     use crate::clients::telegram::TelegramClient;
+    use crate::notify::NotifyTool;
     use crate::secrets::{Secret, load_secret};
     use crate::tools::{DirenvCache, git, github};
 
@@ -158,16 +173,19 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         None
     };
 
-    let telegram = if config.telegram.enabled {
-        Some(TelegramChannel::new(
-            TelegramClient::new(
-                Secret::placeholder(),
-                Duration::from_secs(config.telegram.poll_timeout_secs + 10),
-            ),
-            config.telegram.chat_id,
-        ))
+    let (telegram, notifier) = if config.telegram.enabled {
+        let tg_client = TelegramClient::new(
+            Secret::placeholder(),
+            Duration::from_secs(config.telegram.poll_timeout_secs + 10),
+        );
+        let notifier = Arc::new(Notifier::new(tg_client.clone(), config.telegram.chat_id));
+        tools.push(Arc::new(NotifyTool(notifier.clone())));
+        (
+            Some(TelegramChannel::new(tg_client, config.telegram.chat_id)),
+            Some(notifier),
+        )
     } else {
-        None
+        (None, None)
     };
 
     let linear = if config.linear.enabled {
@@ -187,6 +205,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             std::process::exit(1);
         }),
         telegram,
+        notifier,
         gh_cli,
         linear,
     }
