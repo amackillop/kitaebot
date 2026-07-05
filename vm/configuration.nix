@@ -52,6 +52,7 @@ let
   gitEnabled = cfg.settings.git.enabled or false;
   githubEnabled = cfg.settings.github.enabled or false;
   needsGithubToken = gitEnabled || githubEnabled;
+  linearEnabled = cfg.settings.linear.enabled or false;
   signingEnabled = cfg.gitConfig != null && cfg.gitConfig.signingKey != null;
 
   # Suppress direnv's noisy "loading/unloading" output from exec tool results.
@@ -175,6 +176,7 @@ in
         "githubusercontent.com"
         "flakehub.com"
         "api.perplexity.ai"
+        "api.linear.app"
       ];
       description = "Domains the kitaebot process may connect to. All others blocked.";
     };
@@ -309,6 +311,7 @@ in
               "telegram-bot-token:${config.kitaebot.secretsDir}/telegram-bot-token"
             ]
             ++ lib.optional needsGithubToken "github-token:${config.kitaebot.secretsDir}/github-token"
+            ++ lib.optional linearEnabled "linear-api-key:${config.kitaebot.secretsDir}/linear-api-key"
             ++ lib.optional signingEnabled "gpg-signing-key:${config.kitaebot.secretsDir}/gpg-signing-key";
 
             # Process isolation

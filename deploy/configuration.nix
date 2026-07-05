@@ -6,6 +6,7 @@
 #   echo 'sk-or-...' > secrets/provider-api-key
 #   echo '0000000000:...' > secrets/telegram-bot-token
 #   echo 'ghp_...'    > secrets/github-token  (when git.enabled or github.enabled)
+#   echo 'lin_api_...' > secrets/linear-api-key  (when linear.enabled)
 #   gpg --export-secret-keys --armor KEY_ID > secrets/gpg-signing-key
 #
 # Update the sharedDirectories source path to match your checkout.
@@ -56,6 +57,12 @@ in
       github = {
         enabled = true;
         owner = "amackillop";
+        trusted_users = [ ];
+      };
+      # Flip on after creating secrets/linear-api-key and adding your
+      # Linear account email to trusted_users (never the bot's own email).
+      linear = {
+        enabled = false;
         trusted_users = [ ];
       };
     };
