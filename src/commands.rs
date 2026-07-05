@@ -99,7 +99,7 @@ pub async fn execute(
         SlashCommand::Context => {
             let stats = engine.stats();
             let pct = if stats.budget > 0 {
-                (stats.token_estimate / stats.budget) * 100
+                stats.token_estimate * 100 / stats.budget
             } else {
                 0
             };
