@@ -215,9 +215,10 @@ Comments authored by the viewer are skipped to prevent self-reply loops.
   plus an instruction: if the comment approves the plan, execute
   end-to-end — clone the repo, create a branch named
   `kitaebot_<ticket-id>_<summary>` (the ticket id links the PR to the issue
-  automatically), implement, test, commit, push, open a PR, and reply with
-  a short completion note. Otherwise treat it as feedback and reply with a
-  revised plan.
+  automatically), implement, test, commit, push, and open a PR. On success
+  the reply is one line at most (the PR attaches itself to the ticket);
+  detail is reserved for failures or open decisions. Otherwise treat it as
+  feedback and reply with a revised plan.
 
 **Repo selection**: the target repository comes from a label on the issue —
 a label named like `owner/repo` (contains exactly one `/`). Issues without

@@ -9,6 +9,7 @@ mod engine;
 mod error;
 mod github_channel;
 mod heartbeat;
+mod linear_channel;
 mod provider;
 mod runtime;
 mod safety;
