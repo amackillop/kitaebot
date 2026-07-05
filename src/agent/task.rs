@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tokio::sync::mpsc;
 
+use crate::activity::Activity;
 use crate::engine::SummarizeFn;
 use crate::engine::ephemeral::EphemeralSession;
 use crate::error::ToolError;
@@ -187,7 +189,7 @@ impl<P: Provider> Tool for TaskTool<P> {
     fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: ToolCtx,
+        ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
@@ -197,12 +199,20 @@ impl<P: Provider> Tool for TaskTool<P> {
                 AgentKind::Explore => &self.explore,
                 AgentKind::Worker => &self.worker,
             };
+            let label = match args.agent_type {
+                AgentKind::Explore => "explore",
+                AgentKind::Worker => "worker",
+            };
 
             // Fresh context per call, discarded on return. The token is
             // never cancelled: parent cancellation drops this future
             // instead (the parent's loop races tool execution against
             // its own token).
             let mut engine = EphemeralSession::new();
+            let child_ctx = ToolCtx {
+                activity: ctx.activity.as_ref().map(|parent| forward(parent, label)),
+                ..ToolCtx::default()
+            };
             run_turn(
                 &mut engine,
                 &self.summarize,
@@ -211,12 +221,32 @@ impl<P: Provider> Tool for TaskTool<P> {
                 &*self.provider,
                 &agent.tools,
                 self.max_iterations,
-                &ToolCtx::default(),
+                &child_ctx,
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("sub-agent failed: {e}")))
         })
     }
+}
+
+/// Spawn a forwarder that wraps child activity events in
+/// [`Activity::Nested`] labeled with the agent type, and relays them
+/// to the parent sink.
+///
+/// The forwarder ends when the returned sender (held only by the child
+/// ctx) is dropped at the end of the task call.
+fn forward(parent: &mpsc::Sender<Activity>, agent: &'static str) -> mpsc::Sender<Activity> {
+    let parent = parent.clone();
+    let (tx, mut rx) = mpsc::channel(32);
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let _ = parent.try_send(Activity::Nested {
+                agent: agent.to_string(),
+                event: Box::new(event),
+            });
+        }
+    });
+    tx
 }
 
 #[cfg(test)]
@@ -360,6 +390,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "worker done");
+    }
+
+    #[tokio::test]
+    async fn forwards_child_activity_labeled_with_agent_type() {
+        let tool = task_tool(
+            vec![
+                Ok(mock_tool_calls()),
+                Ok(Response::Text("used the tool".to_string())),
+            ],
+            Tools::default(),
+            mock_tools(),
+            5,
+        );
+        let (tx, mut rx) = mpsc::channel(64);
+        tool.execute(
+            serde_json::json!({"prompt": "use a tool", "agent_type": "worker"}),
+            ToolCtx {
+                activity: Some(tx),
+                ..ToolCtx::default()
+            },
+        )
+        .await
+        .unwrap();
+        // The parent sender is gone (moved into the ctx) and the
+        // forwarder's clone drops when it exits, so recv() drains the
+        // full stream and then terminates.
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        let nested: Vec<(&str, &Activity)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Activity::Nested { agent, event } => Some((agent.as_str(), event.as_ref())),
+                _ => None,
+            })
+            .collect();
+        assert!(nested.iter().any(|(agent, e)| *agent == "worker"
+            && matches!(e, Activity::ToolStart { tool } if tool == "mock")));
+        assert!(nested.iter().any(|(agent, e)| *agent == "worker"
+            && matches!(e, Activity::ToolEnd { tool, error: None } if tool == "mock")));
     }
 
     #[tokio::test]

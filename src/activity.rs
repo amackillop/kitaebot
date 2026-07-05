@@ -19,6 +19,8 @@ pub enum Activity {
     Compaction { before: usize, after: usize },
     /// Agent loop exhausted its iteration budget.
     MaxIterations,
+    /// An event from a delegated sub-agent turn.
+    Nested { agent: String, event: Box<Activity> },
     /// A tool call completed.
     ToolEnd { tool: String, error: Option<String> },
     /// A tool call is about to execute.
@@ -33,6 +35,7 @@ impl fmt::Display for Activity {
                 write!(f, "Compacting context: {before} -> {after} tokens")
             }
             Self::MaxIterations => write!(f, "Max iterations reached"),
+            Self::Nested { agent, event } => write!(f, "[{agent}] {event}"),
             Self::ToolEnd { tool, error: None } => write!(f, "Tool finished: {tool}"),
             Self::ToolEnd {
                 tool,
@@ -104,6 +107,33 @@ mod tests {
             event.to_string(),
             "Tool failed: file_read (Permission denied)"
         );
+    }
+
+    #[test]
+    fn display_nested() {
+        let event = Activity::Nested {
+            agent: "worker".into(),
+            event: Box::new(Activity::ToolStart {
+                tool: "exec".into(),
+            }),
+        };
+        assert_eq!(event.to_string(), "[worker] Running tool: exec");
+    }
+
+    #[test]
+    fn serialize_nested_keeps_kind_tag() {
+        let event = Activity::Nested {
+            agent: "explore".into(),
+            event: Box::new(Activity::ToolEnd {
+                tool: "grep".into(),
+                error: None,
+            }),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["kind"], "nested");
+        assert_eq!(json["agent"], "explore");
+        assert_eq!(json["event"]["kind"], "tool_end");
+        assert_eq!(json["event"]["tool"], "grep");
     }
 
     #[test]
