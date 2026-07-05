@@ -9,17 +9,153 @@
 //! formatting, and poll-state persistence. The poll loop is the thin
 //! effectful shell on top.
 
-#![allow(dead_code)] // Wired up when the poll loop lands.
-
 use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::time::{self, MissedTickBehavior};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::clients::linear::Issue;
+use crate::agent::AgentHandle;
+use crate::agent::envelope::ChannelSource;
+use crate::clients::linear::{Issue, LinearClient};
+use crate::error::LinearError;
 use crate::time::now_iso8601;
+
+// ---------------------------------------------------------------------------
+// Channel
+// ---------------------------------------------------------------------------
+
+/// Maximum retries for `commentCreate` on transient failures.
+const POST_RETRIES: u32 = 3;
+
+/// Linear issue polling channel.
+pub struct LinearChannel {
+    client: LinearClient,
+    interval: Duration,
+    trusted_users: Vec<String>,
+}
+
+impl LinearChannel {
+    pub fn new(client: LinearClient, interval: Duration, trusted_users: Vec<String>) -> Self {
+        Self {
+            client,
+            interval,
+            trusted_users,
+        }
+    }
+
+    /// Post a comment with retries on transient failures.
+    ///
+    /// Retries up to [`POST_RETRIES`] times with exponential backoff
+    /// (1s, 2s, 4s) on network errors; 429/5xx surface as
+    /// [`LinearError::Network`] from the client.
+    async fn post_comment(&self, issue_id: &str, body: &str) -> Result<(), LinearError> {
+        let mut attempts = 0u32;
+        loop {
+            match self.client.create_comment(issue_id, body).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempts < POST_RETRIES && is_transient(&e) => {
+                    let delay = Duration::from_secs(u64::from(1u32 << attempts));
+                    attempts += 1;
+                    warn!(
+                        attempt = attempts,
+                        "create_comment retrying in {delay:?}: {e}"
+                    );
+                    time::sleep(delay).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+/// Whether a [`LinearError`] is worth retrying.
+fn is_transient(err: &LinearError) -> bool {
+    matches!(err, LinearError::Network(_))
+}
+
+// ---------------------------------------------------------------------------
+// Poll loop
+// ---------------------------------------------------------------------------
+
+/// Run the Linear polling loop forever.
+///
+/// Resolves the viewer once at startup; failure disables the channel
+/// (logged, then pending forever) rather than crashing the daemon.
+pub async fn poll_loop(channel: &LinearChannel, handle: &AgentHandle, state_path: &Path) -> ! {
+    let viewer = match channel.client.viewer().await {
+        Ok(v) => {
+            info!(name = %v.name, email = %v.email, "Linear channel resolved bot identity");
+            v
+        }
+        Err(e) => {
+            error!("Linear channel: failed to resolve viewer: {e}");
+            std::future::pending().await
+        }
+    };
+
+    let mut state = load_state(state_path);
+    info!(last_poll = %state.last_poll, "Linear channel starting");
+
+    let mut tick = time::interval(channel.interval);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tick.tick().await;
+        let issues = match channel.client.assigned_issues().await {
+            Ok(issues) => issues,
+            Err(e) => {
+                error!("Linear poll error (will retry next tick): {e}");
+                continue;
+            }
+        };
+
+        let (dispatches, next) = decide_events(
+            &issues,
+            &state,
+            &viewer.id,
+            &channel.trusted_users,
+            &now_iso8601(),
+        );
+        let count = dispatches.len();
+        for d in dispatches {
+            dispatch(channel, handle, d).await;
+        }
+        info!(count, "Linear poll: dispatched {count} items");
+
+        state = next;
+        save_state(state_path, &state);
+    }
+}
+
+/// Run one agent turn and post the reply (or error) as a comment.
+async fn dispatch(channel: &LinearChannel, handle: &AgentHandle, d: Dispatch) {
+    let cancel = CancellationToken::new();
+    let source = ChannelSource::Linear {
+        issue: d.identifier.clone(),
+    };
+    // Route per-issue: actor switches to this session for the turn.
+    let body = match handle
+        .send_message(source, d.message, Some(d.identifier.clone()), None, cancel)
+        .await
+    {
+        Ok(reply) => {
+            info!("Linear {}: {}", d.identifier, reply.content);
+            reply.content
+        }
+        Err(e) => {
+            error!("Linear {} error: {e}", d.identifier);
+            e
+        }
+    };
+    if let Err(e) = channel.post_comment(&d.issue_id, &body).await {
+        error!("Linear {}: failed to post comment: {e}", d.identifier);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Poll state
@@ -262,7 +398,6 @@ mod tests {
 
     fn comment(created_at: &str, user: Option<CommentUser>, body: &str) -> Comment {
         Comment {
-            id: "c".into(),
             body: body.into(),
             created_at: created_at.into(),
             user,
@@ -483,5 +618,126 @@ mod tests {
         let corrupt = load_state(&path);
         assert!(corrupt.last_poll.ends_with('Z'));
         assert!(corrupt.announced_issues.is_empty());
+    }
+
+    // -- Shell tests --
+
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use crate::clients::RawResponse;
+
+    /// Fake client: captures `commentCreate` bodies, pops queued results.
+    fn comment_client(
+        results: Vec<Result<(), LinearError>>,
+        sent: Arc<Mutex<Vec<String>>>,
+    ) -> LinearClient {
+        let results = Arc::new(Mutex::new(VecDeque::from(results)));
+        LinearClient::from_fn(move |body| {
+            let results = Arc::clone(&results);
+            let sent = Arc::clone(&sent);
+            async move {
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                sent.lock()
+                    .unwrap()
+                    .push(req["variables"]["body"].as_str().unwrap().to_string());
+                match results.lock().unwrap().pop_front().unwrap() {
+                    Ok(()) => Ok(RawResponse {
+                        status: 200,
+                        body: br#"{"data":{"commentCreate":{"success":true}}}"#.to_vec(),
+                    }),
+                    Err(e) => Err(e),
+                }
+            }
+        })
+    }
+
+    fn channel(client: LinearClient) -> LinearChannel {
+        LinearChannel::new(client, Duration::from_secs(120), trusted())
+    }
+
+    #[test]
+    fn transient_error_classification() {
+        assert!(is_transient(&LinearError::Network("timeout".into())));
+        assert!(!is_transient(&LinearError::Api("bad input".into())));
+        assert!(!is_transient(&LinearError::Deserialize("nope".into())));
+    }
+
+    #[tokio::test]
+    async fn post_comment_retries_transient_then_succeeds() {
+        tokio::time::pause();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let ch = channel(comment_client(
+            vec![
+                Err(LinearError::Network("timeout".into())),
+                Err(LinearError::Network("503".into())),
+                Ok(()),
+            ],
+            sent.clone(),
+        ));
+
+        ch.post_comment("i1", "plan").await.unwrap();
+
+        assert_eq!(sent.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn post_comment_does_not_retry_permanent_error() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let ch = channel(comment_client(
+            vec![Err(LinearError::Api("invalid issue".into()))],
+            sent.clone(),
+        ));
+
+        let err = ch.post_comment("i1", "plan").await.unwrap_err();
+
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        assert!(matches!(err, LinearError::Api(_)));
+    }
+
+    #[tokio::test]
+    async fn dispatch_posts_reply_as_comment() {
+        use crate::config::ContextConfig;
+        use crate::provider::MockProvider;
+        use crate::tools::Tools;
+        use crate::types::Response;
+        use crate::workspace::Workspace;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(Workspace::init_at(dir.path().to_path_buf()).unwrap());
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text("a plan".into()))]));
+        let engine = crate::engine::flat::FlatSession::new(
+            ws.path().join("sessions"),
+            ws.path().join("memory"),
+            ContextConfig::default(),
+        )
+        .unwrap();
+        let summarize = crate::engine::make_summarize_fn(provider.clone());
+        let handle = AgentHandle::spawn(
+            ws,
+            provider,
+            Arc::new(Tools::default()),
+            1,
+            engine,
+            summarize,
+        );
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let ch = channel(comment_client(vec![Ok(())], sent.clone()));
+
+        dispatch(
+            &ch,
+            &handle,
+            Dispatch {
+                issue_id: "i1".into(),
+                identifier: "MDK-1".into(),
+                message: "new issue".into(),
+            },
+        )
+        .await;
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0], "a plan");
     }
 }

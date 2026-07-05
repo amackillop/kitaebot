@@ -6,6 +6,7 @@
 use tracing::error;
 
 use crate::config::Config;
+use crate::linear_channel::LinearChannel;
 use crate::provider::CompletionsProvider;
 use crate::telegram::TelegramChannel;
 use crate::tools::Tools;
@@ -18,6 +19,7 @@ pub struct Runtime {
     pub tools: Tools,
     pub telegram: Option<TelegramChannel>,
     pub gh_cli: Option<GhCli>,
+    pub linear: Option<LinearChannel>,
 }
 
 // ---------------------------------------------------------------------------
@@ -29,6 +31,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use std::time::Duration;
 
     use crate::clients::chat_completion::CompletionsClient;
+    use crate::clients::linear::LinearClient;
     use crate::clients::telegram::TelegramClient;
     use crate::secrets::load_secret;
     use crate::tools::{DirenvCache, git, github, network};
@@ -66,6 +69,20 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         None
     };
 
+    let linear = if config.linear.enabled {
+        let key = load_secret("linear-api-key").unwrap_or_else(|e| {
+            error!("Failed to load Linear credentials: {e}");
+            std::process::exit(1);
+        });
+        Some(LinearChannel::new(
+            LinearClient::new(key),
+            Duration::from_secs(config.linear.poll_interval_secs),
+            config.linear.trusted_users.clone(),
+        ))
+    } else {
+        None
+    };
+
     let provider_api_key = load_secret("provider-api-key").unwrap_or_else(|e| {
         error!("Failed to load Provider credentials: {e}");
         std::process::exit(1);
@@ -93,6 +110,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         }),
         telegram,
         gh_cli,
+        linear,
     }
 }
 
@@ -105,6 +123,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use std::time::Duration;
 
     use crate::clients::chat_completion::CompletionsClient;
+    use crate::clients::linear::LinearClient;
     use crate::clients::telegram::TelegramClient;
     use crate::secrets::{Secret, load_secret};
     use crate::tools::{DirenvCache, git, github};
@@ -151,6 +170,16 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         None
     };
 
+    let linear = if config.linear.enabled {
+        Some(LinearChannel::new(
+            LinearClient::new(Secret::placeholder()),
+            Duration::from_secs(config.linear.poll_interval_secs),
+            config.linear.trusted_users.clone(),
+        ))
+    } else {
+        None
+    };
+
     Runtime {
         provider,
         tools: Tools::new(tools, &config.tools.disabled).unwrap_or_else(|e| {
@@ -159,5 +188,6 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         }),
         telegram,
         gh_cli,
+        linear,
     }
 }

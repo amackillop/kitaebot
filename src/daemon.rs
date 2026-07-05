@@ -1,8 +1,10 @@
-//! Long-running daemon that drives the heartbeat, GitHub, Telegram, and socket loops.
+//! Long-running daemon that drives the heartbeat, GitHub, Linear,
+//! Telegram, and socket loops.
 //!
-//! The daemon runs four concurrent loops — heartbeat ticks on a
+//! The daemon runs five concurrent loops — heartbeat ticks on a
 //! configurable interval, the GitHub PR poller checks for new reviews
-//! and comments, the Telegram poller long-polls for incoming messages,
+//! and comments, the Linear poller checks for assigned issues and
+//! comments, the Telegram poller long-polls for incoming messages,
 //! and the socket listener accepts Unix domain socket clients. All are
 //! pinned futures inside a single `tokio::select!`, so they make
 //! progress concurrently.
@@ -20,6 +22,7 @@ use tracing::info;
 use crate::agent::AgentHandle;
 use crate::github_channel;
 use crate::heartbeat;
+use crate::linear_channel::{self, LinearChannel};
 use crate::socket;
 use crate::telegram::{self, TelegramChannel};
 use crate::tools::github::GhCli;
@@ -36,6 +39,7 @@ pub async fn run(
     github_interval: Duration,
     github_owner: &str,
     github_trusted_users: &[String],
+    linear: Option<&LinearChannel>,
     socket_path: &Path,
 ) {
     run_with_shutdown(
@@ -47,13 +51,15 @@ pub async fn run(
         github_interval,
         github_owner,
         github_trusted_users,
+        linear,
         socket_path,
         shutdown_signal(),
     )
     .await;
 }
 
-/// Testable core: runs heartbeat + github + telegram + socket until `shutdown` resolves.
+/// Testable core: runs heartbeat + github + linear + telegram + socket
+/// until `shutdown` resolves.
 #[allow(clippy::too_many_arguments)]
 async fn run_with_shutdown<S: Future<Output = ()>>(
     workspace: &Workspace,
@@ -64,6 +70,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     github_interval: Duration,
     github_owner: &str,
     github_trusted_users: &[String],
+    linear: Option<&LinearChannel>,
     socket_path: &Path,
     shutdown: S,
 ) {
@@ -95,12 +102,23 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         }
     };
 
+    let linear_state_path = workspace.linear_poll_state_path();
+    let linear_loop = async {
+        match linear {
+            Some(ch) => {
+                linear_channel::poll_loop(ch, handle, &linear_state_path).await;
+            }
+            None => std::future::pending().await,
+        }
+    };
+
     let socket_loop = socket::listen(socket_path, handle);
 
     tokio::select! {
         () = heartbeat_loop => unreachable!("heartbeat loop never exits"),
         () = telegram_loop => unreachable!("telegram loop never exits"),
         () = github_loop => unreachable!("github loop never exits"),
+        () = linear_loop => unreachable!("linear loop never exits"),
         () = socket_loop => unreachable!("socket loop never exits"),
         () = shutdown => {
             info!("Shutdown signal received, exiting.");
@@ -179,8 +197,9 @@ mod tests {
             None,
             None,
             Duration::ZERO,
-            "",  // github_owner
-            &[], // github_trusted_users
+            "",   // github_owner
+            &[],  // github_trusted_users
+            None, // linear
             &sock_path,
             tokio::time::sleep(Duration::from_millis(50)),
         )
@@ -207,8 +226,9 @@ mod tests {
             None,
             None,
             Duration::ZERO,
-            "",  // github_owner
-            &[], // github_trusted_users
+            "",   // github_owner
+            &[],  // github_trusted_users
+            None, // linear
             &sock_path,
             async {
                 // Let 3 ticks fire: immediate + 2 more.
@@ -247,8 +267,9 @@ mod tests {
             None,
             None,
             Duration::ZERO,
-            "",  // github_owner
-            &[], // github_trusted_users
+            "",   // github_owner
+            &[],  // github_trusted_users
+            None, // linear
             &sock_path,
             tokio::time::sleep(Duration::from_millis(50)),
         )

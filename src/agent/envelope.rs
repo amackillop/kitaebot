@@ -24,6 +24,9 @@ pub enum ChannelSource {
         #[allow(dead_code)] // Routed via session_hint, not consumed by actor.
         repo: String,
     },
+    Linear {
+        issue: String,
+    },
     Socket,
     Telegram,
 }
@@ -33,6 +36,7 @@ impl fmt::Display for ChannelSource {
         match self {
             Self::Heartbeat => write!(f, "Heartbeat"),
             Self::GitHub { pr_number, .. } => write!(f, "GitHub PR #{pr_number}"),
+            Self::Linear { issue } => write!(f, "Linear {issue}"),
             Self::Socket => write!(f, "Socket"),
             Self::Telegram => write!(f, "Telegram"),
         }
@@ -77,6 +81,14 @@ mod tests {
             repo: "owner/repo".into(),
         };
         assert_eq!(src.to_string(), "GitHub PR #42");
+    }
+
+    #[test]
+    fn display_linear() {
+        let src = ChannelSource::Linear {
+            issue: "MDK-123".into(),
+        };
+        assert_eq!(src.to_string(), "Linear MDK-123");
     }
 
     #[test]

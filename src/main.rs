@@ -128,6 +128,7 @@ async fn main() {
                 Duration::from_secs(config.github.poll_interval_secs),
                 &config.github.owner,
                 &config.github.trusted_users,
+                rt.linear.as_ref(),
                 socket_path,
             )
             .await;

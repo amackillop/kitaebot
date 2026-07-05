@@ -37,6 +37,10 @@ Skip this for obvious fixes and additions.
 - Static dispatch over trait objects (trait objects only for runtime polymorphism)
 - Implement std traits (`FromStr`, `From`, `Display`) over ad-hoc methods
 - Enum variants and match arms in alphabetical order
+- Comments are terse: one line stating the non-obvious fact, nothing more.
+  Design rationale, backstory, and observed symptoms belong in the commit
+  message (retrievable via `git log -L`), not in the code. If a comment
+  restates what the commit message already explains, delete it.
 
 
 IMPORTANT: Running `just check` MUST PASS before asking for a review
