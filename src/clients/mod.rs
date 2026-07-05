@@ -1,4 +1,5 @@
 pub mod chat_completion;
+pub mod linear;
 pub mod telegram;
 
 /// Raw HTTP response at the IO/pure boundary.

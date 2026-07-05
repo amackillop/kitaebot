@@ -203,6 +203,22 @@ pub enum TelegramError {
     Session(String),
 }
 
+/// Linear channel errors.
+#[derive(Clone, Debug, Error)]
+pub enum LinearError {
+    /// GraphQL layer returned errors.
+    #[error("Linear API error: {0}")]
+    Api(String),
+
+    /// Failed to deserialize a Linear API response body.
+    #[error("Deserialize error: {0}")]
+    Deserialize(String),
+
+    /// HTTP request failed (timeout, DNS, non-2xx status, etc.).
+    #[error("Network error: {0}")]
+    Network(String),
+}
+
 /// Sandbox application errors.
 ///
 /// Not wired into the top-level `Error` enum — sandbox failures are
