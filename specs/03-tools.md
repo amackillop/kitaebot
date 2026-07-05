@@ -345,6 +345,18 @@ registry like any other tool; excluded from all sub-agent tool sets.
 
 ---
 
+### `notify` — Push Notification
+
+Defined and owned by [spec 17](17-notify.md). Registered only when
+`telegram.enabled`; excluded from all sub-agent tool sets.
+
+| Param | Type | Required | Notes |
+|-------|------|----------|-------|
+| `message` | String | yes | Content to send |
+| `urgency` | String | no | `low` (default, batched) or `high` (immediate) |
+
+---
+
 ### Testing
 
 `CliRunner` is the subprocess boundary trait. `RealCliRunner` spawns real

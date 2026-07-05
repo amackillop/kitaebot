@@ -88,7 +88,7 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [14](14-context-engine.md) | Context Engine | Pluggable context management (LCM DAG, sessions) |
 | [15](15-sandbox.md) | Sandbox | Landlock filesystem confinement |
 | [16](16-activity.md) | Activity | Structured turn events for channel observability |
-| [17](17-notify.md) | Notify | Push notifications to user (not yet implemented) |
+| [17](17-notify.md) | Notify | Push notifications to user |
 | [18](18-egress-filter.md) | Egress Filter | Domain-allowlisted outbound proxy |
 | [19](19-sub-agents.md) | Sub-Agents | Task delegation with isolated child contexts |
 
