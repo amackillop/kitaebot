@@ -22,6 +22,7 @@
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::LazyLock;
 
 use regex::RegexSet;
@@ -502,7 +503,15 @@ impl Tool for Exec {
                 .arg(&args.command)
                 .current_dir(&cwd)
                 .env_clear()
-                .envs(super::safe_env());
+                .envs(super::safe_env())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                // Kill the child when the future is dropped: on timeout
+                // below, or when the turn is cancelled and the parent
+                // drops the whole tool future. Command::output() would
+                // leave the process running.
+                .kill_on_drop(true);
 
             match direnv_env {
                 Ok(Some(ref env)) => {
@@ -514,7 +523,10 @@ impl Tool for Exec {
                 }
             }
 
-            let output = timeout(self.timeout, cmd.output())
+            let child = cmd
+                .spawn()
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            let output = timeout(self.timeout, child.wait_with_output())
                 .await
                 .map_err(|_| ToolError::Timeout)?
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -972,6 +984,37 @@ mod tests {
         let result = tool.execute(args, ToolCtx::default()).await.unwrap();
         assert!(result.contains("hello"));
         assert!(result.contains("Exit code: 0"));
+    }
+
+    fn quick_timeout_tool(dir: &std::path::Path) -> Exec {
+        Exec {
+            workspace_root: dir.to_path_buf(),
+            timeout: Duration::from_millis(50),
+            max_output_bytes: 4096,
+            direnv_cache: DirenvCache::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exec_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = quick_timeout_tool(dir.path());
+        let args = serde_json::json!({"command": "sleep 5"});
+        let result = tool.execute(args, ToolCtx::default()).await;
+        assert!(matches!(result, Err(ToolError::Timeout)));
+    }
+
+    #[tokio::test]
+    async fn test_exec_timeout_kills_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = quick_timeout_tool(dir.path());
+        let args = serde_json::json!({"command": "sleep 0.3 && touch marker"});
+        let result = tool.execute(args, ToolCtx::default()).await;
+        assert!(matches!(result, Err(ToolError::Timeout)));
+        // If the child survived the timeout it would touch the marker
+        // at ~0.3s. kill_on_drop must have killed it before that.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!dir.path().join("marker").exists());
     }
 
     #[tokio::test]
