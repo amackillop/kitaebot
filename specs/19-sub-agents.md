@@ -153,31 +153,40 @@ model's responsibility not to issue conflicting parallel writes, and
 
 ### Cancellation
 
-There is no child `CancellationToken` — the `Tool` trait's `execute()`
-receives no token, and none is needed. The parent's loop races tool execution
-against its own token (`cancellable(join_all(...))`), so cancelling the
-parent **drops** the sub-agent's future mid-await. The child loop stops at
-its next await point; its in-memory context is discarded with it.
+The child's `run_turn` receives the parent's real `CancellationToken`,
+delivered through the `ToolCtx` the `task` tool gets on `execute()`
+([spec 03](03-tools.md)).
+
+The **primary** cancel path is still drop-based: the parent's loop races
+tool execution against its own token (`cancellable(join_all(...))`), so
+cancelling the parent drops the sub-agent's future mid-await and its
+in-memory context with it. The threaded token is correctness on top —
+a child that reaches an iteration boundary before the drop lands observes
+the cancellation itself and can emit a (labeled) `Cancelled` event.
 
 The caveat is inherited from the parent's own cancellation semantics:
 drop-based cancellation stops the loop, not necessarily side effects already
 in flight (a spawned process under `exec` relies on kill-on-drop). This is
 the same contract the parent has today.
 
-The child's `run_turn` receives a never-cancelled token to satisfy the
-signature.
-
 ### Activity and Observability
 
-The child runs with `activity_tx = None`. Sub-agent tool events do **not**
-appear in the parent's activity stream; the parent already emits
-`ToolStart { tool: "task" }` / `ToolEnd` around the whole delegation, which
-is the right granularity for a user watching the socket. The child's
-iterations remain visible in the daemon logs via `tracing`, same as the
-parent's.
+The child runs with a private activity channel; the `task` tool forwards
+each child event to the parent's sink wrapped in
+`Nested { agent, event }` ([spec 16](16-activity.md)), labeled with the
+agent type. A user watching a verbose channel sees the delegation
+bracketed and the child's work inside it:
 
-Tagged child activity (a source field on `Activity`) is a future extension —
-it touches every activity consumer for marginal benefit.
+```
+Running tool: task
+[worker] Running tool: exec
+[worker] Tool finished: exec
+Tool finished: task
+```
+
+When the parent ctx has no activity sink, the child gets none either and no
+forwarding machinery is created. The child's iterations also remain visible
+in the daemon logs via `tracing`, same as the parent's.
 
 ### System Prompts
 
@@ -278,7 +287,8 @@ future extension — it requires constructing a second provider instance, and
 - The provider — borrows via `Arc`
 - Tool definitions — reuses shared instances from the parent's registry
 - Engine tool scoping — `ContextEngine::tools(scope)` lives in spec 14
-- Cancellation — inherited structurally via future drop
+- Cancellation — primary path is future drop; the token arrives via `ToolCtx`
+  (spec 03)
 
 ### Interactions
 
@@ -292,7 +302,8 @@ future extension — it requires constructing a second provider instance, and
 - **Tool registry (spec 03)**: registry holds `Arc<dyn Tool>`; per-type sets
   are built at startup from shared instances. The `task` tool registers like
   any other tool.
-- **Activity (spec 16)**: no changes. The child receives no activity sender.
+- **Activity (spec 16)**: child events are forwarded to the parent's sink
+  wrapped in `Nested { agent, event }`.
 
 ## Failure Modes
 
@@ -334,8 +345,6 @@ These are **not** in this spec but the architecture accommodates them:
   with system prompts, tool lists, and model selection.
 - **Per-type model selection** (`explore_model`): a cheaper model for
   research agents. Requires a second provider instance.
-- **Tagged child activity**: a source field on `Activity` so channels can
-  render sub-agent progress distinctly.
 - **Background execution**: non-blocking sub-agents that run concurrently
   while the parent continues. Requires changing the tool result delivery
   mechanism.

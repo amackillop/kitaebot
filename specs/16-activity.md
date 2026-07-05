@@ -15,6 +15,7 @@ pub enum Activity {
     Cancelled,
     Compaction { before: usize, after: usize },
     MaxIterations,
+    Nested { agent: String, event: Box<Activity> },
     ToolEnd { tool: String, error: Option<String> },
     ToolStart { tool: String },
 }
@@ -25,8 +26,12 @@ pub enum Activity {
 | `Cancelled` | Cancellation token fires | — |
 | `Compaction` | After `compact_if_needed` returns `Ok(true)` | `before`/`after`: estimated token counts |
 | `MaxIterations` | Loop exhausts `max_iterations` | — |
+| `Nested` | Event forwarded from a sub-agent turn | `agent`: type label (`explore`/`worker`), `event`: the child event |
 | `ToolEnd` | After each tool result | `tool`: name, `error`: `Some(msg)` if failed/blocked |
 | `ToolStart` | Before `join_all` for each pending call | `tool`: name |
+
+Nesting depth is structurally bounded at one: sub-agents cannot spawn
+sub-agents ([spec 19](19-sub-agents.md)).
 
 ### Display
 
@@ -39,6 +44,7 @@ Running tool: exec
 Tool finished: exec
 Tool failed: file_read (Permission denied)
 Max iterations reached
+[worker] Running tool: exec
 ```
 
 ### Serialization
@@ -66,11 +72,18 @@ The activity sender is threaded through:
 - `AgentHandle::send_message` — accepts `Option<mpsc::Sender<Activity>>`
   (owned, for `'static` bound on the envelope)
 - `Envelope` — stores the owned sender
-- Actor — converts to `Option<&mpsc::Sender<Activity>>` (borrowed reference)
-- `process_message` and `run_turn` — receive and emit via borrowed reference
+- Actor — folds it with the cancellation token into a `ToolCtx`
+  ([spec 03](03-tools.md))
+- `process_message` and `run_turn` — take the `ToolCtx`, emit via
+  `ctx.activity`, and clone the ctx into each tool dispatch
 
 Channels that want events create an `mpsc::channel(64)` per message and pass
 the sender. Channels that don't care pass `None`.
+
+**Sub-agent forwarding**: the `task` tool gives each child turn its own
+channel and forwards child events to the parent sink wrapped in
+`Nested { agent, event }`, labeled with the agent type. No listener on the
+parent ctx means no forwarder — the child runs with `activity: None`.
 
 ### Consumption
 

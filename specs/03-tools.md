@@ -24,13 +24,38 @@ trait Tool: Send + Sync {
     name()        -> &'static str
     description() -> &'static str
     parameters()  -> serde_json::Value    // JSON Schema
-    execute(args) -> Result<String, ToolError>
+    execute(args, ctx) -> Result<String, ToolError>
 }
 ```
 
 Dispatch: find tool by name, parse arguments from JSON string to `Value`,
-call `execute`. Unknown tool name returns `ToolError::NotFound`. Malformed
-arguments return `ToolError::InvalidArguments`.
+call `execute` with a clone of the turn's `ToolCtx`. Unknown tool name
+returns `ToolError::NotFound`. Malformed arguments return
+`ToolError::InvalidArguments`.
+
+### Per-Turn Context
+
+`execute` receives a `ToolCtx` — the per-turn context the agent loop threads
+into every dispatch:
+
+```rust
+pub struct ToolCtx {
+    activity: Option<mpsc::Sender<Activity>>,  // event sink (spec 16)
+    cancel: CancellationToken,                 // fires on client disconnect
+}
+```
+
+`ToolCtx` is owned and cheaply cloneable (both fields are Arc-backed); the
+loop clones it once per tool call, and the clone moves into the tool's boxed
+future. `run_turn` itself carries the same struct in place of separate
+activity/cancel parameters — one source of truth per turn.
+
+Most tools ignore the ctx. The `task` tool ([spec 19](19-sub-agents.md))
+uses both fields: it forwards child activity events (labeled) to the
+parent's sink and passes the real cancellation token into the child loop.
+Primary cancellation remains drop-based — the loop races `join_all` against
+the token — the ctx token exists for tools that can react more gracefully
+than being dropped.
 
 Tool definitions are converted to `ToolDefinition` (OpenAI function-calling
 format) and passed to the provider on each call.
@@ -142,6 +167,13 @@ Stderr is prefixed with `STDERR:` and separated from stdout.
 |-------------|---------|------------|
 | Timeout | 600 seconds | `tools.exec.timeout_secs` |
 | Output size | 10KB (UTF-8 aware) | `tools.exec.max_output_bytes` |
+
+**Process lifetime:**
+
+The child is spawned with `kill_on_drop`. Both timeout and turn cancellation
+work by dropping the wait future, which kills the direct `bash` child instead
+of orphaning it. Grandchildren that detach from the bash process may still
+survive — process-group kill is out of scope.
 
 ---
 
