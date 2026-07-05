@@ -204,14 +204,14 @@ impl<P: Provider> Tool for TaskTool<P> {
                 AgentKind::Worker => "worker",
             };
 
-            // Fresh context per call, discarded on return. The token is
-            // never cancelled: parent cancellation drops this future
-            // instead (the parent's loop races tool execution against
-            // its own token).
+            // Fresh context per call, discarded on return. The parent's
+            // token is threaded through so the child can observe
+            // cancellation at an iteration boundary, though the primary
+            // cancel path is still the parent dropping this future.
             let mut engine = EphemeralSession::new();
             let child_ctx = ToolCtx {
                 activity: ctx.activity.as_ref().map(|parent| forward(parent, label)),
-                ..ToolCtx::default()
+                cancel: ctx.cancel.clone(),
             };
             run_turn(
                 &mut engine,
@@ -432,6 +432,31 @@ mod tests {
             && matches!(e, Activity::ToolStart { tool } if tool == "mock")));
         assert!(nested.iter().any(|(agent, e)| *agent == "worker"
             && matches!(e, Activity::ToolEnd { tool, error: None } if tool == "mock")));
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_parent_token_stops_child() {
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            "never".to_string(),
+        ))]));
+        let tool = TaskTool::new(
+            Arc::clone(&provider),
+            noop_summarize(),
+            agent_type(Tools::default()),
+            agent_type(Tools::default()),
+            5,
+        );
+        let ctx = ToolCtx::default();
+        ctx.cancel.cancel();
+        let err = tool
+            .execute(serde_json::json!({"prompt": "x"}), ctx)
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::ExecutionFailed(msg) => assert!(msg.contains("sub-agent failed")),
+            other => panic!("expected ExecutionFailed, got {other:?}"),
+        }
+        assert_eq!(provider.call_count(), 0);
     }
 
     #[tokio::test]
