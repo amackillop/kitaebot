@@ -128,7 +128,7 @@ locally without being sent to the server.
 ### GitHub
 
 Documented separately in [spec 20](20-github.md). Polls feedback on the
-bot's own PRs and (optionally) review requests for others' PRs.
+bot's own PRs and review requests for others' PRs.
 
 ---
 

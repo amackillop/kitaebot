@@ -26,7 +26,6 @@ mod types;
 mod workspace;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use config::{Config, EngineKind};
 use engine::{ContextEngine, ToolScope};
@@ -128,9 +127,7 @@ async fn main() {
                 config.heartbeat.interval_secs,
                 rt.telegram.as_ref(),
                 rt.gh_cli.as_ref(),
-                Duration::from_secs(config.github.poll_interval_secs),
-                &config.github.owner,
-                &config.github.trusted_users,
+                &config.github,
                 rt.linear.as_ref(),
                 socket_path,
             )

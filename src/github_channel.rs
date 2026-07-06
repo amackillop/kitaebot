@@ -10,6 +10,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde::Deserialize;
+
+use crate::config::GithubConfig;
 use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -96,11 +98,9 @@ struct PollState {
 /// so we don't replay entire PR histories.
 pub async fn poll_loop(
     gh: &GhCli,
-    interval: Duration,
+    config: &GithubConfig,
     handle: &AgentHandle,
     state_path: &Path,
-    owner: &str,
-    trusted_users: &[String],
 ) -> ! {
     let bot_login = match resolve_bot_login(gh).await {
         Ok(login) => {
@@ -116,12 +116,21 @@ pub async fn poll_loop(
     let mut last_poll = load_last_poll(state_path);
     info!(last_poll = %last_poll, "GitHub channel starting");
 
-    let mut tick = time::interval(interval);
+    let mut tick = time::interval(Duration::from_secs(config.poll_interval_secs));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tick.tick().await;
-        match poll_once(gh, handle, &bot_login, &last_poll, owner, trusted_users).await {
+        match poll_once(
+            gh,
+            handle,
+            &bot_login,
+            &last_poll,
+            &config.owner,
+            &config.trusted_users,
+        )
+        .await
+        {
             Ok(count) => {
                 info!(count, "GitHub poll: dispatched {count} items");
                 last_poll = now_iso8601();

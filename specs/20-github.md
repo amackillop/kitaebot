@@ -28,9 +28,8 @@ both queries:
 
 1. **Own PRs**: `gh search prs --author=@me --state=open`, then per PR
    fetch reviews, comments, and inline diff comments.
-2. **Review requests** (when `github.review_requests` is on):
-   `gh search prs --review-requested=@me --state=open`.
-3. **Tracked reviewed PRs** (same flag): for each PR in the `reviewed`
+2. **Review requests**: `gh search prs --review-requested=@me --state=open`.
+3. **Tracked reviewed PRs**: for each PR in the `reviewed`
    map, fetch state, head SHA, and new comments. Closed/merged PRs are
    pruned; a new head SHA triggers an incremental re-review; new trusted
    comments trigger a discussion turn; both in one tick fold into a
@@ -175,11 +174,11 @@ replying to stale code.
 | `github.poll_interval_secs` | `300` | Seconds between poll cycles |
 | `github.owner` | — | Bot owner's GitHub username (required when enabled) |
 | `github.trusted_users` | `[]` | Additional trusted GitHub usernames |
-| `github.review_requests` | `false` | Enable the review-request trigger |
 
-`review_requests` is a separate flag because granting the bot review
-duties is a bigger trust step than letting it read feedback on its own
-PRs. Requires the `github-token` secret.
+There is no separate flag for the review-request trigger: the trust
+check on the PR author already gates who can put code in front of the
+bot, and GitHub only lets repo collaborators request reviews in the
+first place. Requires the `github-token` secret.
 
 **Activity events**: not forwarded (passes `None` for activity sender).
 

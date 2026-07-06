@@ -20,6 +20,7 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::agent::AgentHandle;
+use crate::config::GithubConfig;
 use crate::github_channel;
 use crate::heartbeat;
 use crate::linear_channel::{self, LinearChannel};
@@ -36,9 +37,7 @@ pub async fn run(
     interval_secs: u64,
     telegram: Option<&TelegramChannel>,
     gh_cli: Option<&GhCli>,
-    github_interval: Duration,
-    github_owner: &str,
-    github_trusted_users: &[String],
+    github: &GithubConfig,
     linear: Option<&LinearChannel>,
     socket_path: &Path,
 ) {
@@ -48,9 +47,7 @@ pub async fn run(
         Duration::from_secs(interval_secs),
         telegram,
         gh_cli,
-        github_interval,
-        github_owner,
-        github_trusted_users,
+        github,
         linear,
         socket_path,
         shutdown_signal(),
@@ -67,9 +64,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     interval: Duration,
     telegram: Option<&TelegramChannel>,
     gh_cli: Option<&GhCli>,
-    github_interval: Duration,
-    github_owner: &str,
-    github_trusted_users: &[String],
+    github: &GithubConfig,
     linear: Option<&LinearChannel>,
     socket_path: &Path,
     shutdown: S,
@@ -84,19 +79,12 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     };
 
     let state_path = workspace.github_poll_state_path();
-    #[allow(clippy::too_many_arguments)]
     let github_loop = async {
-        match gh_cli {
+        // gh_cli is also Some when only the git tools are enabled;
+        // the channel itself is gated on `github.enabled`.
+        match gh_cli.filter(|_| github.enabled) {
             Some(gh) => {
-                github_channel::poll_loop(
-                    gh,
-                    github_interval,
-                    handle,
-                    &state_path,
-                    github_owner,
-                    github_trusted_users,
-                )
-                .await;
+                github_channel::poll_loop(gh, github, handle, &state_path).await;
             }
             None => std::future::pending().await,
         }
@@ -197,9 +185,7 @@ mod tests {
             Duration::from_secs(3600), // large interval — only the immediate first tick matters
             None,
             None,
-            Duration::ZERO,
-            "",   // github_owner
-            &[],  // github_trusted_users
+            &GithubConfig::default(),
             None, // linear
             &sock_path,
             tokio::time::sleep(Duration::from_millis(50)),
@@ -226,9 +212,7 @@ mod tests {
             Duration::from_millis(100), // 100ms interval for fast test
             None,
             None,
-            Duration::ZERO,
-            "",   // github_owner
-            &[],  // github_trusted_users
+            &GithubConfig::default(),
             None, // linear
             &sock_path,
             async {
@@ -267,9 +251,7 @@ mod tests {
             Duration::from_secs(3600),
             None,
             None,
-            Duration::ZERO,
-            "",   // github_owner
-            &[],  // github_trusted_users
+            &GithubConfig::default(),
             None, // linear
             &sock_path,
             tokio::time::sleep(Duration::from_millis(50)),
