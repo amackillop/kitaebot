@@ -81,7 +81,7 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [07](07-heartbeat.md) | Heartbeat | Periodic awareness checks |
 | [08](08-binaries.md) | Binaries | Daemon lifecycle and socket client |
 | [09](09-vm.md) | NixOS VM | Deployment and system configuration |
-| [10](10-channels.md) | Channels | External messaging interfaces (Telegram, Unix socket, GitHub, Linear) |
+| [10](10-channels.md) | Channels | External messaging interfaces (Telegram, Unix socket, Linear) |
 | [11](11-safety.md) | Safety | Leak detection and output wrapping |
 | 12 | Context | Folded into [spec 14](14-context-engine.md) (flat engine compaction) |
 | [13](13-credentials.md) | Credentials | Secret loading and isolation |
@@ -91,6 +91,7 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [17](17-notify.md) | Notify | Push notifications to user |
 | [18](18-egress-filter.md) | Egress Filter | Domain-allowlisted outbound proxy |
 | [19](19-sub-agents.md) | Sub-Agents | Task delegation with isolated child contexts |
+| [20](20-github.md) | GitHub Channel | PR feedback polling and review requests |
 
 ## Data Flow
 

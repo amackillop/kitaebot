@@ -127,54 +127,8 @@ locally without being sent to the server.
 
 ### GitHub
 
-Polls for new activity on the bot's own open pull requests.
-
-**Poll loop**: `tokio::time::interval` with `MissedTickBehavior::Skip`. Each
-tick:
-
-1. List bot's open PRs via `gh search prs --author=@me --state=open`
-2. For each PR: fetch reviews, comments, and inline diff comments
-3. Filter: skip bot's own comments, skip items older than `last_poll`, skip
-   untrusted users
-4. Send each new item through the agent handle with
-   `ChannelSource::GitHub { pr_number }`
-5. Update `last_poll` timestamp
-
-**Bot identity**: resolved on startup via `gh api user`. All comments from
-this user are skipped to prevent self-reply loops.
-
-**Access control**: the bot owner (from `github.owner`) is always trusted.
-Additional users can be granted access via `trusted_users`. Both are
-case-insensitive. Messages from anyone else are logged and skipped.
-
-**Message format**:
-
-- Review: `Review on PR #5 "Title" (owner/repo) by @alice: APPROVED\n\nBody`
-- Comment: `Comment on PR #5 "Title" (owner/repo) by @carol:\n\nBody`
-- Diff comment: `Inline comment on PR #5 "Title" (owner/repo) by @dave at src/main.rs:42:\n\nBody`
-
-**State persistence**: `memory/github_poll_state.json` via atomic write.
-Missing or corrupt state defaults to "now" to avoid replaying entire PR
-histories.
-
-**Activity events**: not forwarded (passes `None` for activity sender).
-
-| Config key | Default | Description |
-|------------|---------|-------------|
-| `github.enabled` | `false` | Enable the GitHub channel |
-| `github.poll_interval_secs` | `300` | Seconds between poll cycles |
-| `github.owner` | — | Bot owner's GitHub username (required when enabled) |
-| `github.trusted_users` | `[]` | Additional trusted GitHub usernames |
-
-Requires the `github-token` secret.
-
-#### Error Handling
-
-| Error | Behavior |
-|-------|----------|
-| Bot login resolution fails | Log error, park forever (no polling) |
-| PR list/fetch fails | Log error, retry next tick |
-| Individual message send fails | Log error, continue with remaining items |
+Documented separately in [spec 20](20-github.md). Polls feedback on the
+bot's own PRs and (optionally) review requests for others' PRs.
 
 ---
 
@@ -288,7 +242,7 @@ Documented separately in [spec 07](07-heartbeat.md).
 - Access control per channel
 - Verbose mode (socket and Telegram)
 - Send retries (Telegram)
-- State persistence (GitHub and Linear poll cursors)
+- State persistence (Linear poll cursor; GitHub's lives in spec 20)
 
 ### Does Not Own
 
