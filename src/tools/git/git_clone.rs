@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tracing::debug;
 
 use super::git_cli::GitCli;
-use super::url::{extract_repo_name, to_https_url, validate_name};
+use super::url::{extract_nwo, extract_repo_name, to_https_url, validate_name};
 use super::{Tool, ToolCtx};
 use crate::error::ToolError;
 use crate::tools::DirenvCache;
@@ -26,7 +26,12 @@ struct Args {
     name: Option<String>,
 }
 
-pub struct GitClone(pub GitCli, pub DirenvCache);
+pub struct GitClone {
+    pub git: GitCli,
+    pub direnv: DirenvCache,
+    /// Repos (`owner/repo` or `owner/*`) whose `.envrc` may be trusted.
+    pub trusted_repos: Vec<String>,
+}
 
 impl Tool for GitClone {
     fn name(&self) -> &'static str {
@@ -66,9 +71,9 @@ impl GitClone {
             None => extract_repo_name(&https_url)?,
         };
 
-        let projects_dir = self.0.workspace_root().join("projects");
+        let projects_dir = self.git.workspace_root().join("projects");
         Ok(self
-            .0
+            .git
             .prepare_git(&["clone", "--", &https_url, &repo_name], &projects_dir))
     }
 
@@ -90,28 +95,62 @@ impl GitClone {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("mkdir projects/: {e}")))?;
 
-        let mut output = self.0.exec_git(call, true).await?.format()?;
+        // repo_name is derived from the URL or user-provided; the nwo for
+        // the trust check always comes from the normalized clone URL.
+        let nwo = extract_nwo(&call.args[2]);
+
+        let mut output = self.git.exec_git(call, true).await?.format()?;
         let _ = write!(
             output,
             "\nCloned to projects/{repo_name} (use working_dir: \"projects/{repo_name}\" with exec)"
         );
 
         if target.join(".envrc").exists() {
-            // Trust the .envrc synchronously so that any subsequent exec
-            // call (which may race with the background warm) can already
-            // run `direnv export json` successfully.
-            direnv_allow(&target).await;
+            // An .envrc is arbitrary shell executing at clone time, before
+            // anyone has read the repo. Only trust it for allowlisted
+            // repos; an unresolvable nwo counts as untrusted.
+            let trusted = nwo
+                .as_deref()
+                .is_some_and(|n| is_trusted_repo(n, &self.trusted_repos));
+            if trusted {
+                // Trust the .envrc synchronously so that any subsequent exec
+                // call (which may race with the background warm) can already
+                // run `direnv export json` successfully.
+                direnv_allow(&target).await;
 
-            warm_direnv_cache(self.1.clone(), target);
-            let _ = write!(
-                output,
-                "\nDetected .envrc — warming direnv cache in the background. \
-                 The devshell will be available shortly."
-            );
+                warm_direnv_cache(self.direnv.clone(), target);
+                let _ = write!(
+                    output,
+                    "\nDetected .envrc — warming direnv cache in the background. \
+                     The devshell will be available shortly."
+                );
+            } else {
+                let _ = write!(
+                    output,
+                    "\n.envrc detected but {} is not in git.trusted_repos; \
+                     direnv/devshell disabled for this clone.",
+                    nwo.as_deref().unwrap_or("the repo")
+                );
+            }
         }
 
         Ok(output)
     }
+}
+
+/// Check whether `nwo` (`owner/repo`) is in the trusted list.
+/// Entries are exact `owner/repo` matches or `owner/*` wildcards,
+/// case-insensitive.
+fn is_trusted_repo(nwo: &str, trusted: &[String]) -> bool {
+    let Some((owner, _)) = nwo.split_once('/') else {
+        return false;
+    };
+    trusted.iter().any(|entry| {
+        entry.eq_ignore_ascii_case(nwo)
+            || entry
+                .strip_suffix("/*")
+                .is_some_and(|o| o.eq_ignore_ascii_case(owner))
+    })
 }
 
 /// Run `direnv allow` for a directory. Must complete before any
@@ -150,7 +189,12 @@ mod tests {
 
     fn stub_clone() -> (GitClone, String) {
         let (git, repo) = stub_git_cli_with_repo();
-        (GitClone(git, DirenvCache::new()), repo)
+        let tool = GitClone {
+            git,
+            direnv: DirenvCache::new(),
+            trusted_repos: Vec::new(),
+        };
+        (tool, repo)
     }
 
     #[test]
@@ -187,6 +231,39 @@ mod tests {
         let (tool, _) = stub_clone();
         let result = tool.prepare("https://github.com/owner/repo.git", Some("../escape"));
         assert!(result.is_err());
+    }
+
+    fn list(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn trusted_repo_exact_match() {
+        assert!(is_trusted_repo("owner/repo", &list(&["owner/repo"])));
+        assert!(!is_trusted_repo("owner/other", &list(&["owner/repo"])));
+        assert!(!is_trusted_repo("owner/repo", &[]));
+    }
+
+    #[test]
+    fn trusted_repo_case_insensitive() {
+        assert!(is_trusted_repo("Owner/Repo", &list(&["owner/repo"])));
+        assert!(is_trusted_repo("owner/repo", &list(&["OWNER/REPO"])));
+    }
+
+    #[test]
+    fn trusted_repo_owner_wildcard() {
+        let trusted = list(&["owner/*"]);
+        assert!(is_trusted_repo("owner/anything", &trusted));
+        assert!(is_trusted_repo("OWNER/anything", &trusted));
+        assert!(!is_trusted_repo("other/anything", &trusted));
+    }
+
+    #[test]
+    fn trusted_repo_rejects_malformed_nwo() {
+        assert!(!is_trusted_repo(
+            "no-slash",
+            &list(&["no-slash", "owner/*"])
+        ));
     }
 
     #[tokio::test]

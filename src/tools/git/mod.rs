@@ -69,15 +69,19 @@ pub(crate) fn resolve_repo_dir(
 pub(crate) fn build(
     token: Secret,
     workspace: &Workspace,
-    co_authors: Vec<String>,
+    config: &crate::config::GitConfig,
     direnv: DirenvCache,
 ) -> Vec<Arc<dyn Tool>> {
     let git = GitCli::new(token, workspace.path(), direnv.clone());
 
     vec![
-        Arc::new(Commit::new(git.clone(), co_authors)),
+        Arc::new(Commit::new(git.clone(), config.co_authors.clone())),
         Arc::new(Push(git.clone())),
-        Arc::new(GitClone(git, direnv)),
+        Arc::new(GitClone {
+            git,
+            direnv,
+            trusted_repos: config.trusted_repos.clone(),
+        }),
     ]
 }
 

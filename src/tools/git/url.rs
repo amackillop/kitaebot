@@ -49,6 +49,25 @@ pub(crate) fn extract_repo_name(url: &str) -> Result<String, ToolError> {
         .ok_or_else(|| ToolError::InvalidArguments(format!("cannot extract repo name from: {url}")))
 }
 
+/// Extract `owner/repo` from an HTTPS URL.
+///
+/// `https://github.com/owner/repo.git` → `owner/repo`. The host is
+/// ignored: which hosts are reachable at all is bounded by the egress
+/// allowlist. Returns `None` unless the path is exactly two segments.
+pub(crate) fn extract_nwo(url: &str) -> Option<String> {
+    let path = url
+        .strip_prefix("https://")?
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        [_host, owner, repo] if !owner.is_empty() && !repo.is_empty() => {
+            Some(format!("{owner}/{repo}"))
+        }
+        _ => None,
+    }
+}
+
 /// Validate a user-provided directory name.
 ///
 /// Rejects path traversal, absolute paths, and slashes.
@@ -124,6 +143,39 @@ mod tests {
             extract_repo_name("https://github.com/owner/repo/").unwrap(),
             "repo"
         );
+    }
+
+    // ── Name-with-owner extraction ──────────────────────────────────
+
+    #[test]
+    fn extract_nwo_with_git_suffix() {
+        assert_eq!(
+            extract_nwo("https://github.com/owner/repo.git").as_deref(),
+            Some("owner/repo")
+        );
+    }
+
+    #[test]
+    fn extract_nwo_without_git_suffix() {
+        assert_eq!(
+            extract_nwo("https://github.com/owner/repo").as_deref(),
+            Some("owner/repo")
+        );
+    }
+
+    #[test]
+    fn extract_nwo_trailing_slash() {
+        assert_eq!(
+            extract_nwo("https://github.com/owner/repo/").as_deref(),
+            Some("owner/repo")
+        );
+    }
+
+    #[test]
+    fn extract_nwo_rejects_wrong_segment_count() {
+        assert_eq!(extract_nwo("https://github.com/repo"), None);
+        assert_eq!(extract_nwo("https://github.com/a/b/c"), None);
+        assert_eq!(extract_nwo("not-a-url"), None);
     }
 
     // ── Name validation ─────────────────────────────────────────────

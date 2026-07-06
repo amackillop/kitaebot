@@ -61,7 +61,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             tools.extend(git::build(
                 token.clone(),
                 workspace,
-                config.git.co_authors.clone(),
+                &config.git,
                 direnv_cache.clone(),
             ));
         }
@@ -160,7 +160,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             tools.extend(git::build(
                 token.clone(),
                 workspace,
-                config.git.co_authors.clone(),
+                &config.git,
                 direnv_cache.clone(),
             ));
         }
