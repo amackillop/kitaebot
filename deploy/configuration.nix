@@ -59,11 +59,9 @@ in
         owner = "amackillop";
         trusted_users = [ ];
       };
-      # Flip on after creating secrets/linear-api-key and adding your
-      # Linear account email to trusted_users (never the bot's own email).
       linear = {
-        enabled = false;
-        trusted_users = [ ];
+        enabled = true;
+        trusted_users = [ "austin@moneydevkit.com" ];
       };
     };
   };
