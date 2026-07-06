@@ -27,7 +27,7 @@ struct ToolStats {
 
 /// How a tool call failed, derived from the Tool message content prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum FailureKind {
+pub(crate) enum FailureKind {
     Blocked,
     ExecutionFailed,
     InvalidArguments,
@@ -195,10 +195,13 @@ fn accumulate(map: &mut HashMap<String, ToolStats>, key: String, bytes: u64) {
 
 /// Classify a tool message as success or failure from its content.
 ///
-/// Returns `None` for successful calls. The content prefixes are produced
-/// by `record_tool_results` in `agent.rs` and are stable within the crate.
-fn classify_failure(content: &str) -> Option<FailureKind> {
-    if content.starts_with("Error: Tool blocked: ") {
+/// Returns `None` for successful calls. The content prefixes are
+/// produced by `record_tool_results` in `agent/mod.rs`: errors are
+/// stored as `Error: {ToolError}` (its Display impl), safety blocks
+/// as `Tool output blocked: ...`. There is no shared type backing
+/// this contract -- the round-trip test in `agent/mod.rs` pins it.
+pub(crate) fn classify_failure(content: &str) -> Option<FailureKind> {
+    if content.starts_with("Error: Blocked: ") {
         Some(FailureKind::Blocked)
     } else if content.starts_with("Error: Execution failed: ") {
         Some(FailureKind::ExecutionFailed)
@@ -643,7 +646,7 @@ mod tests {
     #[test]
     fn classify_blocked() {
         assert_eq!(
-            classify_failure("Error: Tool blocked: command blocked by policy"),
+            classify_failure("Error: Blocked: command blocked by policy"),
             Some(FailureKind::Blocked),
         );
     }
@@ -651,7 +654,7 @@ mod tests {
     #[test]
     fn classify_blocked_with_guidance() {
         assert_eq!(
-            classify_failure("Error: Tool blocked: use the git_push tool"),
+            classify_failure("Error: Blocked: use the git_push tool"),
             Some(FailureKind::Blocked),
         );
     }
@@ -747,13 +750,13 @@ mod tests {
                 "exec",
                 r#"{"command":"git push origin main"}"#,
             )]),
-            make_tool("c1", "Error: Tool blocked: use the git_push tool"),
+            make_tool("c1", "Error: Blocked: use the git_push tool"),
             make_assistant(vec![make_call(
                 "c2",
                 "exec",
                 r#"{"command":"git push origin dev"}"#,
             )]),
-            make_tool("c2", "Error: Tool blocked: use the git_push tool"),
+            make_tool("c2", "Error: Blocked: use the git_push tool"),
         ];
 
         let report = analyze(&[session]);
@@ -777,13 +780,13 @@ mod tests {
                 "exec",
                 r#"{"command":"git push origin main"}"#,
             )]),
-            make_tool("c1", "Error: Tool blocked: use the git_push tool"),
+            make_tool("c1", "Error: Blocked: use the git_push tool"),
             make_assistant(vec![make_call(
                 "c2",
                 "exec",
                 r#"{"command":"git push origin main"}"#,
             )]),
-            make_tool("c2", "Error: Tool blocked: use the git_push tool"),
+            make_tool("c2", "Error: Blocked: use the git_push tool"),
         ];
 
         let report = analyze(&[session]);
@@ -816,7 +819,7 @@ mod tests {
                 "file_read",
                 r#"{"path":"../../etc/passwd"}"#,
             )]),
-            make_tool("c1", "Error: Tool blocked: path traversal detected"),
+            make_tool("c1", "Error: Blocked: path traversal detected"),
         ];
 
         let report = analyze(&[session]);
@@ -867,7 +870,7 @@ mod tests {
                 "exec",
                 r#"{"command":"git push origin main"}"#,
             )]),
-            make_tool("c2", "Error: Tool blocked: use the git_push tool"),
+            make_tool("c2", "Error: Blocked: use the git_push tool"),
         ];
 
         let report = analyze(&[session]);
@@ -889,7 +892,7 @@ mod tests {
                 "exec",
                 r#"{"command":"git push origin main"}"#,
             )]),
-            make_tool("c1", "Error: Tool blocked: use the git_push tool"),
+            make_tool("c1", "Error: Blocked: use the git_push tool"),
         ];
         let report = analyze(&[session]);
         let out = format_report(&report);

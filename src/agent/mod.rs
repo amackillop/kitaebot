@@ -769,6 +769,73 @@ mod tests {
         }
     }
 
+    /// Pins the string contract between `record_tool_results` (producer)
+    /// and `stats::classify_failure` (consumer). There is no shared type:
+    /// errors are stored as `Error: {ToolError}` via Display, safety
+    /// blocks as `Tool output blocked: ...`. If either side drifts, the
+    /// /stats failure tables silently go blind -- exactly what happened
+    /// when `Blocked` was misclassified as success.
+    #[tokio::test]
+    async fn stored_tool_results_round_trip_stats_classification() {
+        use crate::stats::{FailureKind, classify_failure};
+
+        let cases: Vec<(Result<String, ToolError>, Option<FailureKind>)> = vec![
+            (Ok("plain output".into()), None),
+            (
+                Ok("key is sk-proj-abc123def456ghi789jkl012".into()),
+                Some(FailureKind::SafetyBlock),
+            ),
+            (
+                Err(ToolError::Blocked {
+                    operation: "git push origin main".into(),
+                    guidance: "use the git_push tool".into(),
+                }),
+                Some(FailureKind::Blocked),
+            ),
+            (
+                Err(ToolError::ExecutionFailed("exit 1".into())),
+                Some(FailureKind::ExecutionFailed),
+            ),
+            (
+                Err(ToolError::InvalidArguments("missing field".into())),
+                Some(FailureKind::InvalidArguments),
+            ),
+            (
+                Err(ToolError::NotFound("bogus".into())),
+                Some(FailureKind::NotFound),
+            ),
+            (Err(ToolError::Timeout), Some(FailureKind::Timeout)),
+        ];
+        let (results, expected): (Vec<_>, Vec<_>) = cases.into_iter().unzip();
+        let calls: Vec<ToolCall> = (0..results.len())
+            .map(|i| mock_call(&format!("call-{i}")))
+            .collect();
+
+        let mut engine = test_engine();
+        record_tool_results(&mut engine, &calls, results, None).await;
+
+        let ctx = engine.assemble("").await.unwrap();
+        let stored: Vec<&String> = ctx
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Tool { content, .. } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stored.len(), expected.len());
+        for (content, want) in stored.iter().zip(&expected) {
+            assert_eq!(classify_failure(content), *want, "content: {content}");
+        }
+
+        // REPEAT_ERROR is pushed verbatim by run_turn, not through
+        // record_tool_results; pin it against the classifier too.
+        assert_eq!(
+            classify_failure(REPEAT_ERROR),
+            Some(FailureKind::RepeatBlock),
+        );
+    }
+
     #[tokio::test]
     async fn test_activity_tool_events() {
         let provider = Arc::new(MockProvider::new(vec![
