@@ -75,7 +75,7 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [01](01-agent-loop.md) | Agent Loop | Core conversation/tool execution cycle |
 | [02](02-provider.md) | LLM Provider | Multi-backend chat completions |
 | [03](03-tools.md) | Tool System | Tool registry, exec, file ops, git, GitHub |
-| [04](04-session.md) | Session | Unified conversation persistence |
+| 04 | Session | Folded into [spec 14](14-context-engine.md) (flat engine storage) |
 | [05](05-workspace.md) | Workspace | Directory structure and prompt assembly |
 | [06](06-system-prompt.md) | System Prompt | Prompt files, assembly, and injection |
 | [07](07-heartbeat.md) | Heartbeat | Periodic awareness checks |
@@ -83,7 +83,7 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [09](09-vm.md) | NixOS VM | Deployment and system configuration |
 | [10](10-channels.md) | Channels | External messaging interfaces (Telegram, Unix socket, GitHub, Linear) |
 | [11](11-safety.md) | Safety | Leak detection and output wrapping |
-| [12](12-context.md) | Context | Token budget and compaction |
+| 12 | Context | Folded into [spec 14](14-context-engine.md) (flat engine compaction) |
 | [13](13-credentials.md) | Credentials | Secret loading and isolation |
 | [14](14-context-engine.md) | Context Engine | Pluggable context management (LCM DAG, sessions) |
 | [15](15-sandbox.md) | Sandbox | Landlock filesystem confinement |

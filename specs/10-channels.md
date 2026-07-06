@@ -195,8 +195,9 @@ tick:
    and comments
 2. Compute events (pure core) against the persisted poll state
 3. Dispatch each event through the agent handle with
-   `ChannelSource::Linear { issue }` and the issue identifier as session
-   hint (per-issue sessions)
+   `ChannelSource::Linear { issue }` and the issue's `owner/repo` label as
+   session hint — the same session key GitHub uses, so a repo's PRs and
+   tickets share one session
 4. Post the agent's reply as a comment on the issue
 5. Save the poll state
 
@@ -293,7 +294,7 @@ Documented separately in [spec 07](07-heartbeat.md).
 
 - Agent turns — delegates to `AgentHandle::send_message()`
 - Input classification (message vs command) — the actor handles that
-- Session persistence — the session module handles that
+- Session persistence — the context engine handles that (spec 14)
 - Activity event types — the activity module defines those
 
 ## Failure Modes

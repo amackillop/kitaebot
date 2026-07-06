@@ -13,7 +13,7 @@ the LLM produces one.
 
 A turn proceeds in this order:
 
-1. Compact the session if the token budget is exceeded (see [spec 12](12-context.md))
+1. Compact the session if the token budget is exceeded (see [spec 14](14-context-engine.md))
 2. Push the user message onto the session
 3. Enter the tool loop (up to `max_iterations`):
    a. Prepend the system prompt to the session messages (not persisted)

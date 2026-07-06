@@ -14,11 +14,11 @@ Context Management) — a hierarchical DAG of summaries that preserves all
 original messages and lets the agent drill back into them on demand.
 
 The engine is a swappable trait so alternative strategies can be tested. A flat
-session implementation preserves the current behavior behind the same interface.
-
-This spec supersedes the session (spec 04) and context window (spec 12)
-responsibilities when the context engine is active. Those specs describe the
-flat session behavior which becomes one implementation of this trait.
+session implementation preserves the previous behavior behind the same
+interface (it absorbed the former specs 04 "Session" and 12 "Context Window
+Management" — see the Flat Session Implementation section). A third
+implementation, the ephemeral in-memory engine for sub-agent turns, is
+described in spec 19.
 
 ## Behavior
 
@@ -30,23 +30,29 @@ channels interact exclusively with this interface.
 ```
 trait ContextEngine: Send + Sync {
     // -- Turn operations (act on the active session) --
-    push_message(msg: Message) -> Result<(), ContextError>
-    assemble(system_prompt: &str) -> Result<AssembledContext, ContextError>
-    compact_if_needed(summarize: &SummarizeFn) -> Result<Option<CompactionEvent>, ContextError>
-    force_compact(summarize: &SummarizeFn) -> Result<CompactionEvent, ContextError>
-    clear() -> Result<(), ContextError>
-    save() -> Result<(), ContextError>
-    stats() -> Result<ContextStats, ContextError>
+    push_message(msg: Message) -> Result<(), EngineError>
+    assemble(system_prompt: &str) -> Result<AssembledContext, EngineError>
+    compact_if_needed(summarize: &SummarizeFn) -> Result<Option<CompactionEvent>, EngineError>
+    force_compact(summarize: &SummarizeFn) -> Result<CompactionEvent, EngineError>
+    clear() -> Result<(), EngineError>
+    save() -> Result<(), EngineError>
+    stats() -> ContextStats                    // sync, infallible
 
     // -- Tools contributed by this engine --
-    tools() -> Vec<Box<dyn Tool>>
+    tools(scope: ToolScope) -> Vec<Arc<dyn Tool>>
+
+    // -- Reporting --
+    report() -> Result<String, EngineError>    // rendered /stats report
 
     // -- Session management --
     active_session() -> &str
-    switch_session(name: &str) -> Result<(), ContextError>
-    list_sessions() -> Result<Vec<SessionInfo>, ContextError>
+    switch_session(name: &str) -> Result<(), EngineError>
+    list_sessions() -> Result<Vec<SessionInfo>, EngineError>
 }
 ```
+
+`ToolScope` is `Root | SubAgent` (see spec 19); tool instances are `Arc`
+so the same tool can appear in multiple filtered sets.
 
 All methods are async via Rust return-position-impl-trait
 (`impl Future<Output = ...> + Send`). The agent loop is generic over
@@ -111,7 +117,12 @@ SessionInfo {
 Sessions are scoped to projects. Each session maintains its own conversation
 history and memory. The agent builds dedicated knowledge per project over time.
 
-**Naming**: sessions are identified by name. The default session is `general`.
+**Naming**: sessions are identified by name. The default session is `general`
+(hardcoded, not configurable). Names are sanitized before touching storage:
+`/` becomes `--`, `..` and NUL bytes are stripped. The sanitized form is used
+for filenames (flat) and conversation rows (LCM); display output desanitizes
+(`--` back to `/`), so a session named `owner/repo` lists as `owner/repo` but
+lives in `owner--repo.json`.
 
 **Switching**: `switch_session(name)` is idempotent — creates the session if it
 does not exist, loads it if it does. The active session name is persisted to
@@ -133,6 +144,9 @@ disk so it survives daemon restarts.
   hint on the envelope. The actor routes to that session for the turn without
   mutating the active session. If no session exists for the repo, one is
   created automatically.
+- **Linear**: routes per-envelope based on the issue's `owner/repo` label —
+  the same session key as GitHub, so a repo's PRs and tickets share one
+  session. Message tagging stays per-issue via `ChannelSource::Linear`.
 - **Heartbeat**: uses the active session. Per-project heartbeats are a future
   enhancement.
 
@@ -149,21 +163,62 @@ For LCM, switching sessions is a cheap metadata change (active
 
 ### Flat Session Implementation
 
-Preserves the current behavior (specs 04 and 12) behind the `ContextEngine`
-trait. This is the baseline implementation.
+The baseline implementation. Absorbed the former specs 04 (Session) and 12
+(Context Window Management). It exists so the system works without SQLite and
+so the previous behavior is always available as a fallback.
 
-- **Storage**: `sessions/<name>.json` — one JSON file per session containing
-  `Vec<Message>`, `created_at`, `updated_at`.
-- **Compaction**: same as spec 12. Estimate tokens as `chars / 4`. When budget
-  is exceeded and session has >= 2 messages, summarize the entire conversation
-  into a single `Message::System` via LLM call.
+#### Storage
+
+One JSON file per session at `sessions/<sanitized-name>.json`, wrapping the
+`Session` struct from `src/session.rs`:
+
+```
+Session {
+    messages: Vec<Message>,
+    created_at: Timestamp,    // seconds since Unix epoch
+    updated_at: Timestamp,
+}
+```
+
+`Timestamp` is a newtype over `u64`. Messages do not carry individual
+timestamps. On disk, messages use serde's default externally-tagged enum
+format (e.g. `{"User": {"content": "..."}}`) — **not** the OpenAI wire
+format; wire conversion happens in the provider module. No version field:
+unknown fields are silently ignored for forward compatibility.
+
+`Session` operations:
+
+| Method | Behavior |
+|--------|----------|
+| `new()` | Create empty session with current timestamp |
+| `load(path)` | Load from disk. Create new if file doesn't exist. `SessionError::Parse` if corrupt. |
+| `save(path)` | Update `updated_at`, then atomic write (tmp + rename) |
+| `add_message(msg)` | Append message, update `updated_at` |
+| `clear()` | Wipe messages, preserve `created_at`, update `updated_at` |
+| `compact(summary)` | Replace all messages with a single summary message |
+
+Writes are atomic: write to `<name>.json.tmp`, then rename. A crash during
+write leaves the original file intact.
+
+#### Compaction
+
+Effective budget is `max_tokens * budget_percent / 100` (integer arithmetic).
+Tokens are estimated as `chars / 4`; `Message::char_count()` sums content
+length, plus function names and argument strings for `ToolCalls`.
+
+When the estimate exceeds the budget and the session has >= 2 messages:
+format all messages as `[role] content` text, send through `SummarizeFn`
+(no tools), and replace the whole conversation with a single
+`Message::System` containing the summary. No partial windowing.
+`force_compact()` skips the budget check but keeps the >= 2 message guard.
+
+#### Everything else
+
 - **Context assembly**: prepend system prompt, return all messages. No prompt
   augmentation.
-- **Tools**: none. Returns empty vec.
-- **Persistence**: atomic write (tmp + rename).
-
-The flat session exists so the system works without SQLite and so the previous
-behavior is always available as a fallback.
+- **Tools**: none. Returns empty vec for both scopes.
+- **`report()`**: loads every `sessions/*.json` (in-memory messages for the
+  active session) and feeds them through the shared `stats::render` core.
 
 ---
 
@@ -573,9 +628,11 @@ and time ranges up through the DAG.
    - Summary items: format as a `Message::System` with structured metadata
      (id, kind, depth, time range, content).
 3. The protected tail (recent raw messages) is always included.
-4. Budget-aware: from oldest to newest, include what fits the token budget.
-5. Augment system prompt with LCM recall guidance when summaries are present
+4. Augment system prompt with LCM recall guidance when summaries are present
    in the assembled context.
+
+There is no budget-aware truncation at assembly time — compaction is the
+size control. Assembly renders whatever `context_items` currently holds.
 
 **Summary format in context** (injected as system message content):
 
@@ -667,13 +724,8 @@ large volumes of earlier conversation, which would defeat the purpose of
 compaction. When the main agent needs to inspect compacted history, it
 delegates the expansion to a sub-agent (see spec 19), which processes the
 expanded content in its own context window and returns only the relevant
-findings.
-
-**Interim behavior (before spec 19)**: until sub-agents are implemented,
-`lcm_expand` is available to the main agent with a conservative `token_cap`
-default (5000 tokens). The tool description warns the model about context cost.
-When spec 19 lands, the restriction is enforced and the interim path is
-removed.
+findings. The restriction is enforced via `tools(ToolScope::Root)` omitting
+`lcm_expand`.
 
 All three tools operate on the active conversation only. Cross-session search
 is a future enhancement.
@@ -733,16 +785,31 @@ a routed envelope (e.g. GitHub), it switches back.
 
 ---
 
-### Slash Command Changes
+### Slash Commands
 
-| Command | Current | New |
-|---------|---------|-----|
-| `/context` | Display token usage from session | Delegates to `engine.stats()` |
-| `/compact` | Force single-summary compaction | Delegates to `engine.force_compact()` |
-| `/new` | Clear session | Delegates to `engine.clear()` |
-| `/stats` | Display conversation statistics | Delegates to `engine.stats()` |
-| `/project` | — | List sessions, show active |
-| `/project <name>` | — | Switch session |
+| Command | Behavior |
+|---------|----------|
+| `/context` | Token usage, message count, budget percentage from `engine.stats()` |
+| `/compact` | Delegates to `engine.force_compact()` |
+| `/new` | Delegates to `engine.clear()` |
+| `/stats` | Per-engine usage report from `engine.report()` |
+| `/project` | List sessions, show active |
+| `/project <name>` | Switch session |
+
+#### Usage report
+
+`report()` returns a rendered string. All engines feed their stored messages
+through the shared analysis core in `stats.rs`: per-tool call counts and
+output bytes, exec command breakdown, failure classification by content
+prefix, and blocked-command / repeated-call tables. The report is
+cross-session — every session or conversation the engine knows about, not
+just the active one.
+
+The LCM engine reads the raw `messages` table (not the live context), so
+history that compaction folded away still counts. It appends a health
+section: summary counts by depth, `level3-truncate` count (failed
+summarizations), raw-vs-context token totals per conversation, and
+externalized large-file count/bytes.
 
 ---
 
@@ -809,7 +876,7 @@ For LCM, an unknown name simply creates a new conversation row.
 - Retrieval tools (LCM: grep, describe, expand)
 - The `ContextEngine` trait definition and shared types
 - Token estimation
-- `/context`, `/compact`, `/new`, `/project` command implementations
+- `/context`, `/compact`, `/new`, `/project`, `/stats` command implementations
 
 ### Does Not Own
 
@@ -846,7 +913,7 @@ For LCM, an unknown name simply creates a new conversation row.
 
 | Failure | Error | Behavior |
 |---------|-------|----------|
-| SQLite open/init fails | `ContextError::Storage` | Fatal at startup |
+| SQLite open/init fails | `EngineError::Storage` | Fatal at startup |
 | Compaction LLM call fails (level 1) | — | Escalate to level 2 (aggressive) |
 | Compaction LLM call fails (level 2) | — | Escalate to level 3 (deterministic truncation) |
 | Compaction LLM output exceeds input (level 1) | — | Escalate to level 2 |
@@ -854,14 +921,14 @@ For LCM, an unknown name simply creates a new conversation row.
 | Level 3 deterministic truncation | — | Always succeeds. Guaranteed convergence. |
 | Async compaction fails | — | Logged. Next turn retries via `compact_if_needed`. Context unchanged. |
 | Session not found on switch | — | Created automatically (idempotent) |
-| Active session file missing | — | Fall back to `default_session` config |
-| Active session file corrupt | — | Fall back to `default_session` config |
-| FTS query fails | `ContextError::Storage` | Error text returned to LLM via tool error |
+| Active session file missing | — | Fall back to `general` |
+| Active session file corrupt | — | Fall back to `general` |
+| FTS query fails | `EngineError::Storage` | Error text returned to LLM via tool error |
 | Regex query timeout / invalid pattern | `ToolError::ExecutionFailed` | Error text returned to LLM |
 | Token cap exceeded during expand | — | Partial result with `truncated: true` |
 | Large file exploration summary fails | — | Fall back to size + MIME metadata only |
-| JSON session file corrupt (flat) | `ContextError::Parse` | Propagated to caller |
-| Filesystem I/O error | `ContextError::Io` | Propagated to caller |
+| JSON session file corrupt (flat) | `EngineError::Session` | Propagated to caller |
+| Filesystem I/O error | `EngineError::Session` | Propagated to caller |
 
 ## Constraints
 
@@ -871,8 +938,10 @@ For LCM, an unknown name simply creates a new conversation row.
 - LCM database is a single SQLite file in the workspace
 - No cross-session search (tools query the active conversation only)
 - No session deletion
-- `lcm_expand` restricted to sub-agents (interim: available to main agent with
-  conservative token cap until spec 19 is implemented)
+- `lcm_expand` restricted to sub-agents (enforced via `ToolScope`)
+- Routed envelopes (GitHub/Linear session hints) rewrite the
+  `memory/active_session` file on switch: a crash mid-turn restores the
+  routed session, not the one the user last selected via `/project`
 - Async compaction requires the actor to check for pending results before each
   `assemble()` call
 - Async compaction uses `tokio::spawn`; the spawned task opens its own
@@ -894,10 +963,9 @@ The paper's full architecture (LCM paper §3, "From Symbolic to
 Operator-Level Recursion") includes operator-level recursion primitives
 and a scope-reduction invariant for sub-agent delegation. **None of that
 lives in this spec.** Spec 19 owns it. Spec 14 ships a complete and usable
-LCM engine on its own; the resulting agent works, but is not paper-faithful
-until spec 19 lands.
+LCM engine on its own.
 
-Specifically deferred to spec 19:
+Owned by spec 19:
 
 - **The `task` tool** for sub-agent spawning (paper Appendix C.3 describes
   `Task`/`Tasks`; spec 19 ships a single tool — parallelism comes from the
@@ -912,9 +980,8 @@ Specifically deferred to spec 19:
   sub-agents that spawn further sub-agents must declare `delegated_scope`
   and `kept_work`. Calls that delegate the entire responsibility are
   rejected. Root agents and read-only exploration agents are exempt.
-- **Enforced `lcm_expand` restriction**. Spec 14 ships an interim
-  main-agent path with a conservative `token_cap`; spec 19 closes this
-  hatch by enforcing sub-agent-only access.
+- **Enforced `lcm_expand` restriction**. Spec 19 owns the sub-agent-only
+  access; this spec only defines the `ToolScope` split that carries it.
 
 Interfaces between this spec and spec 19:
 
