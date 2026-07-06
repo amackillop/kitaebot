@@ -83,16 +83,25 @@ Each PR from the review-request query is a review candidate, filtered:
 The dispatched message carries PR number, title, repo, author, and body,
 plus an instruction block:
 
-- Fetch the diff (`gh pr diff`) and whatever surrounding context is
+- Fetch the diff (`gh pr diff`) and the commit messages
+  (`gh pr view --json commits`), plus whatever surrounding context is
   needed (`gh pr view`, file reads via a cloned checkout if warranted).
+  Commit messages carry the rationale for the change — the why, the
+  trade-offs, the alternatives rejected. They inform the review, and the
+  review checks that the code actually does what they say.
 - Review for correctness, security, and design. Be specific: file and
   line references, not vibes.
-- Submit a formal review via
-  `gh pr review <n> -R <repo> --comment|--approve`. A formal review (not
-  a plain comment) is required — submitting it is what clears the pending
-  request and stops re-triggering. `--request-changes` is not used:
-  blocking judgments stay with humans; a critical finding is a
-  `--comment` review that says so.
+- Submit one formal review with findings as inline comments on the
+  relevant lines: `POST repos/{nwo}/pulls/{n}/reviews` via `gh api`, with
+  `body` (summary and verdict), `event` (`APPROVE` or `COMMENT`), and
+  `comments` (path/line/body array). Inline findings each become a
+  resolvable thread, which is what the follow-up path engages with. On
+  API failure (usually bad line anchoring), fall back to
+  `gh pr review <n> -R <repo> --comment|--approve` with file:line
+  references in the body. A formal review (not a plain comment) is
+  required — submitting it is what clears the pending request and stops
+  re-triggering. `REQUEST_CHANGES` is not used: blocking judgments stay
+  with humans; a critical finding is a `COMMENT` review that says so.
 - Never push to the PR branch, never merge, never close.
 
 ### Re-reviews on push
@@ -223,8 +232,8 @@ resolves to `std::future::pending()` and parks forever.
 ## Constraints
 
 - Review only: no pushing, merging, closing, or label mutation
-- Review verdicts are `--comment` or `--approve` — never
-  `--request-changes`; blocking judgments stay with humans
+- Review verdicts are `COMMENT` or `APPROVE` — never `REQUEST_CHANGES`;
+  blocking judgments stay with humans
 - The bot never resolves review threads, including its own addressed
   comments after an `--approve` — resolution belongs to the author
 - One review turn per (PR, head SHA); discussion turns are additionally
