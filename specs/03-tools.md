@@ -300,6 +300,8 @@ dependency.
 ### Git Tools
 
 Three tools wrapping the `git` binary. Gated behind `git.enabled` in config.
+`git.trusted_repos` lists repos (`owner/repo` or `owner/*`, case-insensitive)
+whose `.envrc` may be trusted on clone — see [Direnv Cache](#direnv-cache).
 
 `GitCli<R>` holds the GitHub PAT, workspace root, co-authors, and an optional
 direnv cache. The token is injected via a temporary `GIT_ASKPASS` helper script
@@ -308,7 +310,7 @@ not need authentication; clone and push do.
 
 | Tool | Description |
 |------|-------------|
-| `git_clone` | Clone a repository into the workspace. Runs `direnv allow` synchronously then warms the direnv cache in the background. |
+| `git_clone` | Clone a repository into the workspace. For repos in `git.trusted_repos`, runs `direnv allow` synchronously then warms the direnv cache in the background. |
 | `git_commit` | Commit staged changes with co-author trailers. |
 | `git_push` | Push commits to a remote. |
 
@@ -387,7 +389,10 @@ parallel tool calls each trigger a full `nix print-dev-env` evaluation.
 4. **Graceful degradation** — if direnv fails, exec runs without the devshell
 5. **Warm on clone** — `git_clone` pre-populates the cache in the background
 6. **Trust before evaluate** — `git_clone` runs `direnv allow` synchronously
-   before returning
+   before returning, and only for repos listed in `git.trusted_repos`. An
+   `.envrc` is arbitrary shell executing at clone time, before anyone has
+   read the repo; the allowlist is the only gate on that. Unlisted repos
+   clone normally and degrade to no-devshell (requirement 4).
 7. **Shared across tools** — single cache instance shared between exec and
    git_clone
 

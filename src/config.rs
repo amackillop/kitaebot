@@ -225,6 +225,11 @@ pub struct GitConfig {
     /// `Co-authored-by` trailers appended to commit messages.
     /// Each entry is `"Name <email>"`.
     pub co_authors: Vec<String>,
+    /// Repositories whose `.envrc` is trusted: `git_clone` runs
+    /// `direnv allow` only for repos listed here. Entries are
+    /// `owner/repo` or `owner/*`, matched case-insensitively.
+    /// Everything else clones fine but runs without a devshell.
+    pub trusted_repos: Vec<String>,
 }
 
 /// GitHub integration settings.
@@ -875,15 +880,19 @@ max_output_bytes = 20480
         let cfg = load_toml("").unwrap();
         assert!(!cfg.git.enabled);
         assert!(cfg.git.co_authors.is_empty());
+        assert!(cfg.git.trusted_repos.is_empty());
     }
 
     #[test]
     fn git_parse() {
-        let cfg =
-            load_toml("[git]\nenabled = true\nco_authors = [\"Alice <alice@example.com>\"]\n")
-                .unwrap();
+        let cfg = load_toml(
+            "[git]\nenabled = true\nco_authors = [\"Alice <alice@example.com>\"]\n\
+             trusted_repos = [\"alice/repo\", \"alice/*\"]\n",
+        )
+        .unwrap();
         assert!(cfg.git.enabled);
         assert_eq!(cfg.git.co_authors, vec!["Alice <alice@example.com>"]);
+        assert_eq!(cfg.git.trusted_repos, vec!["alice/repo", "alice/*"]);
     }
 
     #[test]
