@@ -5,6 +5,7 @@
 //! `last_poll`. Sends each new item through the [`AgentHandle`].
 //! Skips the bot's own messages to avoid infinite loops.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -83,9 +84,26 @@ struct PrViewResponse {
 }
 
 /// Persisted poll state.
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 struct PollState {
+    /// RFC 3339 cursor; items at or before it are already handled.
     last_poll: String,
+    /// PRs the bot reviews, keyed `owner/repo#42`, mapped to the last
+    /// head SHA dispatched for review. Entries are pruned when the PR
+    /// closes; a PR reappearing with an already-dispatched SHA is
+    /// skipped.
+    #[serde(default)]
+    reviewed: BTreeMap<String, String>,
+}
+
+impl PollState {
+    /// Fresh state: don't replay PR histories, track no reviews.
+    fn starting_now() -> Self {
+        Self {
+            last_poll: now_iso8601(),
+            reviewed: BTreeMap::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,8 +131,8 @@ pub async fn poll_loop(
         }
     };
 
-    let mut last_poll = load_last_poll(state_path);
-    info!(last_poll = %last_poll, "GitHub channel starting");
+    let mut state = load_state(state_path);
+    info!(last_poll = %state.last_poll, "GitHub channel starting");
 
     let mut tick = time::interval(Duration::from_secs(config.poll_interval_secs));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -125,7 +143,7 @@ pub async fn poll_loop(
             gh,
             handle,
             &bot_login,
-            &last_poll,
+            &state.last_poll,
             &config.owner,
             &config.trusted_users,
         )
@@ -133,8 +151,8 @@ pub async fn poll_loop(
         {
             Ok(count) => {
                 info!(count, "GitHub poll: dispatched {count} items");
-                last_poll = now_iso8601();
-                save_last_poll(state_path, &last_poll);
+                state.last_poll = now_iso8601();
+                save_state(state_path, &state);
             }
             Err(e) => {
                 error!("GitHub poll error (will retry next tick): {e}");
@@ -344,31 +362,28 @@ fn format_diff_comment(pr: &SearchResult, nwo: &str, dc: &DiffComment) -> String
 // State persistence
 // ---------------------------------------------------------------------------
 
-fn load_last_poll(path: &Path) -> String {
+fn load_state(path: &Path) -> PollState {
     match std::fs::read_to_string(path) {
         Ok(contents) => match serde_json::from_str::<PollState>(&contents) {
-            Ok(state) => state.last_poll,
+            Ok(state) => state,
             Err(e) => {
                 warn!("Corrupt poll state, starting from now: {e}");
-                now_iso8601()
+                PollState::starting_now()
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             info!("No poll state file, starting from now");
-            now_iso8601()
+            PollState::starting_now()
         }
         Err(e) => {
             warn!("Failed to read poll state, starting from now: {e}");
-            now_iso8601()
+            PollState::starting_now()
         }
     }
 }
 
-fn save_last_poll(path: &Path, timestamp: &str) {
-    let state = PollState {
-        last_poll: timestamp.to_string(),
-    };
-    let json = match serde_json::to_string(&state) {
+fn save_state(path: &Path, state: &PollState) {
+    let json = match serde_json::to_string(state) {
         Ok(j) => j,
         Err(e) => {
             error!("Failed to serialize poll state: {e}");
@@ -521,9 +536,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
 
-        save_last_poll(&path, "2025-01-15T10:00:00Z");
-        let loaded = load_last_poll(&path);
-        assert_eq!(loaded, "2025-01-15T10:00:00Z");
+        let state = PollState {
+            last_poll: "2025-01-15T10:00:00Z".to_string(),
+            reviewed: BTreeMap::from([("owner/repo#42".to_string(), "abc123".to_string())]),
+        };
+        save_state(&path, &state);
+        let loaded = load_state(&path);
+        assert_eq!(loaded.last_poll, "2025-01-15T10:00:00Z");
+        assert_eq!(loaded.reviewed, state.reviewed);
+    }
+
+    #[test]
+    fn load_legacy_state_without_reviewed_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"last_poll":"2025-01-15T10:00:00Z"}"#).unwrap();
+
+        let loaded = load_state(&path);
+        assert_eq!(loaded.last_poll, "2025-01-15T10:00:00Z");
+        assert!(loaded.reviewed.is_empty());
     }
 
     #[test]
@@ -531,10 +562,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.json");
 
-        let loaded = load_last_poll(&path);
+        let loaded = load_state(&path);
         // Should be a valid ISO 8601 timestamp (not empty, not an error).
-        assert!(loaded.ends_with('Z'));
-        assert!(loaded.contains('T'));
+        assert!(loaded.last_poll.ends_with('Z'));
+        assert!(loaded.last_poll.contains('T'));
+        assert!(loaded.reviewed.is_empty());
     }
 
     #[test]
@@ -543,9 +575,9 @@ mod tests {
         let path = dir.path().join("state.json");
         std::fs::write(&path, "not json at all").unwrap();
 
-        let loaded = load_last_poll(&path);
-        assert!(loaded.ends_with('Z'));
-        assert!(loaded.contains('T'));
+        let loaded = load_state(&path);
+        assert!(loaded.last_poll.ends_with('Z'));
+        assert!(loaded.last_poll.contains('T'));
     }
 
     #[test]
