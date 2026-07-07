@@ -27,7 +27,11 @@ The first tick fires immediately on daemon startup.
 3. **Execute**: On ready, the command handler calls `agent::process_message()`
    directly (not through the handle — that would deadlock since we're already
    inside the actor). The heartbeat turn runs in the unified session with full
-   conversational context.
+   conversational context, on the `provider.models.heartbeat` model when
+   configured (see [spec 02](02-provider.md)). Most ticks conclude "nothing
+   to do", so a cheaper model suffices; switching models per turn on the
+   shared session is deliberate — the completions API is stateless, and the
+   full history goes with every request regardless of which model reads it.
 4. **Finish**: On success, `heartbeat::finish()` appends the response to
    `memory/HISTORY.md` with a UTC timestamp. A finish write failure is logged
    but does not fail the heartbeat.

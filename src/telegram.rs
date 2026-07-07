@@ -391,6 +391,7 @@ mod tests {
         let summarize = crate::engine::make_summarize_fn(provider.clone());
         let handle = AgentHandle::spawn(
             ws,
+            provider.clone(),
             provider,
             Arc::new(Tools::default()),
             1,

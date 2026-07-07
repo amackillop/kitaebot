@@ -189,9 +189,11 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     ));
     tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
     tools.extend_with(vec![task_tool], &config.tools.disabled);
+    let heartbeat_provider = role_provider(&provider, models.heartbeat.as_deref());
     agent::AgentHandle::spawn(
         workspace,
         provider,
+        heartbeat_provider,
         Arc::new(tools),
         config.agent.max_iterations,
         engine,

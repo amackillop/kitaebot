@@ -156,6 +156,7 @@ mod tests {
         let summarize = make_summarize_fn(provider.clone());
         AgentHandle::spawn(
             ws.clone(),
+            provider.clone(),
             provider,
             Arc::new(Tools::default()),
             1,

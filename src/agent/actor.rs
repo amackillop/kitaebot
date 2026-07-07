@@ -28,6 +28,7 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     rx: mpsc::Receiver<Envelope>,
     workspace: Arc<Workspace>,
     provider: Arc<P>,
+    heartbeat_provider: Arc<P>,
     tools: Arc<Tools>,
     max_iterations: usize,
     engine: E,
@@ -41,6 +42,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         rx: mpsc::Receiver<Envelope>,
         workspace: Arc<Workspace>,
         provider: Arc<P>,
+        heartbeat_provider: Arc<P>,
         tools: Arc<Tools>,
         max_iterations: usize,
         engine: E,
@@ -51,6 +53,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             rx,
             workspace,
             provider,
+            heartbeat_provider,
             tools,
             max_iterations,
             engine,
@@ -93,7 +96,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                     &mut self.engine,
                     &self.summarize,
                     &self.workspace,
-                    &*self.provider,
+                    &*self.heartbeat_provider,
                     &self.tools,
                     self.max_iterations,
                 )
@@ -196,6 +199,24 @@ mod tests {
         notifier: Option<Arc<Notifier>>,
         max_iterations: usize,
     ) -> AgentHandle {
+        spawn_agent_full(
+            ws,
+            provider.clone(),
+            provider,
+            tools,
+            notifier,
+            max_iterations,
+        )
+    }
+
+    fn spawn_agent_full(
+        ws: Arc<Workspace>,
+        provider: Arc<MockProvider>,
+        heartbeat_provider: Arc<MockProvider>,
+        tools: Tools,
+        notifier: Option<Arc<Notifier>>,
+        max_iterations: usize,
+    ) -> AgentHandle {
         let sessions_dir = ws.path().join("sessions");
         let memory_dir = ws.path().join("memory");
         let engine = FlatSession::new(sessions_dir, memory_dir, ContextConfig::default()).unwrap();
@@ -203,6 +224,7 @@ mod tests {
         AgentHandle::spawn(
             ws,
             provider,
+            heartbeat_provider,
             Arc::new(tools),
             max_iterations,
             engine,
@@ -469,6 +491,41 @@ mod tests {
         let calls = sent.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["text"], "ping");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_turn_uses_heartbeat_provider() {
+        let (_dir, ws) = workspace();
+        // An active task so heartbeat::prepare returns Ready.
+        std::fs::write(ws.heartbeat_path(), "- [ ] Check builds\n").unwrap();
+
+        // The root provider has no responses: any turn hitting it fails.
+        let root = Arc::new(MockProvider::new(vec![]));
+        let heartbeat = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            "from heartbeat provider".into(),
+        ))]));
+
+        let handle = spawn_agent_full(
+            ws,
+            root.clone(),
+            heartbeat.clone(),
+            Tools::default(),
+            None,
+            1,
+        );
+        let result = handle
+            .send_message(
+                ChannelSource::Heartbeat,
+                "/heartbeat".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(result.unwrap().content, "from heartbeat provider");
+        assert_eq!(root.call_count(), 0);
+        assert_eq!(heartbeat.call_count(), 1);
     }
 
     #[tokio::test]

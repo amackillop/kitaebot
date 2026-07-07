@@ -68,13 +68,15 @@ impl FromStr for SlashCommand {
 ///
 /// Called by the agent actor. `/heartbeat` calls `agent::process_message`
 /// directly rather than going through the handle (which would deadlock).
+/// The provider is consumed only by the `/heartbeat` arm, hence the name:
+/// heartbeat turns may run on a cheaper model than root turns.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     cmd: SlashCommand,
     engine: &mut impl ContextEngine,
     summarize: &SummarizeFn,
     workspace: &Workspace,
-    provider: &impl Provider,
+    heartbeat_provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
 ) -> Result<Reply, String> {
@@ -119,7 +121,7 @@ pub async fn execute(
                     summarize,
                     workspace,
                     &prompt,
-                    provider,
+                    heartbeat_provider,
                     tools,
                     max_iterations,
                     &crate::tools::ToolCtx::default(),

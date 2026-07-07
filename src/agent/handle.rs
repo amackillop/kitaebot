@@ -33,9 +33,11 @@ impl AgentHandle {
     /// Spawn the agent actor and return a handle to it.
     ///
     /// The actor task runs until all handles are dropped.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn<P: Provider + 'static, E: ContextEngine + 'static>(
         workspace: Arc<Workspace>,
         provider: Arc<P>,
+        heartbeat_provider: Arc<P>,
         tools: Arc<Tools>,
         max_iterations: usize,
         engine: E,
@@ -47,6 +49,7 @@ impl AgentHandle {
             rx,
             workspace,
             provider,
+            heartbeat_provider,
             tools,
             max_iterations,
             engine,
