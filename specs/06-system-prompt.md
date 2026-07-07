@@ -24,9 +24,9 @@ exist.
 
 ### Assembly and Injection
 
-The system prompt is rebuilt from disk on **every incoming message** (not
-cached). Edits to any prompt file take effect on the next turn without restart
-or `/new`.
+The system prompt is read from disk **once at startup** and cached for
+the process lifetime. Prompt files are provisioned from the Nix store,
+so changing them requires a rebuild and restart regardless.
 
 The prompt is prepended as a `Message::System` to every provider call but
 **never stored in the session**. This keeps the session clean and allows prompt

@@ -25,9 +25,9 @@ A turn proceeds in this order:
 Compaction runs **before** the user message is added, so the current input is
 never summarized away.
 
-The system prompt is assembled fresh on every provider call by concatenating
-`SOUL.md`, `AGENTS.md`, and `USER.md` (optional). Edits to these files take
-effect on the next call without restart.
+The system prompt is the startup concatenation of `SOUL.md`, `AGENTS.md`,
+and `USER.md` (all optional), read once at workspace init (see
+[spec 06](06-system-prompt.md)).
 
 ### Tool Result Recording
 

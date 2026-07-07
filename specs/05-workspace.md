@@ -61,8 +61,9 @@ Workspace init failure is fatal — the process exits.
 Files are separated by a single `\n`. Missing files produce a `warn` log but
 are not fatal — the function returns whatever it could read, possibly empty.
 
-The system prompt is assembled fresh on every provider call (not cached). Edits
-to prompt files take effect on the next turn without restart.
+The system prompt is read once at workspace init and cached for the
+process lifetime. Prompt files are provisioned from the Nix store, so
+changing them requires a rebuild and restart regardless.
 
 ### Path Helpers
 

@@ -17,7 +17,10 @@ const SYSTEM_PROMPTS: [&str; 3] = ["SOUL.md", "AGENTS.md", "USER.md"];
 ///
 /// Construction via [`Workspace::init`] guarantees the directory exists
 /// and contains the required structure.
-pub struct Workspace(PathBuf);
+pub struct Workspace {
+    root: PathBuf,
+    system_prompt: String,
+}
 
 impl Workspace {
     /// Initialize the workspace from `KITAEBOT_WORKSPACE` env var or XDG default.
@@ -45,58 +48,68 @@ impl Workspace {
         mk(&path.join("memory"))?;
         mk(&path.join("projects"))?;
 
-        Ok(Self(path))
+        let system_prompt = read_system_prompt(&path);
+        Ok(Self {
+            root: path,
+            system_prompt,
+        })
     }
 
     /// Root path of the workspace.
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.root
     }
 
     /// Path to the heartbeat task file.
     pub fn heartbeat_path(&self) -> PathBuf {
-        self.0.join("HEARTBEAT.md")
+        self.root.join("HEARTBEAT.md")
     }
 
     /// Path to the heartbeat history log.
     pub fn history_path(&self) -> PathBuf {
-        self.0.join("memory/HISTORY.md")
+        self.root.join("memory/HISTORY.md")
     }
 
     /// Path to the GitHub poll state file.
     pub fn github_poll_state_path(&self) -> PathBuf {
-        self.0.join("memory/github_poll_state.json")
+        self.root.join("memory/github_poll_state.json")
     }
 
     /// Path to the Linear poll state file.
     pub fn linear_poll_state_path(&self) -> PathBuf {
-        self.0.join("memory/linear_poll_state.json")
+        self.root.join("memory/linear_poll_state.json")
     }
 
-    /// Build the system prompt from workspace files.
+    /// The system prompt, read once at workspace init.
     ///
-    /// Reads [`SYSTEM_PROMPTS`] concatenating
-    /// them into a single system prompt. Missing files emit a warning.
-    pub fn system_prompt(&self) -> String {
-        let mut prompt = String::new();
-
-        for name in SYSTEM_PROMPTS {
-            match fs::read_to_string(self.0.join(name)) {
-                Ok(content) => {
-                    if !prompt.is_empty() {
-                        prompt.push('\n');
-                    }
-                    prompt.push_str(&content);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::warn!("{name} not found in workspace");
-                }
-                Err(e) => tracing::warn!("failed to read {name}: {e}"),
-            }
-        }
-
-        prompt
+    /// Prompt files are provisioned via Nix, so changes require a
+    /// restart anyway; caching avoids re-reading three files per turn.
+    pub fn system_prompt(&self) -> &str {
+        &self.system_prompt
     }
+}
+
+/// Concatenate [`SYSTEM_PROMPTS`] into a single system prompt.
+/// Missing files emit a warning.
+fn read_system_prompt(root: &Path) -> String {
+    let mut prompt = String::new();
+
+    for name in SYSTEM_PROMPTS {
+        match fs::read_to_string(root.join(name)) {
+            Ok(content) => {
+                if !prompt.is_empty() {
+                    prompt.push('\n');
+                }
+                prompt.push_str(&content);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!("{name} not found in workspace");
+            }
+            Err(e) => tracing::warn!("failed to read {name}: {e}"),
+        }
+    }
+
+    prompt
 }
 
 /// Resolve the default data directory following XDG Base Directory spec.

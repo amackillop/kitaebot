@@ -72,11 +72,10 @@ pub async fn process_message(
     max_iterations: usize,
     ctx: &ToolCtx,
 ) -> Result<String, Error> {
-    let system_prompt = workspace.system_prompt();
     run_turn(
         engine,
         summarize,
-        &system_prompt,
+        workspace.system_prompt(),
         user_message,
         provider,
         tools,
@@ -90,8 +89,8 @@ pub async fn process_message(
 ///
 /// Pushes the user message onto the session, sends the history (with system
 /// prompt prepended) to the provider, and appends assistant/tool messages.
-/// The system prompt is assembled per provider call via `engine.assemble()`,
-/// so edits to SOUL.md take effect without a restart.
+/// The system prompt is read once at workspace init; prompt files are
+/// Nix-provisioned, so changes require a restart.
 ///
 /// # Errors
 /// Returns error if max iterations reached or provider fails
