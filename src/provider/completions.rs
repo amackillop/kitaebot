@@ -36,10 +36,6 @@ impl CompletionsProvider {
 
     /// A variant of this provider using a different model. Client,
     /// `max_tokens`, and temperature are shared.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by role providers in the next commit")
-    )]
     pub fn with_model(&self, model: &str) -> Self {
         Self {
             client: self.client.clone(),

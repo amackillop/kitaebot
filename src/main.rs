@@ -76,7 +76,8 @@ async fn main() {
             let provider = Arc::new(rt.provider);
             let tools = rt.tools;
             let memory_dir = workspace.path().join("memory");
-            let summarize = engine::make_summarize_fn(provider.clone());
+            let summarizer = config.provider.models.summarizer.as_deref();
+            let summarize = engine::make_summarize_fn(role_provider(&provider, summarizer));
 
             let handle = match config.context.engine {
                 EngineKind::Flat => {
@@ -144,6 +145,18 @@ async fn main() {
             eprintln!("  run  Start daemon (heartbeat + channels)");
             std::process::exit(1);
         }
+    }
+}
+
+/// Provider variant for a role: the override model when configured,
+/// otherwise the shared root provider.
+fn role_provider(
+    provider: &Arc<provider::CompletionsProvider>,
+    model: Option<&str>,
+) -> Arc<provider::CompletionsProvider> {
+    match model {
+        Some(m) => Arc::new(provider.with_model(m)),
+        None => provider.clone(),
     }
 }
 
