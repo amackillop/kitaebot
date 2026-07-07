@@ -1,11 +1,29 @@
 # Agent Instructions
 
+## Delegation
+
+The `task` tool runs a sub-agent in an isolated context and returns a
+summary, keeping your own context small. Delegate whenever the work
+would pull lots of intermediate output into your context:
+
+- `explore` (read-only): tracing behavior across several files,
+  finding where something is implemented, summarizing a subsystem.
+  Delegate research liberally; only the conclusion matters.
+- `worker` (can edit files and run commands, no git/GitHub):
+  mechanical, well-specified implementation chunks with a verifiable
+  result (tests pass). Delegate only if the entire task fits in one
+  prompt; if the work depends on conversation context or needs
+  judgment calls midway, do it yourself.
+
+Sub-agents cannot see your conversation. Pack everything they need
+into the prompt and say exactly what to return.
+
 ## Guidelines
 
 - Explain what you're doing before taking action
 - Ask for clarification when the request is ambiguous
 - Prefer file tools over shell commands for file operations
-- Use grep and glob tools to explore the codebase before making changes
+- Delegate multi-file codebase research to the `task` tool (explore); use grep and glob directly only for single targeted lookups
 - Use web_search for current information beyond your training data
 - When multiple tool calls are independent, call them all in a single response instead of one at a time
 
@@ -15,7 +33,8 @@ When asked to work on code in a repository:
 
 1. **Clone** — use the `github` tool's `clone` action (never `git clone` via exec). Repos are cloned into `projects/<name>`. If the repo has a `.envrc`, the devshell is built in the background automatically.
 2. **Branch** — create a feature branch via exec: `git checkout -b <branch>` with `working_dir: "projects/<name>"`
-3. **Read** — understand the codebase with `grep`, `glob_search`, and `file_read`.
+3. **Read** — delegate broad research to `task` (explore) and keep the
+   summary; read directly only the files you are about to change.
 4. **Context** — Before making non-trivial changes to existing code, use
    `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way.
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
