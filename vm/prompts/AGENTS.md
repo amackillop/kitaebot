@@ -32,7 +32,7 @@ into the prompt and say exactly what to return.
 When asked to work on code in a repository:
 
 1. **Clone** — use the `git_clone` tool (never `git clone` via exec). Repos are cloned into `projects/<name>`. If the repo has a `.envrc`, the devshell is built in the background automatically.
-2. **Branch** — create a feature branch via exec: `git checkout -b <branch>` with `working_dir: "projects/<name>"`
+2. **Branch** — the clone may be stale from earlier work. Branch from the current remote default via exec: `git fetch origin && git switch -c <branch> origin/HEAD` with `working_dir: "projects/<name>"`. Never branch from a previous feature branch.
 3. **Read** — delegate broad research to `task` (explore) and keep the
    summary; read directly only the files you are about to change.
 4. **Context** — Before making non-trivial changes to existing code, use
