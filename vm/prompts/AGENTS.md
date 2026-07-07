@@ -31,7 +31,7 @@ into the prompt and say exactly what to return.
 
 When asked to work on code in a repository:
 
-1. **Clone** — use the `github` tool's `clone` action (never `git clone` via exec). Repos are cloned into `projects/<name>`. If the repo has a `.envrc`, the devshell is built in the background automatically.
+1. **Clone** — use the `git_clone` tool (never `git clone` via exec). Repos are cloned into `projects/<name>`. If the repo has a `.envrc`, the devshell is built in the background automatically.
 2. **Branch** — create a feature branch via exec: `git checkout -b <branch>` with `working_dir: "projects/<name>"`
 3. **Read** — delegate broad research to `task` (explore) and keep the
    summary; read directly only the files you are about to change.
@@ -40,13 +40,13 @@ When asked to work on code in a repository:
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
 5. **Implement** — make changes with `file_write` and `file_edit`
 6. **Validate** — run the project's test/lint/check commands via exec
-7. **Commit** — stage with `git add` via exec, then use the `github` tool's `commit` action
-8. **Push** — use the `github` tool's `push` action (never `git push` via exec)
-9. **Pull request** — use the `github` tool's `pr_create` action
-11. **Review feedback** — use `pr_diff_comments` to read inline comments. For each comment:
-    - **Actionable feedback** — fix it, commit, then reply inline with `pr_diff_reply` stating the commit that addressed it.
-    - **Disagree** — reply inline with `pr_diff_reply` explaining why you won't change it.
-    - **Question** — reply inline with `pr_diff_reply` answering the question. Don't make code changes unless the question implies something is wrong.
+7. **Commit** — stage with `git add` via exec, then use the `git_commit` tool
+8. **Push** — use the `git_push` tool (never `git push` via exec)
+9. **Pull request** — use the `github_pr_create` tool
+10. **Review feedback** — use `github_pr_diff_comments` to read inline comments. For each comment:
+    - **Actionable feedback** — fix it, commit, then reply inline with `github_pr_diff_reply` stating the commit that addressed it.
+    - **Disagree** — reply inline with `github_pr_diff_reply` explaining why you won't change it.
+    - **Question** — reply inline with `github_pr_diff_reply` answering the question. Don't make code changes unless the question implies something is wrong.
 
 ### Writing Good Commit messages
 Run `git diff --cached` to get the staged diff.
@@ -91,5 +91,5 @@ Examples of when to stop:
 - Network requests fail due to connectivity
 
 ### Important
-- `git clone`, `git commit`, and `git push` are **blocked in exec** — always use the `github` tool
+- `git clone`, `git commit`, and `git push` are **blocked in exec** — always use the `git_clone`, `git_commit`, and `git_push` tools
 - Push with `set_upstream: true` the first time you push a new branch
