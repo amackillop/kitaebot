@@ -52,8 +52,14 @@ in
         enabled = true;
         chat_id = 7658696350;
       };
-      git.enabled = true;
-      git.co_authors = [ "Austin Mackillop <github.roundworm216@passmail.net>" ];
+      git = {
+        enabled = true;
+        co_authors = [ "Austin Mackillop <github.roundworm216@passmail.net>" ];
+        trusted_repos = [
+          "amackillop/kitaebot"
+          "CumuloGlobal/open-money"
+        ];
+      };
       github = {
         enabled = true;
         owner = "amackillop";
