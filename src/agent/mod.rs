@@ -148,7 +148,7 @@ pub(crate) async fn run_turn(
         debug!(iteration, "Agent loop iteration");
         let assembled = engine.assemble(system_prompt).await?;
 
-        let response = cancellable(
+        let outcome = cancellable(
             provider.chat(&assembled.messages, &tool_definitions),
             cancel,
             activity_tx,
@@ -156,7 +156,7 @@ pub(crate) async fn run_turn(
         .await?
         .map_err(Error::Provider)?;
 
-        match response {
+        match outcome.response {
             Response::Text(content) => {
                 debug!(content = %truncate_output(&content, LOG_CONTENT_MAX), "Turn finished");
                 engine

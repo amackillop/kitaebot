@@ -13,7 +13,7 @@ use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
 use super::wire::WireMessage;
 
-use super::Provider;
+use super::{ChatOutcome, Provider};
 
 /// Provider for any OpenAI-compatible chat completions endpoint.
 pub struct CompletionsProvider {
@@ -83,7 +83,7 @@ impl Provider for CompletionsProvider {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<Response, ProviderError> {
+    ) -> Result<ChatOutcome, ProviderError> {
         let wire_messages: Vec<WireMessage> = messages.iter().map(WireMessage::from).collect();
         let request = ChatRequest {
             model: &self.model,
@@ -112,7 +112,11 @@ impl Provider for CompletionsProvider {
                 "Usage"
             );
         }
-        Self::parse_response(response)
+        let prompt_tokens = response.usage.as_ref().map(|u| u.prompt_tokens);
+        Ok(ChatOutcome {
+            response: Self::parse_response(response)?,
+            prompt_tokens,
+        })
     }
 }
 
@@ -216,6 +220,36 @@ mod tests {
             ..ProviderConfig::default()
         };
         assert!(!CompletionsProvider::new(client(), &config).usage_accounting);
+    }
+
+    #[tokio::test]
+    async fn chat_surfaces_prompt_tokens_from_usage() {
+        let client = CompletionsClient::from_fn(|_body| async {
+            Ok(crate::clients::RawResponse {
+                status: 200,
+                body: br#"{
+                    "choices":[{"message":{"content":"hi"}}],
+                    "usage":{"prompt_tokens":42,"completion_tokens":7}
+                }"#
+                .to_vec(),
+            })
+        });
+        let provider = CompletionsProvider::new(client, &ProviderConfig::default());
+        let outcome = provider.chat(&[], &[]).await.unwrap();
+        assert_eq!(outcome.prompt_tokens, Some(42));
+    }
+
+    #[tokio::test]
+    async fn chat_without_usage_has_no_prompt_tokens() {
+        let client = CompletionsClient::from_fn(|_body| async {
+            Ok(crate::clients::RawResponse {
+                status: 200,
+                body: br#"{"choices":[{"message":{"content":"hi"}}]}"#.to_vec(),
+            })
+        });
+        let provider = CompletionsProvider::new(client, &ProviderConfig::default());
+        let outcome = provider.chat(&[], &[]).await.unwrap();
+        assert_eq!(outcome.prompt_tokens, None);
     }
 
     #[test]
