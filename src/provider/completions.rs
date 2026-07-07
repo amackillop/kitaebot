@@ -7,7 +7,7 @@ use serde::Serialize;
 use tracing::{debug, trace, warn};
 
 use crate::clients::chat_completion::{ApiToolCall, ChatResponse, CompletionsClient};
-use crate::config::ProviderConfig;
+use crate::config::{Api, ProviderConfig};
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
@@ -21,6 +21,9 @@ pub struct CompletionsProvider {
     model: String,
     max_tokens: u32,
     temperature: f32,
+    /// Request `OpenRouter` usage accounting (cache hit details).
+    /// Off for other APIs — strict endpoints reject unknown params.
+    usage_accounting: bool,
 }
 
 impl CompletionsProvider {
@@ -31,6 +34,7 @@ impl CompletionsProvider {
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             temperature: config.temperature,
+            usage_accounting: matches!(config.api, Api::OpenRouter),
         }
     }
 
@@ -42,6 +46,7 @@ impl CompletionsProvider {
             model: model.to_string(),
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            usage_accounting: self.usage_accounting,
         }
     }
 
@@ -86,12 +91,27 @@ impl Provider for CompletionsProvider {
             tools: if tools.is_empty() { None } else { Some(tools) },
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            usage: self
+                .usage_accounting
+                .then_some(UsageAccounting { include: true }),
         };
 
         debug!(model = %self.model, message_count = messages.len(), "Sending chat request");
         trace!(request = %serde_json::to_string(&request).unwrap_or_default(), "Request body");
 
         let response = self.client.chat_completions(&request).await?;
+        if let Some(usage) = &response.usage {
+            debug!(
+                model = %self.model,
+                prompt_tokens = usage.prompt_tokens,
+                cached_tokens = usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .map_or(0, |d| d.cached_tokens),
+                completion_tokens = usage.completion_tokens,
+                "Usage"
+            );
+        }
         Self::parse_response(response)
     }
 }
@@ -116,6 +136,14 @@ struct ChatRequest<'a> {
     tools: Option<&'a [ToolDefinition]>,
     max_tokens: u32,
     temperature: f32,
+    /// `OpenRouter` usage accounting opt-in; omitted for other APIs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<UsageAccounting>,
+}
+
+#[derive(Serialize)]
+struct UsageAccounting {
+    include: bool,
 }
 
 #[cfg(test)]
@@ -127,6 +155,7 @@ mod tests {
         ChatResponse {
             choices: vec![Choice { message: msg }],
             citations: Vec::new(),
+            usage: None,
         }
     }
 
@@ -151,6 +180,42 @@ mod tests {
         assert_eq!(cheap.model, "cheap/model");
         assert_eq!(cheap.max_tokens, provider.max_tokens);
         assert!((cheap.temperature - provider.temperature).abs() < f32::EPSILON);
+        assert_eq!(cheap.usage_accounting, provider.usage_accounting);
+    }
+
+    #[test]
+    fn usage_accounting_serialized_only_when_set() {
+        let request = |usage| ChatRequest {
+            model: "m",
+            messages: Vec::new(),
+            tools: None,
+            max_tokens: 1,
+            temperature: 0.0,
+            usage,
+        };
+        let with =
+            serde_json::to_string(&request(Some(UsageAccounting { include: true }))).unwrap();
+        assert!(with.contains(r#""usage":{"include":true}"#));
+        let without = serde_json::to_string(&request(None)).unwrap();
+        assert!(!without.contains("usage"));
+    }
+
+    #[test]
+    fn usage_accounting_enabled_only_for_openrouter() {
+        let client = || {
+            CompletionsClient::new(
+                "https://example.invalid".to_string(),
+                crate::secrets::Secret::test("k"),
+            )
+        };
+        // Default API is OpenRouter.
+        let config = ProviderConfig::default();
+        assert!(CompletionsProvider::new(client(), &config).usage_accounting);
+        let config = ProviderConfig {
+            api: Api::OpenAi,
+            ..ProviderConfig::default()
+        };
+        assert!(!CompletionsProvider::new(client(), &config).usage_accounting);
     }
 
     #[test]

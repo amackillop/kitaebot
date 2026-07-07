@@ -147,6 +147,15 @@ all roles. Role providers are built once at startup via
 `CompletionsProvider::with_model`; the model choice per role is static —
 the agent cannot select models at runtime.
 
+On OpenRouter, requests opt into usage accounting (`usage: {include:
+true}`) and the response's token usage — including prompt-cache hits
+(`prompt_tokens_details.cached_tokens`) — is logged at debug level.
+Other APIs skip the opt-in field (strict endpoints reject unknown
+params) but any standard `usage` object they return is still logged.
+Prompt caching itself is implicit on OpenRouter for providers that
+support it; no `cache_control` breakpoints are sent, so Anthropic and
+Qwen models do not get cached.
+
 The API key is loaded from the credentials directory as `provider-api-key`
 (see [spec 13](13-credentials.md)). It is not an environment variable.
 

@@ -158,6 +158,27 @@ pub struct ChatResponse {
     /// Source URLs returned by Perplexity models. Empty for other models.
     #[serde(default)]
     pub citations: Vec<String>,
+    /// Token accounting. Standard in `OpenAI` responses; `OpenRouter`
+    /// adds cache details when usage accounting is requested.
+    #[serde(default)]
+    pub usage: Option<Usage>,
+}
+
+/// Token usage reported by the provider.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+/// Breakdown of prompt tokens; carries prompt-cache hits.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct PromptTokensDetails {
+    /// Tokens read from the provider's prompt cache.
+    pub cached_tokens: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -211,6 +232,7 @@ mod tests {
                 },
             }],
             citations: Vec::new(),
+            usage: None,
         })
         .unwrap()
     }
@@ -230,6 +252,29 @@ mod tests {
         let resp = interpret_response(&raw(200, &text_json("hello"))).unwrap();
         assert_eq!(resp.choices.len(), 1);
         assert_eq!(resp.choices[0].message.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn interpret_parses_usage_with_cache_details() {
+        let body = r#"{
+            "choices":[{"message":{"content":"hi"}}],
+            "usage":{
+                "prompt_tokens":100,
+                "completion_tokens":5,
+                "prompt_tokens_details":{"cached_tokens":80}
+            }
+        }"#;
+        let resp = interpret_response(&raw(200, body)).unwrap();
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.prompt_tokens_details.unwrap().cached_tokens, 80);
+    }
+
+    #[test]
+    fn interpret_missing_usage_is_none() {
+        let resp = interpret_response(&raw(200, &text_json("hello"))).unwrap();
+        assert!(resp.usage.is_none());
     }
 
     #[test]
