@@ -1,33 +1,43 @@
 # Kitaebot
 
-Autonomous programming agent in Rust. Runs in a NixOS VM with Landlock sandboxing, DNS-based egress filtering, credential isolation, and leak detection.
+Autonomous programming agent in Rust. Runs in a NixOS VM with Landlock sandboxing, proxy-based egress filtering, credential isolation, and leak detection.
 
 ## Overview
 
-Kitaebot is a long-running daemon that accepts messages via Telegram, Unix socket, or GitHub PR comments, routes them through an LLM agent loop with tool use, and persists conversation state in a unified session. A periodic heartbeat triggers autonomous task review.
+Kitaebot is a long-running daemon that accepts messages via Telegram, Unix socket, GitHub PR comments, or Linear issues, routes them through an LLM agent loop with tool use, and persists conversation state through a pluggable context engine. A periodic heartbeat triggers autonomous task review.
 
 Two binaries:
 
 | Binary | Purpose | Lifecycle |
 |--------|---------|-----------|
-| `kitaebot run` | Daemon (Telegram + socket + heartbeat + GitHub) | systemd service |
+| `kitaebot run` | Daemon (Telegram + socket + heartbeat + GitHub + Linear) | systemd service |
 | `kchat <socket>` | Socket client REPL | On-demand |
 
 ## Architecture
 
 ```
-Channels (Telegram, Unix socket, GitHub PR, Heartbeat)
+Channels (Telegram, Unix socket, GitHub PR, Linear, Heartbeat)
         │
         ├─ Messages ──► AgentHandle ──► Agent actor (sequential)
         │                                 ├─ process_message ──► LLM loop
         │                                 └─ commands::execute ──► local ops
         │
-        └─ Unified session (single session.json, messages tagged by source)
+        └─ Context engine (flat JSON sessions or LCM SQLite DAG,
+           messages tagged by source)
 ```
 
 The agent is an actor (Ryhl pattern) — a spawned tokio task that processes one envelope at a time. Channels hold cloneable `AgentHandle`s and send messages via `send_message()`, awaiting a reply over a oneshot channel. This eliminates session locking: the actor owns the session and processes requests sequentially.
 
 The agent loop calls the LLM, dispatches tool calls in parallel, checks outputs for leaked secrets, and repeats until the model produces a final response or hits `max_iterations`.
+
+### Context engines
+
+Conversation state lives behind the `ContextEngine` trait, selected via `context.engine`:
+
+- **flat** (default) — per-name JSON session files under `workspace/sessions/`; compacts by summarizing the whole history when the token budget is exceeded.
+- **lcm** — hierarchical compaction over a SQLite DAG at `memory/lcm.db`. Old messages collapse into summary nodes (background at a soft threshold, blocking at a hard threshold); the `lcm_*` tools let the agent search and re-expand compacted history.
+
+Sub-agents run on an ephemeral in-memory engine that never compacts.
 
 ### Tools
 
@@ -53,15 +63,20 @@ Typed tools replace a generic shell. The LLM declares intent via parameters inst
 | `github_pr_diff_reply` | Reply to a PR diff comment |
 | `github_ci_status` | Check CI status for a ref |
 | `github_gh` | General-purpose `gh` CLI wrapper |
+| `task` | Delegate to a sub-agent (`explore` read-only research, `worker` implementation) |
+| `notify` | Push a message to the user via Telegram (batched by priority) |
+| `lcm_grep` | Search compacted history (LCM engine) |
+| `lcm_describe` | Inspect a compacted node (LCM engine) |
+| `lcm_expand` | Re-expand compacted history (LCM engine, sub-agents only) |
 
-Git and GitHub tools are gated on `git.enabled` and `github.enabled` respectively. Tools can be individually disabled via `tools.disabled`.
+Git and GitHub tools are gated on `git.enabled` and `github.enabled` respectively; `notify` on `telegram.enabled`; the `lcm_*` tools on `context.engine = "lcm"`. Tools can be individually disabled via `tools.disabled`.
 
 All tool outputs pass through `safety::check_tool_output` and execute inside the Landlock sandbox.
 
 ### Security model
 
 1. **Landlock sandbox** — Filesystem access restricted to workspace, `/nix/store` (ro), `/tmp`, `/etc` (ro), `/dev`. Applied at startup, inherited by child processes.
-2. **DNS-based egress filter** — dnsmasq resolves only allowlisted domains; nftables drops all other outbound traffic from the kitaebot uid. Prevents prompt-injection-driven exfiltration.
+2. **Proxy-based egress filter** — nftables restricts the kitaebot uid to loopback; all outbound HTTP(S) goes through a local tinyproxy that allows CONNECT only to allowlisted hostnames. Prevents prompt-injection-driven exfiltration.
 3. **Leak detection** — Regex scan on tool outputs before they enter the context window.
 4. **Credential isolation** — Secrets loaded via systemd `LoadCredential` before Landlock enforcement. Inaccessible to child processes.
 5. **Environment scrubbing** — `exec` runs with a safe allowlist of environment variables.
@@ -85,6 +100,7 @@ Requires [Nix](https://nixos.org/) with flakes enabled.
 ```bash
 nix develop              # Enter dev shell
 just check               # Full validation: nix flake check, nix lint/fmt, clippy, tests
+just rust-check          # Fast inner loop: cargo fmt-check + clippy + tests (not the commit gate)
 just build               # Compile
 just test                # Run tests (mock-network feature)
 just test-nixos          # Run all NixOS VM integration tests
@@ -102,10 +118,10 @@ just vm-run             # Start VM, wait for SSH
 just vm-run --fresh     # Wipe state and restart
 just vm-run --rebuild   # Rebuild and restart
 just chat               # Connect to daemon via SSH socket forwarding
+just ask "message"      # Send one message, print the reply, exit
 just vm-ssh             # SSH into running VM
 just vm-shell           # Shell as kitaebot daemon user (debugging)
-just vm-logs            # Tail kitaebot systemd logs
-just vm-logs-dns        # Tail dnsmasq egress filter logs
+just vm-logs            # Tail daemon, tinyproxy (refused CONNECTs), and kernel (egress drops) logs
 just vm-stop            # Kill VM
 ```
 
@@ -145,19 +161,38 @@ kitaebot = {
     agent = {
       max_iterations = 100;
     };
+    sub_agents = {
+      max_iterations = 30;                       # Tool-loop cap per sub-agent turn
+    };
     context = {
+      engine = "flat";                           # flat | lcm
       max_tokens = 200000;
-      budget_percent = 80;
+      budget_percent = 80;                       # Flat engine compaction trigger
+      lcm = {                                    # LCM tuning, ignored when engine = "flat"
+        fresh_tail_count = 32;                   # Newest N items never compacted
+        leaf_chunk_tokens = 20000;               # Max tokens per summary chunk
+        min_condensed_fanout = 2;                # Min children per condensed summary
+        soft_budget_percent = 70;                # Background compaction starts
+        hard_budget_percent = 90;                # Compaction blocks the actor
+        large_file_threshold = 25000;            # Externalize message content above this
+        large_file_summary_tokens = 400;         # Summary budget for externalized files
+      };
     };
     git = {
       enabled = true;                            # Enables git tools (clone, commit, push)
       co_authors = [ "Name <email>" ];
+      trusted_repos = [ "owner/repo" ];          # Repos whose .envrc gets direnv allow
     };
     github = {
       enabled = true;
       poll_interval_secs = 300;            # 5 minutes between PR polls
       owner = "amackillop";                # Required when enabled
       trusted_users = [];                  # Additional allowed users
+    };
+    linear = {
+      enabled = true;
+      poll_interval_secs = 120;
+      trusted_users = [ "user@example.com" ];    # Emails allowed to drive issues
     };
     heartbeat = {
       interval_secs = 1800;
@@ -167,6 +202,12 @@ kitaebot = {
       model = "arcee-ai/trinity-large-preview:free";
       max_tokens = 4096;
       temperature = 0.7;                         # 0.0–2.0
+      model_overrides = {                        # Per-role models, fall back to model
+        explore = "cheap/model";
+        worker = "mid/model";
+        summarizer = "cheap/model";
+        heartbeat = "cheap/model";
+      };
     };
     socket = {
       path = "/run/kitaebot/chat.sock";
@@ -174,6 +215,7 @@ kitaebot = {
     telegram = {
       enabled = true;
       chat_id = 123456789;
+      poll_timeout_secs = 30;                    # getUpdates long-poll timeout
     };
     tools = {
       disabled = [ "web_search" ];               # Disable specific tools by name
@@ -193,16 +235,15 @@ kitaebot = {
     };
   };
 
-  egressAllowlist = [                            # Domains kitaebot uid may connect to
-    "openrouter.ai"                              # (all others get NXDOMAIN + nftables drop)
-    "api.telegram.org"
+  egressAllowlist = [                            # Hostnames kitaebot uid may CONNECT to
+    "openrouter.ai"                              # via tinyproxy (all direct egress is
+    "api.telegram.org"                           # dropped by nftables)
     "github.com"
     "api.github.com"
     "githubusercontent.com"
     "flakehub.com"
     "api.perplexity.ai"
   ];
-  dnsUpstream = "9.9.9.9";                       # Upstream DNS for allowlisted domains (Quad9)
 };
 ```
 
@@ -217,6 +258,7 @@ Secrets are loaded via systemd `LoadCredential` from `kitaebot.secretsDir`. One 
 | `provider-api-key` | Always |
 | `telegram-bot-token` | When `telegram.enabled = true` |
 | `github-token` | When `git.enabled = true` or `github.enabled = true` |
+| `linear-api-key` | When `linear.enabled = true` |
 | `gpg-signing-key` | When `gitConfig.signingKey` is set |
 
 ## Project layout
@@ -229,10 +271,16 @@ src/
 │   ├── mod.rs           Core agent loop (process_message, run_turn)
 │   ├── actor.rs         Agent struct, sequential envelope processing
 │   ├── handle.rs        AgentHandle (cloneable actor interface)
+│   ├── task.rs          task tool (explore/worker sub-agents)
 │   └── envelope.rs      Envelope, ChannelSource types
 ├── clients/             HTTP client abstractions
 │   ├── chat_completion.rs  OpenAI-compatible API
-│   └── telegram.rs         Telegram Bot API
+│   ├── telegram.rs         Telegram Bot API
+│   └── linear.rs           Linear GraphQL API
+├── engine/              Context engines (ContextEngine trait)
+│   ├── flat.rs          Per-name JSON sessions, whole-history compaction
+│   ├── ephemeral.rs     In-memory engine for sub-agents (never compacts)
+│   └── lcm/             Hierarchical compaction over SQLite (lcm_* tools)
 ├── provider/            LLM abstraction (completions, wire format, mock)
 ├── tools/               Tool trait + implementations
 │   ├── exec.rs          Shell command (timeout, deny-list, env scrubbing)
@@ -250,11 +298,12 @@ src/
 ├── secrets.rs           systemd credential loading
 ├── session.rs           Atomic JSON persistence
 ├── config.rs            TOML config with validation
-├── context.rs           Token budget management and compaction
 ├── telegram.rs          Telegram Bot API channel
 ├── socket.rs            Unix socket NDJSON channel
 ├── github_channel.rs    GitHub PR polling channel
-├── daemon.rs            Event loop (select over 4 channels)
+├── linear_channel.rs    Linear issue polling channel
+├── notify.rs            notify tool + Telegram push batching
+├── daemon.rs            Event loop (select over enabled channels)
 ├── dispatch.rs          Input classification and Reply type
 ├── commands.rs          Slash commands (/new, /context, /compact, /heartbeat, /stats)
 ├── heartbeat.rs         Periodic heartbeat channel (timer + prepare/finish)
@@ -275,7 +324,7 @@ nix/
 deploy/
 ├── configuration.nix    Host-specific settings (SSH keys, secrets, tools)
 └── flake.nix            Deployment flake
-specs/                   Design specifications (00–18)
+specs/                   Design specifications
 ```
 
 ## License
