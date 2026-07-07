@@ -34,6 +34,21 @@ impl CompletionsProvider {
         }
     }
 
+    /// A variant of this provider using a different model. Client,
+    /// `max_tokens`, and temperature are shared.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by role providers in the next commit")
+    )]
+    pub fn with_model(&self, model: &str) -> Self {
+        Self {
+            client: self.client.clone(),
+            model: model.to_string(),
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+        }
+    }
+
     /// Parse the API response into our domain type.
     fn parse_response(response: ChatResponse) -> Result<Response, ProviderError> {
         let choice =
@@ -127,6 +142,19 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn with_model_swaps_model_and_keeps_the_rest() {
+        let client = CompletionsClient::new(
+            "https://example.invalid".to_string(),
+            crate::secrets::Secret::test("k"),
+        );
+        let provider = CompletionsProvider::new(client, &ProviderConfig::default());
+        let cheap = provider.with_model("cheap/model");
+        assert_eq!(cheap.model, "cheap/model");
+        assert_eq!(cheap.max_tokens, provider.max_tokens);
+        assert!((cheap.temperature - provider.temperature).abs() < f32::EPSILON);
     }
 
     #[test]

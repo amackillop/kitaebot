@@ -63,6 +63,25 @@ pub struct ProviderConfig {
     pub model: String,
     pub max_tokens: u32,
     pub temperature: f32,
+    /// Per-role model overrides. Unset roles use `model`.
+    pub models: RoleModels,
+}
+
+/// Per-role model overrides. Each role falls back to `provider.model`
+/// when unset. Roles are the structural seams where the difficulty of
+/// the work is already known: sub-agent types, compaction summaries,
+/// and heartbeat ticks.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoleModels {
+    /// Model for `explore` sub-agents (read-only research).
+    pub explore: Option<String>,
+    /// Model for `worker` sub-agents (delegated implementation).
+    pub worker: Option<String>,
+    /// Model for context-compaction summaries.
+    pub summarizer: Option<String>,
+    /// Model for heartbeat turns.
+    pub heartbeat: Option<String>,
 }
 
 /// `OpenAI`-compatible chat completions API.
@@ -394,6 +413,7 @@ impl Default for ProviderConfig {
             model: "arcee-ai/trinity-large-preview:free".to_string(),
             max_tokens: 4096,
             temperature: 0.7,
+            models: RoleModels::default(),
         }
     }
 }
@@ -629,6 +649,48 @@ max_output_bytes = 20480
         assert_eq!(cfg.agent.max_iterations, 30);
         assert_eq!(cfg.tools.exec.timeout_secs, 120);
         assert_eq!(cfg.tools.exec.max_output_bytes, 20480);
+    }
+
+    #[test]
+    fn role_models_default_unset() {
+        let cfg = load_toml("").unwrap();
+        assert!(cfg.provider.models.explore.is_none());
+        assert!(cfg.provider.models.worker.is_none());
+        assert!(cfg.provider.models.summarizer.is_none());
+        assert!(cfg.provider.models.heartbeat.is_none());
+    }
+
+    #[test]
+    fn role_models_parse() {
+        let cfg = load_toml(
+            "\
+[provider.models]
+explore = \"cheap/explore\"
+worker = \"mid/worker\"
+summarizer = \"cheap/summarizer\"
+heartbeat = \"cheap/heartbeat\"
+",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.provider.models.explore.as_deref(),
+            Some("cheap/explore")
+        );
+        assert_eq!(cfg.provider.models.worker.as_deref(), Some("mid/worker"));
+        assert_eq!(
+            cfg.provider.models.summarizer.as_deref(),
+            Some("cheap/summarizer")
+        );
+        assert_eq!(
+            cfg.provider.models.heartbeat.as_deref(),
+            Some("cheap/heartbeat")
+        );
+    }
+
+    #[test]
+    fn role_models_reject_unknown_role() {
+        let result = load_toml("[provider.models]\nroot = \"nope\"\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 
     #[test]
