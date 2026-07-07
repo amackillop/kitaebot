@@ -89,6 +89,9 @@ impl Tool for WebSearch {
                         ProviderError::EmptyResponse => {
                             ToolError::ExecutionFailed("provider returned an empty response".into())
                         }
+                        ProviderError::Truncated => ToolError::ExecutionFailed(
+                            "provider response truncated at max_tokens".into(),
+                        ),
                         ProviderError::InvalidResponse(msg) => {
                             ToolError::ExecutionFailed(format!("invalid response: {msg}"))
                         }

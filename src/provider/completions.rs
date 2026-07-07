@@ -58,6 +58,10 @@ impl CompletionsProvider {
             })?;
 
         let content = choice.message.content.unwrap_or_default();
+        // `length` means generation was cut off by max_tokens —
+        // typically a reasoning model spending the whole budget
+        // on reasoning.
+        let truncated = choice.finish_reason.as_deref() == Some("length");
 
         match choice.message.tool_calls {
             Some(calls) if !calls.is_empty() => {
@@ -65,13 +69,31 @@ impl CompletionsProvider {
                 Ok(Response::ToolCalls { content, calls })
             }
             // A text response with nothing in it is a provider fault,
-            // not a reply.
+            // not a reply. Truncation is distinct from a genuinely
+            // empty reply.
             _ if content.trim().is_empty() => {
                 warn!(
+                    finish_reason = choice.finish_reason.as_deref().unwrap_or("<missing>"),
                     reasoning_len = choice.message.reasoning.as_ref().map_or(0, String::len),
                     "Provider returned empty content with no tool calls"
                 );
-                Err(ProviderError::EmptyResponse)
+                if truncated {
+                    Err(ProviderError::Truncated)
+                } else {
+                    Err(ProviderError::EmptyResponse)
+                }
+            }
+            // Partial text is still worth surfacing, but mark the cut
+            // so readers (and the model, next turn) know the reply is
+            // incomplete.
+            _ if truncated => {
+                warn!(
+                    content_len = content.len(),
+                    "Provider response truncated at max_tokens"
+                );
+                Ok(Response::Text(format!(
+                    "{content}\n\n[truncated at max_tokens]"
+                )))
             }
             _ => Ok(Response::Text(content)),
         }
@@ -156,8 +178,15 @@ mod tests {
     use crate::clients::chat_completion::{ApiFunction, AssistantMessage, Choice};
 
     fn response(msg: AssistantMessage) -> ChatResponse {
+        response_with_finish(msg, None)
+    }
+
+    fn response_with_finish(msg: AssistantMessage, finish_reason: Option<&str>) -> ChatResponse {
         ChatResponse {
-            choices: vec![Choice { message: msg }],
+            choices: vec![Choice {
+                message: msg,
+                finish_reason: finish_reason.map(str::to_string),
+            }],
             citations: Vec::new(),
             usage: None,
         }
@@ -280,6 +309,60 @@ mod tests {
             reasoning: None,
         }));
         assert!(matches!(result, Err(ProviderError::EmptyResponse)));
+    }
+
+    #[test]
+    fn empty_content_with_length_finish_is_truncated_error() {
+        let result = CompletionsProvider::parse_response(response_with_finish(
+            AssistantMessage {
+                content: None,
+                tool_calls: None,
+                reasoning: Some("thinking...".to_string()),
+            },
+            Some("length"),
+        ));
+        assert!(matches!(result, Err(ProviderError::Truncated)));
+    }
+
+    #[test]
+    fn empty_content_with_stop_finish_is_empty_response_error() {
+        let result = CompletionsProvider::parse_response(response_with_finish(
+            AssistantMessage {
+                content: None,
+                tool_calls: None,
+                reasoning: None,
+            },
+            Some("stop"),
+        ));
+        assert!(matches!(result, Err(ProviderError::EmptyResponse)));
+    }
+
+    #[test]
+    fn text_with_length_finish_is_surfaced_with_marker() {
+        let result = CompletionsProvider::parse_response(response_with_finish(
+            AssistantMessage {
+                content: Some("partial answer".to_string()),
+                tool_calls: None,
+                reasoning: None,
+            },
+            Some("length"),
+        ));
+        assert!(
+            matches!(result, Ok(Response::Text(t)) if t == "partial answer\n\n[truncated at max_tokens]")
+        );
+    }
+
+    #[test]
+    fn text_with_stop_finish_has_no_marker() {
+        let result = CompletionsProvider::parse_response(response_with_finish(
+            AssistantMessage {
+                content: Some("full answer".to_string()),
+                tool_calls: None,
+                reasoning: None,
+            },
+            Some("stop"),
+        ));
+        assert!(matches!(result, Ok(Response::Text(t)) if t == "full answer"));
     }
 
     #[test]

@@ -121,6 +121,9 @@ The provider is split into two layers:
 | Rate limited | `ProviderError::RateLimited` returned to caller |
 | Malformed response (valid HTTP, bad JSON) | `ProviderError::InvalidResponse` |
 | Empty choices array | `ProviderError::InvalidResponse` |
+| No content, no tool calls, `finish_reason = "length"` | `ProviderError::Truncated` — generation hit `provider.max_tokens` before any output (reasoning models can burn the whole budget on reasoning); the fix is a larger `provider.max_tokens` |
+| No content, no tool calls, other finish reason | `ProviderError::EmptyResponse` |
+| Partial text, `finish_reason = "length"` | Surfaced as a normal reply with `[truncated at max_tokens]` appended, so readers and the model (next turn) see the cut |
 | Network/server error | `ProviderError::Network` with status and body |
 
 No retries for any failure. The agent loop surfaces the error to the user and

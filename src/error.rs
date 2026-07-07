@@ -85,6 +85,12 @@ pub enum ProviderError {
     /// Rate limited by the provider.
     #[error("Rate limited")]
     RateLimited,
+
+    /// Generation hit `max_tokens` before producing any content or
+    /// tool calls (e.g. a reasoning model spending the whole budget
+    /// on reasoning). Raise `provider.max_tokens`.
+    #[error("Provider response truncated at max_tokens before any content")]
+    Truncated,
 }
 
 /// Tool execution errors.

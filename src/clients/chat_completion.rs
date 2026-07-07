@@ -184,6 +184,10 @@ pub struct PromptTokensDetails {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Choice {
     pub message: AssistantMessage,
+    /// Why generation stopped (`"stop"`, `"length"`, `"tool_calls"`, ...).
+    /// `"length"` means the response hit `max_tokens` mid-generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -230,6 +234,7 @@ mod tests {
                     tool_calls: None,
                     reasoning: None,
                 },
+                finish_reason: None,
             }],
             citations: Vec::new(),
             usage: None,
