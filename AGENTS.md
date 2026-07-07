@@ -18,8 +18,8 @@ Skip this for obvious fixes and additions.
 
 ### Building
 - Build exactly one commit at a time from the plan then wait for human review.
-- Use ONLY `just check` to validate code changes.
-- DO NOT use `cargo` commands.
+- Use `just rust-check` to validate code while iterating on Rust modules
+- DO NOT use `cargo` commands directly, use the `just` recipes.
 - `just check` MUST PASS before asking for review.
 - Use `just fmt` to format code. Use `just fix` to fix simple lints automatically.
 - Prepare a commit message for review as well using the `/commit` skill
@@ -46,4 +46,4 @@ Skip this for obvious fixes and additions.
 IMPORTANT: Running `just check` MUST PASS before asking for a review
 IMPORTANT: Plans are broken down into buildable, easily reviewable and verifiable commits.
 IMPORTANT: Wait for the human to actually commit before moving to the next step in the plan.
-IMPORTANT: Check the README to see if it should be updated after completing a plan
+IMPORTANT: Check the README to see if it should be updated after implementation

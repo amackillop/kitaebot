@@ -6,6 +6,14 @@ check:
     nix flake check
     @just check-nix
 
+# Fast inner-loop check on the working tree (incremental cargo).
+# Mirrors the flake's fmt/clippy/test checks but is NOT the commit
+# gate: `just check` stays authoritative (and in the pre-commit hook).
+rust-check:
+    cargo fmt -- --check
+    @just lint
+    @just test
+
 # Check Nix code formatting and lint
 check-nix:
     nixfmt --check flake.nix vm/*.nix deploy/*.nix
