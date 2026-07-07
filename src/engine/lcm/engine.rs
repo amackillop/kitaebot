@@ -84,6 +84,11 @@ pub struct LcmEngine {
     /// plain-text payloads. Injected at construction; compaction
     /// receives its own via method arguments.
     summarize: SummarizeFn,
+    /// Provider-reported prompt size of the last request, if any.
+    /// Cleared whenever the context shrinks (compaction, clear,
+    /// session switch) — a stale high-water mark would re-trigger
+    /// compaction forever via `max()`.
+    observed_tokens: Option<usize>,
 }
 
 impl LcmEngine {
@@ -116,6 +121,7 @@ impl LcmEngine {
             ctx,
             pending_compaction: None,
             summarize,
+            observed_tokens: None,
         })
     }
 
@@ -141,7 +147,11 @@ impl LcmEngine {
     async fn drain_pending(&mut self) -> Option<CompactionEvent> {
         let handle = self.pending_compaction.take()?;
         match handle.await {
-            Ok(Ok(event)) => Some(event),
+            Ok(Ok(event)) => {
+                // The context shrank; the observation predates it.
+                self.observed_tokens = None;
+                Some(event)
+            }
             Ok(Err(e)) => {
                 error!("background compaction failed: {e}");
                 None
@@ -318,9 +328,8 @@ impl ContextEngine for LcmEngine {
         .await
     }
 
-    fn observe_tokens(&mut self, _prompt_tokens: usize) {
-        // Not consumed yet; the threshold checks fold this in in a
-        // follow-up commit.
+    fn observe_tokens(&mut self, prompt_tokens: usize) {
+        self.observed_tokens = Some(prompt_tokens);
     }
 
     async fn compact_if_needed(
@@ -346,6 +355,7 @@ impl ContextEngine for LcmEngine {
                 summarize,
             )
             .await?;
+            self.observed_tokens = None;
             return Ok(Some(event));
         }
 
@@ -375,13 +385,15 @@ impl ContextEngine for LcmEngine {
         // Drop a half-finished background pass before issuing fresh
         // writes; otherwise the two would race for the same chunks.
         let _ = self.drain_pending().await;
-        compaction::run_compaction(
+        let event = compaction::run_compaction(
             Arc::clone(&self.conn),
             self.conversation_id,
             self.ctx.lcm,
             summarize,
         )
-        .await
+        .await?;
+        self.observed_tokens = None;
+        Ok(event)
     }
 
     async fn clear(&mut self) -> Result<(), EngineError> {
@@ -398,7 +410,9 @@ impl ContextEngine for LcmEngine {
             .map_err(|e| storage_err(&e))?;
             Ok(())
         })
-        .await
+        .await?;
+        self.observed_tokens = None;
+        Ok(())
     }
 
     async fn save(&mut self) -> Result<(), EngineError> {
@@ -411,7 +425,15 @@ impl ContextEngine for LcmEngine {
         let (count, tokens) = self.context_stats_query().unwrap_or((0, 0));
         ContextStats {
             message_count: usize::try_from(count).unwrap_or(0),
-            token_estimate: usize::try_from(tokens).unwrap_or(0),
+            // Best available count: the stored estimate or the
+            // provider-observed prompt size, whichever is larger.
+            // Both undercount (estimates are char/4 and miss the
+            // system prompt; the observation lags one turn).
+            // `compact_if_needed` reads this, so the observation
+            // feeds the thresholds too.
+            token_estimate: usize::try_from(tokens)
+                .unwrap_or(0)
+                .max(self.observed_tokens.unwrap_or(0)),
             // Reported budget is the soft threshold: the level at which
             // compaction first kicks in. The hard threshold above it
             // exists to bound the worst case but isn't user-facing.
@@ -473,6 +495,7 @@ impl ContextEngine for LcmEngine {
         let conn = Arc::clone(&self.conn);
         let name_for_db = sanitized.clone();
         let id = run_blocking(conn, move |c| ensure_conversation(c, &name_for_db)).await?;
+        self.observed_tokens = None;
         self.active_name = sanitized;
         self.conversation_id = id;
         self.active_id.store(id, Ordering::Release);
@@ -1730,6 +1753,98 @@ mod tests {
     /// summary, regardless of input.
     fn canned_summarize(summary: &'static str) -> SummarizeFn {
         Arc::new(move |_prompt, _messages| Box::pin(async move { Ok(summary.to_string()) }))
+    }
+
+    #[tokio::test]
+    async fn observed_tokens_trigger_blocking_compaction() {
+        // max_tokens=1000 → soft=700, hard=900. 35 messages × ~11
+        // estimated tokens ≈ 385, below soft — only the observation
+        // can trigger anything.
+        let (mut engine, _dir) = temp_engine_with_max_tokens(1000);
+        let filler = "x".repeat(40);
+        for i in 0..35 {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i} {filler}"),
+                })
+                .await
+                .unwrap();
+        }
+        let summarize =
+            canned_summarize("compact summary that is long enough to pass the level-1 shrink test");
+        assert!(
+            engine
+                .compact_if_needed(&summarize)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        engine.observe_tokens(950);
+        let event = engine
+            .compact_if_needed(&summarize)
+            .await
+            .unwrap()
+            .expect("observation above hard threshold must block");
+        assert!(event.before > 0);
+        assert!(engine.pending_compaction.is_none());
+
+        // Cleared: the next check must not see the stale 950.
+        assert!(
+            engine
+                .compact_if_needed(&summarize)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_tokens_spawn_background_compaction() {
+        // max_tokens=1000 → soft=700, hard=900. Observation of 800
+        // sits between the two; the stored estimate (~385) stays
+        // below soft.
+        let (mut engine, _dir) = temp_engine_with_max_tokens(1000);
+        let filler = "x".repeat(40);
+        for i in 0..35 {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i} {filler}"),
+                })
+                .await
+                .unwrap();
+        }
+        let summarize =
+            canned_summarize("compact summary that is long enough to pass the level-1 shrink test");
+
+        engine.observe_tokens(800);
+        let first = engine.compact_if_needed(&summarize).await.unwrap();
+        assert!(first.is_none(), "soft path returns None on the spawn turn");
+        assert!(engine.pending_compaction.is_some());
+
+        // Drain clears the observation, so no fresh spawn follows.
+        let second = engine
+            .compact_if_needed(&summarize)
+            .await
+            .unwrap()
+            .expect("drained background event");
+        assert!(second.after <= second.before);
+        assert!(engine.pending_compaction.is_none());
+        assert!(engine.observed_tokens.is_none());
+    }
+
+    #[tokio::test]
+    async fn observation_cleared_on_clear_and_switch() {
+        let (mut engine, _dir) = temp_engine();
+
+        engine.observe_tokens(500);
+        assert_eq!(engine.stats().token_estimate, 500);
+        engine.clear().await.unwrap();
+        assert_eq!(engine.stats().token_estimate, 0);
+
+        engine.observe_tokens(500);
+        engine.switch_session("other").await.unwrap();
+        assert_eq!(engine.stats().token_estimate, 0);
     }
 
     #[tokio::test]

@@ -37,6 +37,7 @@ trait ContextEngine: Send + Sync {
     clear() -> Result<(), EngineError>
     save() -> Result<(), EngineError>
     stats() -> ContextStats                    // sync, infallible
+    observe_tokens(prompt_tokens: usize)       // sync, infallible
 
     // -- Tools contributed by this engine --
     tools(scope: ToolScope) -> Vec<Arc<dyn Tool>>
@@ -102,6 +103,25 @@ CompactionEvent {
 
 Engine-specific details (which DAG layers were created, how many summaries) are
 internal. The event carries only what the activity system needs.
+
+### Observed Tokens
+
+Char-based estimates (`chars / 4`) undercount: they never see the system
+prompt or tool schemas the provider actually tokenizes. When the provider
+reports usage, the agent loop feeds the request's `prompt_tokens` back
+into the engine via `observe_tokens()` after every response.
+
+Engines keep the last observation for the active session and take
+`max(estimate, observed)` for compaction triggers and `stats()`. Both
+values are lower bounds on the next request's true size — the estimate
+misses fixed overhead, the observation lags one turn — so the larger
+one is the tighter bound.
+
+The observation is dropped whenever the context shrinks (compaction,
+`clear()`, `switch_session()`): it describes a request that no longer
+reflects the session, and a stale high-water mark would win the `max()`
+forever and re-trigger compaction on every turn. `EphemeralSession`
+ignores observations since it never compacts.
 
 ### Session Info
 
@@ -211,7 +231,8 @@ Effective budget is `max_tokens * budget_percent / 100` (integer arithmetic).
 Tokens are estimated as `chars / 4`; `Message::char_count()` sums content
 length, plus function names and argument strings for `ToolCalls`.
 
-When the estimate exceeds the budget and the session has >= 2 messages:
+When `max(estimate, observed)` (see §"Observed Tokens") exceeds the
+budget and the session has >= 2 messages:
 format all messages as `[role] content` text, send through `SummarizeFn`
 (no tools), and replace the whole conversation with a single
 `Message::System` containing the summary. No partial windowing.
@@ -498,7 +519,8 @@ escalation.
 
 ##### Dual Thresholds
 
-Two token thresholds govern when compaction fires:
+Two token thresholds govern when compaction fires. Both compare against
+`max(estimate, observed)` (see §"Observed Tokens"):
 
 | Threshold | Default | Config | Behavior |
 |-----------|---------|--------|----------|

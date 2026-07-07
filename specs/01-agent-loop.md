@@ -18,8 +18,11 @@ A turn proceeds in this order:
 3. Enter the tool loop (up to `max_iterations`):
    a. Prepend the system prompt to the session messages (not persisted)
    b. Call the provider
-   c. If `Response::Text` — store assistant message, return text, exit loop
-   d. If `Response::ToolCalls` — store assistant message, run safety gates,
+   c. Feed the response's `prompt_tokens` (when the API reports usage)
+      into the engine via `observe_tokens` — ground truth for the next
+      compaction check (see [spec 14](14-context-engine.md))
+   d. If `Response::Text` — store assistant message, return text, exit loop
+   e. If `Response::ToolCalls` — store assistant message, run safety gates,
       execute calls in parallel, record results, continue loop
 
 Compaction runs **before** the user message is added, so the current input is
