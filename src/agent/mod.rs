@@ -156,6 +156,10 @@ pub(crate) async fn run_turn(
         .await?
         .map_err(Error::Provider)?;
 
+        if let Some(prompt_tokens) = outcome.prompt_tokens {
+            engine.observe_tokens(prompt_tokens as usize);
+        }
+
         match outcome.response {
             Response::Text(content) => {
                 debug!(content = %truncate_output(&content, LOG_CONTENT_MAX), "Turn finished");

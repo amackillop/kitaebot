@@ -25,13 +25,6 @@ pub struct ChatOutcome {
     /// tokenizer, when the API reports usage. Ground truth for
     /// context size — includes system prompt and tool schemas that
     /// char-based estimates miss.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by the context engine in the next commit"
-        )
-    )]
     pub prompt_tokens: Option<u32>,
 }
 

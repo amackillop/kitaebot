@@ -104,6 +104,16 @@ pub trait ContextEngine: Send + Sync {
         system_prompt: &str,
     ) -> impl Future<Output = Result<AssembledContext, EngineError>> + Send;
 
+    /// Record the provider-reported prompt size of the last request.
+    ///
+    /// Ground truth for the context size: the provider's tokenizer
+    /// counts the system prompt and tool schemas that char-based
+    /// estimates miss. Engines take `max(estimate, observed)` when
+    /// deciding to compact, and must drop the observation whenever the
+    /// context shrinks (compaction, clear, session switch) — it
+    /// describes a request that no longer reflects the session.
+    fn observe_tokens(&mut self, prompt_tokens: usize);
+
     /// Compact if estimated tokens exceed the budget. Returns `None` if no
     /// compaction was needed.
     fn compact_if_needed(

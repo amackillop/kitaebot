@@ -318,6 +318,11 @@ impl ContextEngine for LcmEngine {
         .await
     }
 
+    fn observe_tokens(&mut self, _prompt_tokens: usize) {
+        // Not consumed yet; the threshold checks fold this in in a
+        // follow-up commit.
+    }
+
     async fn compact_if_needed(
         &mut self,
         summarize: &SummarizeFn,

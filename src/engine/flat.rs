@@ -48,6 +48,11 @@ pub struct FlatSession {
     sessions_dir: PathBuf,
     memory_dir: PathBuf,
     ctx: ContextConfig,
+    /// Provider-reported prompt size of the last request, if any.
+    /// Cleared whenever the context shrinks (compaction, clear,
+    /// session switch) — a stale high-water mark would re-trigger
+    /// compaction forever via `max()`.
+    observed_tokens: Option<usize>,
 }
 
 impl FlatSession {
@@ -69,7 +74,15 @@ impl FlatSession {
             sessions_dir,
             memory_dir,
             ctx,
+            observed_tokens: None,
         })
+    }
+
+    /// Best available token count: the char-based estimate or the
+    /// provider-observed prompt size, whichever is larger.
+    fn current_tokens(&self) -> usize {
+        self.token_estimate(0)
+            .max(self.observed_tokens.unwrap_or(0))
     }
 
     /// Estimated tokens for the current session content plus a system prompt.
@@ -99,9 +112,10 @@ impl FlatSession {
             return Ok(None);
         }
 
-        let before = self.token_estimate(0);
+        let before = self.current_tokens();
         let summary = summarize(FLAT_SUMMARIZE_PROMPT, self.session.messages()).await?;
         self.session.compact(Message::System { content: summary });
+        self.observed_tokens = None;
         let after = self.token_estimate(0);
 
         Ok(Some(CompactionEvent { before, after }))
@@ -129,11 +143,15 @@ impl ContextEngine for FlatSession {
         Ok(AssembledContext { messages })
     }
 
+    fn observe_tokens(&mut self, prompt_tokens: usize) {
+        self.observed_tokens = Some(prompt_tokens);
+    }
+
     async fn compact_if_needed(
         &mut self,
         summarize: &SummarizeFn,
     ) -> Result<Option<CompactionEvent>, EngineError> {
-        let tokens = self.token_estimate(0);
+        let tokens = self.current_tokens();
         let limit = self.budget();
 
         if tokens <= limit || self.session.len() < 2 {
@@ -164,6 +182,7 @@ impl ContextEngine for FlatSession {
 
     async fn clear(&mut self) -> Result<(), EngineError> {
         self.session.clear();
+        self.observed_tokens = None;
         Ok(())
     }
 
@@ -174,7 +193,7 @@ impl ContextEngine for FlatSession {
 
     fn stats(&self) -> ContextStats {
         ContextStats {
-            token_estimate: self.token_estimate(0),
+            token_estimate: self.current_tokens(),
             budget: self.budget(),
             message_count: self.session.len(),
         }
@@ -235,6 +254,7 @@ impl ContextEngine for FlatSession {
         // Load (or create) the target session.
         let path = self.path_for(&sanitized);
         self.session = Session::load(&path)?;
+        self.observed_tokens = None;
         self.active_name = sanitized;
         persist_active_session(&self.memory_dir, &self.active_name);
         Ok(())
@@ -451,6 +471,95 @@ mod tests {
 
         assert!(event.before > event.after);
         assert_eq!(engine.stats().message_count, 1);
+    }
+
+    // ── Observed token tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn observed_tokens_trigger_compaction_when_estimate_is_low() {
+        // Budget is 50; two tiny messages estimate near zero.
+        let mut engine = temp_engine(tiny_config());
+        engine
+            .push_message(Message::User {
+                content: "a".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::Assistant {
+                content: "b".into(),
+            })
+            .await
+            .unwrap();
+
+        let summarize = mock_summarize("summary");
+        assert!(
+            engine
+                .compact_if_needed(&summarize)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        engine.observe_tokens(100);
+        let event = engine.compact_if_needed(&summarize).await.unwrap().unwrap();
+        assert_eq!(event.before, 100);
+        assert_eq!(engine.stats().message_count, 1);
+    }
+
+    #[tokio::test]
+    async fn observation_cleared_after_compaction() {
+        let mut engine = temp_engine(tiny_config());
+        engine
+            .push_message(Message::User {
+                content: "a".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::Assistant {
+                content: "b".into(),
+            })
+            .await
+            .unwrap();
+        engine.observe_tokens(100);
+
+        let summarize = mock_summarize("summary");
+        engine.compact_if_needed(&summarize).await.unwrap().unwrap();
+
+        // A stale observation would re-trigger here forever.
+        engine
+            .push_message(Message::User {
+                content: "c".into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            engine
+                .compact_if_needed(&summarize)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stats_report_observed_tokens_when_larger() {
+        let mut engine = temp_engine(tiny_config());
+        engine.observe_tokens(100);
+        assert_eq!(engine.stats().token_estimate, 100);
+    }
+
+    #[tokio::test]
+    async fn observation_cleared_on_clear_and_switch() {
+        let mut engine = temp_engine(tiny_config());
+        engine.observe_tokens(100);
+        engine.clear().await.unwrap();
+        assert_eq!(engine.stats().token_estimate, 0);
+
+        engine.observe_tokens(100);
+        engine.switch_session("other").await.unwrap();
+        assert_eq!(engine.stats().token_estimate, 0);
     }
 
     #[tokio::test]

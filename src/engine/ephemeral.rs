@@ -47,6 +47,10 @@ impl ContextEngine for EphemeralSession {
         Ok(AssembledContext { messages })
     }
 
+    fn observe_tokens(&mut self, _prompt_tokens: usize) {
+        // Never compacts, so there is no trigger to inform.
+    }
+
     async fn compact_if_needed(
         &mut self,
         _summarize: &SummarizeFn,
