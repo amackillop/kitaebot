@@ -128,11 +128,12 @@ filtering.
 
 The `task` tool's `execute()`:
 
-1. Parse `agent_type`, pick the prebuilt tool set and system prompt.
+1. Parse `agent_type`, pick the prebuilt tool set, system prompt, and
+   provider.
 2. Create a fresh `EphemeralSession`.
 3. Run the same `run_turn` the parent uses (exposed `pub(crate)` from the
    agent module) with the child engine, the type's system prompt, `prompt` as
-   the user message, the shared provider, and `sub_agents.max_iterations`.
+   the user message, the type's provider, and `sub_agents.max_iterations`.
 4. Return the final assistant text as the tool result.
 
 The sub-agent runs **synchronously** from the parent's perspective. It is a
@@ -241,7 +242,8 @@ about sub-agents):
 
 ```rust
 struct TaskTool<P: Provider> {
-    provider: Arc<P>,
+    explore_provider: Arc<P>,        // provider.models.explore, or the root's
+    worker_provider: Arc<P>,         // provider.models.worker, or the root's
     summarize: SummarizeFn,          // run_turn signature; child never compacts
     explore: AgentType,              // system prompt + prebuilt Tools
     worker: AgentType,
@@ -268,9 +270,13 @@ max_iterations = 30
 |------------|---------|-------------|
 | `sub_agents.max_iterations` | `30` | Max tool loop iterations per sub-agent |
 
-Sub-agents use the parent's provider and model. Per-type model selection is a
-future extension — it requires constructing a second provider instance, and
-"same as parent" was the default anyway.
+Each agent type runs on its own model when `provider.models.explore` or
+`provider.models.worker` is set (see [spec 02](02-provider.md)); unset types
+use the parent's model. Model selection is static config only — there is
+deliberately no per-call model argument on the `task` tool, so the parent
+model never controls spend. The delegation itself is the difficulty
+classification: what the root keeps runs on the root model, what it hands
+off runs on the type's model.
 
 ## Boundaries
 
@@ -328,7 +334,8 @@ text, and the parent LLM decides how to proceed.
 - Explicit tool allowlists per type — no "everything except" sets
 - No git/GitHub tools in any sub-agent — outward-visible actions belong to
   the parent
-- One model for all agents (the parent's)
+- One model per agent type, fixed in config (`provider.models.*`); the
+  parent cannot pick a model per call
 - Synchronous execution only (blocking tool call); concurrency comes from the
   parent emitting parallel `task` calls, bounded by the provider's rate
   limits like any other parallel tool execution
@@ -343,8 +350,6 @@ These are **not** in this spec but the architecture accommodates them:
 
 - **Custom agent types**: user-defined types via config or markdown files
   with system prompts, tool lists, and model selection.
-- **Per-type model selection** (`explore_model`): a cheaper model for
-  research agents. Requires a second provider instance.
 - **Background execution**: non-blocking sub-agents that run concurrently
   while the parent continues. Requires changing the tool result delivery
   mechanism.

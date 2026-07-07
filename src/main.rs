@@ -178,8 +178,10 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
 ) -> agent::AgentHandle {
     let (explore, worker) =
         agent::task::build_agent_types(&tools, engine.tools(ToolScope::SubAgent), workspace.path());
+    let models = &config.provider.models;
     let task_tool: Arc<dyn tools::Tool> = Arc::new(agent::task::TaskTool::new(
-        provider.clone(),
+        role_provider(&provider, models.explore.as_deref()),
+        role_provider(&provider, models.worker.as_deref()),
         summarize.clone(),
         explore,
         worker,

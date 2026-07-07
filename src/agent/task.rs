@@ -134,7 +134,8 @@ struct Args {
 /// Generic over the provider because [`Provider`] is not object-safe;
 /// the registry erases the generic behind `Arc<dyn Tool>`.
 pub(crate) struct TaskTool<P: Provider> {
-    provider: Arc<P>,
+    explore_provider: Arc<P>,
+    worker_provider: Arc<P>,
     summarize: SummarizeFn,
     explore: AgentType,
     worker: AgentType,
@@ -143,14 +144,16 @@ pub(crate) struct TaskTool<P: Provider> {
 
 impl<P: Provider> TaskTool<P> {
     pub fn new(
-        provider: Arc<P>,
+        explore_provider: Arc<P>,
+        worker_provider: Arc<P>,
         summarize: SummarizeFn,
         explore: AgentType,
         worker: AgentType,
         max_iterations: usize,
     ) -> Self {
         Self {
-            provider,
+            explore_provider,
+            worker_provider,
             summarize,
             explore,
             worker,
@@ -195,13 +198,9 @@ impl<P: Provider> Tool for TaskTool<P> {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-            let agent = match args.agent_type {
-                AgentKind::Explore => &self.explore,
-                AgentKind::Worker => &self.worker,
-            };
-            let label = match args.agent_type {
-                AgentKind::Explore => "explore",
-                AgentKind::Worker => "worker",
+            let (agent, provider, label) = match args.agent_type {
+                AgentKind::Explore => (&self.explore, &self.explore_provider, "explore"),
+                AgentKind::Worker => (&self.worker, &self.worker_provider, "worker"),
             };
 
             // Fresh context per call, discarded on return. The parent's
@@ -218,7 +217,7 @@ impl<P: Provider> Tool for TaskTool<P> {
                 &self.summarize,
                 &agent.system_prompt,
                 &args.prompt,
-                &*self.provider,
+                &**provider,
                 &agent.tools,
                 self.max_iterations,
                 &child_ctx,
@@ -291,8 +290,10 @@ mod tests {
         worker: Tools,
         max_iterations: usize,
     ) -> TaskTool<MockProvider> {
+        let provider = Arc::new(MockProvider::new(responses));
         TaskTool::new(
-            Arc::new(MockProvider::new(responses)),
+            provider.clone(),
+            provider,
             noop_summarize(),
             agent_type(explore),
             agent_type(worker),
@@ -376,6 +377,7 @@ mod tests {
             Ok(Response::Text("worker done".to_string())),
         ]));
         let tool = TaskTool::new(
+            provider.clone(),
             provider,
             noop_summarize(),
             agent_type(Tools::default()),
@@ -390,6 +392,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "worker done");
+    }
+
+    #[tokio::test]
+    async fn each_agent_type_uses_its_own_provider() {
+        let explore_provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            "from explore provider".to_string(),
+        ))]));
+        let worker_provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            "from worker provider".to_string(),
+        ))]));
+        let tool = TaskTool::new(
+            explore_provider.clone(),
+            worker_provider.clone(),
+            noop_summarize(),
+            agent_type(Tools::default()),
+            agent_type(Tools::default()),
+            5,
+        );
+
+        let explored = tool
+            .execute(
+                serde_json::json!({"prompt": "x", "agent_type": "explore"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(explored, "from explore provider");
+
+        let worked = tool
+            .execute(
+                serde_json::json!({"prompt": "x", "agent_type": "worker"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(worked, "from worker provider");
+
+        assert_eq!(explore_provider.call_count(), 1);
+        assert_eq!(worker_provider.call_count(), 1);
     }
 
     #[tokio::test]
@@ -440,6 +481,7 @@ mod tests {
             "never".to_string(),
         ))]));
         let tool = TaskTool::new(
+            Arc::clone(&provider),
             Arc::clone(&provider),
             noop_summarize(),
             agent_type(Tools::default()),
