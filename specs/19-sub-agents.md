@@ -242,8 +242,8 @@ about sub-agents):
 
 ```rust
 struct TaskTool<P: Provider> {
-    explore_provider: Arc<P>,        // provider.models.explore, or the root's
-    worker_provider: Arc<P>,         // provider.models.worker, or the root's
+    explore_provider: Arc<P>,        // provider.model_overrides.explore, or the root's
+    worker_provider: Arc<P>,         // provider.model_overrides.worker, or the root's
     summarize: SummarizeFn,          // run_turn signature; child never compacts
     explore: AgentType,              // system prompt + prebuilt Tools
     worker: AgentType,
@@ -270,8 +270,8 @@ max_iterations = 30
 |------------|---------|-------------|
 | `sub_agents.max_iterations` | `30` | Max tool loop iterations per sub-agent |
 
-Each agent type runs on its own model when `provider.models.explore` or
-`provider.models.worker` is set (see [spec 02](02-provider.md)); unset types
+Each agent type runs on its own model when `provider.model_overrides.explore` or
+`provider.model_overrides.worker` is set (see [spec 02](02-provider.md)); unset types
 use the parent's model. Model selection is static config only — there is
 deliberately no per-call model argument on the `task` tool, so the parent
 model never controls spend. The delegation itself is the difficulty
@@ -334,7 +334,7 @@ text, and the parent LLM decides how to proceed.
 - Explicit tool allowlists per type — no "everything except" sets
 - No git/GitHub tools in any sub-agent — outward-visible actions belong to
   the parent
-- One model per agent type, fixed in config (`provider.models.*`); the
+- One model per agent type, fixed in config (`provider.model_overrides.*`); the
   parent cannot pick a model per call
 - Synchronous execution only (blocking tool call); concurrency comes from the
   parent emitting parallel `task` calls, bounded by the provider's rate

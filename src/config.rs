@@ -64,7 +64,7 @@ pub struct ProviderConfig {
     pub max_tokens: u32,
     pub temperature: f32,
     /// Per-role model overrides. Unset roles use `model`.
-    pub models: RoleModels,
+    pub model_overrides: ModelOverrides,
 }
 
 /// Per-role model overrides. Each role falls back to `provider.model`
@@ -73,7 +73,7 @@ pub struct ProviderConfig {
 /// and heartbeat ticks.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct RoleModels {
+pub struct ModelOverrides {
     /// Model for `explore` sub-agents (read-only research).
     pub explore: Option<String>,
     /// Model for `worker` sub-agents (delegated implementation).
@@ -413,7 +413,7 @@ impl Default for ProviderConfig {
             model: "arcee-ai/trinity-large-preview:free".to_string(),
             max_tokens: 4096,
             temperature: 0.7,
-            models: RoleModels::default(),
+            model_overrides: ModelOverrides::default(),
         }
     }
 }
@@ -652,19 +652,19 @@ max_output_bytes = 20480
     }
 
     #[test]
-    fn role_models_default_unset() {
+    fn model_overrides_default_unset() {
         let cfg = load_toml("").unwrap();
-        assert!(cfg.provider.models.explore.is_none());
-        assert!(cfg.provider.models.worker.is_none());
-        assert!(cfg.provider.models.summarizer.is_none());
-        assert!(cfg.provider.models.heartbeat.is_none());
+        assert!(cfg.provider.model_overrides.explore.is_none());
+        assert!(cfg.provider.model_overrides.worker.is_none());
+        assert!(cfg.provider.model_overrides.summarizer.is_none());
+        assert!(cfg.provider.model_overrides.heartbeat.is_none());
     }
 
     #[test]
-    fn role_models_parse() {
+    fn model_overrides_parse() {
         let cfg = load_toml(
             "\
-[provider.models]
+[provider.model_overrides]
 explore = \"cheap/explore\"
 worker = \"mid/worker\"
 summarizer = \"cheap/summarizer\"
@@ -672,24 +672,16 @@ heartbeat = \"cheap/heartbeat\"
 ",
         )
         .unwrap();
-        assert_eq!(
-            cfg.provider.models.explore.as_deref(),
-            Some("cheap/explore")
-        );
-        assert_eq!(cfg.provider.models.worker.as_deref(), Some("mid/worker"));
-        assert_eq!(
-            cfg.provider.models.summarizer.as_deref(),
-            Some("cheap/summarizer")
-        );
-        assert_eq!(
-            cfg.provider.models.heartbeat.as_deref(),
-            Some("cheap/heartbeat")
-        );
+        let overrides = &cfg.provider.model_overrides;
+        assert_eq!(overrides.explore.as_deref(), Some("cheap/explore"));
+        assert_eq!(overrides.worker.as_deref(), Some("mid/worker"));
+        assert_eq!(overrides.summarizer.as_deref(), Some("cheap/summarizer"));
+        assert_eq!(overrides.heartbeat.as_deref(), Some("cheap/heartbeat"));
     }
 
     #[test]
-    fn role_models_reject_unknown_role() {
-        let result = load_toml("[provider.models]\nroot = \"nope\"\n");
+    fn model_overrides_reject_unknown_role() {
+        let result = load_toml("[provider.model_overrides]\nroot = \"nope\"\n");
         assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 

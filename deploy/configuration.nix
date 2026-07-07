@@ -43,7 +43,12 @@ in
     };
     settings = {
       provider = {
-        model = "moonshotai/kimi-k2.5";
+        model = "z-ai/glm-5.2";
+        model_overrides = {
+          explore = "deepseek/deepseek-v4-pro";
+          summarizer = "deepseek/deepseek-v4-flash";
+          heartbeat = "deepseek/deepseek-v4-flash";
+        };
       };
 
       context.engine = "lcm";

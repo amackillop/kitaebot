@@ -27,7 +27,7 @@ The first tick fires immediately on daemon startup.
 3. **Execute**: On ready, the command handler calls `agent::process_message()`
    directly (not through the handle — that would deadlock since we're already
    inside the actor). The heartbeat turn runs in the unified session with full
-   conversational context, on the `provider.models.heartbeat` model when
+   conversational context, on the `provider.model_overrides.heartbeat` model when
    configured (see [spec 02](02-provider.md)). Most ticks conclude "nothing
    to do", so a cheaper model suffices; switching models per turn on the
    shared session is deliberate — the completions API is stateless, and the

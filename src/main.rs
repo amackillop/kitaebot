@@ -76,7 +76,7 @@ async fn main() {
             let provider = Arc::new(rt.provider);
             let tools = rt.tools;
             let memory_dir = workspace.path().join("memory");
-            let summarizer = config.provider.models.summarizer.as_deref();
+            let summarizer = config.provider.model_overrides.summarizer.as_deref();
             let summarize = engine::make_summarize_fn(role_provider(&provider, summarizer));
 
             let handle = match config.context.engine {
@@ -178,10 +178,10 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
 ) -> agent::AgentHandle {
     let (explore, worker) =
         agent::task::build_agent_types(&tools, engine.tools(ToolScope::SubAgent), workspace.path());
-    let models = &config.provider.models;
+    let overrides = &config.provider.model_overrides;
     let task_tool: Arc<dyn tools::Tool> = Arc::new(agent::task::TaskTool::new(
-        role_provider(&provider, models.explore.as_deref()),
-        role_provider(&provider, models.worker.as_deref()),
+        role_provider(&provider, overrides.explore.as_deref()),
+        role_provider(&provider, overrides.worker.as_deref()),
         summarize.clone(),
         explore,
         worker,
@@ -189,7 +189,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     ));
     tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
     tools.extend_with(vec![task_tool], &config.tools.disabled);
-    let heartbeat_provider = role_provider(&provider, models.heartbeat.as_deref());
+    let heartbeat_provider = role_provider(&provider, overrides.heartbeat.as_deref());
     agent::AgentHandle::spawn(
         workspace,
         provider,

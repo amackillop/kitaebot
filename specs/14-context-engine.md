@@ -68,7 +68,7 @@ the callback constructed once at startup via `make_summarize_fn`. The
 system turn is fixed inside the closure (see §"Three-Level Summarization
 Escalation"), so the engine only varies instructions per call.
 
-The provider captured by the closure uses `provider.models.summarizer`
+The provider captured by the closure uses `provider.model_overrides.summarizer`
 when set (see [spec 02](02-provider.md)), falling back to the root
 model. Summaries are high-volume and low-stakes, so they typically run
 on a cheaper model.
@@ -603,7 +603,7 @@ reference tags, include timestamps for key decisions, note tool usage and
 outcomes, and omit verbose tool output (already in the immutable store).
 
 The `model` column on the summary records which LLM produced it. If a
-dedicated summarizer model is configured (`provider.models.summarizer`),
+dedicated summarizer model is configured (`provider.model_overrides.summarizer`),
 it is used instead of the agent's primary model. This allows using a
 cheaper/faster model for summarization. Level 3 records
 `level3-truncate` (no LLM).
@@ -858,7 +858,7 @@ engine and under `<workspace>/memory/lcm.db` for LCM. Both paths are
 derived from the workspace root rather than configured separately.
 
 The cheaper summarization model called for by phase 4 (large file
-handling) is configured via `provider.models.summarizer`
+handling) is configured via `provider.model_overrides.summarizer`
 (see [spec 02](02-provider.md)).
 
 ### Active Session Persistence

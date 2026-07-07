@@ -136,12 +136,12 @@ Configuration via `config.toml` under `[provider]`:
 | `model` | `arcee-ai/trinity-large-preview:free` | Model identifier |
 | `max_tokens` | 4096 | Max tokens in LLM response |
 | `temperature` | 0.7 | Sampling temperature |
-| `models.explore` | unset | Model for `explore` sub-agents |
-| `models.worker` | unset | Model for `worker` sub-agents |
-| `models.summarizer` | unset | Model for compaction summaries |
-| `models.heartbeat` | unset | Model for heartbeat turns |
+| `model_overrides.explore` | unset | Model for `explore` sub-agents |
+| `model_overrides.worker` | unset | Model for `worker` sub-agents |
+| `model_overrides.summarizer` | unset | Model for compaction summaries |
+| `model_overrides.heartbeat` | unset | Model for heartbeat turns |
 
-Each `models.*` key overrides the model for that role only; unset roles
+Each `model_overrides.*` key overrides the model for that role only; unset roles
 fall back to `model`. `max_tokens` and `temperature` are shared across
 all roles. Role providers are built once at startup via
 `CompletionsProvider::with_model`; the model choice per role is static —
