@@ -92,9 +92,11 @@ No keepalives, no timeouts.
 
 #### Verbose Mode
 
-`/verbose` toggles activity event forwarding for the current connection.
-Intercepted before dispatch — it is UI state, not a slash command. Resets
-on disconnect.
+Activity forwarding starts **on** for each connection, so one-shot
+clients (`kchat <socket> <message>`) see turn internals without a
+toggle round trip. `/verbose` turns it off for the current connection.
+Intercepted before dispatch — it is UI state, not a slash command.
+Resets on disconnect.
 
 #### Client Disconnect Mid-Turn
 

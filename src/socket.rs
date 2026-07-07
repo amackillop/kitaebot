@@ -91,7 +91,9 @@ async fn serve(listener: &UnixListener, stream: UnixStream, handle: &AgentHandle
     }
 
     // Message loop: read from client, reject new connections concurrently.
-    let mut verbose = false;
+    // Activity frames are on by default so one-shot clients see turn
+    // internals without a toggle round trip; /verbose turns them off.
+    let mut verbose = true;
     let mut line = String::new();
     loop {
         line.clear();
@@ -354,7 +356,7 @@ mod tests {
             provider.clone(),
             provider,
             Arc::new(tools),
-            1,
+            5,
             engine,
             summarize,
             None,
@@ -406,6 +408,75 @@ mod tests {
         assert!(matches!(client2.recv().await, ServerMsg::Error { .. }));
 
         drop(client);
+        join.abort();
+    }
+
+    /// A tool that returns immediately; used to make a turn emit
+    /// activity events.
+    struct EchoTool;
+
+    impl crate::tools::Tool for EchoTool {
+        fn name(&self) -> &'static str {
+            "echo"
+        }
+        fn description(&self) -> &'static str {
+            "returns immediately"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: crate::tools::ToolCtx,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<String, crate::error::ToolError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async { Ok("echoed".to_string()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn activity_forwarded_by_default() {
+        use crate::types::{ToolCall, ToolFunction};
+
+        let calls = Response::ToolCalls {
+            content: String::new(),
+            calls: vec![ToolCall::new(
+                "c1".to_string(),
+                ToolFunction {
+                    name: "echo".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            )],
+        };
+        let tools = Tools::new(vec![Arc::new(EchoTool)], &[]).unwrap();
+        let (mut client, join, _ws, _sock) =
+            spawn_listener_with_tools(vec![Ok(calls), Ok(Response::Text("done".into()))], tools)
+                .await;
+
+        client.recv().await; // greeting
+        client.send("go").await;
+
+        // Without sending /verbose, tool activity must stream before
+        // the final response.
+        let mut saw_activity = false;
+        loop {
+            match client.recv().await {
+                ServerMsg::Activity { .. } => saw_activity = true,
+                ServerMsg::Response { content } => {
+                    assert_eq!(content, "done");
+                    break;
+                }
+                other => panic!("expected Activity or Response, got {other:?}"),
+            }
+        }
+        assert!(saw_activity, "no activity frames forwarded by default");
+
         join.abort();
     }
 

@@ -106,8 +106,11 @@ while let Ok(event) = rx.try_recv() { /* display */ }
 
 Channel-local UI state, intercepted before dispatch:
 
-- **Socket**: toggled per connection in `parse_line`. Resets on disconnect.
-- **Telegram**: toggled per polling session in `handle_message`. Resets on
+- **Socket**: toggled per connection in `parse_line`; defaults to **on**
+  so one-shot clients see activity without a toggle round trip. Resets
+  on disconnect.
+- **Telegram**: toggled per polling session in `handle_message`; defaults
+  to off (activity as separate Telegram messages is noisy). Resets on
   daemon restart.
 - **Heartbeat**: no toggle (passes `None` for activity sender).
 
