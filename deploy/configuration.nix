@@ -44,6 +44,7 @@ in
     settings = {
       provider = {
         model = "z-ai/glm-5.2";
+        max_tokens = 32768;
         model_overrides = {
           explore = "deepseek/deepseek-v4-pro";
           summarizer = "deepseek/deepseek-v4-flash";
