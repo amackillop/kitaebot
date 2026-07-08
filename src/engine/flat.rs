@@ -14,7 +14,7 @@ use crate::config::ContextConfig;
 use crate::error::EngineError;
 use crate::session::Session;
 use crate::tools::Tool;
-use crate::types::Message;
+use crate::types::{Message, estimate_tokens_from_chars};
 
 use super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
@@ -93,7 +93,7 @@ impl FlatSession {
             .iter()
             .map(Message::char_count)
             .sum();
-        (system_prompt_chars + message_chars) / 4
+        estimate_tokens_from_chars(system_prompt_chars + message_chars)
     }
 
     /// Token budget at which compaction triggers.
@@ -289,7 +289,7 @@ impl ContextEngine for FlatSession {
                 sessions.push(SessionInfo {
                     name,
                     message_count: s.len(),
-                    estimated_tokens: chars / 4,
+                    estimated_tokens: estimate_tokens_from_chars(chars),
                 });
             }
         }

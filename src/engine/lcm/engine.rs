@@ -35,7 +35,7 @@ use tracing::{error, info};
 use crate::config::ContextConfig;
 use crate::error::EngineError;
 use crate::tools::Tool;
-use crate::types::{Message, ToolCall, ToolFunction};
+use crate::types::{Message, ToolCall, ToolFunction, estimate_tokens};
 
 use super::super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
@@ -199,11 +199,11 @@ impl LcmEngine {
     ) -> Result<(Message, Option<LargeFileRow>), EngineError> {
         let threshold = self.ctx.lcm.large_file_threshold as usize;
         match msg {
-            Message::User { content } if content.len() / 4 > threshold => {
+            Message::User { content } if estimate_tokens(&content) > threshold => {
                 let (reference, row) = self.externalize(&content, None).await?;
                 Ok((Message::User { content: reference }, Some(row)))
             }
-            Message::Tool { call_id, content } if content.len() / 4 > threshold => {
+            Message::Tool { call_id, content } if estimate_tokens(&content) > threshold => {
                 let hint = self.file_read_path_hint(&call_id).await;
                 let (reference, row) = self.externalize(&content, hint).await?;
                 Ok((
@@ -272,7 +272,7 @@ impl LcmEngine {
         )
         .await;
 
-        let token_count = content.len() / 4;
+        let token_count = estimate_tokens(content);
         info!(
             file_id,
             tokens = token_count,
@@ -542,7 +542,7 @@ fn push_message_sync(
 ) -> Result<(), EngineError> {
     let role = role_str(msg);
     let content = msg.content().to_string();
-    let token_count = i64::try_from(msg.char_count() / 4).unwrap_or(i64::MAX);
+    let token_count = i64::try_from(msg.token_estimate()).unwrap_or(i64::MAX);
 
     let tx = conn.transaction().map_err(|e| storage_err(&e))?;
 

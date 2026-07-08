@@ -635,6 +635,7 @@ mod tests {
     use super::*;
     use crate::engine::lcm::schema;
     use crate::engine::lcm::summarize::EscalationLevel;
+    use crate::types::estimate_tokens;
 
     fn fresh_conn() -> (tempfile::TempDir, Connection) {
         let dir = tempfile::tempdir().unwrap();
@@ -652,7 +653,11 @@ mod tests {
         conn.execute(
             "INSERT INTO messages(conversation_id, seq, role, content, token_count, created_at) \
              VALUES (1, ?1, 'user', ?2, ?3, '2025-01-01')",
-            params![seq, content, i64::try_from(content.len() / 4).unwrap()],
+            params![
+                seq,
+                content,
+                i64::try_from(estimate_tokens(content)).unwrap()
+            ],
         )
         .unwrap();
         conn.last_insert_rowid()
@@ -682,7 +687,7 @@ mod tests {
             content: content.to_string(),
             level: EscalationLevel::Normal,
             input_tokens: 100,
-            output_tokens: content.len() / 4,
+            output_tokens: estimate_tokens(content),
         }
     }
 
@@ -690,7 +695,7 @@ mod tests {
         ChunkRow {
             ordinal,
             message_id,
-            token_count: i64::try_from(content.len() / 4).unwrap(),
+            token_count: i64::try_from(estimate_tokens(content)).unwrap(),
             created_at: "2025-01-01".into(),
             message: Message::User {
                 content: content.into(),

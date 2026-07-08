@@ -86,6 +86,30 @@ impl Message {
             _ => self.content().len(),
         }
     }
+
+    /// Estimated token count for this message via [`estimate_tokens_from_chars`].
+    pub fn token_estimate(&self) -> usize {
+        estimate_tokens_from_chars(self.char_count())
+    }
+}
+
+/// Estimate a token count from a character count (`chars / 4`).
+///
+/// Callers that sum characters across several sources should divide
+/// once through this function rather than summing per-source estimates,
+/// to avoid accumulating flooring error.
+pub fn estimate_tokens_from_chars(chars: usize) -> usize {
+    chars / 4
+}
+
+/// Estimate the token count of a string via the `chars / 4` heuristic.
+///
+/// This is the single token estimator used across the codebase (engines,
+/// compaction, LCM tools). It undercounts structure-heavy content like
+/// JSON but is cheap and consistent; observed `prompt_tokens` from the
+/// provider corrects for drift where it matters (see spec 14).
+pub fn estimate_tokens(s: &str) -> usize {
+    estimate_tokens_from_chars(s.len())
 }
 
 /// LLM response - either final text or tool call requests.

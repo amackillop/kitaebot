@@ -28,7 +28,7 @@ use std::fmt::Write as _;
 use tracing::{debug, warn};
 
 use super::super::{SummarizeFn, format_messages_for_summary};
-use crate::types::Message;
+use crate::types::{Message, estimate_tokens};
 
 /// Level-1 (normal) instruction block. Asks for prose that retains
 /// specifics: decisions, file paths, commands, tool results.
@@ -124,33 +124,9 @@ pub struct EscalationOutcome {
     pub output_tokens: usize,
 }
 
-/// Estimate token count via the `chars / 4` heuristic used everywhere
-/// else in the engine.
-pub fn estimate_tokens(s: &str) -> usize {
-    s.len() / 4
-}
-
 /// Estimate token count for a slice of messages.
 pub fn estimate_messages_tokens(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .map(|m| match m {
-            Message::User { content }
-            | Message::Assistant { content }
-            | Message::System { content }
-            | Message::Tool { content, .. } => estimate_tokens(content),
-            Message::ToolCalls { content, calls } => {
-                estimate_tokens(content)
-                    + calls
-                        .iter()
-                        .map(|c| {
-                            estimate_tokens(&c.function.name)
-                                + estimate_tokens(&c.function.arguments)
-                        })
-                        .sum::<usize>()
-            }
-        })
-        .sum()
+    messages.iter().map(Message::token_estimate).sum()
 }
 
 /// Run a chunk of messages through the escalation ladder.

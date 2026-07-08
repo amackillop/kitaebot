@@ -27,6 +27,7 @@ use tracing::debug;
 use super::explore::extract_file_ids;
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolCtx};
+use crate::types::estimate_tokens;
 
 /// Default result limit for `lcm_grep`. Generous but capped so a
 /// pathological query cannot dump the whole conversation back to the
@@ -676,7 +677,7 @@ fn expand(
 
         let chunk =
             format!("## {id} (kind={kind}, depth={node_depth}, level={level})\n{content}\n\n");
-        if tokens_used as usize + chunk.len() / 4 > cap {
+        if tokens_used as usize + estimate_tokens(&chunk) > cap {
             let _ = writeln!(
                 out,
                 "[truncated at token_cap={cap}; remaining frontier: {} node(s)]",
@@ -714,12 +715,12 @@ fn expand(
                 for r in rows {
                     let (mid, role, mc) = r.map_err(|e| exec_err(&e))?;
                     let block = format!("### message_id={mid} role={role}\n{mc}\n\n");
-                    if tokens_used as usize + block.len() / 4 > cap {
+                    if tokens_used as usize + estimate_tokens(&block) > cap {
                         let _ = writeln!(out, "[truncated at token_cap={cap}]");
                         return Ok(out);
                     }
                     out.push_str(&block);
-                    tokens_used += u32::try_from(mc.len() / 4).unwrap_or(u32::MAX);
+                    tokens_used += u32::try_from(estimate_tokens(&mc)).unwrap_or(u32::MAX);
 
                     // Externalized payloads: the message stores a
                     // `<file>` reference; the original bytes live on
@@ -790,7 +791,7 @@ fn append_payload(
     );
     let remaining_chars = cap.saturating_sub(tokens_used as usize).saturating_mul(4);
     if payload.len() <= remaining_chars {
-        let tokens = u32::try_from(payload.len() / 4).unwrap_or(u32::MAX);
+        let tokens = u32::try_from(estimate_tokens(&payload)).unwrap_or(u32::MAX);
         let _ = write!(out, "### {file_id} (externalized payload)\n{payload}\n\n");
         PayloadAppend::Fit(tokens)
     } else {
@@ -846,7 +847,7 @@ mod tests {
                 seq,
                 role,
                 content,
-                i64::try_from(content.len() / 4).unwrap_or(0),
+                i64::try_from(estimate_tokens(content)).unwrap_or(0),
             ],
         )
         .unwrap();
