@@ -13,7 +13,10 @@
 //! `large_files` row records its metadata, and `messages.content`
 //! stores a compact `<file>` reference with an exploration summary
 //! (see `explore.rs`). The reference plus the on-disk payload
-//! together remain the source of truth.
+//! together remain the source of truth. User messages threshold on
+//! `lcm.large_file_threshold` with an LLM summary; tool results on
+//! the lower `context.tool_output_tokens` with a free head+tail
+//! excerpt.
 //!
 //! Active session persistence reuses `memory/active_session` — the
 //! same plain-text file flat sessions write to, so switching engines
@@ -188,24 +191,31 @@ impl LcmEngine {
 
     /// Intercept oversized user and tool payloads before storage.
     ///
-    /// User and tool messages whose content exceeds
-    /// `large_file_threshold` estimated tokens are externalized: the
-    /// message comes back with its content replaced by a `<file>`
-    /// reference, alongside the `large_files` row to insert with it.
-    /// Everything else passes through untouched.
+    /// Oversized content is externalized: the message comes back with
+    /// its content replaced by a `<file>` reference, alongside the
+    /// `large_files` row to insert with it. User messages threshold on
+    /// `lcm.large_file_threshold` and get the LLM exploration summary;
+    /// tool results threshold on the much lower `tool_output_tokens`
+    /// and get a free mechanical excerpt, because they arrive on every
+    /// turn. Everything else passes through untouched.
     async fn intercept_large(
         &mut self,
         msg: Message,
     ) -> Result<(Message, Option<LargeFileRow>), EngineError> {
-        let threshold = self.ctx.lcm.large_file_threshold as usize;
+        let user_threshold = self.ctx.lcm.large_file_threshold as usize;
+        let tool_threshold = self.ctx.tool_output_tokens as usize;
         match msg {
-            Message::User { content } if estimate_tokens(&content) > threshold => {
-                let (reference, row) = self.externalize(&content, None).await?;
+            Message::User { content } if estimate_tokens(&content) > user_threshold => {
+                let (reference, row) = self
+                    .externalize(&content, None, SummaryStrategy::Explore)
+                    .await?;
                 Ok((Message::User { content: reference }, Some(row)))
             }
-            Message::Tool { call_id, content } if estimate_tokens(&content) > threshold => {
+            Message::Tool { call_id, content } if estimate_tokens(&content) > tool_threshold => {
                 let hint = self.file_read_path_hint(&call_id).await;
-                let (reference, row) = self.externalize(&content, hint).await?;
+                let (reference, row) = self
+                    .externalize(&content, hint, SummaryStrategy::Mechanical)
+                    .await?;
                 Ok((
                     Message::Tool {
                         call_id,
@@ -247,6 +257,7 @@ impl LcmEngine {
         &self,
         content: &str,
         path_hint: Option<String>,
+        strategy: SummaryStrategy,
     ) -> Result<(String, LargeFileRow), EngineError> {
         let file_id = explore::file_id(content);
         let payload_dir = self.payloads_dir();
@@ -264,13 +275,18 @@ impl LcmEngine {
         // break every structured parser.
         let unframed = explore::strip_tool_framing(content);
         let kind = explore::detect_kind(path_hint.as_deref(), &unframed);
-        let summary = explore::exploration_summary(
-            &unframed,
-            path_hint.as_deref(),
-            &self.summarize,
-            self.ctx.lcm.large_file_summary_tokens,
-        )
-        .await;
+        let summary = match strategy {
+            SummaryStrategy::Explore => {
+                explore::exploration_summary(
+                    &unframed,
+                    path_hint.as_deref(),
+                    &self.summarize,
+                    self.ctx.lcm.large_file_summary_tokens,
+                )
+                .await
+            }
+            SummaryStrategy::Mechanical => explore::mechanical_excerpt(&unframed),
+        };
 
         let token_count = estimate_tokens(content);
         info!(
@@ -293,6 +309,16 @@ impl LcmEngine {
         };
         Ok((reference, row))
     }
+}
+
+/// How the exploration summary of an externalized payload is built.
+enum SummaryStrategy {
+    /// Type-aware exploration; plain text may call the LLM.
+    /// Used for user payloads, which are rare and worth the spend.
+    Explore,
+    /// Head+tail excerpt, no LLM call. Used for tool output, which
+    /// is too frequent to summarize per event.
+    Mechanical,
 }
 
 /// Metadata for a `large_files` insert, produced by
@@ -1036,10 +1062,14 @@ mod tests {
         (engine, dir)
     }
 
-    /// Engine whose `large_file_threshold` is 10 tokens (40 bytes),
-    /// so tests can trigger externalization with small payloads.
+    /// Engine whose externalization thresholds are 10 tokens (40
+    /// bytes) for both user and tool content, so tests can trigger
+    /// externalization with small payloads.
     fn temp_engine_small_threshold() -> (LcmEngine, tempfile::TempDir) {
-        let mut ctx = ContextConfig::default();
+        let mut ctx = ContextConfig {
+            tool_output_tokens: 10,
+            ..ContextConfig::default()
+        };
         ctx.lcm.large_file_threshold = 10;
         temp_engine_with_ctx(ctx)
     }
@@ -1166,7 +1196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn framed_tool_result_is_explored_as_json() {
+    async fn framed_tool_result_excerpt_strips_framing() {
         use std::fmt::Write as _;
 
         let (mut engine, dir) = temp_engine_small_threshold();
@@ -1205,9 +1235,12 @@ mod tests {
             .await
             .unwrap();
 
+        // The mechanical excerpt sees the unframed file content:
+        // no wrapper tags, no line-number columns.
         let content = stored_content(&engine, 1);
-        assert!(content.contains("Structured summary (JSON)"));
-        assert!(content.contains("users: array"));
+        assert!(content.contains("\"users\": ["));
+        assert!(!content.contains("<tool_output"));
+        assert!(!content.contains("1\t{"));
 
         // The disk copy stays verbatim, framing intact.
         let file_id = explore::file_id(&framed);
@@ -1220,6 +1253,94 @@ mod tests {
         )
         .unwrap();
         assert_eq!(on_disk, framed);
+    }
+
+    /// A `SummarizeFn` that panics when called, proving a code path
+    /// never invokes the LLM.
+    fn panicking_summarize() -> SummarizeFn {
+        Arc::new(|_prompt, _messages| panic!("summarizer must not be called for tool output"))
+    }
+
+    #[tokio::test]
+    async fn oversized_tool_output_externalized_without_summarizer() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        let ctx = ContextConfig {
+            tool_output_tokens: 10,
+            ..ContextConfig::default()
+        };
+        let mut engine = LcmEngine::new(
+            &dir.path().join("lcm.db"),
+            memory_dir,
+            ctx,
+            panicking_summarize(),
+        )
+        .unwrap();
+
+        let payload = {
+            use std::fmt::Write as _;
+            let mut s = String::new();
+            for i in 0..100 {
+                writeln!(s, "log line {i}").unwrap();
+            }
+            s
+        };
+        engine
+            .push_message(Message::Tool {
+                call_id: "c1".into(),
+                content: payload.clone(),
+            })
+            .await
+            .unwrap();
+
+        let content = stored_content(&engine, 0);
+        assert!(content.starts_with("<file id=\"file_"));
+        assert!(content.contains("log line 0"));
+        assert!(content.contains("log line 99"));
+        assert!(content.contains("bytes omitted]"));
+        assert!(!content.contains("log line 50\n"));
+
+        // The excerpt is the stored exploration summary, so
+        // lcm_describe surfaces it.
+        let summary: String = {
+            let conn = engine.conn.lock().unwrap();
+            conn.query_row("SELECT exploration_summary FROM large_files", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert!(summary.contains("bytes omitted]"));
+    }
+
+    #[tokio::test]
+    async fn tool_threshold_is_lower_than_user_threshold() {
+        // 1000 tokens of content: over tool_output_tokens (10), well
+        // under large_file_threshold (default 25k). The tool message
+        // externalizes; the identical user message stays inline.
+        let ctx = ContextConfig {
+            tool_output_tokens: 10,
+            ..ContextConfig::default()
+        };
+        let (mut engine, _dir) = temp_engine_with_ctx(ctx);
+        let payload = "w".repeat(4000);
+
+        engine
+            .push_message(Message::Tool {
+                call_id: "c1".into(),
+                content: payload.clone(),
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::User {
+                content: payload.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert!(stored_content(&engine, 0).starts_with("<file id=\"file_"));
+        assert_eq!(stored_content(&engine, 1), payload);
     }
 
     #[tokio::test]

@@ -97,6 +97,52 @@ pub fn format_file_reference(
     )
 }
 
+/// Lines kept at each end of a [`mechanical_excerpt`].
+const EXCERPT_LINES_PER_SIDE: usize = 30;
+/// Byte cap per excerpt side, so pathological few-line output (a
+/// minified JSON blob, say) still yields a small excerpt.
+const EXCERPT_BYTES_PER_SIDE: usize = 2_000;
+
+/// Free head+tail excerpt for externalized tool output.
+///
+/// Tool results arrive on every turn, so unlike user payloads they
+/// get no LLM exploration pass: the excerpt is the first and last
+/// ~30 lines (byte-capped per side) with an omission marker in the
+/// middle. Tail included deliberately: build and test logs put the
+/// failure at the end.
+pub fn mechanical_excerpt(content: &str) -> String {
+    let head_end: usize = content
+        .split_inclusive('\n')
+        .take(EXCERPT_LINES_PER_SIDE)
+        .map(str::len)
+        .sum();
+    let head = prefix_at_char_boundary(&content[..head_end], EXCERPT_BYTES_PER_SIDE);
+    let tail_len: usize = content
+        .split_inclusive('\n')
+        .rev()
+        .take(EXCERPT_LINES_PER_SIDE)
+        .map(str::len)
+        .sum();
+    let tail =
+        suffix_at_char_boundary(&content[content.len() - tail_len..], EXCERPT_BYTES_PER_SIDE);
+
+    // Head and tail meeting or overlapping means nothing would be
+    // omitted; keep the content whole.
+    if head.len() + tail.len() >= content.len() {
+        return content.to_string();
+    }
+    let omitted = &content[head.len()..content.len() - tail.len()];
+    format!(
+        "Tool output excerpt ({} lines, {} bytes total):\n{}\n... [{} lines / {} bytes omitted] ...\n{}",
+        content.lines().count(),
+        content.len(),
+        head.trim_end_matches('\n'),
+        omitted.lines().count(),
+        omitted.len(),
+        tail,
+    )
+}
+
 static FILE_READ_TRAILER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\(\d+ lines shown, \d+ total, \d+ bytes\)$").expect("valid regex")
 });
@@ -660,6 +706,49 @@ mod tests {
         // Too short, too long, and non-hex must not match.
         let content = "file_0123456789abcde file_0123456789abcdef0 file_0123456789abcdeg";
         assert_eq!(extract_file_ids(content), Vec::<String>::new());
+    }
+
+    // ── mechanical excerpt ────────────────────────────────────────
+
+    #[test]
+    fn mechanical_excerpt_keeps_head_and_tail() {
+        use std::fmt::Write as _;
+        let mut content = String::new();
+        for i in 0..200 {
+            writeln!(content, "line {i}").unwrap();
+        }
+        let excerpt = mechanical_excerpt(&content);
+        assert!(excerpt.starts_with("Tool output excerpt (200 lines,"));
+        assert!(excerpt.contains("line 0\n"));
+        assert!(excerpt.contains("line 29\n"));
+        assert!(excerpt.contains("line 170\n"));
+        assert!(excerpt.contains("line 199\n"));
+        assert!(!excerpt.contains("line 100\n"));
+        assert!(excerpt.contains("[140 lines / "));
+        assert!(excerpt.contains(" bytes omitted]"));
+    }
+
+    #[test]
+    fn mechanical_excerpt_passes_small_content_through() {
+        let content = "one\ntwo\nthree";
+        assert_eq!(mechanical_excerpt(content), content);
+    }
+
+    #[test]
+    fn mechanical_excerpt_byte_caps_few_line_content() {
+        // One giant line: the line limit never kicks in, the byte cap
+        // must.
+        let content = "x".repeat(100_000);
+        let excerpt = mechanical_excerpt(&content);
+        assert!(excerpt.len() < 5_000);
+        assert!(excerpt.contains("bytes omitted]"));
+    }
+
+    #[test]
+    fn mechanical_excerpt_is_multibyte_safe() {
+        let content = "€".repeat(50_000);
+        let excerpt = mechanical_excerpt(&content);
+        assert!(excerpt.len() < content.len());
     }
 
     // ── tool framing ──────────────────────────────────────────────

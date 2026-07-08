@@ -188,6 +188,12 @@ pub struct ContextConfig {
     /// Percentage of `max_tokens` at which compaction triggers (1..=100).
     /// Used by the flat engine; ignored by LCM (see [`LcmConfig`]).
     pub budget_percent: u8,
+    /// Tool result content above this many estimated tokens gets
+    /// size-limited by the engine: LCM externalizes it to disk with a
+    /// mechanical excerpt, flat truncates it tail-biased. Much lower
+    /// than `lcm.large_file_threshold` because tool output arrives on
+    /// every turn. Must be > 0.
+    pub tool_output_tokens: u32,
     /// LCM-specific tuning. Ignored when `engine = "flat"`.
     pub lcm: LcmConfig,
 }
@@ -303,6 +309,7 @@ impl Default for ContextConfig {
             engine: EngineKind::default(),
             max_tokens: 200_000,
             budget_percent: 80,
+            tool_output_tokens: 4096,
             lcm: LcmConfig::default(),
         }
     }
@@ -319,6 +326,30 @@ impl Default for LcmConfig {
             large_file_threshold: 25_000,
             large_file_summary_tokens: 400,
         }
+    }
+}
+
+impl ContextConfig {
+    /// Section-local invariants. The cross-section check against
+    /// `provider.max_tokens` (output reserve) lives in
+    /// [`Config::validate`].
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_tokens == 0 {
+            return Err(ConfigError::Invalid(
+                "context max_tokens must be > 0".into(),
+            ));
+        }
+        if self.budget_percent == 0 || self.budget_percent > 100 {
+            return Err(ConfigError::Invalid(
+                "context budget_percent must be 1..=100".into(),
+            ));
+        }
+        if self.tool_output_tokens == 0 {
+            return Err(ConfigError::Invalid(
+                "context tool_output_tokens must be > 0".into(),
+            ));
+        }
+        self.lcm.validate()
     }
 }
 
@@ -499,22 +530,12 @@ impl Config {
                 "sub_agents max_iterations must be > 0".into(),
             ));
         }
-        if self.context.max_tokens == 0 {
-            return Err(ConfigError::Invalid(
-                "context max_tokens must be > 0".into(),
-            ));
-        }
+        self.context.validate()?;
         if self.context.max_tokens <= self.provider.max_tokens {
             return Err(ConfigError::Invalid(
                 "context max_tokens must be > provider max_tokens (output reserve)".into(),
             ));
         }
-        if self.context.budget_percent == 0 || self.context.budget_percent > 100 {
-            return Err(ConfigError::Invalid(
-                "context budget_percent must be 1..=100".into(),
-            ));
-        }
-        self.context.lcm.validate()?;
         if self.heartbeat.interval_secs == 0 {
             return Err(ConfigError::Invalid(
                 "heartbeat interval_secs must be > 0".into(),
@@ -836,7 +857,20 @@ heartbeat = \"cheap/heartbeat\"
         let cfg = load_toml("").unwrap();
         assert_eq!(cfg.context.max_tokens, 200_000);
         assert_eq!(cfg.context.budget_percent, 80);
+        assert_eq!(cfg.context.tool_output_tokens, 4096);
         assert_eq!(cfg.context.engine, EngineKind::Flat);
+    }
+
+    #[test]
+    fn context_parse_tool_output_tokens() {
+        let cfg = load_toml("[context]\ntool_output_tokens = 8000\n").unwrap();
+        assert_eq!(cfg.context.tool_output_tokens, 8000);
+    }
+
+    #[test]
+    fn context_reject_zero_tool_output_tokens() {
+        let result = load_toml("[context]\ntool_output_tokens = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 
     #[test]

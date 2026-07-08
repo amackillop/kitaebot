@@ -452,14 +452,21 @@ Tool results frequently include file contents that individually approach or
 exceed the context budget. A single large log file or codebase dump can consume
 the entire window in one turn.
 
-**Threshold**: files above `large_file_threshold` tokens (default: 25,000) are
-stored externally rather than inlined into the active context.
+**Thresholds**: two, by message role. User content above
+`large_file_threshold` tokens (default: 25,000) is stored externally rather
+than inlined into the active context. Tool results threshold on the much
+lower `context.tool_output_tokens` (default: 4,096) because they arrive on
+every turn; instead of an LLM exploration summary they get a free
+**mechanical excerpt** — first and last ~30 lines (byte-capped per side)
+with an omission marker in the middle. The tail matters: build and test
+logs put the failure at the end.
 
-**On push_message**: when the engine receives a tool result containing file
-content above the threshold, it:
+**On push_message**: when the engine receives content above the applicable
+threshold, it:
 
 1. Stores the file path, size, and metadata in the `large_files` table.
-2. Generates an **exploration summary** via a type-aware dispatcher.
+2. Generates an **exploration summary**: a type-aware dispatcher for user
+   payloads, the mechanical excerpt for tool results.
 3. Replaces the file content in the active context with a compact reference:
 
 ```
@@ -857,6 +864,7 @@ externalized large-file count/bytes.
 engine = "lcm"              # "lcm" or "flat"
 max_tokens = 200000
 budget_percent = 80         # flat session compaction trigger
+tool_output_tokens = 4096   # engine-level tool result size policy
 
 [context.lcm]
 fresh_tail_count = 32
@@ -873,6 +881,7 @@ large_file_summary_tokens = 400
 | `context.engine` | `flat` | Which engine implementation to use |
 | `context.max_tokens` | `200000` | Model context window size. Must be > `provider.max_tokens`; engines see the window minus that output reserve. |
 | `context.budget_percent` | `80` | Flat-session compaction trigger (1-100). Ignored by LCM, which uses the dual thresholds below. |
+| `context.tool_output_tokens` | `4096` | Tool result content above this many estimated tokens is size-limited by the engine: LCM externalizes it with a mechanical excerpt. Must be > 0. |
 | `context.lcm.fresh_tail_count` | `32` | Protected tail size (raw messages exempt from compaction). Must be > 0. |
 | `context.lcm.leaf_chunk_tokens` | `20000` | Max tokens per leaf or condensed chunk |
 | `context.lcm.min_condensed_fanout` | `2` | Minimum children to form a condensed summary. Must be >= 2. |
