@@ -183,7 +183,7 @@ All values configurable via `config.toml`:
 |------------|---------|------------|
 | Max iterations per turn | 100 | `agent.max_iterations` |
 | Exec tool timeout | 60s | `tools.exec.timeout_secs` |
-| Provider response max tokens | 4096 | `provider.max_tokens` |
+| Provider response max tokens | 32768 | `provider.max_tokens` |
 | Context window budget | 200,000 tokens at 80% | `context.max_tokens`, `context.budget_percent` |
 
 Note: `provider.max_tokens` caps the LLM's response length. `context.max_tokens`

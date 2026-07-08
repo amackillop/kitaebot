@@ -39,7 +39,7 @@ Requests are serialized to the OpenAI chat completions format:
     "model": "...",
     "messages": [...],
     "tools": [...],
-    "max_tokens": 4096,
+    "max_tokens": 32768,
     "temperature": 0.7
 }
 ```
@@ -137,7 +137,7 @@ Configuration via `config.toml` under `[provider]`:
 |-------|---------|-------------|
 | `api` | `openrouter` | Backend endpoint selection |
 | `model` | `arcee-ai/trinity-large-preview:free` | Model identifier |
-| `max_tokens` | 4096 | Max tokens in LLM response |
+| `max_tokens` | 32768 | Max tokens in LLM response. Reasoning tokens count against it (OpenRouter), so it must cover reasoning plus output |
 | `temperature` | 0.7 | Sampling temperature |
 | `model_overrides.explore` | unset | Model for `explore` sub-agents |
 | `model_overrides.worker` | unset | Model for `worker` sub-agents |

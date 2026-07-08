@@ -61,6 +61,9 @@ pub struct ProviderConfig {
     /// `OpenAI`-compatible API to use.
     pub api: Api,
     pub model: String,
+    /// Output budget per request. Reasoning tokens count against it on
+    /// `OpenRouter`, so a small value starves reasoning models into
+    /// empty responses (`finish_reason = "length"`).
     pub max_tokens: u32,
     pub temperature: f32,
     /// Per-role model overrides. Unset roles use `model`.
@@ -438,7 +441,7 @@ impl Default for ProviderConfig {
         Self {
             api: Api::default(),
             model: "arcee-ai/trinity-large-preview:free".to_string(),
-            max_tokens: 4096,
+            max_tokens: 32_768,
             temperature: 0.7,
             model_overrides: ModelOverrides::default(),
         }
@@ -622,7 +625,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config::load(dir.path()).unwrap();
         assert_eq!(cfg.provider.model, "arcee-ai/trinity-large-preview:free");
-        assert_eq!(cfg.provider.max_tokens, 4096);
+        assert_eq!(cfg.provider.max_tokens, 32_768);
         assert!((cfg.provider.temperature - 0.7).abs() < f32::EPSILON);
         assert_eq!(cfg.agent.max_iterations, 100);
         assert_eq!(cfg.tools.exec.timeout_secs, 600);
@@ -657,7 +660,7 @@ mod tests {
     #[test]
     fn load_empty_string_returns_defaults() {
         let cfg = load_toml("").unwrap();
-        assert_eq!(cfg.provider.max_tokens, 4096);
+        assert_eq!(cfg.provider.max_tokens, 32_768);
         assert_eq!(cfg.agent.max_iterations, 100);
     }
 
@@ -666,7 +669,7 @@ mod tests {
         let cfg = load_toml("[provider]\nmodel = \"anthropic/claude-sonnet-4\"\n").unwrap();
         assert_eq!(cfg.provider.model, "anthropic/claude-sonnet-4");
         // Other fields keep defaults
-        assert_eq!(cfg.provider.max_tokens, 4096);
+        assert_eq!(cfg.provider.max_tokens, 32_768);
         assert_eq!(cfg.agent.max_iterations, 100);
     }
 
