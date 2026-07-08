@@ -90,8 +90,9 @@ fn snippet(s: &str) -> String {
 #[derive(Deserialize, JsonSchema)]
 struct GrepArgs {
     /// Search pattern. FTS5 query syntax in `fts` mode (token search,
-    /// boolean operators, phrase queries). Rust regex syntax in
-    /// `regex` mode.
+    /// boolean operators, phrase queries); patterns that fail to parse
+    /// as FTS5 syntax (e.g. dotted literals like `isl-0.20`) are
+    /// retried as a quoted phrase. Rust regex syntax in `regex` mode.
     pattern: String,
     /// `fts` (default) or `regex`.
     #[serde(default)]
@@ -175,6 +176,18 @@ impl Tool for LcmGrep {
     }
 }
 
+/// Quote a pattern as an FTS5 phrase literal: wrapped in double
+/// quotes, embedded quotes doubled. `isl-0.20` becomes `"isl-0.20"`,
+/// which FTS5 tokenizes into an adjacent-token phrase instead of
+/// choking on the punctuation.
+fn fts_phrase(pattern: &str) -> String {
+    format!("\"{}\"", pattern.replace('"', "\"\""))
+}
+
+fn is_fts_syntax_error(e: &ToolError) -> bool {
+    matches!(e, ToolError::ExecutionFailed(msg) if msg.contains("fts5: syntax error"))
+}
+
 fn run_grep(
     conn: &Connection,
     conversation_id: i64,
@@ -183,15 +196,26 @@ fn run_grep(
     scope: &str,
     limit: u32,
 ) -> Result<String, ToolError> {
-    let mut hits: Vec<String> = Vec::new();
     let lim = i64::from(limit);
 
-    if matches!(scope, "messages" | "both") {
-        hits.extend(grep_messages(conn, conversation_id, pattern, mode, lim)?);
-    }
-    if matches!(scope, "summaries" | "both") {
-        hits.extend(grep_summaries(conn, conversation_id, pattern, mode, lim)?);
-    }
+    let run = |pattern: &str| -> Result<Vec<String>, ToolError> {
+        let mut hits: Vec<String> = Vec::new();
+        if matches!(scope, "messages" | "both") {
+            hits.extend(grep_messages(conn, conversation_id, pattern, mode, lim)?);
+        }
+        if matches!(scope, "summaries" | "both") {
+            hits.extend(grep_summaries(conn, conversation_id, pattern, mode, lim)?);
+        }
+        Ok(hits)
+    };
+
+    // LLMs routinely pass literal strings full of FTS5-hostile
+    // punctuation. When the raw pattern is not valid query syntax,
+    // retry it as a quoted phrase instead of surfacing the parse error.
+    let hits = match run(pattern) {
+        Err(e) if mode == "fts" && is_fts_syntax_error(&e) => run(&fts_phrase(pattern))?,
+        other => other?,
+    };
 
     if hits.is_empty() {
         Ok(format!("No matches for {pattern:?} in {scope} ({mode})."))
@@ -873,6 +897,55 @@ mod tests {
         assert!(out.contains("brown fox"), "missing match in: {out}");
         assert!(out.contains("message_id="), "missing id in: {out}");
         assert!(!out.contains("lazy dog"), "unrelated row leaked: {out}");
+    }
+
+    #[tokio::test]
+    async fn lcm_grep_fts_dotted_literal_falls_back_to_phrase() {
+        let (_dir, db) = fresh_db();
+        let writer = schema::open(&db).unwrap();
+        insert_message(
+            &writer,
+            1,
+            "tool",
+            "/nix/store/8r5lzavlng6mcm3jvdny0d7wjhpcdk76-isl-0.20.drv",
+        );
+        insert_message(&writer, 1, "user", "unrelated");
+
+        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        // Raw `isl-0.20` is an FTS5 syntax error; the phrase retry
+        // must find the row anyway.
+        let out = tool
+            .execute(
+                serde_json::json!({"pattern": "isl-0.20"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("isl-0.20.drv"), "missing match in: {out}");
+        assert!(!out.contains("unrelated"), "unrelated row leaked: {out}");
+    }
+
+    #[tokio::test]
+    async fn lcm_grep_fts_embedded_quotes_do_not_error() {
+        let (_dir, db) = fresh_db();
+        let writer = schema::open(&db).unwrap();
+        insert_message(&writer, 1, "user", "he said \"hello.world\" twice");
+
+        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let out = tool
+            .execute(
+                serde_json::json!({"pattern": "said \"hello.world\""}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("hello.world"), "missing match in: {out}");
+    }
+
+    #[test]
+    fn fts_phrase_quotes_and_escapes() {
+        assert_eq!(fts_phrase("isl-0.20"), "\"isl-0.20\"");
+        assert_eq!(fts_phrase("a \"b\" c"), "\"a \"\"b\"\" c\"");
     }
 
     #[tokio::test]

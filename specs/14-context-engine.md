@@ -727,7 +727,9 @@ The LCM engine contributes three tools via `tools()`:
 
 `fts` mode uses SQLite FTS5 — token-based matching with boolean operators
 (`AND`, `OR`, `NOT`, phrase queries). This is the fast path for keyword
-searches.
+searches. Patterns that fail FTS5 parsing (punctuation-heavy literals like
+`isl-0.20`, which models pass routinely) are retried once as a quoted
+phrase instead of surfacing the syntax error.
 
 `regex` mode uses a `REGEXP` user function registered on the SQLite connection.
 It scans the `content` column directly (no index), so it is slower than FTS but
