@@ -122,7 +122,7 @@ impl Tool for Grep {
             if results.is_empty() {
                 Ok("No matches found.".to_string())
             } else {
-                Ok(super::truncate_output(&results, 10 * 1024).into_owned())
+                Ok(super::truncate_output(&results, super::TOOL_OUTPUT_CEILING_BYTES).into_owned())
             }
         })
     }

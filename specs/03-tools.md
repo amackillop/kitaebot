@@ -78,7 +78,11 @@ hardcoded, so typos are caught by tests instead.
 
 - **`truncate_output`** — UTF-8 aware string truncation with byte count
   reporting. Used by `exec`, `grep`, `web_fetch`, and any tool with large
-  output.
+  output. Most callers pass `TOOL_OUTPUT_CEILING_BYTES` (5 MiB, not
+  configurable): a memory-protection ceiling, not context policy.
+  Context-size limits live in the engines (`context.tool_output_tokens`,
+  spec 14), which externalize or truncate tool results long before the
+  ceiling matters.
 - **`PathGuard`** — workspace-confined path resolution. Rejects null bytes,
   `../`, and absolute paths. Canonicalizes and verifies the result is under the
   workspace root. Provides `resolve()` for existing files and `resolve_new()`
@@ -166,7 +170,7 @@ Stderr is prefixed with `STDERR:` and separated from stdout.
 | Restriction | Default | Config key |
 |-------------|---------|------------|
 | Timeout | 600 seconds | `tools.exec.timeout_secs` |
-| Output size | 10KB (UTF-8 aware) | `tools.exec.max_output_bytes` |
+| Output size | 5 MiB memory ceiling (UTF-8 aware) | none — engine policy applies first (spec 14) |
 
 **Process lifetime:**
 
@@ -272,7 +276,7 @@ to max bytes.
 | Restriction | Default | Config key |
 |-------------|---------|------------|
 | Timeout | 30 seconds | `tools.web_fetch.timeout_secs` |
-| Max response | 50KB | `tools.web_fetch.max_response_bytes` |
+| Max response | 512KB | `tools.web_fetch.max_response_bytes` |
 
 ---
 
@@ -440,9 +444,8 @@ The agent loop's policy gate escalates repeated `Blocked` errors (see
 | Config key | Default | Description |
 |------------|---------|-------------|
 | `tools.exec.timeout_secs` | 600 | Exec command timeout |
-| `tools.exec.max_output_bytes` | 10240 | Exec output cap (UTF-8 aware) |
 | `tools.web_fetch.timeout_secs` | 30 | HTTP GET timeout |
-| `tools.web_fetch.max_response_bytes` | 51200 | HTTP response cap |
+| `tools.web_fetch.max_response_bytes` | 524288 | HTTP response cap (also bounds network transfer) |
 | `tools.web_search.model` | `perplexity/sonar` | Search model |
 | `tools.web_search.max_tokens` | 1024 | Search response cap |
 | `tools.web_search.timeout_secs` | 30 | Search timeout |

@@ -13,9 +13,6 @@ use tracing::debug;
 
 use crate::error::ToolError;
 
-/// Maximum output bytes before truncation.
-pub(crate) const MAX_OUTPUT_BYTES: usize = 10 * 1024;
-
 /// Default timeout for subprocess operations.
 const TIMEOUT_SECS: u64 = 120;
 
@@ -41,7 +38,7 @@ impl CmdOutput {
         if !self.stdout.is_empty() {
             result.push_str(&crate::tools::truncate_output(
                 &self.stdout,
-                MAX_OUTPUT_BYTES,
+                crate::tools::TOOL_OUTPUT_CEILING_BYTES,
             ));
         }
         if !self.stderr.is_empty() {
@@ -50,7 +47,7 @@ impl CmdOutput {
             }
             result.push_str(&crate::tools::truncate_output(
                 &self.stderr,
-                MAX_OUTPUT_BYTES,
+                crate::tools::TOOL_OUTPUT_CEILING_BYTES,
             ));
         }
 

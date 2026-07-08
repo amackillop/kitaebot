@@ -129,7 +129,6 @@ pub struct ToolsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ExecConfig {
     pub timeout_secs: u64,
-    pub max_output_bytes: usize,
 }
 
 /// Settings for the `web_fetch` tool.
@@ -401,10 +400,7 @@ impl LcmConfig {
 
 impl Default for ExecConfig {
     fn default() -> Self {
-        Self {
-            timeout_secs: 600,
-            max_output_bytes: 10 * 1024,
-        }
+        Self { timeout_secs: 600 }
     }
 }
 
@@ -471,7 +467,7 @@ impl Default for WebFetchConfig {
     fn default() -> Self {
         Self {
             timeout_secs: 30,
-            max_response_bytes: 50 * 1024,
+            max_response_bytes: 512 * 1024,
         }
     }
 }
@@ -586,9 +582,6 @@ impl Config {
         if self.tools.exec.timeout_secs == 0 {
             return Err(ConfigError::Invalid("timeout_secs must be > 0".into()));
         }
-        if self.tools.exec.max_output_bytes == 0 {
-            return Err(ConfigError::Invalid("max_output_bytes must be > 0".into()));
-        }
         if self.tools.web_fetch.timeout_secs == 0 {
             return Err(ConfigError::Invalid(
                 "web_fetch timeout_secs must be > 0".into(),
@@ -633,7 +626,7 @@ mod tests {
         assert!((cfg.provider.temperature - 0.7).abs() < f32::EPSILON);
         assert_eq!(cfg.agent.max_iterations, 100);
         assert_eq!(cfg.tools.exec.timeout_secs, 600);
-        assert_eq!(cfg.tools.exec.max_output_bytes, 10240);
+        assert_eq!(cfg.tools.web_fetch.max_response_bytes, 512 * 1024);
     }
 
     #[test]
@@ -691,7 +684,6 @@ max_iterations = 30
 
 [tools.exec]
 timeout_secs = 120
-max_output_bytes = 20480
 ",
         )
         .unwrap();
@@ -700,7 +692,6 @@ max_output_bytes = 20480
         assert!((cfg.provider.temperature - 0.5).abs() < f32::EPSILON);
         assert_eq!(cfg.agent.max_iterations, 30);
         assert_eq!(cfg.tools.exec.timeout_secs, 120);
-        assert_eq!(cfg.tools.exec.max_output_bytes, 20480);
     }
 
     #[test]

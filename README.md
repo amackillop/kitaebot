@@ -221,11 +221,10 @@ kitaebot = {
       disabled = [ "web_search" ];               # Disable specific tools by name
       exec = {
         timeout_secs = 600;
-        max_output_bytes = 10240;
       };
       web_fetch = {
         timeout_secs = 30;
-        max_response_bytes = 51200;
+        max_response_bytes = 524288;
       };
       web_search = {
         model = "perplexity/sonar";

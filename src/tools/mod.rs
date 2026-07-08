@@ -251,6 +251,14 @@ impl Tools {
     }
 }
 
+/// Memory-protection ceiling for tool output, in bytes.
+///
+/// Not configurable: it protects the daemon from a runaway command
+/// filling RAM, not the context window. Context-size policy lives in
+/// the engines (`context.tool_output_tokens`), which see the output
+/// long before it approaches this ceiling.
+pub(crate) const TOOL_OUTPUT_CEILING_BYTES: usize = 5 * 1024 * 1024;
+
 /// Truncate string at byte boundary without splitting UTF-8.
 ///
 /// If `s` exceeds `max_bytes`, it is cut at the nearest character boundary

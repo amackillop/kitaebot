@@ -423,7 +423,6 @@ struct Args {
 pub struct Exec {
     workspace_root: PathBuf,
     timeout: Duration,
-    max_output_bytes: usize,
     direnv_cache: DirenvCache,
 }
 
@@ -436,7 +435,6 @@ impl Exec {
         Self {
             workspace_root: workspace_root.into(),
             timeout: Duration::from_secs(config.timeout_secs),
-            max_output_bytes: config.max_output_bytes,
             direnv_cache,
         }
     }
@@ -537,7 +535,10 @@ impl Tool for Exec {
             let mut result = format!("$ {}\n", args.command);
 
             if !stdout.is_empty() {
-                result.push_str(&super::truncate_output(&stdout, self.max_output_bytes));
+                result.push_str(&super::truncate_output(
+                    &stdout,
+                    super::TOOL_OUTPUT_CEILING_BYTES,
+                ));
             }
 
             if !stderr.is_empty() {
@@ -545,7 +546,10 @@ impl Tool for Exec {
                     result.push('\n');
                 }
                 result.push_str("STDERR:\n");
-                result.push_str(&super::truncate_output(&stderr, self.max_output_bytes));
+                result.push_str(&super::truncate_output(
+                    &stderr,
+                    super::TOOL_OUTPUT_CEILING_BYTES,
+                ));
             }
 
             let _ = write!(
@@ -990,7 +994,6 @@ mod tests {
         Exec {
             workspace_root: dir.to_path_buf(),
             timeout: Duration::from_millis(50),
-            max_output_bytes: 4096,
             direnv_cache: DirenvCache::new(),
         }
     }
