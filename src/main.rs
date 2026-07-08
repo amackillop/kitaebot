@@ -79,15 +79,17 @@ async fn main() {
             let summarizer = config.provider.model_overrides.summarizer.as_deref();
             let summarize = engine::make_summarize_fn(role_provider(&provider, summarizer));
 
-            let handle = match config.context.engine {
+            // Thresholds apply to the window minus the output reserve;
+            // see Config::effective_context.
+            let context = config.effective_context();
+            let handle = match context.engine {
                 EngineKind::Flat => {
                     let sessions_dir = workspace.path().join("sessions");
-                    let engine =
-                        engine::flat::FlatSession::new(sessions_dir, memory_dir, config.context)
-                            .unwrap_or_else(|e| {
-                                error!("Failed to initialize flat session: {e}");
-                                std::process::exit(1);
-                            });
+                    let engine = engine::flat::FlatSession::new(sessions_dir, memory_dir, context)
+                        .unwrap_or_else(|e| {
+                            error!("Failed to initialize flat session: {e}");
+                            std::process::exit(1);
+                        });
                     spawn_with_engine(
                         workspace.clone(),
                         provider,
@@ -103,7 +105,7 @@ async fn main() {
                     let engine = engine::lcm::LcmEngine::new(
                         &db_path,
                         memory_dir,
-                        config.context,
+                        context,
                         summarize.clone(),
                     )
                     .unwrap_or_else(|e| {

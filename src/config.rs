@@ -476,6 +476,19 @@ impl Config {
         Ok(config)
     }
 
+    /// Context config with the provider's output budget reserved.
+    ///
+    /// The provider can generate up to `provider.max_tokens` on top of
+    /// the prompt, so compaction thresholds must apply to the window
+    /// minus that reserve. Otherwise a prompt sitting just under the
+    /// hard threshold can still overflow the window mid-generation.
+    pub fn effective_context(&self) -> ContextConfig {
+        ContextConfig {
+            max_tokens: self.context.max_tokens - self.provider.max_tokens,
+            ..self.context
+        }
+    }
+
     /// Validate invariants that serde alone cannot enforce.
     fn validate(&self) -> Result<(), ConfigError> {
         if self.agent.max_iterations == 0 {
@@ -489,6 +502,11 @@ impl Config {
         if self.context.max_tokens == 0 {
             return Err(ConfigError::Invalid(
                 "context max_tokens must be > 0".into(),
+            ));
+        }
+        if self.context.max_tokens <= self.provider.max_tokens {
+            return Err(ConfigError::Invalid(
+                "context max_tokens must be > provider max_tokens (output reserve)".into(),
             ));
         }
         if self.context.budget_percent == 0 || self.context.budget_percent > 100 {
@@ -595,6 +613,19 @@ mod tests {
         assert_eq!(cfg.agent.max_iterations, 100);
         assert_eq!(cfg.tools.exec.timeout_secs, 600);
         assert_eq!(cfg.tools.exec.max_output_bytes, 10240);
+    }
+
+    #[test]
+    fn reject_context_window_not_larger_than_output_budget() {
+        let result = load_toml("[provider]\nmax_tokens = 300000\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn effective_context_reserves_output_budget() {
+        let cfg =
+            load_toml("[provider]\nmax_tokens = 32768\n[context]\nmax_tokens = 200000\n").unwrap();
+        assert_eq!(cfg.effective_context().max_tokens, 200_000 - 32_768);
     }
 
     #[test]

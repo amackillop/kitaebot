@@ -227,7 +227,9 @@ write leaves the original file intact.
 
 #### Compaction
 
-Effective budget is `max_tokens * budget_percent / 100` (integer arithmetic).
+Effective budget is `(max_tokens - provider.max_tokens) * budget_percent /
+100` (integer arithmetic; the output reserve is subtracted at startup, see
+§"Dual Thresholds").
 Tokens are estimated as `chars / 4`; `Message::char_count()` sums content
 length, plus function names and argument strings for `ToolCalls`.
 
@@ -524,8 +526,15 @@ Two token thresholds govern when compaction fires. Both compare against
 
 | Threshold | Default | Config | Behavior |
 |-----------|---------|--------|----------|
-| Soft (`tau_soft`) | `max_tokens * 0.70` | `context.lcm.soft_budget_percent` (70) | Triggers async compaction between turns. Non-blocking. |
-| Hard (`tau_hard`) | `max_tokens * 0.90` | `context.lcm.hard_budget_percent` (90) | Triggers synchronous compaction. Blocks the turn. |
+| Soft (`tau_soft`) | `effective * 0.70` | `context.lcm.soft_budget_percent` (70) | Triggers async compaction between turns. Non-blocking. |
+| Hard (`tau_hard`) | `effective * 0.90` | `context.lcm.hard_budget_percent` (90) | Triggers synchronous compaction. Blocks the turn. |
+
+`effective` is `context.max_tokens - provider.max_tokens`: the provider can
+generate up to its output budget on top of the prompt, so thresholds apply to
+the window minus that reserve (computed once at startup via
+`Config::effective_context`; config validation requires `context.max_tokens >
+provider.max_tokens`). The same reserve applies to the flat engine's
+`budget_percent`.
 
 The control loop (per the paper's Figure 2):
 
@@ -862,7 +871,7 @@ large_file_summary_tokens = 400
 | Config key | Default | Description |
 |------------|---------|-------------|
 | `context.engine` | `flat` | Which engine implementation to use |
-| `context.max_tokens` | `200000` | Model context window size |
+| `context.max_tokens` | `200000` | Model context window size. Must be > `provider.max_tokens`; engines see the window minus that output reserve. |
 | `context.budget_percent` | `80` | Flat-session compaction trigger (1-100). Ignored by LCM, which uses the dual thresholds below. |
 | `context.lcm.fresh_tail_count` | `32` | Protected tail size (raw messages exempt from compaction). Must be > 0. |
 | `context.lcm.leaf_chunk_tokens` | `20000` | Max tokens per leaf or condensed chunk |
