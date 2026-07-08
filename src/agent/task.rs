@@ -52,6 +52,14 @@ const WORKER_TOOLS: &[&str] = &[
     "exec",
 ];
 
+/// Tool output cap (estimated tokens) for sub-agent contexts.
+///
+/// Deliberately far above the root's `context.tool_output_tokens`:
+/// sub-agents exist to absorb verbose output, and `lcm_expand` may
+/// legitimately return up to `MAX_EXPAND_TOKEN_CAP` (20k) in one tool
+/// result. Matching it means expansion output survives untruncated.
+const SUB_AGENT_TOOL_OUTPUT_TOKENS: usize = 20_000;
+
 const EXPLORE_PROMPT: &str = "You are a research agent. Your job is to \
 find information and report back.\n\nBe concise and specific. Include \
 file paths, line numbers, and code snippets when relevant. Do not \
@@ -207,7 +215,7 @@ impl<P: Provider> Tool for TaskTool<P> {
             // token is threaded through so the child can observe
             // cancellation at an iteration boundary, though the primary
             // cancel path is still the parent dropping this future.
-            let mut engine = EphemeralSession::new();
+            let mut engine = EphemeralSession::new(SUB_AGENT_TOOL_OUTPUT_TOKENS);
             let child_ctx = ToolCtx {
                 activity: ctx.activity.as_ref().map(|parent| forward(parent, label)),
                 cancel: ctx.cancel.clone(),

@@ -204,6 +204,36 @@ pub fn make_summarize_fn<P: Provider + 'static>(provider: Arc<P>) -> SummarizeFn
     })
 }
 
+/// Tail-biased truncation for tool result content.
+///
+/// Engines that cannot externalize to disk (flat, ephemeral) cap tool
+/// output at `max_tokens` estimated tokens by keeping half from the
+/// head and half from the tail, with a marker in between. The tail is
+/// kept deliberately: build and test logs put the failure at the end,
+/// which head-only truncation used to destroy.
+pub(crate) fn truncate_tool_output(content: &str, max_tokens: usize) -> std::borrow::Cow<'_, str> {
+    if crate::types::estimate_tokens(content) <= max_tokens {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    // Bytes kept per side; over-threshold content is strictly longer
+    // than both sides combined, so the slices never overlap.
+    let keep = max_tokens * 4 / 2;
+    let mut head_end = keep;
+    while !content.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = content.len() - keep;
+    while !content.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let omitted = crate::types::estimate_tokens(&content[head_end..tail_start]);
+    std::borrow::Cow::Owned(format!(
+        "{}\n... [~{omitted} tokens truncated] ...\n{}",
+        &content[..head_end],
+        &content[tail_start..],
+    ))
+}
+
 pub(crate) fn format_messages_for_summary(messages: &[Message]) -> String {
     let mut out = String::new();
     for msg in messages {
@@ -248,6 +278,33 @@ mod tests {
     use super::*;
     use crate::provider::MockProvider;
     use crate::types::Response;
+
+    #[test]
+    fn truncate_tool_output_passes_small_content_through() {
+        let content = "short output";
+        let result = truncate_tool_output(content, 100);
+        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn truncate_tool_output_keeps_head_and_tail() {
+        let content = format!("HEAD{}TAIL", "x".repeat(10_000));
+        let result = truncate_tool_output(&content, 100);
+        assert!(result.starts_with("HEAD"));
+        assert!(result.ends_with("TAIL"));
+        assert!(result.contains("tokens truncated] ..."));
+        // 100 tokens = 400 bytes kept plus the marker.
+        assert!(result.len() < 500);
+    }
+
+    #[test]
+    fn truncate_tool_output_is_multibyte_safe() {
+        let content = "€".repeat(10_000);
+        let result = truncate_tool_output(&content, 100);
+        assert!(result.len() < content.len());
+        assert!(result.contains("tokens truncated"));
+    }
 
     #[tokio::test]
     async fn summarize_fn_calls_provider() {

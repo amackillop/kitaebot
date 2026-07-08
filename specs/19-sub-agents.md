@@ -95,6 +95,12 @@ sub-agent that outgrows the provider's context window gets a provider error
 back (see Failure Modes), which the parent sees as tool error text. Compacting
 a child that is supposed to return a summary would be treating the symptom.
 
+The one size policy it applies: tool results above 20,000 estimated tokens
+(`SUB_AGENT_TOOL_OUTPUT_TOKENS`) are truncated tail-biased at push. The cap
+sits far above the root's `context.tool_output_tokens` because sub-agents
+exist to absorb verbose output, and `lcm_expand` may legitimately return up
+to `MAX_EXPAND_TOKEN_CAP` (20k) in a single tool result.
+
 **LCM integration**: when the parent runs the LCM engine, the sub-agent's
 tool set includes the engine's retrieval tools (`lcm_grep`, `lcm_describe`,
 `lcm_expand`) as shared instances. These tools already carry

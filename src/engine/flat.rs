@@ -129,6 +129,22 @@ impl FlatSession {
 
 impl ContextEngine for FlatSession {
     async fn push_message(&mut self, msg: Message) -> Result<(), EngineError> {
+        // The flat engine cannot externalize to disk, so oversized
+        // tool output is truncated tail-biased instead (LCM keeps it
+        // lossless; see spec 14).
+        let msg = match msg {
+            Message::Tool { call_id, content } => {
+                let content = match super::truncate_tool_output(
+                    &content,
+                    self.ctx.tool_output_tokens as usize,
+                ) {
+                    std::borrow::Cow::Owned(truncated) => truncated,
+                    std::borrow::Cow::Borrowed(_) => content,
+                };
+                Message::Tool { call_id, content }
+            }
+            other => other,
+        };
         self.session.add_message(msg);
         Ok(())
     }
@@ -392,6 +408,46 @@ mod tests {
     }
 
     // ── Basic operations ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn oversized_tool_output_is_truncated_tail_biased() {
+        let ctx = ContextConfig {
+            tool_output_tokens: 100,
+            ..ContextConfig::default()
+        };
+        let mut engine = temp_engine(ctx);
+        let payload = format!("HEAD{}TAIL", "x".repeat(10_000));
+        engine
+            .push_message(Message::Tool {
+                call_id: "c1".to_string(),
+                content: payload,
+            })
+            .await
+            .unwrap();
+
+        let stored = engine.session.messages()[0].content();
+        assert!(stored.starts_with("HEAD"));
+        assert!(stored.ends_with("TAIL"));
+        assert!(stored.contains("tokens truncated"));
+        assert!(stored.len() < 500);
+    }
+
+    #[tokio::test]
+    async fn oversized_user_message_is_not_truncated() {
+        let ctx = ContextConfig {
+            tool_output_tokens: 100,
+            ..ContextConfig::default()
+        };
+        let mut engine = temp_engine(ctx);
+        let payload = "u".repeat(10_000);
+        engine
+            .push_message(Message::User {
+                content: payload.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(engine.session.messages()[0].content(), payload);
+    }
 
     #[test]
     fn contributes_no_tools_in_any_scope() {

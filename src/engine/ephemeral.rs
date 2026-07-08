@@ -21,19 +21,35 @@ use super::{
 /// compacts — a child that outgrows the provider's window should fail
 /// (surfaced to the parent as tool error text), not quietly summarize
 /// away the work it was delegated.
-#[derive(Default)]
 pub struct EphemeralSession {
     messages: Vec<Message>,
+    /// Tool result contents above this many estimated tokens are
+    /// truncated tail-biased at push. Sub-agents exist to absorb
+    /// verbose output, so their cap is far above the root's.
+    tool_output_tokens: usize,
 }
 
 impl EphemeralSession {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(tool_output_tokens: usize) -> Self {
+        Self {
+            messages: Vec::new(),
+            tool_output_tokens,
+        }
     }
 }
 
 impl ContextEngine for EphemeralSession {
     async fn push_message(&mut self, msg: Message) -> Result<(), EngineError> {
+        let msg = match msg {
+            Message::Tool { call_id, content } => {
+                let content = match super::truncate_tool_output(&content, self.tool_output_tokens) {
+                    std::borrow::Cow::Owned(truncated) => truncated,
+                    std::borrow::Cow::Borrowed(_) => content,
+                };
+                Message::Tool { call_id, content }
+            }
+            other => other,
+        };
         self.messages.push(msg);
         Ok(())
     }
@@ -132,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn assemble_prepends_system_prompt_in_order() {
-        let mut engine = EphemeralSession::new();
+        let mut engine = EphemeralSession::new(20_000);
         engine
             .push_message(Message::User {
                 content: "one".to_string(),
@@ -154,8 +170,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_output_within_cap_is_untouched() {
+        // 20k tokens = 80k bytes; an lcm_expand-sized result (just
+        // under the cap) must survive whole.
+        let mut engine = EphemeralSession::new(20_000);
+        let payload = "y".repeat(79_000);
+        engine
+            .push_message(Message::Tool {
+                call_id: "c1".to_string(),
+                content: payload.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            &engine.messages[0],
+            Message::Tool { content, .. } if *content == payload
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_output_over_cap_is_truncated() {
+        let mut engine = EphemeralSession::new(100);
+        engine
+            .push_message(Message::Tool {
+                call_id: "c1".to_string(),
+                content: "z".repeat(10_000),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            &engine.messages[0],
+            Message::Tool { content, .. } if content.contains("tokens truncated")
+        ));
+    }
+
+    #[tokio::test]
     async fn compaction_is_a_noop() {
-        let mut engine = EphemeralSession::new();
+        let mut engine = EphemeralSession::new(20_000);
         engine
             .push_message(Message::User {
                 content: "x".repeat(10_000),
@@ -171,7 +222,7 @@ mod tests {
     #[tokio::test]
     async fn run_turn_completes_against_ephemeral_session() {
         let provider = MockProvider::new(vec![Ok(Response::Text("done".to_string()))]);
-        let mut engine = EphemeralSession::new();
+        let mut engine = EphemeralSession::new(20_000);
 
         let result = crate::agent::run_turn(
             &mut engine,

@@ -240,6 +240,13 @@ format all messages as `[role] content` text, send through `SummarizeFn`
 `Message::System` containing the summary. No partial windowing.
 `force_compact()` skips the budget check but keeps the >= 2 message guard.
 
+#### Tool output truncation
+
+The flat engine cannot externalize, so at `push_message` it truncates
+`Message::Tool` content above `context.tool_output_tokens` tail-biased:
+keep the head half and the tail half, with a `... [~N tokens truncated] ...`
+marker in between. Other roles pass through untouched.
+
 #### Everything else
 
 - **Context assembly**: prepend system prompt, return all messages. No prompt
@@ -881,7 +888,7 @@ large_file_summary_tokens = 400
 | `context.engine` | `flat` | Which engine implementation to use |
 | `context.max_tokens` | `200000` | Model context window size. Must be > `provider.max_tokens`; engines see the window minus that output reserve. |
 | `context.budget_percent` | `80` | Flat-session compaction trigger (1-100). Ignored by LCM, which uses the dual thresholds below. |
-| `context.tool_output_tokens` | `4096` | Tool result content above this many estimated tokens is size-limited by the engine: LCM externalizes it with a mechanical excerpt. Must be > 0. |
+| `context.tool_output_tokens` | `4096` | Tool result content above this many estimated tokens is size-limited by the engine: LCM externalizes it with a mechanical excerpt; the flat engine truncates it tail-biased at push. Must be > 0. |
 | `context.lcm.fresh_tail_count` | `32` | Protected tail size (raw messages exempt from compaction). Must be > 0. |
 | `context.lcm.leaf_chunk_tokens` | `20000` | Max tokens per leaf or condensed chunk |
 | `context.lcm.min_condensed_fanout` | `2` | Minimum children to form a condensed summary. Must be >= 2. |
