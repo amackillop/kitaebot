@@ -58,6 +58,7 @@ async fn current_branch(cwd: &std::path::Path) -> Result<String, ToolError> {
         cwd: cwd.to_path_buf(),
         env,
         timeout_secs: None,
+        stdin: None,
     };
     let output = cli_runner::exec(&call).await?;
     if output.exit_code != 0 {

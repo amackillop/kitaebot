@@ -162,6 +162,7 @@ async fn direnv_allow(dir: &Path) {
         cwd: dir.to_path_buf(),
         env: crate::tools::safe_env().collect(),
         timeout_secs: Some(10),
+        stdin: None,
     };
     if let Err(e) = cli_runner::exec(&call).await {
         debug!(dir = %dir.display(), error = %e, "direnv allow failed");

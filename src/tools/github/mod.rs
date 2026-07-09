@@ -30,6 +30,7 @@ mod pr_create;
 mod pr_diff_comments;
 mod pr_diff_reply;
 mod pr_list;
+mod pr_review;
 mod pr_reviews;
 #[cfg(test)]
 mod test_helpers;
@@ -42,6 +43,7 @@ pub use pr_create::PrCreate;
 pub use pr_diff_comments::PrDiffComments;
 pub use pr_diff_reply::PrDiffReply;
 pub use pr_list::PrList;
+pub use pr_review::PrReview;
 pub use pr_reviews::PrReviews;
 
 // Re-export parent utility so tool files can `use super::Tool`.
@@ -58,6 +60,7 @@ pub(crate) fn build(gh: GhCli) -> Vec<Arc<dyn Tool>> {
         Arc::new(PrDiffComments(gh.clone())),
         Arc::new(PrDiffReply(gh.clone())),
         Arc::new(PrList(gh.clone())),
+        Arc::new(PrReview(gh.clone())),
         Arc::new(PrReviews(gh)),
     ]
 }

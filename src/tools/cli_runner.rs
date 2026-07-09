@@ -6,7 +6,9 @@
 use std::ffi::OsString;
 use std::fmt::Write;
 use std::path::PathBuf;
+use std::process::Stdio;
 
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tracing::debug;
@@ -74,6 +76,8 @@ pub struct SubprocessCall {
     pub env: Vec<(OsString, OsString)>,
     /// Per-call timeout override. Falls back to [`TIMEOUT_SECS`] when `None`.
     pub timeout_secs: Option<u64>,
+    /// Data piped to the subprocess's stdin. `None` leaves stdin closed.
+    pub stdin: Option<String>,
 }
 
 impl SubprocessCall {
@@ -94,7 +98,7 @@ pub async fn exec(call: &SubprocessCall) -> Result<CmdOutput, ToolError> {
         .envs(call.env.iter().map(|(k, v)| (k, v)));
     let label = format!("{} {}", call.binary, args_ref.join(" "));
     let timeout_secs = call.timeout_secs.unwrap_or(TIMEOUT_SECS);
-    exec_cmd(&mut cmd, label, timeout_secs).await
+    exec_cmd(&mut cmd, label, timeout_secs, call.stdin.as_deref()).await
 }
 
 // ── Command execution ───────────────────────────────────────────────
@@ -104,10 +108,11 @@ async fn exec_cmd(
     cmd: &mut Command,
     command: String,
     timeout_secs: u64,
+    stdin: Option<&str>,
 ) -> Result<CmdOutput, ToolError> {
     debug!(%command, "Running command");
 
-    let output = timeout(Duration::from_secs(timeout_secs), cmd.output())
+    let output = timeout(Duration::from_secs(timeout_secs), run(cmd, stdin))
         .await
         .map_err(|_| ToolError::Timeout)?
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -118,4 +123,49 @@ async fn exec_cmd(
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         exit_code: output.status.code().unwrap_or(-1),
     })
+}
+
+/// Spawn and wait, piping `stdin` into the child when present.
+async fn run(cmd: &mut Command, stdin: Option<&str>) -> std::io::Result<std::process::Output> {
+    let Some(input) = stdin else {
+        return cmd.output().await;
+    };
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut pipe = child.stdin.take().expect("stdin was piped");
+    pipe.write_all(input.as_bytes()).await?;
+    drop(pipe);
+    child.wait_with_output().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cat_call(stdin: Option<String>) -> SubprocessCall {
+        SubprocessCall {
+            binary: "cat",
+            args: vec![],
+            cwd: std::env::temp_dir(),
+            env: vec![("PATH".into(), std::env::var_os("PATH").unwrap_or_default())],
+            timeout_secs: None,
+            stdin,
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_pipes_stdin_to_child() {
+        let out = exec(&cat_call(Some("hello stdin".into()))).await.unwrap();
+        assert_eq!(out.stdout, "hello stdin");
+        assert_eq!(out.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn exec_without_stdin_closes_it() {
+        let out = exec(&cat_call(None)).await.unwrap();
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.exit_code, 0);
+    }
 }

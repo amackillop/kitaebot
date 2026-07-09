@@ -338,6 +338,7 @@ workspace root.
 | `github_gh` | Generic `gh` CLI escape hatch — runs arbitrary `gh` subcommands. |
 | `github_pr_create` | Create a pull request. |
 | `github_pr_list` | List pull requests (open/closed/all). |
+| `github_pr_review_submit` | Submit a formal PR review (APPROVE or COMMENT) with inline comments. REQUEST_CHANGES is unrepresentable in the args. |
 | `github_pr_reviews` | Fetch reviews for a pull request. |
 | `github_pr_diff_comments` | Fetch inline diff comments on a PR. |
 | `github_pr_diff_reply` | Reply to an inline diff comment. |

@@ -53,6 +53,7 @@ impl GhCli {
             cwd: cwd.to_path_buf(),
             env,
             timeout_secs: None,
+            stdin: None,
         }
     }
 

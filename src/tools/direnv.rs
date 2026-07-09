@@ -173,6 +173,7 @@ async fn evaluate_direnv(dir: &Path) -> Result<HashMap<String, String>, String> 
         cwd: dir.to_path_buf(),
         env: crate::tools::safe_env().collect(),
         timeout_secs: Some(900),
+        stdin: None,
     };
 
     let output = cli_runner::exec(&call)
