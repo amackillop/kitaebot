@@ -97,6 +97,10 @@ plus an instruction block:
   findings still land there via the sub-agent's summary.
 - Review for correctness, security, and design. Be specific: file and
   line references, not vibes.
+- Comments are for what is suspect or needs to change. No praise
+  comments — inline threads exist to be resolved, and "nice" resolves
+  nothing. A truly remarkable observation gets one line in the review
+  body.
 - Submit one formal review with the `github_pr_review_submit` tool
   ([spec 03](03-tools.md)): `body` (summary and verdict), `event`
   (`APPROVE` or `COMMENT`), and `comments` (path/line/body array).
@@ -132,7 +136,8 @@ message carries the previously reviewed SHA and instructs the model to:
   (explore), same as the initial review.
 - Submit a formal review via `github_pr_review_submit`: `APPROVE` when
   the feedback is addressed, `COMMENT` naming the remaining gaps
-  otherwise.
+  otherwise. Same comment discipline as the initial review: suspect or
+  needs-change only, no praise.
 
 The `reviewed` entry updates to the new SHA on dispatch, so each push
 gets at most one incremental turn.
