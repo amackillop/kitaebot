@@ -97,17 +97,18 @@ plus an instruction block:
   findings still land there via the sub-agent's summary.
 - Review for correctness, security, and design. Be specific: file and
   line references, not vibes.
-- Submit one formal review with findings as inline comments on the
-  relevant lines: `POST repos/{nwo}/pulls/{n}/reviews` via `gh api`, with
-  `body` (summary and verdict), `event` (`APPROVE` or `COMMENT`), and
-  `comments` (path/line/body array). Inline findings each become a
-  resolvable thread, which is what the follow-up path engages with. On
-  API failure (usually bad line anchoring), fall back to
-  `gh pr review <n> -R <repo> --comment|--approve` with file:line
-  references in the body. A formal review (not a plain comment) is
-  required — submitting it is what clears the pending request and stops
-  re-triggering. `REQUEST_CHANGES` is not used: blocking judgments stay
-  with humans; a critical finding is a `COMMENT` review that says so.
+- Submit one formal review with the `github_pr_review_submit` tool
+  ([spec 03](03-tools.md)): `body` (summary and verdict), `event`
+  (`APPROVE` or `COMMENT`), and `comments` (path/line/body array).
+  Inline findings each become a resolvable thread, which is what the
+  follow-up path engages with. The tool needs a cloned checkout for
+  `repo_dir`, so trivial PRs get cloned too. On failure (usually bad
+  line anchoring), the affected finding moves into `body` with a
+  file:line reference and the review is resubmitted. A formal review
+  (not a plain comment) is required — submitting it is what clears the
+  pending request and stops re-triggering. `REQUEST_CHANGES` is
+  unrepresentable in the tool: blocking judgments stay with humans; a
+  critical finding is a `COMMENT` review that says so.
 - Never push to the PR branch, never merge, never close.
 
 ### Re-reviews on push
@@ -117,8 +118,10 @@ re-request needed. A new head SHA triggers an incremental re-review,
 scoped to the delta in the context of the prior review. The dispatched
 message carries the previously reviewed SHA and instructs the model to:
 
-- Fetch the incremental diff
-  (`gh api repos/{nwo}/compare/{prev}...{head}`), not the whole PR.
+- Fetch the incremental diff, not the whole PR: in the cloned
+  checkout, `git fetch origin pull/{n}/head` then `git log` and
+  `git diff` over `{prev}..FETCH_HEAD`, falling back to the full
+  `gh pr diff` when that fails (e.g. after a force push).
 - Recall its prior review: the repo session carries it, and
   `gh pr view --json reviews` recovers the submitted text if compaction
   ate the details.
@@ -127,8 +130,9 @@ message carries the previously reviewed SHA and instructs the model to:
   of untouched code is explicitly not wanted.
 - Delegate any context-gathering beyond the diff to the `task` tool
   (explore), same as the initial review.
-- Submit a formal review: `--approve` when the feedback is addressed,
-  `--comment` naming the remaining gaps otherwise.
+- Submit a formal review via `github_pr_review_submit`: `APPROVE` when
+  the feedback is addressed, `COMMENT` naming the remaining gaps
+  otherwise.
 
 The `reviewed` entry updates to the new SHA on dispatch, so each push
 gets at most one incremental turn.
@@ -141,8 +145,8 @@ its end of the discussion. For each tracked PR, new comments since
 trusted users are dispatched with an instruction to engage on the
 merits: agree, state what that concedes about the original comment, or
 disagree and explain why, with specifics. Replies go to the same thread
-(inline replies via the diff-comment reply endpoint, PR comments via a
-normal comment). Going quiet is not an option; neither is reflexively
+(inline replies via `github_pr_diff_reply`, PR comments via a normal
+comment). Going quiet is not an option; neither is reflexively
 defending a bad take.
 
 The bot responds only to human comments, never to its own, so threads
