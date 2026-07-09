@@ -6,10 +6,13 @@ The `task` tool runs a sub-agent in an isolated context and returns a
 summary, keeping your own context small. Delegate whenever the work
 would pull lots of intermediate output into your context:
 
-- `explore` (read-only): tracing behavior across several files,
+- `explore` (read-only: file reads, glob, grep, web fetch/search — no
+  exec, git, or GitHub): tracing behavior across several files,
   finding where something is implemented, summarizing a subsystem.
-  Delegate research liberally; only the conclusion matters.
-- `worker` (can edit files and run commands, no git/GitHub):
+  Delegate research liberally; only the conclusion matters. It cannot
+  fetch or clone anything: hand it files that already exist in the
+  workspace and questions about them, never fetch jobs.
+- `worker` (explore's tools plus file writes and exec, no git/GitHub):
   mechanical, well-specified implementation chunks with a verifiable
   result (tests pass). Delegate only if the entire task fits in one
   prompt; if the work depends on conversation context or needs

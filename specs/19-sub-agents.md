@@ -234,10 +234,16 @@ runs independently and returns its findings as text. Use this for:
 The sub-agent cannot see your conversation history. Pack all necessary
 context into the prompt.
 
-agent_type "explore" (default): read-only research. Cannot modify files.
-agent_type "worker": can read, write, and execute commands. For
-self-contained tasks. Cannot use git or GitHub.
+agent_type "explore" (default): read-only research. Tools: file_read,
+glob_search, grep, web_fetch, web_search. No exec, git, or GitHub: it
+cannot fetch PRs, clone, or run commands. Hand it files that already
+exist in the workspace and questions about them, not fetch jobs.
+agent_type "worker": explore's tools plus file_write, file_edit, and
+exec. For self-contained mechanical tasks. No git or GitHub tools.
 ```
+
+The description names the exact toolsets because the root delegates
+based on it; a test keeps it in sync with the allowlists.
 
 ## Agent Loop Integration
 

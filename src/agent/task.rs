@@ -188,10 +188,14 @@ impl<P: Provider> Tool for TaskTool<P> {
         sub-agents)\n\n\
         The sub-agent cannot see your conversation history. Pack all \
         necessary context into the prompt.\n\n\
-        agent_type \"explore\" (default): read-only research. Cannot modify \
-        files.\n\
-        agent_type \"worker\": can read, write, and execute commands. For \
-        self-contained tasks. Cannot use git or GitHub."
+        agent_type \"explore\" (default): read-only research. Tools: \
+        file_read, glob_search, grep, web_fetch, web_search. No exec, git, \
+        or GitHub: it cannot fetch PRs, clone, or run commands. Hand it \
+        files that already exist in the workspace and questions about \
+        them, not fetch jobs.\n\
+        agent_type \"worker\": explore's tools plus file_write, file_edit, \
+        and exec. For self-contained mechanical tasks. No git or GitHub \
+        tools."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -586,6 +590,17 @@ mod tests {
                 catalog.contains(name),
                 "allowlist names unknown tool {name}"
             );
+        }
+    }
+
+    /// The description advertises the toolsets to the root; keep it in
+    /// sync with the allowlists.
+    #[test]
+    fn description_names_every_allowlisted_tool() {
+        let tool = task_tool(Vec::new(), Tools::default(), Tools::default(), 1);
+        let desc = tool.description();
+        for name in EXPLORE_TOOLS.iter().chain(WORKER_TOOLS) {
+            assert!(desc.contains(name), "description omits {name}");
         }
     }
 
