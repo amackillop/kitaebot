@@ -81,7 +81,21 @@ Transport failures (connection, timeout, reading the body) map to `Network`.
 resent; everything else is a defect in the request or credentials and must
 never be retried.
 
-There is no retry logic yet. Errors are returned directly to the caller.
+### Retry
+
+`CompletionsProvider::chat` retries transient errors up to 3 times with
+exponential backoff: 1s/2s/4s, or 5s/10s/20s when rate limited. Constants,
+not config. Fatal errors return immediately. Each retry logs a warning.
+
+The loop itself is a generic combinator (`retry::retry(op, policy)`,
+reusable by other IO layers); the provider owns only the pure policy
+function mapping error and attempt to a delay. Retrying inside the
+provider rather than the agent loop means every consumer (root turns,
+sub-agents, summarizer, heartbeat) gets it for free, and `MockProvider`
+call counts in agent tests stay deterministic. Cancellation needs no
+special handling — dropping the `chat` future drops the sleep with it.
+
+No jitter: a single daemon cannot cause a thundering herd.
 
 ## Boundaries
 
@@ -135,8 +149,10 @@ The provider is split into two layers:
 | HTTP 5xx | `ProviderError::ServerError` with status and body |
 | HTTP 4xx (other than 401/403/429) | `ProviderError::BadRequest` with status and body |
 
-No retries for any failure. The agent loop surfaces the error to the user and
-saves the session.
+Transient failures (`Network`, `ServerError`, `RateLimited`) are retried
+inside the provider (see Retry). Once retries are exhausted, and for all
+other failures, the agent loop surfaces the error to the user and saves
+the session.
 
 ## Constraints
 

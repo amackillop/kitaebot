@@ -12,6 +12,7 @@ mod heartbeat;
 mod linear_channel;
 mod notify;
 mod provider;
+mod retry;
 mod runtime;
 mod safety;
 mod sandbox;

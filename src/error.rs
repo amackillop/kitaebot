@@ -103,7 +103,6 @@ pub enum ProviderError {
 
 impl ProviderError {
     /// True when the identical request may succeed if resent.
-    #[allow(dead_code)] // Consumed by the retry loop in the next commit.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,

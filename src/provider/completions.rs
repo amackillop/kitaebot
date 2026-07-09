@@ -3,6 +3,8 @@
 //! Bridges the [`Provider`] trait with any endpoint that speaks the
 //! `OpenAI` chat completions wire format.
 
+use std::time::Duration;
+
 use serde::Serialize;
 use tracing::{debug, trace, warn};
 
@@ -14,6 +16,25 @@ use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 use super::wire::WireMessage;
 
 use super::{ChatOutcome, Provider};
+
+/// Retries after the initial attempt for transient failures.
+const MAX_RETRIES: u32 = 3;
+
+/// Retry policy for chat requests: exponential backoff for transient
+/// errors, starting at 1s, or 5s when rate limited (the window is
+/// typically seconds, not milliseconds). No jitter: one daemon, no
+/// thundering herd.
+fn retry_policy(e: &ProviderError, attempt: u32) -> Option<Duration> {
+    if !e.is_transient() || attempt >= MAX_RETRIES {
+        return None;
+    }
+    let base = if matches!(e, ProviderError::RateLimited) {
+        5
+    } else {
+        1
+    };
+    Some(Duration::from_secs(base << attempt))
+}
 
 /// Provider for any OpenAI-compatible chat completions endpoint.
 pub struct CompletionsProvider {
@@ -121,7 +142,8 @@ impl Provider for CompletionsProvider {
         debug!(model = %self.model, message_count = messages.len(), "Sending chat request");
         trace!(request = %serde_json::to_string(&request).unwrap_or_default(), "Request body");
 
-        let response = self.client.chat_completions(&request).await?;
+        let response =
+            crate::retry::retry(|| self.client.chat_completions(&request), retry_policy).await?;
         if let Some(usage) = &response.usage {
             debug!(
                 model = %self.model,
@@ -279,6 +301,107 @@ mod tests {
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
         let outcome = provider.chat(&[], &[]).await.unwrap();
         assert_eq!(outcome.prompt_tokens, None);
+    }
+
+    #[test]
+    fn policy_doubles_from_one_second() {
+        let e = ProviderError::Network("reset".into());
+        assert_eq!(retry_policy(&e, 0), Some(Duration::from_secs(1)));
+        assert_eq!(retry_policy(&e, 1), Some(Duration::from_secs(2)));
+        assert_eq!(retry_policy(&e, 2), Some(Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn policy_rate_limited_doubles_from_five_seconds() {
+        let e = ProviderError::RateLimited;
+        assert_eq!(retry_policy(&e, 0), Some(Duration::from_secs(5)));
+        assert_eq!(retry_policy(&e, 1), Some(Duration::from_secs(10)));
+        assert_eq!(retry_policy(&e, 2), Some(Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn policy_stops_at_max_retries() {
+        let e = ProviderError::RateLimited;
+        assert_eq!(retry_policy(&e, MAX_RETRIES), None);
+    }
+
+    #[test]
+    fn policy_rejects_fatal_errors() {
+        assert_eq!(
+            retry_policy(&ProviderError::BadRequest("400".into()), 0),
+            None
+        );
+        assert_eq!(retry_policy(&ProviderError::Authentication, 0), None);
+    }
+
+    /// Provider whose client fails `failures` times before succeeding,
+    /// counting every request.
+    fn flaky_provider(
+        failures: usize,
+        error: ProviderError,
+    ) -> (
+        CompletionsProvider,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let client = CompletionsClient::from_fn(move |_body| {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            let error = error.clone();
+            async move {
+                if n < failures {
+                    Err(error)
+                } else {
+                    Ok(crate::clients::RawResponse {
+                        status: 200,
+                        body: br#"{"choices":[{"message":{"content":"hi"}}]}"#.to_vec(),
+                    })
+                }
+            }
+        });
+        (
+            CompletionsProvider::new(client, &ProviderConfig::default()),
+            calls,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_retries_transient_errors_until_success() {
+        use std::sync::atomic::Ordering;
+        let (provider, calls) = flaky_provider(2, ProviderError::ServerError("503".into()));
+        let outcome = provider.chat(&[], &[]).await.unwrap();
+        assert!(matches!(outcome.response, Response::Text(t) if t == "hi"));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_does_not_retry_fatal_errors() {
+        use std::sync::atomic::Ordering;
+        let (provider, calls) = flaky_provider(usize::MAX, ProviderError::BadRequest("400".into()));
+        let err = provider.chat(&[], &[]).await.unwrap_err();
+        assert!(matches!(err, ProviderError::BadRequest(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_gives_up_after_max_retries() {
+        use std::sync::atomic::Ordering;
+        let (provider, calls) = flaky_provider(usize::MAX, ProviderError::Network("reset".into()));
+        let err = provider.chat(&[], &[]).await.unwrap_err();
+        assert!(matches!(err, ProviderError::Network(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1 + MAX_RETRIES as usize);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_rate_limit_waits_longer() {
+        let start = tokio::time::Instant::now();
+        let (provider, _) = flaky_provider(usize::MAX, ProviderError::RateLimited);
+        provider.chat(&[], &[]).await.unwrap_err();
+        // 5s + 10s + 20s across the three retries.
+        assert_eq!(start.elapsed(), Duration::from_secs(35));
     }
 
     #[test]

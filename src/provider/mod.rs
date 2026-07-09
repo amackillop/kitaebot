@@ -18,6 +18,7 @@ use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolDefinition};
 
 /// A provider reply plus request-level metadata.
+#[derive(Debug)]
 pub struct ChatOutcome {
     /// The model's reply.
     pub response: Response,
