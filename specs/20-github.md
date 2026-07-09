@@ -84,11 +84,17 @@ The dispatched message carries PR number, title, repo, author, and body,
 plus an instruction block:
 
 - Fetch the diff (`gh pr diff`) and the commit messages
-  (`gh pr view --json commits`), plus whatever surrounding context is
-  needed (`gh pr view`, file reads via a cloned checkout if warranted).
-  Commit messages carry the rationale for the change — the why, the
-  trade-offs, the alternatives rejected. They inform the review, and the
-  review checks that the code actually does what they say.
+  (`gh pr view --json commits`). Commit messages carry the rationale for
+  the change — the why, the trade-offs, the alternatives rejected. They
+  inform the review, and the review checks that the code actually does
+  what they say.
+- Context beyond the diff (usage of changed code, existing behavior,
+  test coverage) goes through the `task` tool (explore, [spec
+  19](19-sub-agents.md)) against a cloned checkout, with specific
+  questions and file:line evidence required in the answer. Direct file
+  reads are reserved for judging a hunk whose surrounding code the diff
+  does not show. This keeps cross-file tracing out of the root context;
+  findings still land there via the sub-agent's summary.
 - Review for correctness, security, and design. Be specific: file and
   line references, not vibes.
 - Submit one formal review with findings as inline comments on the
@@ -119,6 +125,8 @@ message carries the previously reviewed SHA and instructs the model to:
 - Judge the delta against that feedback: does it address the prior
   review adequately and without introducing new bugs? A full re-review
   of untouched code is explicitly not wanted.
+- Delegate any context-gathering beyond the diff to the `task` tool
+  (explore), same as the initial review.
 - Submit a formal review: `--approve` when the feedback is addressed,
   `--comment` naming the remaining gaps otherwise.
 
