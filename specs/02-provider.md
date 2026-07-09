@@ -70,11 +70,18 @@ All backends use the same wire format. Switching backend requires only changing
 | HTTP Status | Error |
 |-------------|-------|
 | 200-299 | Parse response. If deserialization fails or choices is empty, `InvalidResponse`. |
-| 401 | `Authentication` |
+| 401, 403 | `Authentication` |
 | 429 | `RateLimited` |
-| Any other | `Network` with status code and response body |
+| 500-599 | `ServerError` with status code and response body |
+| Any other 4xx | `BadRequest` with status code and response body |
 
-There is no retry logic. Errors are returned directly to the caller.
+Transport failures (connection, timeout, reading the body) map to `Network`.
+`ProviderError::is_transient()` classifies retryability: `Network`,
+`ServerError`, and `RateLimited` may succeed if the identical request is
+resent; everything else is a defect in the request or credentials and must
+never be retried.
+
+There is no retry logic yet. Errors are returned directly to the caller.
 
 ## Boundaries
 
@@ -124,7 +131,9 @@ The provider is split into two layers:
 | No content, no tool calls, `finish_reason = "length"` | `ProviderError::Truncated` — generation hit `provider.max_tokens` before any output (reasoning models can burn the whole budget on reasoning); the fix is a larger `provider.max_tokens` |
 | No content, no tool calls, other finish reason | `ProviderError::EmptyResponse` |
 | Partial text, `finish_reason = "length"` | Surfaced as a normal reply with `[truncated at max_tokens]` appended, so readers and the model (next turn) see the cut |
-| Network/server error | `ProviderError::Network` with status and body |
+| Transport failure (connect, timeout, body read) | `ProviderError::Network` |
+| HTTP 5xx | `ProviderError::ServerError` with status and body |
+| HTTP 4xx (other than 401/403/429) | `ProviderError::BadRequest` with status and body |
 
 No retries for any failure. The agent loop surfaces the error to the user and
 saves the session.

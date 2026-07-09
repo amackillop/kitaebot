@@ -78,9 +78,17 @@ pub enum ProviderError {
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
 
-    /// Network error (connection failed, timeout, etc.).
+    /// Transport-level failure (connection, timeout, reading the body).
     #[error("Network error: {0}")]
     Network(String),
+
+    /// HTTP 5xx: the provider failed, the request may be fine.
+    #[error("Provider server error: {0}")]
+    ServerError(String),
+
+    /// HTTP 4xx other than 401/403/429: the request itself is bad.
+    #[error("Provider rejected the request: {0}")]
+    BadRequest(String),
 
     /// Rate limited by the provider.
     #[error("Rate limited")]
@@ -91,6 +99,17 @@ pub enum ProviderError {
     /// on reasoning). Raise `provider.max_tokens`.
     #[error("Provider response truncated at max_tokens before any content")]
     Truncated,
+}
+
+impl ProviderError {
+    /// True when the identical request may succeed if resent.
+    #[allow(dead_code)] // Consumed by the retry loop in the next commit.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::Network(_) | Self::ServerError(_) | Self::RateLimited
+        )
+    }
 }
 
 /// Tool execution errors.

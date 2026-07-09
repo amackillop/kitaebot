@@ -15,7 +15,7 @@ use tracing::{debug, warn};
 use super::{Tool, ToolCtx};
 use crate::clients::chat_completion::CompletionsClient;
 use crate::config::WebSearchConfig;
-use crate::error::{ProviderError, ToolError};
+use crate::error::ToolError;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -79,26 +79,9 @@ impl Tool for WebSearch {
                 tokio::time::timeout(self.timeout, self.client.chat_completions(&request))
                     .await
                     .map_err(|_| ToolError::Timeout)?
-                    .map_err(|e| match e {
-                        ProviderError::Authentication => {
-                            ToolError::ExecutionFailed("authentication failed".into())
-                        }
-                        ProviderError::RateLimited => {
-                            ToolError::ExecutionFailed("rate limited".into())
-                        }
-                        ProviderError::EmptyResponse => {
-                            ToolError::ExecutionFailed("provider returned an empty response".into())
-                        }
-                        ProviderError::Truncated => ToolError::ExecutionFailed(
-                            "provider response truncated at max_tokens".into(),
-                        ),
-                        ProviderError::InvalidResponse(msg) => {
-                            ToolError::ExecutionFailed(format!("invalid response: {msg}"))
-                        }
-                        ProviderError::Network(msg) => {
-                            warn!("Search API error: {msg}");
-                            ToolError::ExecutionFailed(format!("search request failed: {msg}"))
-                        }
+                    .map_err(|e| {
+                        warn!("Search API error: {e}");
+                        ToolError::ExecutionFailed(format!("search request failed: {e}"))
                     })?;
 
             let mut answer = response

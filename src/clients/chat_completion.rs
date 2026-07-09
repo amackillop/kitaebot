@@ -108,7 +108,7 @@ impl CompletionsClient {
         request: &R,
     ) -> Result<ChatResponse, ProviderError> {
         let body =
-            serde_json::to_vec(request).map_err(|e| ProviderError::Network(e.to_string()))?;
+            serde_json::to_vec(request).map_err(|e| ProviderError::BadRequest(e.to_string()))?;
         let raw = (self.post)(body).await?;
         interpret_response(&raw)
     }
@@ -128,18 +128,26 @@ pub fn interpret_response(raw: &RawResponse) -> Result<ChatResponse, ProviderErr
     match raw.status {
         200..=299 => serde_json::from_slice(&raw.body)
             .map_err(|e| ProviderError::InvalidResponse(e.to_string())),
-        401 => {
-            error!("Authentication failed");
+        401 | 403 => {
+            error!(status = raw.status, "Authentication failed");
             Err(ProviderError::Authentication)
         }
         429 => {
             error!("Rate limited");
             Err(ProviderError::RateLimited)
         }
+        500..=599 => {
+            let body = String::from_utf8_lossy(&raw.body);
+            error!(status = raw.status, "Provider server error: {body}");
+            Err(ProviderError::ServerError(format!(
+                "{}: {body}",
+                raw.status
+            )))
+        }
         s => {
             let body = String::from_utf8_lossy(&raw.body);
-            error!(status = s, "Provider error: {body}");
-            Err(ProviderError::Network(format!("{s}: {body}")))
+            error!(status = s, "Provider rejected the request: {body}");
+            Err(ProviderError::BadRequest(format!("{s}: {body}")))
         }
     }
 }
@@ -302,9 +310,29 @@ mod tests {
     }
 
     #[test]
-    fn interpret_server_error() {
+    fn interpret_server_error_is_transient() {
         let err = interpret_response(&raw(503, "Service Unavailable")).unwrap_err();
-        assert!(matches!(err, ProviderError::Network(_)));
+        assert!(matches!(err, ProviderError::ServerError(_)));
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn interpret_bad_request_is_not_transient() {
+        let err = interpret_response(&raw(400, "tokens in request more than max")).unwrap_err();
+        assert!(matches!(err, ProviderError::BadRequest(_)));
+        assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn interpret_forbidden_as_authentication() {
+        let err = interpret_response(&raw(403, "")).unwrap_err();
+        assert!(matches!(err, ProviderError::Authentication));
+        assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn rate_limited_is_transient() {
+        assert!(ProviderError::RateLimited.is_transient());
     }
 
     #[test]
