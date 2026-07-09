@@ -96,17 +96,35 @@ struct ReviewRequestPr {
     body: String,
 }
 
-/// Response from `gh pr view --json headRefOid`.
+/// Response from `gh pr view --json headRefOid,baseRefName,commits,files`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct HeadRef {
+struct ReviewPrView {
     head_ref_oid: String,
+    base_ref_name: String,
+    commits: Vec<Commit>,
+    files: Vec<ChangedFile>,
 }
 
-/// A review-requested PR with its head SHA resolved.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Commit {
+    oid: String,
+    message_headline: String,
+    message_body: String,
+}
+
+#[derive(Deserialize)]
+struct ChangedFile {
+    path: String,
+    additions: u64,
+    deletions: u64,
+}
+
+/// A review-requested PR with head SHA, base, commits, and files resolved.
 struct ReviewCandidate {
     pr: ReviewRequestPr,
-    head_sha: String,
+    view: ReviewPrView,
 }
 
 /// Response from `gh pr view --json state,title,headRefOid,comments`.
@@ -323,12 +341,12 @@ async fn review_request_pass(
     let mut candidates = Vec::new();
     for pr in prs {
         let nwo = pr.repository.name_with_owner.clone();
-        match fetch_head_sha(gh, &nwo, pr.number).await {
-            Ok(head_sha) => candidates.push(ReviewCandidate { pr, head_sha }),
+        match fetch_review_view(gh, &nwo, pr.number).await {
+            Ok(view) => candidates.push(ReviewCandidate { pr, view }),
             Err(e) => {
                 warn!(
                     pr = %format!("{nwo}#{}", pr.number),
-                    "Skipping review candidate this tick, head SHA fetch failed: {e}"
+                    "Skipping review candidate this tick, PR view fetch failed: {e}"
                 );
             }
         }
@@ -493,10 +511,10 @@ fn decide_review_requests(
 
         dispatches.push(ReviewDispatch {
             key,
-            head_sha: candidate.head_sha.clone(),
+            head_sha: candidate.view.head_ref_oid.clone(),
             pr_number: pr.number,
             repo: nwo.clone(),
-            message: format_review_request(pr, nwo),
+            message: format_review_request(pr, nwo, &candidate.view),
         });
     }
     dispatches
@@ -641,15 +659,25 @@ async fn list_review_requested_prs(gh: &GhCli) -> Result<Vec<ReviewRequestPr>, T
     gh.exec_parse(&call).await
 }
 
-async fn fetch_head_sha(gh: &GhCli, nwo: &str, pr_number: u32) -> Result<String, ToolError> {
+async fn fetch_review_view(
+    gh: &GhCli,
+    nwo: &str,
+    pr_number: u32,
+) -> Result<ReviewPrView, ToolError> {
     let number = pr_number.to_string();
     let repo_flag = format!("-R{nwo}");
     let call = gh.prepare_gh(
-        &["pr", "view", &number, &repo_flag, "--json", "headRefOid"],
+        &[
+            "pr",
+            "view",
+            &number,
+            &repo_flag,
+            "--json",
+            "headRefOid,baseRefName,commits,files",
+        ],
         gh.workspace_root(),
     );
-    let head: HeadRef = gh.exec_parse(&call).await?;
-    Ok(head.head_ref_oid)
+    gh.exec_parse(&call).await
 }
 
 async fn fetch_tracked_pr(
@@ -725,7 +753,7 @@ fn format_diff_comment(pr: &SearchResult, nwo: &str, dc: &DiffComment) -> String
     s
 }
 
-fn format_review_request(pr: &ReviewRequestPr, nwo: &str) -> String {
+fn format_review_request(pr: &ReviewRequestPr, nwo: &str, view: &ReviewPrView) -> String {
     let n = pr.number;
     let mut s = String::new();
     let _ = writeln!(
@@ -736,6 +764,25 @@ fn format_review_request(pr: &ReviewRequestPr, nwo: &str) -> String {
     if !pr.body.is_empty() {
         let _ = writeln!(s, "\nPR description:\n{}", pr.body);
     }
+    let base = &view.base_ref_name;
+    let _ = writeln!(s, "\nBase branch: {base}");
+    if !view.files.is_empty() {
+        let _ = writeln!(s, "\nChanged files:");
+        for f in &view.files {
+            let _ = writeln!(s, "- {} (+{} -{})", f.path, f.additions, f.deletions);
+        }
+    }
+    if !view.commits.is_empty() {
+        let _ = writeln!(s, "\nCommits:");
+        for c in &view.commits {
+            let short = c.oid.get(..10).unwrap_or(&c.oid);
+            let _ = writeln!(s, "\n{short} {}", c.message_headline);
+            let body = c.message_body.trim();
+            if !body.is_empty() {
+                let _ = writeln!(s, "\n{body}");
+            }
+        }
+    }
     let _ = write!(
         s,
         "\nReview this PR:\n\
@@ -743,9 +790,8 @@ fn format_review_request(pr: &ReviewRequestPr, nwo: &str) -> String {
          exists under `projects/`; clone with `git_clone` only if it does not. Then \
          fetch the PR branch via exec in it: `git fetch origin pull/{n}/head`. \
          Never `gh pr checkout`.\n\
-         - List the changed files with `gh pr diff {n} -R {nwo} --name-only` and \
-         fetch the commit messages with `gh pr view {n} -R {nwo} --json commits`. \
-         Read the changes per file with `git diff HEAD...FETCH_HEAD -- <path>` in \
+         - The changed files and full commit messages are listed above. Read the \
+         changes per file with `git diff origin/{base}...FETCH_HEAD -- <path>` in \
          the checkout; the full `gh pr diff` output is usually too large to keep \
          in context.\n\
          - Oversized tool output is replaced by a `<file>` reference holding a \
@@ -1096,7 +1142,20 @@ mod tests {
                 },
                 body: "Please take a look.".to_string(),
             },
-            head_sha: sha.to_string(),
+            view: ReviewPrView {
+                head_ref_oid: sha.to_string(),
+                base_ref_name: "main".to_string(),
+                commits: vec![Commit {
+                    oid: "abc1234567890".to_string(),
+                    message_headline: "Fix the frobnicator".to_string(),
+                    message_body: "It was broken because of reasons.".to_string(),
+                }],
+                files: vec![ChangedFile {
+                    path: "src/frob.rs".to_string(),
+                    additions: 10,
+                    deletions: 2,
+                }],
+            },
         }
     }
 
@@ -1117,10 +1176,11 @@ mod tests {
         ));
         assert!(d.message.contains("PR description:\nPlease take a look."));
         assert!(d.message.contains("git fetch origin pull/42/head"));
-        assert!(
-            d.message
-                .contains("gh pr diff 42 -R owner/repo --name-only")
-        );
+        assert!(d.message.contains("Base branch: main"));
+        assert!(d.message.contains("- src/frob.rs (+10 -2)"));
+        assert!(d.message.contains("abc1234567 Fix the frobnicator"));
+        assert!(d.message.contains("It was broken because of reasons."));
+        assert!(d.message.contains("git diff origin/main...FETCH_HEAD"));
         assert!(d.message.contains("lcm_grep"));
         assert!(d.message.contains("github_pr_review_submit"));
         assert!(d.message.contains("`task` tool"));

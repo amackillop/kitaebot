@@ -80,8 +80,20 @@ Each PR from the review-request query is a review candidate, filtered:
 | PR author untrusted | Log warning, skip |
 | Already dispatched for this head SHA | Skip (see State) |
 
-The dispatched message carries PR number, title, repo, author, and body,
-plus an instruction block:
+The dispatched message carries PR number, title, repo, author, and
+body, plus mechanically fetched context and an instruction block. The
+context — base branch, changed-file list with add/del counts, and full
+commit messages (headline and body) — comes from the same `gh pr view`
+call that resolves the head SHA, so it costs no extra request and
+matches the SHA recorded in `reviewed` exactly: the review cannot race
+a push and judge commits it was not dispatched for. Commit messages
+are required reading for every review (they carry the rationale the
+code is checked against), so the harness supplies them instead of
+prompting the model to fetch them. The diff is deliberately NOT
+packed: which files to read in full is a judgment call, and packing
+all diffs just moves the size problem into the User message.
+
+The instruction block:
 
 - Get a checkout (the review submission needs one). The repo session
   usually has one under `projects/` already — `git_clone` errors on an
@@ -89,16 +101,16 @@ plus an instruction block:
   PR branch into it: `git fetch origin pull/{n}/head`. Never
   `gh pr checkout` — it switches the shared checkout's branch and
   working tree, and `github_gh` blocks it ([spec 03](03-tools.md)).
-- Read the diff per file: changed-file list via
-  `gh pr diff --name-only`, commit messages via
-  `gh pr view --json commits`, then `git diff HEAD...FETCH_HEAD --
-  <path>` in the checkout for each file. The full `gh pr diff` output
-  typically exceeds the tool-output threshold ([spec
-  14](14-context-engine.md)) and comes back as an excerpt the root
-  cannot expand; per-file diffs stay readable. Commit messages carry
-  the rationale for the change — the why, the trade-offs, the
-  alternatives rejected. They inform the review, and the review checks
-  that the code actually does what they say.
+- Read the diff per file: the changed-file list and commit messages
+  are already in the message, so go straight to
+  `git diff origin/<base>...FETCH_HEAD -- <path>` in the checkout for
+  each file worth reading. The full `gh pr diff` output typically
+  exceeds the tool-output threshold ([spec 14](14-context-engine.md))
+  and comes back as an excerpt the root cannot expand; per-file diffs
+  stay readable. Commit messages carry the rationale for the change —
+  the why, the trade-offs, the alternatives rejected. They inform the
+  review, and the review checks that the code actually does what they
+  say.
 - The prompt states the externalization contract: oversized tool
   output becomes a `<file>` reference with a head/tail excerpt, the
   full text remains searchable via `lcm_grep`, and re-running the
