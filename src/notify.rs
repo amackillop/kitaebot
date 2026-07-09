@@ -125,6 +125,15 @@ impl Notifier {
         }
     }
 
+    /// Harness-initiated immediate send. Bypasses the per-turn rate
+    /// counter: only the actor calls this, at most once per turn.
+    /// Best-effort, like `flush`.
+    pub async fn alert(&self, text: &str) {
+        if let Err(e) = self.send(text).await {
+            warn!("Failed to deliver alert: {e}");
+        }
+    }
+
     fn record(&self, message: String, urgency: Urgency) -> NotifyAction {
         self.state.lock().unwrap().record(message, urgency)
     }

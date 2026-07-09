@@ -232,7 +232,7 @@ first place. Requires the `github-token` secret.
 | Bot login resolution fails | Log error, park forever (no polling) |
 | PR list/fetch fails | Log error, retry next tick without advancing `last_poll` |
 | Individual message send fails | Log error, continue with remaining items |
-| Agent turn fails (review) | Logged. SHA already recorded, so no retry storm; the next push or a human re-request retries. |
+| Agent turn fails (review) | Logged and alerted via the notifier (spec 17). SHA already recorded, so no retry storm; the next push or a human re-request retries. |
 | Model never submits a formal review | Pending request stays, but the SHA guard prevents re-dispatch. Visible as a stale request on the PR. |
 | Head SHA / tracked-PR fetch fails | Skip the PR this tick |
 | Incremental compare fetch fails | The model falls back to the full diff |

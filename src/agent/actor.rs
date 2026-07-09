@@ -89,7 +89,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
     }
 
     async fn handle(&mut self, envelope: &InputEnvelope) -> Result<Reply, String> {
-        match Input::parse(&envelope.input) {
+        let result = match Input::parse(&envelope.input) {
             Ok(Input::Command(cmd)) => {
                 commands::execute(
                     cmd,
@@ -104,7 +104,20 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             }
             Ok(Input::Message(text)) => self.handle_message(envelope, text).await,
             Err(_) => Err(format!("Unknown command: {}", envelope.input)),
+        };
+
+        // Nobody reads an unattended reply; a failure there would
+        // vanish into the logs.
+        if let Err(problem) = &result
+            && !envelope.source.is_attended()
+            && let Some(notifier) = &self.notifier
+        {
+            notifier
+                .alert(&format!("{}: turn failed: {problem}", envelope.source))
+                .await;
         }
+
+        result
     }
 
     /// Process a free-text message, optionally switching sessions for the turn.
@@ -147,9 +160,22 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                 cancel: envelope.cancel.clone(),
             },
         )
-        .await
-        .map(|out| Reply::text(out.into_text()))
-        .map_err(|e| e.to_string());
+        .await;
+
+        // A policy halt is an Ok reply, so the Err hook in `handle`
+        // never sees it. Alert here where the outcome is still typed.
+        if let Ok(super::TurnOutput::PolicyHalt { reasons }) = &result
+            && !envelope.source.is_attended()
+            && let Some(notifier) = &self.notifier
+        {
+            notifier
+                .alert(&format!(
+                    "{}: turn halted by policy gate: {}",
+                    envelope.source,
+                    reasons.join("; ")
+                ))
+                .await;
+        }
 
         // Deliver batched low-urgency notifications after every turn —
         // success, error, and cancellation alike.
@@ -167,6 +193,8 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         }
 
         result
+            .map(|out| Reply::text(out.into_text()))
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -491,6 +519,145 @@ mod tests {
         let calls = sent.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["text"], "ping");
+    }
+
+    fn blocked_call_response() -> Response {
+        use crate::types::{ToolCall, ToolFunction};
+        Response::ToolCalls {
+            content: String::new(),
+            calls: vec![ToolCall::new(
+                "b1".to_string(),
+                ToolFunction {
+                    name: "mock_blocked".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            )],
+        }
+    }
+
+    fn blocked_tools() -> Tools {
+        Tools::new(
+            vec![Arc::new(crate::tools::MockBlockedTool::new("not allowed"))],
+            &[],
+        )
+        .unwrap()
+    }
+
+    fn github_source() -> ChannelSource {
+        ChannelSource::GitHub {
+            pr_number: 7,
+            repo: "owner/repo".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn unattended_policy_halt_sends_alert() {
+        let (_dir, ws) = workspace();
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(blocked_call_response()),
+            Ok(blocked_call_response()),
+        ]));
+
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let notifier = fake_notifier(&sent);
+
+        let handle = spawn_agent_with(ws, provider, blocked_tools(), Some(notifier), 5);
+        let result = handle
+            .send_message(
+                github_source(),
+                "review this".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(result.unwrap().content.contains("halted automatically"));
+
+        let calls = sent.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let text = calls[0]["text"].as_str().unwrap();
+        assert!(text.contains("GitHub PR #7"), "got: {text}");
+        assert!(text.contains("halted by policy gate"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn attended_policy_halt_does_not_alert() {
+        let (_dir, ws) = workspace();
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(blocked_call_response()),
+            Ok(blocked_call_response()),
+        ]));
+
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let notifier = fake_notifier(&sent);
+
+        let handle = spawn_agent_with(ws, provider, blocked_tools(), Some(notifier), 5);
+        let result = handle
+            .send_message(
+                ChannelSource::Socket,
+                "hi".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(result.unwrap().content.contains("halted automatically"));
+
+        assert!(sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unattended_turn_error_sends_alert() {
+        let (_dir, ws) = workspace();
+        let provider = Arc::new(MockProvider::new(vec![Err(
+            crate::error::ProviderError::Network("boom".into()),
+        )]));
+
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let notifier = fake_notifier(&sent);
+
+        let handle = spawn_agent_with(ws, provider, Tools::default(), Some(notifier), 1);
+        let result = handle
+            .send_message(
+                github_source(),
+                "review this".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_err());
+
+        let calls = sent.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let text = calls[0]["text"].as_str().unwrap();
+        assert!(text.contains("GitHub PR #7"), "got: {text}");
+        assert!(text.contains("turn failed"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn attended_turn_error_does_not_alert() {
+        let (_dir, ws) = workspace();
+        let provider = Arc::new(MockProvider::new(vec![Err(
+            crate::error::ProviderError::Network("boom".into()),
+        )]));
+
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let notifier = fake_notifier(&sent);
+
+        let handle = spawn_agent_with(ws, provider, Tools::default(), Some(notifier), 1);
+        let result = handle
+            .send_message(
+                ChannelSource::Socket,
+                "hi".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_err());
+
+        assert!(sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

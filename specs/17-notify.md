@@ -73,6 +73,24 @@ The actor flushes after every turn — success, error, and cancellation alike
 with `\n\n` and sent as one Telegram message. A flush failure is logged and
 dropped; the turn is already over and there is no one to hand the error to.
 
+### Harness alerts on failed unattended turns
+
+The model is not the only notification source: a turn can fail in a way
+the model cannot report — the policy gate halts it (spec 01), or the
+provider errors out. On attended channels (Socket, Telegram) a human
+reads the reply, so nothing extra is needed. On unattended channels
+(Heartbeat, GitHub, Linear) the reply goes nowhere and the failure would
+vanish into the logs — the actor sends an immediate alert via the shared
+`Notifier` instead: source plus a one-line failure description
+(`GitHub PR #141: turn halted by policy gate: ...`). The 4000-byte send
+cap applies as usual.
+
+Alerts are harness-initiated, so they bypass the per-turn rate counter:
+the actor sends at most one per turn, and the counter exists to stop the
+*model* from hammering the API. Delivery is best-effort, like the batch
+flush. With Telegram disabled there is no `Notifier` and no alert — same
+as the tool.
+
 ### Scope
 
 Root agent only. Sub-agent tool sets (spec 19) are explicit allowlists that

@@ -31,6 +31,14 @@ pub enum ChannelSource {
     Telegram,
 }
 
+impl ChannelSource {
+    /// Whether a human is watching the reply. Failed unattended turns
+    /// are pushed to the user via the notifier.
+    pub fn is_attended(&self) -> bool {
+        matches!(self, Self::Socket | Self::Telegram)
+    }
+}
+
 impl fmt::Display for ChannelSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -68,6 +76,26 @@ pub(super) struct InputEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_socket_and_telegram_are_attended() {
+        assert!(ChannelSource::Socket.is_attended());
+        assert!(ChannelSource::Telegram.is_attended());
+        assert!(!ChannelSource::Heartbeat.is_attended());
+        assert!(
+            !ChannelSource::GitHub {
+                pr_number: 1,
+                repo: "owner/repo".into(),
+            }
+            .is_attended()
+        );
+        assert!(
+            !ChannelSource::Linear {
+                issue: "MDK-1".into(),
+            }
+            .is_attended()
+        );
+    }
 
     #[test]
     fn display_heartbeat() {
