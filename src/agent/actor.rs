@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use tracing::error;
+use tracing::{Instrument, error, field, info_span};
 
 use crate::commands;
 use crate::dispatch::{Input, Reply};
@@ -34,6 +34,8 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     engine: E,
     summarize: SummarizeFn,
     notifier: Option<Arc<Notifier>>,
+    /// Monotonic turn counter, the `id` field of the per-turn log span.
+    turn_seq: u64,
 }
 
 impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
@@ -59,6 +61,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             engine,
             summarize,
             notifier,
+            turn_seq: 0,
         }
     }
 
@@ -67,7 +70,16 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         while let Some(envelope) = self.rx.recv().await {
             match envelope {
                 Envelope::Input(input) => {
-                    let result = self.handle(&input).await;
+                    // Every event inside the turn inherits this span;
+                    // `session` is recorded once the target is known.
+                    let span = info_span!(
+                        "turn",
+                        id = self.turn_seq,
+                        source = %input.source,
+                        session = field::Empty,
+                    );
+                    self.turn_seq += 1;
+                    let result = self.handle(&input).instrument(span).await;
                     let _ = input.reply_tx.send(result);
                 }
                 Envelope::Greeting(reply_tx) => {
@@ -134,6 +146,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         let original = self.engine.active_session().to_string();
         let target = envelope.session_hint.as_deref().unwrap_or(&original);
         let switched = target != original;
+        tracing::Span::current().record("session", target);
 
         if switched {
             // switch_session saves the current session before loading the target.

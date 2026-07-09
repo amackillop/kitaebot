@@ -14,6 +14,7 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 use crate::activity::Activity;
 use crate::engine::SummarizeFn;
@@ -230,6 +231,7 @@ impl<P: Provider> Tool for TaskTool<P> {
                 self.max_iterations,
                 &child_ctx,
             )
+            .instrument(tracing::info_span!("subagent", agent = label))
             .await
             .map(super::TurnOutput::into_text)
             .map_err(|e| ToolError::ExecutionFailed(format!("sub-agent failed: {e}")))
