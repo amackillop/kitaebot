@@ -335,7 +335,7 @@ workspace root.
 | Tool | Description |
 |------|-------------|
 | `github_ci_status` | Check CI status for a git ref. |
-| `github_gh` | Generic `gh` CLI escape hatch — runs arbitrary `gh` subcommands. |
+| `github_gh` | Generic `gh` CLI escape hatch. Subcommands allowlisted (`issue`, `pr`, `release`); `pr checkout` is blocked because it mutates the shared checkout. |
 | `github_pr_create` | Create a pull request. |
 | `github_pr_list` | List pull requests (open/closed/all). |
 | `github_pr_review_submit` | Submit a formal PR review (APPROVE or COMMENT) with inline comments. REQUEST_CHANGES is unrepresentable in the args. |

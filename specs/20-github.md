@@ -83,11 +83,26 @@ Each PR from the review-request query is a review candidate, filtered:
 The dispatched message carries PR number, title, repo, author, and body,
 plus an instruction block:
 
-- Fetch the diff (`gh pr diff`) and the commit messages
-  (`gh pr view --json commits`). Commit messages carry the rationale for
-  the change — the why, the trade-offs, the alternatives rejected. They
-  inform the review, and the review checks that the code actually does
-  what they say.
+- Get a checkout (the review submission needs one). The repo session
+  usually has one under `projects/` already — `git_clone` errors on an
+  existing directory — so clone only if it is missing. Then fetch the
+  PR branch into it: `git fetch origin pull/{n}/head`. Never
+  `gh pr checkout` — it switches the shared checkout's branch and
+  working tree, and `github_gh` blocks it ([spec 03](03-tools.md)).
+- Read the diff per file: changed-file list via
+  `gh pr diff --name-only`, commit messages via
+  `gh pr view --json commits`, then `git diff HEAD...FETCH_HEAD --
+  <path>` in the checkout for each file. The full `gh pr diff` output
+  typically exceeds the tool-output threshold ([spec
+  14](14-context-engine.md)) and comes back as an excerpt the root
+  cannot expand; per-file diffs stay readable. Commit messages carry
+  the rationale for the change — the why, the trade-offs, the
+  alternatives rejected. They inform the review, and the review checks
+  that the code actually does what they say.
+- The prompt states the externalization contract: oversized tool
+  output becomes a `<file>` reference with a head/tail excerpt, the
+  full text remains searchable via `lcm_grep`, and re-running the
+  command with different flags to shrink it is a waste of a turn.
 - Context beyond the diff (usage of changed code, existing behavior,
   test coverage) goes through the `task` tool (explore, [spec
   19](19-sub-agents.md)) against a cloned checkout, with specific
@@ -105,8 +120,8 @@ plus an instruction block:
   ([spec 03](03-tools.md)): `body` (summary and verdict), `event`
   (`APPROVE` or `COMMENT`), and `comments` (path/line/body array).
   Inline findings each become a resolvable thread, which is what the
-  follow-up path engages with. The tool needs a cloned checkout for
-  `repo_dir`, so trivial PRs get cloned too. On failure (usually bad
+  follow-up path engages with. `repo_dir` is the checkout. On failure
+  (usually bad
   line anchoring), the affected finding moves into `body` with a
   file:line reference and the review is resubmitted. A formal review
   (not a plain comment) is required — submitting it is what clears the

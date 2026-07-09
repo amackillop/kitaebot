@@ -739,8 +739,18 @@ fn format_review_request(pr: &ReviewRequestPr, nwo: &str) -> String {
     let _ = write!(
         s,
         "\nReview this PR:\n\
-         - Fetch the diff with `gh pr diff {n} -R {nwo}` and the commit messages with \
-         `gh pr view {n} -R {nwo} --json commits`.\n\
+         - You need a checkout (review submission requires one). It likely already \
+         exists under `projects/`; clone with `git_clone` only if it does not. Then \
+         fetch the PR branch via exec in it: `git fetch origin pull/{n}/head`. \
+         Never `gh pr checkout`.\n\
+         - List the changed files with `gh pr diff {n} -R {nwo} --name-only` and \
+         fetch the commit messages with `gh pr view {n} -R {nwo} --json commits`. \
+         Read the changes per file with `git diff HEAD...FETCH_HEAD -- <path>` in \
+         the checkout; the full `gh pr diff` output is usually too large to keep \
+         in context.\n\
+         - Oversized tool output is replaced by a `<file>` reference holding a \
+         head/tail excerpt. The full text is kept and searchable with `lcm_grep`; \
+         do not re-run the command with different flags to shrink it.\n\
          - For context beyond the diff (how changed code is used elsewhere, existing \
          behavior, test coverage), clone the repo and delegate to the `task` tool \
          (explore) with specific questions; require file:line evidence in the answer. \
@@ -758,8 +768,8 @@ fn format_review_request(pr: &ReviewRequestPr, nwo: &str) -> String {
          - Submit one formal review with the `github_pr_review_submit` tool: `body` \
          is the summary and verdict, `event` is APPROVE if the PR is sound or COMMENT \
          otherwise, `comments` holds inline findings anchored to diff lines \
-         (path/line/body). Its `repo_dir` is a cloned checkout, so clone with \
-         `git_clone` first if you have not already. If submission fails (usually bad \
+         (path/line/body). Its `repo_dir` is the checkout. If \
+         submission fails (usually bad \
          line anchoring), move the affected finding into `body` with a file:line \
          reference and resubmit. A formal review (not a plain comment) is required; \
          submitting it clears the pending request. Blocking judgments stay with \
@@ -1106,7 +1116,12 @@ mod tests {
             "Your review was requested on PR #42 \"Add feature\" (owner/repo) by author @alice."
         ));
         assert!(d.message.contains("PR description:\nPlease take a look."));
-        assert!(d.message.contains("gh pr diff 42 -R owner/repo"));
+        assert!(d.message.contains("git fetch origin pull/42/head"));
+        assert!(
+            d.message
+                .contains("gh pr diff 42 -R owner/repo --name-only")
+        );
+        assert!(d.message.contains("lcm_grep"));
         assert!(d.message.contains("github_pr_review_submit"));
         assert!(d.message.contains("`task` tool"));
         assert!(d.message.contains("Blocking judgments stay with humans"));

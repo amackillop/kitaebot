@@ -70,6 +70,17 @@ impl Gh {
             });
         }
 
+        // Mutates the shared checkout (branch switch, working tree).
+        if subcmd == "pr" && args.get(1).is_some_and(|a| a == "checkout") {
+            return Err(ToolError::Blocked {
+                operation: "gh pr checkout".into(),
+                guidance: "fetch the PR head without touching the working tree: \
+                           `git fetch origin pull/<n>/head` via exec, then diff \
+                           against FETCH_HEAD"
+                    .into(),
+            });
+        }
+
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         Ok(self.0.prepare_gh(&refs, &cwd))
@@ -107,6 +118,18 @@ mod tests {
                 "{subcmd} should be blocked",
             );
         }
+    }
+
+    #[test]
+    fn rejects_pr_checkout() {
+        let (gh, repo) = stub_gh_cli_with_repo();
+        let tool = Gh(gh);
+        let args: Vec<String> = ["pr", "checkout", "42"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let result = tool.prepare(&repo, &args);
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 
     #[test]
