@@ -45,6 +45,25 @@ const LOG_CONTENT_MAX: usize = 500;
 const POLICY_STOP_DIRECTIVE: &str = "POLICY VIOLATION: A tool call was blocked. \
     Do NOT work around this. Report the situation to the user and await direction.";
 
+/// Outcome of a completed turn.
+#[derive(Debug)]
+pub enum TurnOutput {
+    /// The model produced a final text response.
+    Text(String),
+    /// The turn was halted after repeated policy violations.
+    PolicyHalt { reasons: Vec<String> },
+}
+
+impl TurnOutput {
+    /// Render the outcome as user-facing text.
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Text(s) => s,
+            Self::PolicyHalt { reasons } => policy_halt_msg(&reasons),
+        }
+    }
+}
+
 fn policy_halt_msg(reasons: &[String]) -> String {
     use std::fmt::Write;
     let mut msg = String::from(
@@ -71,7 +90,7 @@ pub async fn process_message(
     tools: &Tools,
     max_iterations: usize,
     ctx: &ToolCtx,
-) -> Result<String, Error> {
+) -> Result<TurnOutput, Error> {
     run_turn(
         engine,
         summarize,
@@ -107,7 +126,7 @@ pub(crate) async fn run_turn(
     tools: &Tools,
     max_iterations: usize,
     ctx: &ToolCtx,
-) -> Result<String, Error> {
+) -> Result<TurnOutput, Error> {
     let activity_tx = ctx.activity.as_ref();
     let cancel = &ctx.cancel;
     if cancel.is_cancelled() {
@@ -168,7 +187,7 @@ pub(crate) async fn run_turn(
                         content: content.clone(),
                     })
                     .await?;
-                return Ok(content);
+                return Ok(TurnOutput::Text(content));
             }
             Response::ToolCalls { content, calls } => {
                 engine
@@ -227,7 +246,9 @@ pub(crate) async fn run_turn(
                     policy_strikes += 1;
                     if policy_strikes >= POLICY_STRIKE_LIMIT {
                         warn!("Policy strike limit reached, halting turn");
-                        return Ok(policy_halt_msg(&blocked_reasons));
+                        return Ok(TurnOutput::PolicyHalt {
+                            reasons: blocked_reasons,
+                        });
                     }
                     engine
                         .push_message(Message::System {
@@ -422,7 +443,7 @@ mod tests {
             &ToolCtx::default(),
         )
         .await;
-        assert_eq!(result.unwrap(), "Hello from LLM");
+        assert_eq!(result.unwrap().into_text(), "Hello from LLM");
         // User + Assistant messages stored
         assert_eq!(engine.stats().message_count, 2);
     }
@@ -448,7 +469,7 @@ mod tests {
             &ToolCtx::default(),
         )
         .await;
-        assert_eq!(result.unwrap(), "Tool result processed");
+        assert_eq!(result.unwrap().into_text(), "Tool result processed");
     }
 
     #[tokio::test]
@@ -504,7 +525,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result.unwrap(), "Gave up");
+        assert_eq!(result.unwrap().into_text(), "Gave up");
         assert_eq!(provider.call_count(), 6);
 
         drop(tx);
@@ -577,7 +598,7 @@ mod tests {
             &ToolCtx::default(),
         )
         .await;
-        assert_eq!(result.unwrap(), "Done");
+        assert_eq!(result.unwrap().into_text(), "Done");
 
         // No repetition error messages in assembled context.
         let ctx = engine.assemble(SYSTEM).await.unwrap();
@@ -637,7 +658,7 @@ mod tests {
             &tx_ctx(&tx),
         )
         .await;
-        assert_eq!(result.unwrap(), "Done");
+        assert_eq!(result.unwrap().into_text(), "Done");
 
         drop(tx);
         let mut events = Vec::new();
@@ -695,7 +716,7 @@ mod tests {
             &ToolCtx::default(),
         )
         .await;
-        assert_eq!(result.unwrap(), "Multiple tools executed");
+        assert_eq!(result.unwrap().into_text(), "Multiple tools executed");
     }
 
     #[tokio::test]
@@ -1013,7 +1034,7 @@ mod tests {
             &ToolCtx::default(),
         )
         .await;
-        assert_eq!(result.unwrap(), "OK I'll stop");
+        assert_eq!(result.unwrap().into_text(), "OK I'll stop");
 
         let ctx = engine.assemble("").await.unwrap();
         let has_directive = ctx.messages.iter().any(
@@ -1044,7 +1065,12 @@ mod tests {
         )
         .await;
 
-        let msg = result.unwrap();
+        let out = result.unwrap();
+        assert!(
+            matches!(out, TurnOutput::PolicyHalt { .. }),
+            "expected policy halt outcome",
+        );
+        let msg = out.into_text();
         assert!(
             msg.contains("halted automatically"),
             "expected halt message, got: {msg}",
@@ -1078,7 +1104,7 @@ mod tests {
             &ToolCtx::default(),
         )
         .await;
-        assert_eq!(r1.unwrap(), "Turn 1 done");
+        assert_eq!(r1.unwrap().into_text(), "Turn 1 done");
 
         let r2 = run_turn(
             &mut engine,
@@ -1091,6 +1117,6 @@ mod tests {
             &ToolCtx::default(),
         )
         .await;
-        assert_eq!(r2.unwrap(), "Turn 2 done");
+        assert_eq!(r2.unwrap().into_text(), "Turn 2 done");
     }
 }

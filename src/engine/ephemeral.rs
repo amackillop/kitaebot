@@ -237,7 +237,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result, "done");
+        assert_eq!(result.into_text(), "done");
         // User message plus assistant reply, nothing else.
         assert_eq!(engine.stats().message_count, 2);
     }

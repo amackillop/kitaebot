@@ -148,7 +148,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             },
         )
         .await
-        .map(Reply::text)
+        .map(|out| Reply::text(out.into_text()))
         .map_err(|e| e.to_string());
 
         // Deliver batched low-urgency notifications after every turn —

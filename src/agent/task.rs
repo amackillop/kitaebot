@@ -231,6 +231,7 @@ impl<P: Provider> Tool for TaskTool<P> {
                 &child_ctx,
             )
             .await
+            .map(super::TurnOutput::into_text)
             .map_err(|e| ToolError::ExecutionFailed(format!("sub-agent failed: {e}")))
         })
     }

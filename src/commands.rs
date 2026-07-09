@@ -128,7 +128,8 @@ pub async fn execute(
                 )
                 .await
                 {
-                    Ok(response) => {
+                    Ok(output) => {
+                        let response = output.into_text();
                         if let Err(e) = heartbeat::finish(workspace, &response) {
                             error!("Failed to write heartbeat history: {e}");
                         }

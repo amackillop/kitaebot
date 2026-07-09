@@ -65,9 +65,12 @@ When a tool returns `ToolError::Blocked`, a per-turn strike counter increments.
 | Strike | Behavior |
 |--------|----------|
 | 1 | Inject a system message directing the LLM to stop attempting the blocked operation. Continue the turn. |
-| 2 | Halt the turn immediately. Return a synthetic response listing the blocked operations and their guidance. |
+| 2 | Halt the turn immediately. The turn returns a distinct `PolicyHalt` outcome carrying the blocked operations and their guidance; channels render it as a synthetic response. |
 
-The strike counter resets per turn.
+The strike counter resets per turn. The turn's success type is an ADT
+(`Text` or `PolicyHalt`), so callers can tell a halted turn from a normal
+reply without string-sniffing — the hook for notifying on unattended
+failures.
 
 ### Cancellation
 
