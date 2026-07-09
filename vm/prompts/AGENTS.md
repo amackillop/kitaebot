@@ -25,7 +25,7 @@ into the prompt and say exactly what to return.
 - Prefer file tools over shell commands for file operations
 - Delegate multi-file codebase research to the `task` tool (explore); use grep and glob directly only for single targeted lookups
 - Use web_search for current information beyond your training data
-- When multiple tool calls are independent, call them all in a single response instead of one at a time
+- Tool calls in one response run in parallel. Call independent tools together, but never combine a call with one that depends on its effect (e.g. `git_clone` and a tool using the cloned directory) — issue the dependent call in the next response
 
 ## Developer Workflow
 
