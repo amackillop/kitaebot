@@ -16,7 +16,7 @@ use std::future::Future;
 use futures::future::join_all;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::activity::{self, Activity};
 use crate::engine::{ContextEngine, SummarizeFn};
@@ -104,6 +104,14 @@ pub async fn process_message(
     .await
 }
 
+/// Counters for the end-of-turn summary line.
+#[derive(Default)]
+struct TurnStats {
+    iterations: usize,
+    tool_calls: usize,
+    prompt_tokens: Option<usize>,
+}
+
 /// Run a single turn of the agent loop.
 ///
 /// Pushes the user message onto the session, sends the history (with system
@@ -111,12 +119,15 @@ pub async fn process_message(
 /// The system prompt is read once at workspace init; prompt files are
 /// Nix-provisioned, so changes require a restart.
 ///
+/// Emits one INFO summary event per turn: outcome, iterations, tool
+/// calls, last observed prompt tokens, and duration.
+///
 /// # Errors
 /// Returns error if max iterations reached or provider fails
 ///
 /// Exposed crate-internally so sub-agents (spec 19) run the exact
 /// same loop against an ephemeral child context.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_turn(
     engine: &mut impl ContextEngine,
     summarize: &SummarizeFn,
@@ -126,6 +137,62 @@ pub(crate) async fn run_turn(
     tools: &Tools,
     max_iterations: usize,
     ctx: &ToolCtx,
+) -> Result<TurnOutput, Error> {
+    let started = std::time::Instant::now();
+    let mut stats = TurnStats::default();
+    let result = turn_loop(
+        engine,
+        summarize,
+        system_prompt,
+        user_message,
+        provider,
+        tools,
+        max_iterations,
+        ctx,
+        &mut stats,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    let outcome = match &result {
+        Ok(TurnOutput::Text(_)) => "text",
+        Ok(TurnOutput::PolicyHalt { .. }) => "policy_halt",
+        Err(Error::Cancelled) => "cancelled",
+        Err(Error::MaxIterationsReached) => "max_iterations",
+        Err(_) => "error",
+    };
+    match &result {
+        Ok(_) => info!(
+            outcome,
+            iterations = stats.iterations,
+            tool_calls = stats.tool_calls,
+            prompt_tokens = stats.prompt_tokens,
+            ?elapsed,
+            "Turn summary"
+        ),
+        Err(e) => info!(
+            outcome,
+            error = %e,
+            iterations = stats.iterations,
+            tool_calls = stats.tool_calls,
+            prompt_tokens = stats.prompt_tokens,
+            ?elapsed,
+            "Turn summary"
+        ),
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn turn_loop(
+    engine: &mut impl ContextEngine,
+    summarize: &SummarizeFn,
+    system_prompt: &str,
+    user_message: &str,
+    provider: &impl Provider,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: &ToolCtx,
+    stats: &mut TurnStats,
 ) -> Result<TurnOutput, Error> {
     let activity_tx = ctx.activity.as_ref();
     let cancel = &ctx.cancel;
@@ -164,6 +231,7 @@ pub(crate) async fn run_turn(
             return Err(Error::Cancelled);
         }
 
+        stats.iterations = iteration + 1;
         debug!(iteration, "Agent loop iteration");
         let assembled = engine.assemble(system_prompt).await?;
 
@@ -177,6 +245,7 @@ pub(crate) async fn run_turn(
 
         if let Some(prompt_tokens) = outcome.prompt_tokens {
             engine.observe_tokens(prompt_tokens as usize);
+            stats.prompt_tokens = Some(prompt_tokens as usize);
         }
 
         match outcome.response {
@@ -213,6 +282,7 @@ pub(crate) async fn run_turn(
                     continue;
                 }
 
+                stats.tool_calls += calls.len();
                 for call in &calls {
                     activity::emit(
                         activity_tx,
