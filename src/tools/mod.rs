@@ -237,7 +237,34 @@ impl Tools {
             .collect()
     }
 
+    /// Dispatch a tool call, logging start/end with duration. Results
+    /// are recorded by the agent loop only after all parallel calls
+    /// finish, so these events are the accurate per-call timeline.
     pub async fn execute(&self, call: &ToolCall, ctx: ToolCtx) -> Result<String, ToolError> {
+        tracing::debug!(tool = %call.function.name, call_id = %call.id, "Tool started");
+        let started = std::time::Instant::now();
+        let result = self.dispatch(call, ctx).await;
+        let elapsed = started.elapsed();
+        match &result {
+            Ok(output) => tracing::debug!(
+                tool = %call.function.name,
+                call_id = %call.id,
+                ?elapsed,
+                bytes = output.len(),
+                "Tool finished"
+            ),
+            Err(e) => tracing::debug!(
+                tool = %call.function.name,
+                call_id = %call.id,
+                ?elapsed,
+                error = %e,
+                "Tool failed"
+            ),
+        }
+        result
+    }
+
+    async fn dispatch(&self, call: &ToolCall, ctx: ToolCtx) -> Result<String, ToolError> {
         let tool = self
             .0
             .iter()
