@@ -56,8 +56,12 @@ recorded SHA means leftover state from a previous review turn can never
 block the next one, and the checkout matches the SHA recorded in
 `reviewed` exactly. The model is told the checkout is read-only.
 
-Preparation failure logs a warning and skips the PR for the tick
-without writing state, so the next tick retries naturally. The head SHA
+Both the review-request and tracked passes prepare the checkout this
+way. Preparation failure logs a warning and skips the PR for the tick
+without writing state, so the next tick retries naturally. For tracked
+PRs, push turns retry via the SHA delta; a comment-only turn is lost
+once `last_poll` advances — accepted, since prep failures on an
+existing clone are transient. The head SHA
 must be a 40-char hex string and the base ref must not start with `-`;
 both come from the GitHub API, but git would parse an option-shaped
 value as a flag.
@@ -170,10 +174,11 @@ re-request needed. A new head SHA triggers an incremental re-review,
 scoped to the delta in the context of the prior review. The dispatched
 message carries the previously reviewed SHA and instructs the model to:
 
-- Fetch the incremental diff, not the whole PR: in the cloned
-  checkout, `git fetch origin pull/{n}/head` then `git log` and
-  `git diff` over `{prev}..FETCH_HEAD`, falling back to the full
-  `gh pr diff` when that fails (e.g. after a force push).
+- Read the incremental diff, not the whole PR: the channel has already
+  prepared the review checkout (same as the initial review — new head
+  detached, read-only), so `git log` and `git diff` over `{prev}..HEAD`
+  in it, falling back to the full `gh pr diff` when that fails (e.g.
+  after a force push).
 - Recall its prior review: the review session carries it, and
   `gh pr view --json reviews` recovers the submitted text if compaction
   ate the details.
