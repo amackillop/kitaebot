@@ -153,6 +153,13 @@ The instruction block:
   comments — inline threads exist to be resolved, and "nice" resolves
   nothing. A truly remarkable observation gets one line in the review
   body.
+- Findings with a concrete better version carry a GitHub suggestion
+  block with the replacement lines: the author commits it with one
+  click, so consent and authorship stay with them and the bot's no-push
+  invariant holds. This covers mechanical fixes (typo, off-by-one,
+  wrong constant) and cleaner shapes for the commented lines alike;
+  findings that need discussion rather than replacement lines get
+  prose.
 - Submit one formal review with the `github_pr_review_submit` tool
   ([spec 03](03-tools.md)): `body` (summary and verdict), `event`
   (`APPROVE` or `COMMENT`), and `comments` (path/line/body array).
@@ -190,7 +197,8 @@ message carries the previously reviewed SHA and instructs the model to:
 - Submit a formal review via `github_pr_review_submit`: `APPROVE` when
   the feedback is addressed, `COMMENT` naming the remaining gaps
   otherwise. Same comment discipline as the initial review: suspect or
-  needs-change only, no praise.
+  needs-change only, no praise, suggestion blocks where a concrete
+  better version exists.
 
 The `reviewed` entry updates to the new SHA on dispatch, so each push
 gets at most one incremental turn.
@@ -206,6 +214,13 @@ disagree and explain why, with specifics. Replies go to the same thread
 (inline replies via `github_pr_diff_reply`, PR comments via a normal
 comment). Going quiet is not an option; neither is reflexively
 defending a bad take.
+
+When a commenter asks the bot to implement the fix, the answer is a
+suggestion block in the inline thread, never a push — same mechanism as
+the proactive suggestions in reviews. Fixes that do not fit the
+commented lines are spelled out with file:line references instead.
+Pushing to the PR branch directly remains future work (needs
+`headRefName`, fork handling, and a self-review guard).
 
 The bot responds only to human comments, never to its own, so threads
 terminate when the human stops replying.
