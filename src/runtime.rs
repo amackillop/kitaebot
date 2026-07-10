@@ -13,6 +13,7 @@ use crate::notify::Notifier;
 use crate::provider::CompletionsProvider;
 use crate::telegram::TelegramChannel;
 use crate::tools::Tools;
+use crate::tools::git::GitCli;
 use crate::tools::github::GhCli;
 use crate::workspace::Workspace;
 
@@ -23,6 +24,8 @@ pub struct Runtime {
     pub telegram: Option<TelegramChannel>,
     pub notifier: Option<Arc<Notifier>>,
     pub gh_cli: Option<GhCli>,
+    /// Used by the GitHub channel to prepare review checkouts.
+    pub git_cli: Option<GitCli>,
     pub linear: Option<LinearChannel>,
 }
 
@@ -52,7 +55,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     } else {
         None
     };
-    let gh_cli = if config.git.enabled || config.github.enabled {
+    let (gh_cli, git_cli) = if config.git.enabled || config.github.enabled {
         let token = load_secret("github-token").unwrap_or_else(|e| {
             error!("Failed to load GitHub token: {e}");
             std::process::exit(1);
@@ -65,13 +68,19 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 direnv_cache.clone(),
             ));
         }
+        // The channel prepares review checkouts itself, even when the
+        // git tools are disabled.
+        let git_cli = config
+            .github
+            .enabled
+            .then(|| GitCli::new(token.clone(), workspace.path(), direnv_cache.clone()));
         let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
             tools.extend(github::build(gh.clone()));
         }
-        Some(gh)
+        (Some(gh), git_cli)
     } else {
-        None
+        (None, None)
     };
 
     let linear = if config.linear.enabled {
@@ -124,6 +133,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         telegram,
         notifier,
         gh_cli,
+        git_cli,
         linear,
     }
 }
@@ -151,7 +161,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
 
     let direnv_cache = DirenvCache::new();
     let mut tools = Tools::local(workspace, config, direnv_cache.clone());
-    let gh_cli = if config.git.enabled || config.github.enabled {
+    let (gh_cli, git_cli) = if config.git.enabled || config.github.enabled {
         let token = load_secret("github-token").unwrap_or_else(|e| {
             error!("Failed to load GitHub token: {e}");
             std::process::exit(1);
@@ -164,13 +174,19 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 direnv_cache.clone(),
             ));
         }
+        // The channel prepares review checkouts itself, even when the
+        // git tools are disabled.
+        let git_cli = config
+            .github
+            .enabled
+            .then(|| GitCli::new(token.clone(), workspace.path(), direnv_cache.clone()));
         let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
             tools.extend(github::build(gh.clone()));
         }
-        Some(gh)
+        (Some(gh), git_cli)
     } else {
-        None
+        (None, None)
     };
 
     let (telegram, notifier) = if config.telegram.enabled {
@@ -207,6 +223,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         telegram,
         notifier,
         gh_cli,
+        git_cli,
         linear,
     }
 }

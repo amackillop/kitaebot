@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-#[allow(dead_code)] // Wired into the poll passes in the next commit.
 mod review_checkout;
 
 use crate::config::GithubConfig;
@@ -24,6 +23,7 @@ use crate::agent::AgentHandle;
 use crate::agent::envelope::ChannelSource;
 use crate::error::ToolError;
 use crate::time::now_iso8601;
+use crate::tools::git::GitCli;
 use crate::tools::github::GhCli;
 
 // ---------------------------------------------------------------------------
@@ -130,7 +130,7 @@ struct ReviewCandidate {
     view: ReviewPrView,
 }
 
-/// Response from `gh pr view --json state,title,headRefOid,comments`.
+/// Response from `gh pr view --json state,title,headRefOid,baseRefName,comments`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TrackedPrView {
@@ -138,6 +138,7 @@ struct TrackedPrView {
     state: String,
     title: String,
     head_ref_oid: String,
+    base_ref_name: String,
     comments: Vec<PrComment>,
 }
 
@@ -158,6 +159,8 @@ struct ReviewDispatch {
     head_sha: String,
     pr_number: u32,
     repo: String,
+    /// Base branch name, needed to prepare the review checkout.
+    base: String,
     message: String,
 }
 
@@ -194,6 +197,7 @@ impl PollState {
 /// so we don't replay entire PR histories.
 pub async fn poll_loop(
     gh: &GhCli,
+    git: &GitCli,
     config: &GithubConfig,
     handle: &AgentHandle,
     state_path: &Path,
@@ -217,7 +221,7 @@ pub async fn poll_loop(
 
     loop {
         tick.tick().await;
-        match poll_once(gh, config, handle, &bot_login, &mut state, state_path).await {
+        match poll_once(gh, git, config, handle, &bot_login, &mut state, state_path).await {
             Ok(count) => {
                 info!(count, "GitHub poll: dispatched {count} items");
                 state.last_poll = now_iso8601();
@@ -236,6 +240,7 @@ pub async fn poll_loop(
 
 async fn poll_once(
     gh: &GhCli,
+    git: &GitCli,
     config: &GithubConfig,
     handle: &AgentHandle,
     bot_login: &str,
@@ -243,7 +248,7 @@ async fn poll_once(
     state_path: &Path,
 ) -> Result<usize, ToolError> {
     let mut count = feedback_pass(gh, config, handle, bot_login, &state.last_poll).await?;
-    count += review_request_pass(gh, config, handle, bot_login, state, state_path).await?;
+    count += review_request_pass(gh, git, config, handle, bot_login, state, state_path).await?;
     count += tracked_pass(gh, config, handle, bot_login, state, state_path).await;
     Ok(count)
 }
@@ -282,7 +287,14 @@ async fn feedback_pass(
                 );
                 continue;
             }
-            send(handle, pr.number, nwo, format_review(pr, nwo, review)).await;
+            send(
+                handle,
+                pr.number,
+                nwo,
+                nwo.clone(),
+                format_review(pr, nwo, review),
+            )
+            .await;
             count += 1;
         }
 
@@ -300,7 +312,14 @@ async fn feedback_pass(
                 );
                 continue;
             }
-            send(handle, pr.number, nwo, format_comment(pr, nwo, comment)).await;
+            send(
+                handle,
+                pr.number,
+                nwo,
+                nwo.clone(),
+                format_comment(pr, nwo, comment),
+            )
+            .await;
             count += 1;
         }
 
@@ -318,7 +337,14 @@ async fn feedback_pass(
                 );
                 continue;
             }
-            send(handle, pr.number, nwo, format_diff_comment(pr, nwo, dc)).await;
+            send(
+                handle,
+                pr.number,
+                nwo,
+                nwo.clone(),
+                format_diff_comment(pr, nwo, dc),
+            )
+            .await;
             count += 1;
         }
     }
@@ -328,11 +354,15 @@ async fn feedback_pass(
 
 /// Pass 2: PRs where a review is requested from the bot's account.
 ///
-/// Each dispatch records the head SHA in `state.reviewed` and saves
-/// state *before* the turn runs, so a failed turn does not re-trigger
-/// every tick. Re-reviews on later pushes are the tracked pass's job.
+/// Each dispatch first prepares the review checkout (clone under
+/// `reviews/`, detach at the head SHA); a prep failure skips the PR
+/// for this tick without recording state, so the next tick retries.
+/// Then the head SHA is recorded in `state.reviewed` and state saved
+/// *before* the turn runs, so a failed turn does not re-trigger every
+/// tick. Re-reviews on later pushes are the tracked pass's job.
 async fn review_request_pass(
     gh: &GhCli,
+    git: &GitCli,
     config: &GithubConfig,
     handle: &AgentHandle,
     bot_login: &str,
@@ -363,11 +393,25 @@ async fn review_request_pass(
         &config.trusted_users,
     );
 
-    let count = dispatches.len();
+    let mut count = 0;
     for d in dispatches {
+        if let Err(e) =
+            review_checkout::prepare(git, &d.repo, d.pr_number, &d.head_sha, &d.base).await
+        {
+            warn!(pr = %d.key, "Skipping review this tick, checkout prep failed: {e}");
+            continue;
+        }
         state.reviewed.insert(d.key, d.head_sha);
         save_state(state_path, state);
-        send(handle, d.pr_number, &d.repo, d.message).await;
+        send(
+            handle,
+            d.pr_number,
+            &d.repo,
+            review_session(&d.repo),
+            d.message,
+        )
+        .await;
+        count += 1;
     }
     Ok(count)
 }
@@ -437,7 +481,14 @@ async fn tracked_pass(
     for d in dispatches {
         state.reviewed.insert(d.key, d.head_sha);
         save_state(state_path, state);
-        send(handle, d.pr_number, &d.repo, d.message).await;
+        send(
+            handle,
+            d.pr_number,
+            &d.repo,
+            review_session(&d.repo),
+            d.message,
+        )
+        .await;
     }
     count
 }
@@ -448,15 +499,22 @@ fn parse_tracking_key(key: &str) -> Option<(&str, u32)> {
     Some((nwo, number.parse().ok()?))
 }
 
-async fn send(handle: &AgentHandle, pr_number: u32, repo: &str, message: String) {
+/// Session key for review turns on a repo. Kept separate from the
+/// work session (`{nwo}`): reviewing and building the same repo are
+/// different conversations, and prior-review context lives here.
+fn review_session(nwo: &str) -> String {
+    format!("review:{nwo}")
+}
+
+async fn send(handle: &AgentHandle, pr_number: u32, repo: &str, session: String, message: String) {
     let cancel = CancellationToken::new();
     let source = ChannelSource::GitHub {
         pr_number,
         repo: repo.to_string(),
     };
-    // Route per-repo: actor switches to this session for the turn.
+    // Actor switches to this session for the turn.
     match handle
-        .send_message(source, message, Some(repo.to_string()), None, cancel)
+        .send_message(source, message, Some(session), None, cancel)
         .await
     {
         Ok(reply) => info!(pr_number, "GitHub PR #{pr_number}: {}", reply.content),
@@ -511,13 +569,21 @@ fn decide_review_requests(
         if reviewed.contains_key(&key) {
             continue;
         }
+        let checkout = match review_checkout::checkout_rel_path(nwo) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(pr = %key, "Skipping review request, bad repo name: {e}");
+                continue;
+            }
+        };
 
         dispatches.push(ReviewDispatch {
             key,
             head_sha: candidate.view.head_ref_oid.clone(),
             pr_number: pr.number,
             repo: nwo.clone(),
-            message: format_review_request(pr, nwo, &candidate.view),
+            base: candidate.view.base_ref_name.clone(),
+            message: format_review_request(pr, nwo, &candidate.view, &checkout),
         });
     }
     dispatches
@@ -561,6 +627,7 @@ fn decide_tracked(
             head_sha: s.view.head_ref_oid.clone(),
             pr_number: s.pr_number,
             repo: s.nwo.clone(),
+            base: s.view.base_ref_name.clone(),
             message: format_tracked_turn(s, pushed.then_some(prev_sha.as_str()), &comments),
         });
     }
@@ -697,7 +764,7 @@ async fn fetch_tracked_pr(
             &number,
             &repo_flag,
             "--json",
-            "state,title,headRefOid,comments",
+            "state,title,headRefOid,baseRefName,comments",
         ],
         gh.workspace_root(),
     );
@@ -756,7 +823,12 @@ fn format_diff_comment(pr: &SearchResult, nwo: &str, dc: &DiffComment) -> String
     s
 }
 
-fn format_review_request(pr: &ReviewRequestPr, nwo: &str, view: &ReviewPrView) -> String {
+fn format_review_request(
+    pr: &ReviewRequestPr,
+    nwo: &str,
+    view: &ReviewPrView,
+    checkout: &str,
+) -> String {
     let n = pr.number;
     let mut s = String::new();
     let _ = writeln!(
@@ -768,6 +840,7 @@ fn format_review_request(pr: &ReviewRequestPr, nwo: &str, view: &ReviewPrView) -
         let _ = writeln!(s, "\nPR description:\n{}", pr.body);
     }
     let base = &view.base_ref_name;
+    let head = &view.head_ref_oid;
     let _ = writeln!(s, "\nBase branch: {base}");
     if !view.files.is_empty() {
         let _ = writeln!(s, "\nChanged files:");
@@ -789,22 +862,23 @@ fn format_review_request(pr: &ReviewRequestPr, nwo: &str, view: &ReviewPrView) -
     let _ = write!(
         s,
         "\nReview this PR:\n\
-         - You need a checkout (review submission requires one). It likely already \
-         exists under `projects/`; clone with `git_clone` only if it does not. Then \
-         fetch the PR branch via exec in it: `git fetch origin pull/{n}/head`. \
-         Never `gh pr checkout`.\n\
+         - The PR head is already checked out at `{checkout}` (detached at \
+         {head}), with the base branch fetched. This checkout exists only for \
+         reviews: read with git (diff, log, show), but never switch branches, \
+         edit files, stash, or `gh pr checkout`. Your working checkout under \
+         `projects/` is not involved; leave it alone.\n\
          - The changed files and full commit messages are listed above. Read the \
-         changes per file with `git diff origin/{base}...FETCH_HEAD -- <path>` in \
-         the checkout; the full `gh pr diff` output is usually too large to keep \
-         in context.\n\
+         changes per file with `git diff origin/{base}...HEAD -- <path>` via exec \
+         in `{checkout}`; the full `gh pr diff` output is usually too large to \
+         keep in context.\n\
          - Oversized tool output is replaced by a `<file>` reference holding a \
          head/tail excerpt. The full text is kept and searchable with `lcm_grep`; \
          do not re-run the command with different flags to shrink it.\n\
          - For context beyond the diff (how changed code is used elsewhere, existing \
-         behavior, test coverage), clone the repo and delegate to the `task` tool \
-         (explore) with specific questions; require file:line evidence in the answer. \
-         Read files directly only to judge a hunk whose surrounding code the diff \
-         does not show.\n\
+         behavior, test coverage), delegate to the `task` tool (explore) with \
+         specific questions against files in `{checkout}`; require file:line \
+         evidence in the answer. Read files directly only to judge a hunk whose \
+         surrounding code the diff does not show.\n\
          - Commit messages carry the rationale for the change: the why, the trade-offs, \
          the alternatives rejected. Let them inform the review, and check that the code \
          actually does what they say.\n\
@@ -817,7 +891,7 @@ fn format_review_request(pr: &ReviewRequestPr, nwo: &str, view: &ReviewPrView) -
          - Submit one formal review with the `github_pr_review_submit` tool: `body` \
          is the summary and verdict, `event` is APPROVE if the PR is sound or COMMENT \
          otherwise, `comments` holds inline findings anchored to diff lines \
-         (path/line/body). Its `repo_dir` is the checkout. If \
+         (path/line/body). Its `repo_dir` is `{checkout}`. If \
          submission fails (usually bad \
          line anchoring), move the affected finding into `body` with a file:line \
          reference and resubmit. A formal review (not a plain comment) is required; \
@@ -1174,16 +1248,20 @@ mod tests {
         assert_eq!(d.head_sha, "abc123");
         assert_eq!(d.pr_number, 42);
         assert_eq!(d.repo, "owner/repo");
+        assert_eq!(d.base, "main");
         assert!(d.message.starts_with(
             "Your review was requested on PR #42 \"Add feature\" (owner/repo) by author @alice."
         ));
         assert!(d.message.contains("PR description:\nPlease take a look."));
-        assert!(d.message.contains("git fetch origin pull/42/head"));
+        assert!(d.message.contains("checked out at `reviews/owner/repo`"));
+        assert!(d.message.contains("detached at abc123"));
         assert!(d.message.contains("Base branch: main"));
         assert!(d.message.contains("- src/frob.rs (+10 -2)"));
         assert!(d.message.contains("abc1234567 Fix the frobnicator"));
         assert!(d.message.contains("It was broken because of reasons."));
-        assert!(d.message.contains("git diff origin/main...FETCH_HEAD"));
+        assert!(d.message.contains("git diff origin/main...HEAD"));
+        assert!(d.message.contains("`repo_dir` is `reviews/owner/repo`"));
+        assert!(!d.message.contains("git_clone"));
         assert!(d.message.contains("lcm_grep"));
         assert!(d.message.contains("github_pr_review_submit"));
         assert!(d.message.contains("`task` tool"));
@@ -1222,6 +1300,18 @@ mod tests {
     }
 
     #[test]
+    fn review_request_skips_invalid_repo_name() {
+        let candidates = vec![candidate("-flag/repo", 1, "alice", "abc")];
+        let dispatches = decide_review_requests(&candidates, &BTreeMap::new(), "bot", "alice", &[]);
+        assert!(dispatches.is_empty());
+    }
+
+    #[test]
+    fn review_session_key_is_prefixed() {
+        assert_eq!(review_session("owner/repo"), "review:owner/repo");
+    }
+
+    #[test]
     fn review_request_omits_empty_body() {
         let mut c = candidate("o/r", 3, "alice", "abc");
         c.pr.body = String::new();
@@ -1239,6 +1329,7 @@ mod tests {
                 state: state.to_string(),
                 title: "Add feature".to_string(),
                 head_ref_oid: head_sha.to_string(),
+                base_ref_name: "main".to_string(),
                 comments: Vec::new(),
             },
             diff_comments: Vec::new(),

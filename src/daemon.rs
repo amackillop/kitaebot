@@ -26,6 +26,7 @@ use crate::heartbeat;
 use crate::linear_channel::{self, LinearChannel};
 use crate::socket;
 use crate::telegram::{self, TelegramChannel};
+use crate::tools::git::GitCli;
 use crate::tools::github::GhCli;
 use crate::workspace::Workspace;
 
@@ -37,6 +38,7 @@ pub async fn run(
     interval_secs: u64,
     telegram: Option<&TelegramChannel>,
     gh_cli: Option<&GhCli>,
+    git_cli: Option<&GitCli>,
     github: &GithubConfig,
     linear: Option<&LinearChannel>,
     socket_path: &Path,
@@ -47,6 +49,7 @@ pub async fn run(
         Duration::from_secs(interval_secs),
         telegram,
         gh_cli,
+        git_cli,
         github,
         linear,
         socket_path,
@@ -64,6 +67,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     interval: Duration,
     telegram: Option<&TelegramChannel>,
     gh_cli: Option<&GhCli>,
+    git_cli: Option<&GitCli>,
     github: &GithubConfig,
     linear: Option<&LinearChannel>,
     socket_path: &Path,
@@ -81,10 +85,11 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     let state_path = workspace.github_poll_state_path();
     let github_loop = async {
         // gh_cli is also Some when only the git tools are enabled;
-        // the channel itself is gated on `github.enabled`.
-        match gh_cli.filter(|_| github.enabled) {
-            Some(gh) => {
-                github_channel::poll_loop(gh, github, handle, &state_path).await;
+        // the channel itself is gated on `github.enabled`. git_cli is
+        // Some exactly when `github.enabled`.
+        match gh_cli.filter(|_| github.enabled).zip(git_cli) {
+            Some((gh, git)) => {
+                github_channel::poll_loop(gh, git, github, handle, &state_path).await;
             }
             None => std::future::pending().await,
         }
@@ -186,6 +191,7 @@ mod tests {
             Duration::from_secs(3600), // large interval — only the immediate first tick matters
             None,
             None,
+            None,
             &GithubConfig::default(),
             None, // linear
             &sock_path,
@@ -211,6 +217,7 @@ mod tests {
             &ws,
             &handle,
             Duration::from_millis(100), // 100ms interval for fast test
+            None,
             None,
             None,
             &GithubConfig::default(),
@@ -250,6 +257,7 @@ mod tests {
             &ws,
             &handle,
             Duration::from_secs(3600),
+            None,
             None,
             None,
             &GithubConfig::default(),

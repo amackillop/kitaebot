@@ -36,10 +36,31 @@ both queries:
    single combined turn.
 
 Items are filtered (see below) and dispatched through the agent handle
-with `ChannelSource::GitHub { pr_number, repo }` and the repo
-(`owner/repo`) as session hint — the same session key as Linear issue
-routing, so a repo's authored PRs, tickets, and reviews share one session.
-`last_poll` advances only after a successful poll.
+with `ChannelSource::GitHub { pr_number, repo }`. The session key splits
+by direction: feedback on the bot's own PRs routes to the repo's work
+session (`owner/repo`, the same key as Linear issue routing), while
+review and re-review/discussion turns route to `review:owner/repo`.
+Reviewing and building the same repo are different conversations —
+prior-review context lives in the review session, in-progress work in
+the work session, and neither compacts the other away. `last_poll`
+advances only after a successful poll.
+
+### Review checkout
+
+Review turns never touch the working checkout under `projects/`. Before
+dispatching a review, the channel prepares a dedicated clone at
+`reviews/<owner>/<repo>`: clone on first use, then
+`git fetch origin <base> pull/{n}/head` and
+`git checkout --force --detach <head-sha>`. Force-detaching at the
+recorded SHA means leftover state from a previous review turn can never
+block the next one, and the checkout matches the SHA recorded in
+`reviewed` exactly. The model is told the checkout is read-only.
+
+Preparation failure logs a warning and skips the PR for the tick
+without writing state, so the next tick retries naturally. The head SHA
+must be a 40-char hex string and the base ref must not start with `-`;
+both come from the GitHub API, but git would parse an option-shaped
+value as a flag.
 
 ### Bot identity
 
@@ -95,15 +116,15 @@ all diffs just moves the size problem into the User message.
 
 The instruction block:
 
-- Get a checkout (the review submission needs one). The repo session
-  usually has one under `projects/` already — `git_clone` errors on an
-  existing directory — so clone only if it is missing. Then fetch the
-  PR branch into it: `git fetch origin pull/{n}/head`. Never
-  `gh pr checkout` — it switches the shared checkout's branch and
-  working tree, and `github_gh` blocks it ([spec 03](03-tools.md)).
+- The PR head is already checked out at `reviews/<owner>/<repo>`,
+  detached at the recorded SHA with the base branch fetched (see Review
+  checkout). Treat it as read-only: git only to read (diff, log, show);
+  no branch switching, edits, or stashing, and never `gh pr checkout`
+  (`github_gh` blocks it anyway, [spec 03](03-tools.md)). The working
+  checkout under `projects/` is not involved.
 - Read the diff per file: the changed-file list and commit messages
   are already in the message, so go straight to
-  `git diff origin/<base>...FETCH_HEAD -- <path>` in the checkout for
+  `git diff origin/<base>...HEAD -- <path>` in the review checkout for
   each file worth reading. The full `gh pr diff` output typically
   exceeds the tool-output threshold ([spec 14](14-context-engine.md))
   and comes back as an excerpt the root cannot expand; per-file diffs
@@ -117,8 +138,8 @@ The instruction block:
   command with different flags to shrink it is a waste of a turn.
 - Context beyond the diff (usage of changed code, existing behavior,
   test coverage) goes through the `task` tool (explore, [spec
-  19](19-sub-agents.md)) against a cloned checkout, with specific
-  questions and file:line evidence required in the answer. Direct file
+  19](19-sub-agents.md)) against files in the review checkout, with
+  specific questions and file:line evidence required in the answer. Direct file
   reads are reserved for judging a hunk whose surrounding code the diff
   does not show. This keeps cross-file tracing out of the root context;
   findings still land there via the sub-agent's summary.
@@ -132,7 +153,7 @@ The instruction block:
   ([spec 03](03-tools.md)): `body` (summary and verdict), `event`
   (`APPROVE` or `COMMENT`), and `comments` (path/line/body array).
   Inline findings each become a resolvable thread, which is what the
-  follow-up path engages with. `repo_dir` is the checkout. On failure
+  follow-up path engages with. `repo_dir` is the review checkout. On failure
   (usually bad
   line anchoring), the affected finding moves into `body` with a
   file:line reference and the review is resubmitted. A formal review
@@ -153,7 +174,7 @@ message carries the previously reviewed SHA and instructs the model to:
   checkout, `git fetch origin pull/{n}/head` then `git log` and
   `git diff` over `{prev}..FETCH_HEAD`, falling back to the full
   `gh pr diff` when that fails (e.g. after a force push).
-- Recall its prior review: the repo session carries it, and
+- Recall its prior review: the review session carries it, and
   `gh pr view --json reviews` recovers the submitted text if compaction
   ate the details.
 - Judge the delta against that feedback: does it address the prior
@@ -241,6 +262,7 @@ first place. Requires the `github-token` secret.
 
 - The poll passes (own PRs, review requests, tracked reviewed PRs) and
   their filtering
+- Review checkout preparation under `reviews/`
 - Bot identity resolution and self-reply prevention
 - Message formatting for reviews, comments, diff comments, review
   requests, and follow-up discussions
@@ -266,6 +288,7 @@ first place. Requires the `github-token` secret.
 | Individual message send fails | Log error, continue with remaining items |
 | Agent turn fails (review) | Logged and alerted via the notifier (spec 17). SHA already recorded, so no retry storm; the next push or a human re-request retries. |
 | Model never submits a formal review | Pending request stays, but the SHA guard prevents re-dispatch. Visible as a stale request on the PR. |
+| Review checkout prep fails (clone/fetch/detach) | Log warning, skip the PR this tick without recording state; retried next tick |
 | Head SHA / tracked-PR fetch fails | Skip the PR this tick |
 | Incremental compare fetch fails | The model falls back to the full diff |
 | State file corrupt | Defaults: `last_poll = now`, empty `reviewed` map |

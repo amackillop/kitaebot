@@ -131,6 +131,7 @@ async fn main() {
                 config.heartbeat.interval_secs,
                 rt.telegram.as_ref(),
                 rt.gh_cli.as_ref(),
+                rt.git_cli.as_ref(),
                 &config.github,
                 rt.linear.as_ref(),
                 socket_path,
