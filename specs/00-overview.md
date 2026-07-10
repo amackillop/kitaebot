@@ -92,6 +92,7 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [18](18-egress-filter.md) | Egress Filter | Domain-allowlisted outbound proxy |
 | [19](19-sub-agents.md) | Sub-Agents | Task delegation with isolated child contexts |
 | [20](20-github.md) | GitHub Channel | PR feedback polling and review requests |
+| [21](21-memory.md) | Memory | Durable cross-session knowledge: index, topics, distillation |
 
 ## Data Flow
 

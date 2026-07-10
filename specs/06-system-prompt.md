@@ -28,6 +28,10 @@ The system prompt is read from disk **once at startup** and cached for
 the process lifetime. Prompt files are provisioned from the Nix store,
 so changing them requires a rebuild and restart regardless.
 
+The one dynamic exception is the memory index (`memory/MEMORY.md`),
+appended after the static files and re-read each turn because the
+agent writes it at runtime — see [spec 21](21-memory.md).
+
 The prompt is prepended as a `Message::System` to every provider call but
 **never stored in the session**. This keeps the session clean and allows prompt
 changes without invalidating history.
