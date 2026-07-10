@@ -12,6 +12,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+#[allow(dead_code)] // Wired into the poll passes in the next commit.
+mod review_checkout;
+
 use crate::config::GithubConfig;
 use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;

@@ -81,6 +81,8 @@
             // {
               inherit cargoArtifacts;
               cargoTestExtraArgs = "--features mock-network";
+              # review_checkout tests spawn real git against a fixture repo.
+              nativeCheckInputs = [ pkgs.git ];
             }
           );
         };
