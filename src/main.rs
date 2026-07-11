@@ -10,6 +10,7 @@ mod error;
 mod github_channel;
 mod heartbeat;
 mod linear_channel;
+mod memory;
 mod notify;
 mod provider;
 mod retry;
@@ -200,6 +201,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         heartbeat_provider,
         Arc::new(tools),
         config.agent.max_iterations,
+        config.memory.index_cap_bytes,
         engine,
         summarize,
         notifier,

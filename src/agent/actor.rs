@@ -31,6 +31,7 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     heartbeat_provider: Arc<P>,
     tools: Arc<Tools>,
     max_iterations: usize,
+    memory_index_cap: usize,
     engine: E,
     summarize: SummarizeFn,
     notifier: Option<Arc<Notifier>>,
@@ -47,6 +48,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         heartbeat_provider: Arc<P>,
         tools: Arc<Tools>,
         max_iterations: usize,
+        memory_index_cap: usize,
         engine: E,
         summarize: SummarizeFn,
         notifier: Option<Arc<Notifier>>,
@@ -58,6 +60,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             heartbeat_provider,
             tools,
             max_iterations,
+            memory_index_cap,
             engine,
             summarize,
             notifier,
@@ -111,6 +114,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                     &*self.heartbeat_provider,
                     &self.tools,
                     self.max_iterations,
+                    self.memory_index_cap,
                 )
                 .await
             }
@@ -168,6 +172,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             &*self.provider,
             &self.tools,
             self.max_iterations,
+            self.memory_index_cap,
             &crate::tools::ToolCtx {
                 activity: envelope.activity_tx.clone(),
                 cancel: envelope.cancel.clone(),
@@ -268,6 +273,7 @@ mod tests {
             heartbeat_provider,
             Arc::new(tools),
             max_iterations,
+            8192,
             engine,
             summarize,
             notifier,

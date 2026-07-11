@@ -27,6 +27,8 @@ pub struct Config {
     #[serde(default)]
     pub linear: LinearConfig,
     #[serde(default)]
+    pub memory: MemoryConfig,
+    #[serde(default)]
     pub provider: ProviderConfig,
     #[serde(default)]
     pub socket: SocketConfig,
@@ -156,6 +158,16 @@ pub struct WebSearchConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct HeartbeatConfig {
     pub interval_secs: u64,
+}
+
+/// Memory subsystem settings (spec 21).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryConfig {
+    /// Byte cap on the `memory/MEMORY.md` index injected into the
+    /// system prompt each root turn. Content beyond it is truncated.
+    /// Must be > 0.
+    pub index_cap_bytes: usize,
 }
 
 /// Telegram channel settings.
@@ -426,6 +438,14 @@ impl Default for HeartbeatConfig {
     }
 }
 
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            index_cap_bytes: 8192,
+        }
+    }
+}
+
 impl Default for LinearConfig {
     fn default() -> Self {
         Self {
@@ -538,6 +558,11 @@ impl Config {
         if self.heartbeat.interval_secs == 0 {
             return Err(ConfigError::Invalid(
                 "heartbeat interval_secs must be > 0".into(),
+            ));
+        }
+        if self.memory.index_cap_bytes == 0 {
+            return Err(ConfigError::Invalid(
+                "memory index_cap_bytes must be > 0".into(),
             ));
         }
         if self.provider.max_tokens == 0 {
@@ -777,6 +802,30 @@ heartbeat = \"cheap/heartbeat\"
     fn heartbeat_reject_zero_interval() {
         let result = load_toml("[heartbeat]\ninterval_secs = 0\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn memory_defaults() {
+        let cfg = load_toml("").unwrap();
+        assert_eq!(cfg.memory.index_cap_bytes, 8192);
+    }
+
+    #[test]
+    fn memory_parse() {
+        let cfg = load_toml("[memory]\nindex_cap_bytes = 4096\n").unwrap();
+        assert_eq!(cfg.memory.index_cap_bytes, 4096);
+    }
+
+    #[test]
+    fn memory_reject_zero_cap() {
+        let result = load_toml("[memory]\nindex_cap_bytes = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn memory_reject_unknown_field() {
+        let result = load_toml("[memory]\ntypo = 1\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 
     #[test]

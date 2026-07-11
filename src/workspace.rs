@@ -72,6 +72,11 @@ impl Workspace {
         self.root.join("state")
     }
 
+    /// Directory holding the memory subsystem's files (spec 21).
+    pub fn memory_dir(&self) -> PathBuf {
+        self.root.join("memory")
+    }
+
     /// Path to the heartbeat task file.
     pub fn heartbeat_path(&self) -> PathBuf {
         self.root.join("HEARTBEAT.md")

@@ -79,6 +79,7 @@ pub async fn execute(
     heartbeat_provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
+    memory_index_cap: usize,
 ) -> Result<Reply, String> {
     match cmd {
         SlashCommand::Compact => match engine.force_compact(summarize).await {
@@ -124,6 +125,7 @@ pub async fn execute(
                     heartbeat_provider,
                     tools,
                     max_iterations,
+                    memory_index_cap,
                     &crate::tools::ToolCtx::default(),
                 )
                 .await

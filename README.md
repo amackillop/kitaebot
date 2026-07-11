@@ -197,6 +197,9 @@ kitaebot = {
     heartbeat = {
       interval_secs = 1800;
     };
+    memory = {
+      index_cap_bytes = 8192;                    # Byte cap on the injected MEMORY.md index
+    };
     provider = {
       api = "openrouter";                        # openrouter | openai | groq | together | mistral
       model = "arcee-ai/trinity-large-preview:free";

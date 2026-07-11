@@ -356,6 +356,7 @@ mod tests {
             provider,
             Arc::new(tools),
             5,
+            8192,
             engine,
             summarize,
             None,

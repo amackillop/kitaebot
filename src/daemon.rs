@@ -165,6 +165,7 @@ mod tests {
             provider,
             Arc::new(Tools::default()),
             1,
+            8192,
             engine,
             summarize,
             None,

@@ -79,7 +79,10 @@ fn policy_halt_msg(reasons: &[String]) -> String {
 
 /// Run a single turn: compact if needed, push user message, loop until done.
 ///
-/// Shared by all channels (telegram, socket, heartbeat).
+/// Shared by all root channels (telegram, socket, heartbeat). Prepends
+/// the memory index (spec 21) to the cached system prompt, read fresh so
+/// runtime writes take effect on the next turn. Sub-agents call
+/// [`run_turn`] directly and are excluded by design.
 #[allow(clippy::too_many_arguments)]
 pub async fn process_message(
     engine: &mut impl ContextEngine,
@@ -89,12 +92,18 @@ pub async fn process_message(
     provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
+    memory_index_cap: usize,
     ctx: &ToolCtx,
 ) -> Result<TurnOutput, Error> {
+    let system_prompt =
+        match crate::memory::index_segment(&workspace.memory_dir(), memory_index_cap) {
+            Some(index) => format!("{}\n{index}", workspace.system_prompt()),
+            None => workspace.system_prompt().to_string(),
+        };
     run_turn(
         engine,
         summarize,
-        workspace.system_prompt(),
+        &system_prompt,
         user_message,
         provider,
         tools,
@@ -1050,6 +1059,7 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
+            8192,
             &ToolCtx::default(),
         )
         .await;
