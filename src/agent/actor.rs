@@ -12,6 +12,7 @@ use tracing::{Instrument, error, field, info_span};
 
 use crate::commands;
 use crate::dispatch::{Input, Reply};
+use crate::distill::Distiller;
 use crate::engine::{ContextEngine, SummarizeFn};
 use crate::notify::Notifier;
 use crate::provider::Provider;
@@ -29,7 +30,9 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     workspace: Arc<Workspace>,
     provider: Arc<P>,
     heartbeat_provider: Arc<P>,
+    memory_provider: Arc<P>,
     tools: Arc<Tools>,
+    distiller: Arc<Distiller>,
     max_iterations: usize,
     memory_index_cap: usize,
     engine: E,
@@ -46,7 +49,9 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         workspace: Arc<Workspace>,
         provider: Arc<P>,
         heartbeat_provider: Arc<P>,
+        memory_provider: Arc<P>,
         tools: Arc<Tools>,
+        distiller: Arc<Distiller>,
         max_iterations: usize,
         memory_index_cap: usize,
         engine: E,
@@ -58,7 +63,9 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             workspace,
             provider,
             heartbeat_provider,
+            memory_provider,
             tools,
+            distiller,
             max_iterations,
             memory_index_cap,
             engine,
@@ -112,7 +119,9 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                     &self.summarize,
                     &self.workspace,
                     &*self.heartbeat_provider,
+                    &*self.memory_provider,
                     &self.tools,
+                    &self.distiller,
                     self.max_iterations,
                     self.memory_index_cap,
                 )
@@ -267,11 +276,21 @@ mod tests {
         let state_dir = ws.state_dir();
         let engine = FlatSession::new(sessions_dir, state_dir, ContextConfig::default()).unwrap();
         let summarize = make_summarize_fn(provider.clone());
+        // Threshold far above any test transcript, so /heartbeat tests
+        // never trip the distillation gate.
+        let distiller = Arc::new(crate::distill::Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            40_000,
+            1,
+        ));
         AgentHandle::spawn(
             ws,
-            provider,
+            provider.clone(),
             heartbeat_provider,
+            provider,
             Arc::new(tools),
+            distiller,
             max_iterations,
             8192,
             engine,

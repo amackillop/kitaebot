@@ -388,11 +388,19 @@ mod tests {
         let state_dir = ws.state_dir();
         let engine = crate::engine::flat::FlatSession::new(sessions_dir, state_dir, ctx()).unwrap();
         let summarize = crate::engine::make_summarize_fn(provider.clone());
+        let distiller = Arc::new(crate::distill::Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            40_000,
+            1,
+        ));
         let handle = AgentHandle::spawn(
             ws,
             provider.clone(),
+            provider.clone(),
             provider,
             Arc::new(Tools::default()),
+            distiller,
             1,
             8192,
             engine,

@@ -724,11 +724,19 @@ mod tests {
         )
         .unwrap();
         let summarize = crate::engine::make_summarize_fn(provider.clone());
+        let distiller = Arc::new(crate::distill::Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            40_000,
+            1,
+        ));
         let handle = AgentHandle::spawn(
             ws,
             provider.clone(),
+            provider.clone(),
             provider,
             Arc::new(Tools::default()),
+            distiller,
             1,
             8192,
             engine,

@@ -41,6 +41,23 @@ Because `/heartbeat` routes through the `Command` dispatch branch (not the
 `[Heartbeat]` channel prefix. Source tagging only applies to free-text
 messages.
 
+### Distillation duty
+
+Each `/heartbeat` also runs a memory distillation pass ([spec 21](21-memory.md)),
+**independent** of the task review above: it runs whether or not there were
+active tasks, so an empty HEARTBEAT.md still keeps memory current. The order is
+review first, then distillation.
+
+The pass is gated **mechanically** on accumulated undistilled tokens — no LLM
+runs until the backlog reaches `memory.distill_threshold_tokens`, so an idle
+week costs nothing. When the gate opens, it folds recent session history into
+`memory/` on a fresh ephemeral context via a **worker** sub-agent on the
+`provider.model_overrides.memory` model, never the root session, so a bulk
+transcript read cannot evict live context. On a successful pass the one-line
+summary is appended to `HISTORY.md` and folded into the heartbeat reply; a gate
+that stays closed is silent. A distillation failure is logged, not fatal — the
+review reply still stands.
+
 ### HEARTBEAT.md Format
 
 Tasks are recurring — they run every heartbeat cycle, not once. Checkboxes act
@@ -98,6 +115,7 @@ persisted to HISTORY.md.
 - Task parsing — extract `- [ ]` lines from HEARTBEAT.md
 - Prompt construction — build the heartbeat prompt from active tasks
 - History logging — append timestamped responses to HISTORY.md
+- Hosting the distillation duty — runs `distill::run` after the review each tick
 
 ### Does Not Own
 
@@ -105,6 +123,8 @@ persisted to HISTORY.md.
 - Session persistence — the session module handles that
 - HEARTBEAT.md content — provisioned by NixOS, edited by user or agent
 - Activity events — heartbeat passes `None` for the activity sender
+- Distillation mechanics — the gate, watermarks, and worker live in `distill`
+  ([spec 21](21-memory.md)); the heartbeat only invokes the pass
 
 ### Interactions
 
@@ -132,6 +152,7 @@ next tick.
 | Config key | Default | Description |
 |------------|---------|-------------|
 | `heartbeat.interval_secs` | 1800 | Seconds between ticks (must be > 0) |
+| `memory.distill_threshold_tokens` | 40000 | Undistilled tokens that open the distillation gate ([spec 21](21-memory.md)) |
 
 There is no `enabled` flag for heartbeat. It naturally no-ops when
 HEARTBEAT.md has no active tasks.

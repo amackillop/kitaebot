@@ -130,7 +130,6 @@ impl FlatSession {
     /// A session's messages: in-memory when active (sees unsaved
     /// pushes), otherwise loaded from disk. An unreadable file yields
     /// an empty span rather than failing the whole distill pass.
-    #[allow(dead_code)]
     fn session_messages(&self, name: &str) -> Vec<Message> {
         if name == self.active_name {
             self.session.messages().to_vec()

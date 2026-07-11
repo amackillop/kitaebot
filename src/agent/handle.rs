@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::activity::Activity;
 use crate::dispatch::Reply;
+use crate::distill::Distiller;
 use crate::engine::{ContextEngine, SummarizeFn};
 use crate::notify::Notifier;
 use crate::provider::Provider;
@@ -38,7 +39,9 @@ impl AgentHandle {
         workspace: Arc<Workspace>,
         provider: Arc<P>,
         heartbeat_provider: Arc<P>,
+        memory_provider: Arc<P>,
         tools: Arc<Tools>,
+        distiller: Arc<Distiller>,
         max_iterations: usize,
         memory_index_cap: usize,
         engine: E,
@@ -51,7 +54,9 @@ impl AgentHandle {
             workspace,
             provider,
             heartbeat_provider,
+            memory_provider,
             tools,
+            distiller,
             max_iterations,
             memory_index_cap,
             engine,

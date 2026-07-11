@@ -3,12 +3,8 @@
 //! Distillation folds recent session history into `memory/`. This
 //! module owns the persisted per-session watermarks, the mechanical
 //! token gate that decides when a pass is worth an LLM turn, and the
-//! distiller worker that runs the pass. The heartbeat wiring lands in
-//! a later commit.
-
-// Nothing calls the state, gate, or worker until the heartbeat duty
-// wires distillation (spec 21).
-#![allow(dead_code)]
+//! distiller worker that runs the pass. The heartbeat duty in
+//! `commands::execute` drives it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -126,16 +122,21 @@ direct requests of trusted users, are durable facts.\n\n\
 When done, reply with a one-line summary of what you changed.";
 
 /// The distiller worker: a fixed system prompt plus the memory-editing
-/// tool set, mirroring the sub-agent construction in `agent::task`.
+/// tool set, mirroring the sub-agent construction in `agent::task`. It
+/// also carries the run knobs (the gate threshold and the tool-loop
+/// cap) since both are fixed properties of the distiller, not the call
+/// site.
 pub struct Distiller {
     system_prompt: String,
     tools: Tools,
+    threshold: u64,
+    max_iterations: usize,
 }
 
 impl Distiller {
     /// Build the distiller from the parent's base registry
     /// (post-`tools.disabled`), filtered to the memory-editing tools.
-    pub fn new(base: &Tools, workspace_dir: &Path) -> Self {
+    pub fn new(base: &Tools, workspace_dir: &Path, threshold: u64, max_iterations: usize) -> Self {
         let tools = base.filtered(DISTILL_TOOLS);
         let names: Vec<String> = tools
             .definitions()
@@ -150,6 +151,8 @@ impl Distiller {
         Self {
             system_prompt,
             tools,
+            threshold,
+            max_iterations,
         }
     }
 }
@@ -157,35 +160,32 @@ impl Distiller {
 /// Run one distillation pass if the gate is open (spec 21).
 ///
 /// Probes the per-session pending token totals, and if their sum has
-/// not reached `threshold`, returns `Ok(None)` without an LLM call.
-/// Otherwise it gathers the pending spans across sessions (sharing one
-/// token budget so the consolidated pass stays bounded), folds them
-/// into a single distiller turn on a fresh ephemeral context, and on
-/// success advances each session's watermark and persists the state.
-/// A failed turn leaves the watermarks untouched so the same span is
-/// retried at the next gate crossing.
-#[allow(clippy::too_many_arguments)]
+/// not reached the distiller's threshold, returns `Ok(None)` without an
+/// LLM call. Otherwise it gathers the pending spans across sessions
+/// (sharing one token budget so the consolidated pass stays bounded),
+/// folds them into a single distiller turn on a fresh ephemeral
+/// context, and on success advances each session's watermark and
+/// persists the state. A failed turn leaves the watermarks untouched so
+/// the same span is retried at the next gate crossing.
 pub async fn run<P: Provider, E: ContextEngine>(
     engine: &E,
     distiller: &Distiller,
     provider: &P,
     summarize: &SummarizeFn,
     workspace: &Workspace,
-    threshold: u64,
     state: &mut DistillState,
-    max_iterations: usize,
 ) -> Result<Option<String>, Error> {
     let pending = engine.pending_distill_tokens(&state.watermarks).await?;
     let total = total_pending(&pending);
-    if !gate_open(total, threshold) {
-        info!(total, threshold, "Distillation gate closed");
+    if !gate_open(total, distiller.threshold) {
+        info!(total, distiller.threshold, "Distillation gate closed");
         return Ok(None);
     }
 
     // Share one token budget across sessions so the consolidated span
     // cannot outgrow the distiller's window; each fetch is clamped and
     // always makes progress.
-    let mut gathered = Gathered::new(threshold);
+    let mut gathered = Gathered::new(distiller.threshold);
     for name in pending.keys() {
         if gathered.budget == 0 {
             break;
@@ -210,7 +210,7 @@ pub async fn run<P: Provider, E: ContextEngine>(
         &user_message,
         provider,
         &distiller.tools,
-        max_iterations,
+        distiller.max_iterations,
         &ToolCtx::default(),
     )
     .await?;
@@ -523,7 +523,7 @@ mod run_tests {
             transcripts: BTreeMap::new(),
         };
         let provider = Arc::new(MockProvider::new(vec![]));
-        let distiller = Distiller::new(&Tools::default(), ws.path());
+        let distiller = Distiller::new(&Tools::default(), ws.path(), 1000, 5);
         let mut state = DistillState::default();
 
         let out = run(
@@ -532,9 +532,7 @@ mod run_tests {
             &*provider,
             &noop_summarize(),
             &ws,
-            1000,
             &mut state,
-            5,
         )
         .await
         .unwrap();
@@ -563,7 +561,7 @@ mod run_tests {
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
             "wrote canary fact".into(),
         ))]));
-        let distiller = Distiller::new(&Tools::default(), ws.path());
+        let distiller = Distiller::new(&Tools::default(), ws.path(), 1000, 5);
         let mut state = DistillState::default();
 
         let out = run(
@@ -572,9 +570,7 @@ mod run_tests {
             &*provider,
             &noop_summarize(),
             &ws,
-            1000,
             &mut state,
-            5,
         )
         .await
         .unwrap();
@@ -601,7 +597,7 @@ mod run_tests {
             )]),
         };
         let provider = Arc::new(MockProvider::new(vec![Err(ProviderError::RateLimited)]));
-        let distiller = Distiller::new(&Tools::default(), ws.path());
+        let distiller = Distiller::new(&Tools::default(), ws.path(), 1000, 5);
         let mut state = DistillState::default();
 
         let result = run(
@@ -610,9 +606,7 @@ mod run_tests {
             &*provider,
             &noop_summarize(),
             &ws,
-            1000,
             &mut state,
-            5,
         )
         .await;
 

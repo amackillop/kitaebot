@@ -101,23 +101,41 @@ reading session history through the context engine abstraction:
   destructively, so there distillation is best-effort over what
   compaction has not yet eaten.
 - **Event:** one persisted message appended to a persistent session —
-  any role (user, assistant, tool result). For scale: a typical agent
-  turn is roughly `2 + 2 × tool calls` events, so an ordinary turn
-  lands around 10-30 and a full PR review in the low hundreds.
-- **Gate (mechanical, no LLM cost):** distillation runs when the count
-  of events recorded since the last distillation crosses a threshold.
-  Event-count, not wall-clock: an idle week must not burn distillation
-  turns re-reading nothing, and a busy day may warrant more than one
-  pass. A watermark (last-distilled event per session) makes the gate a
-  counting query.
-- **Execution:** runs as a worker sub-agent, not on the root session —
-  reading transcript spans is bulk work that must not evict real
-  context. Uses the `provider.model_overrides.memory` role when
-  configured.
+  any role (user, assistant, tool result). Positions are dense, so a
+  per-session watermark (last-distilled position) both bounds the read
+  span and, subtracted from the head, counts what is pending.
+- **Gate (mechanical, no LLM cost):** the pending events across all
+  sessions are weighed by their summed `token_count`, and distillation
+  runs once that total crosses `distill_threshold_tokens`. Tokens, not
+  a raw event count, because the binding constraint is the distiller's
+  context window: the threshold doubles as the shared token budget for
+  the consolidated span, so a triggered pass fits in one turn. Not
+  wall-clock either — an idle week burns nothing, a busy day may cross
+  the gate more than once. The watermark makes the probe a counting
+  query that never loads message bodies.
+- **Execution:** one **consolidated** pass folds every session's pending
+  span into a single distiller turn (cheapest, and it enables
+  cross-session dedupe). It runs as a worker sub-agent on a fresh
+  ephemeral context, never the root session — reading transcript spans
+  is bulk work that must not evict real context. Uses the
+  `provider.model_overrides.memory` role when configured. The spans
+  share one token budget seeded from the threshold; each fetch is
+  clamped to the remaining budget and still returns at least one event,
+  so an oversized head cannot stall progress.
+- **Backlog carry:** exactly one pass runs per heartbeat tick, and it
+  reads at most one budget's worth. Each session's watermark advances by
+  the events actually read (positions are dense, so `after + count`),
+  **not** to the head — so history the budget could not reach this tick
+  stays pending, not dropped. Between ticks a session can accumulate far
+  more than the budget; the gate simply stays open and the next tick
+  folds the next span. Bursty load drains on idle ticks. Sustained load
+  above one budget per tick lags without bound (nothing is lost, memory
+  just trails); draining the backlog within a tick is deferred
+  ([FUTURE](FUTURE.md)).
 - **Duties:** extract durable facts from the new events into topics and
   index; merge and dedupe entries the in-turn writes accumulated; prune
   entries invalidated by newer events; enforce the index cap.
-- The watermark advances only after a successful pass, so a failed
+- The watermarks advance only after a successful pass, so a failed
   distillation retries over the same span.
 
 ### Provenance discipline
@@ -191,7 +209,7 @@ not "no response".
 | Config key | Default | Description |
 |------------|---------|-------------|
 | `memory.index_cap_bytes` | 8192 | Injection truncation cap for MEMORY.md |
-| `memory.distill_threshold_events` | 500 (provisional) | Undistilled-event count that opens the distillation gate |
+| `memory.distill_threshold_tokens` | 40000 (provisional) | Undistilled-token total that opens the distillation gate, and the token budget for the consolidated span |
 | `provider.model_overrides.memory` | unset | Model for the distillation pass (falls back to `provider.model`) |
 
 - The index is plain markdown, human-readable and human-editable; no
@@ -205,7 +223,10 @@ not "no response".
   mechanism (FUTURE.md, System Prompt) once that exists, or stay a
   simple unconditional append? Decided to defer: append first,
   refactor when segments land.
-- Threshold value for the distillation gate. With an event defined as
-  one persisted message, a plausible starting default is ~500
-  (a few busy turns or one big review); needs live event-volume data
-  to confirm.
+- Threshold value for the distillation gate. The default of 40000
+  tokens (roughly a few busy turns or one big review, and comfortably
+  inside the distiller's window) is provisional; needs live
+  token-volume data to confirm.
+- Large consolidated spans could approach the memory model's window at
+  very high thresholds. The threshold bounds it in practice, so
+  chunking the span across turns is deferred, not built.

@@ -99,8 +99,6 @@ impl Workspace {
     }
 
     /// Path to the memory distillation state file (spec 21).
-    // Consumed once the heartbeat wires distillation.
-    #[allow(dead_code)]
     pub fn distillation_state_path(&self) -> PathBuf {
         self.state_dir().join("distillation_state.json")
     }

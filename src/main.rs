@@ -184,6 +184,15 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
 ) -> agent::AgentHandle {
     let (explore, worker) =
         agent::task::build_agent_types(&tools, engine.tools(ToolScope::SubAgent), workspace.path());
+    // The distiller mirrors a worker: built from the base registry
+    // (memory-editing tools only) and capped at the sub-agent iteration
+    // budget, before root engine tools and the task tool are merged in.
+    let distiller = Arc::new(distill::Distiller::new(
+        &tools,
+        workspace.path(),
+        config.memory.distill_threshold_tokens,
+        config.sub_agents.max_iterations,
+    ));
     let overrides = &config.provider.model_overrides;
     let task_tool: Arc<dyn tools::Tool> = Arc::new(agent::task::TaskTool::new(
         role_provider(&provider, overrides.explore.as_deref()),
@@ -196,11 +205,14 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
     tools.extend_with(vec![task_tool], &config.tools.disabled);
     let heartbeat_provider = role_provider(&provider, overrides.heartbeat.as_deref());
+    let memory_provider = role_provider(&provider, overrides.memory.as_deref());
     agent::AgentHandle::spawn(
         workspace,
         provider,
         heartbeat_provider,
+        memory_provider,
         Arc::new(tools),
+        distiller,
         config.agent.max_iterations,
         config.memory.index_cap_bytes,
         engine,

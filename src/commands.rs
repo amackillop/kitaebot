@@ -10,6 +10,7 @@ use tracing::error;
 
 use crate::agent;
 use crate::dispatch::Reply;
+use crate::distill::{self, Distiller};
 use crate::engine::{ContextEngine, SummarizeFn};
 use crate::heartbeat;
 use crate::provider::Provider;
@@ -68,8 +69,9 @@ impl FromStr for SlashCommand {
 ///
 /// Called by the agent actor. `/heartbeat` calls `agent::process_message`
 /// directly rather than going through the handle (which would deadlock).
-/// The provider is consumed only by the `/heartbeat` arm, hence the name:
-/// heartbeat turns may run on a cheaper model than root turns.
+/// The heartbeat and memory providers are consumed only by the
+/// `/heartbeat` arm: the review turn may run on a cheaper model than
+/// root turns, and distillation runs on its own memory model.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     cmd: SlashCommand,
@@ -77,7 +79,9 @@ pub async fn execute(
     summarize: &SummarizeFn,
     workspace: &Workspace,
     heartbeat_provider: &impl Provider,
+    memory_provider: &impl Provider,
     tools: &Tools,
+    distiller: &Distiller,
     max_iterations: usize,
     memory_index_cap: usize,
 ) -> Result<Reply, String> {
@@ -115,36 +119,62 @@ pub async fn execute(
                 engine.active_session(),
             )))
         }
-        SlashCommand::Heartbeat => match heartbeat::prepare(workspace) {
-            Ok(heartbeat::Prepared::Ready(prompt)) => {
-                match agent::process_message(
-                    engine,
-                    summarize,
-                    workspace,
-                    &prompt,
-                    heartbeat_provider,
-                    tools,
-                    max_iterations,
-                    memory_index_cap,
-                    &crate::tools::ToolCtx::default(),
-                )
-                .await
-                {
-                    Ok(output) => {
-                        let response = output.into_text();
-                        if let Err(e) = heartbeat::finish(workspace, &response) {
-                            error!("Failed to write heartbeat history: {e}");
-                        }
-                        Ok(Reply::text(response))
+        SlashCommand::Heartbeat => {
+            // The task-review turn. May be skipped when there are no
+            // standing tasks; distillation below runs regardless.
+            let review = match heartbeat::prepare(workspace) {
+                Ok(heartbeat::Prepared::Ready(prompt)) => {
+                    let output = agent::process_message(
+                        engine,
+                        summarize,
+                        workspace,
+                        &prompt,
+                        heartbeat_provider,
+                        tools,
+                        max_iterations,
+                        memory_index_cap,
+                        &crate::tools::ToolCtx::default(),
+                    )
+                    .await
+                    .map_err(|e| format!("Heartbeat failed: {e}"))?;
+                    let response = output.into_text();
+                    if let Err(e) = heartbeat::finish(workspace, &response) {
+                        error!("Failed to write heartbeat history: {e}");
                     }
-                    Err(e) => Err(format!("Heartbeat failed: {e}")),
+                    response
+                }
+                Ok(heartbeat::Prepared::Skipped(reason)) => format!("Skipped: {reason}"),
+                Err(e) => return Err(format!("Heartbeat failed: {e}")),
+            };
+
+            // Distillation is independent of the review: it folds
+            // accumulated session history into memory whenever the
+            // mechanical gate opens, even with no review tasks. A
+            // failure is logged, not fatal — the review reply stands.
+            let mut state = distill::DistillState::load(&workspace.distillation_state_path());
+            match distill::run(
+                engine,
+                distiller,
+                memory_provider,
+                summarize,
+                workspace,
+                &mut state,
+            )
+            .await
+            {
+                Ok(Some(summary)) => {
+                    if let Err(e) = heartbeat::finish(workspace, &format!("Distilled: {summary}")) {
+                        error!("Failed to write distillation history: {e}");
+                    }
+                    Ok(Reply::text(format!("{review}\n\nDistilled: {summary}")))
+                }
+                Ok(None) => Ok(Reply::text(review)),
+                Err(e) => {
+                    error!("Distillation failed: {e}");
+                    Ok(Reply::text(review))
                 }
             }
-            Ok(heartbeat::Prepared::Skipped(reason)) => {
-                Ok(Reply::text(format!("Skipped: {reason}")))
-            }
-            Err(e) => Err(format!("Heartbeat failed: {e}")),
-        },
+        }
         SlashCommand::New => {
             engine.clear().await.map_err(|e| e.to_string())?;
             if let Err(e) = engine.save().await {

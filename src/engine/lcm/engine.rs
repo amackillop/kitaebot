@@ -707,7 +707,6 @@ fn list_sessions_sync(conn: &mut Connection) -> Result<Vec<SessionInfo>, EngineE
 /// Sum each conversation's undistilled `token_count` for the distill
 /// gate. seq is monotonic and raw rows survive compaction, so the
 /// count is a faithful high-water regardless of DAG state.
-#[allow(dead_code)]
 fn pending_distill_tokens_sync(
     conn: &Connection,
     since: &BTreeMap<String, u64>,
@@ -744,7 +743,6 @@ fn pending_distill_tokens_sync(
 /// Reconstruct one conversation's undistilled span, oldest first,
 /// clamped to `max_tokens` (at least one event when any are pending).
 /// A missing conversation yields an empty span.
-#[allow(dead_code)]
 fn transcript_since_sync(
     conn: &Connection,
     stem: &str,
