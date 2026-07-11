@@ -1,7 +1,7 @@
 //! Flat session implementation of [`ContextEngine`].
 //!
 //! Each session is a separate JSON file under `sessions/<name>.json`.
-//! The active session name is persisted to `memory/active_session` so
+//! The active session name is persisted to `state/active_session` so
 //! it survives daemon restarts.
 
 use std::fs;
@@ -46,7 +46,7 @@ pub struct FlatSession {
     session: Session,
     active_name: String,
     sessions_dir: PathBuf,
-    memory_dir: PathBuf,
+    state_dir: PathBuf,
     ctx: ContextConfig,
     /// Provider-reported prompt size of the last request, if any.
     /// Cleared whenever the context shrinks (compaction, clear,
@@ -58,21 +58,21 @@ pub struct FlatSession {
 impl FlatSession {
     /// Open the flat session engine.
     ///
-    /// Reads `memory/active_session` to restore the last active session.
+    /// Reads `state/active_session` to restore the last active session.
     /// Falls back to `"general"` if the file is missing or unreadable.
     pub fn new(
         sessions_dir: PathBuf,
-        memory_dir: PathBuf,
+        state_dir: PathBuf,
         ctx: ContextConfig,
     ) -> Result<Self, EngineError> {
-        let active_name = read_active_session(&memory_dir).unwrap_or_else(|| "general".into());
+        let active_name = read_active_session(&state_dir).unwrap_or_else(|| "general".into());
         let path = session_path(&sessions_dir, &active_name);
         let session = Session::load(&path)?;
         Ok(Self {
             session,
             active_name,
             sessions_dir,
-            memory_dir,
+            state_dir,
             ctx,
             observed_tokens: None,
         })
@@ -272,7 +272,7 @@ impl ContextEngine for FlatSession {
         self.session = Session::load(&path)?;
         self.observed_tokens = None;
         self.active_name = sanitized;
-        persist_active_session(&self.memory_dir, &self.active_name);
+        persist_active_session(&self.state_dir, &self.active_name);
         Ok(())
     }
 
@@ -347,9 +347,9 @@ fn session_path(sessions_dir: &Path, name: &str) -> PathBuf {
     sessions_dir.join(format!("{sanitized}.json"))
 }
 
-/// Read the active session name from `memory/active_session`.
-fn read_active_session(memory_dir: &Path) -> Option<String> {
-    let path = memory_dir.join("active_session");
+/// Read the active session name from `state/active_session`.
+fn read_active_session(state_dir: &Path) -> Option<String> {
+    let path = state_dir.join("active_session");
     fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
@@ -357,9 +357,9 @@ fn read_active_session(memory_dir: &Path) -> Option<String> {
 }
 
 /// Persist the active session name atomically.
-fn persist_active_session(memory_dir: &Path, name: &str) {
-    let path = memory_dir.join("active_session");
-    let tmp = memory_dir.join("active_session.tmp");
+fn persist_active_session(state_dir: &Path, name: &str) {
+    let path = state_dir.join("active_session");
+    let tmp = state_dir.join("active_session.tmp");
     if fs::write(&tmp, name).is_ok() {
         let _ = fs::rename(&tmp, &path);
     }
@@ -393,18 +393,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.keep();
         let sessions_dir = base.join("sessions");
-        let memory_dir = base.join("memory");
+        let state_dir = base.join("state");
         fs::create_dir_all(&sessions_dir).unwrap();
-        fs::create_dir_all(&memory_dir).unwrap();
-        FlatSession::new(sessions_dir, memory_dir, ctx).unwrap()
+        fs::create_dir_all(&state_dir).unwrap();
+        FlatSession::new(sessions_dir, state_dir, ctx).unwrap()
     }
 
     fn temp_engine_at(base: &Path, ctx: ContextConfig) -> FlatSession {
         let sessions_dir = base.join("sessions");
-        let memory_dir = base.join("memory");
+        let state_dir = base.join("state");
         fs::create_dir_all(&sessions_dir).unwrap();
-        fs::create_dir_all(&memory_dir).unwrap();
-        FlatSession::new(sessions_dir, memory_dir, ctx).unwrap()
+        fs::create_dir_all(&state_dir).unwrap();
+        FlatSession::new(sessions_dir, state_dir, ctx).unwrap()
     }
 
     // ── Basic operations ────────────────────────────────────────────

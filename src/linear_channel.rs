@@ -718,8 +718,8 @@ mod tests {
         let ws = Arc::new(Workspace::init_at(dir.path().to_path_buf()).unwrap());
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text("a plan".into()))]));
         let engine = crate::engine::flat::FlatSession::new(
-            ws.path().join("sessions"),
-            ws.path().join("memory"),
+            ws.sessions_dir(),
+            ws.state_dir(),
             ContextConfig::default(),
         )
         .unwrap();

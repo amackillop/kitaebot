@@ -76,7 +76,7 @@ async fn main() {
             let workspace = Arc::new(workspace);
             let provider = Arc::new(rt.provider);
             let tools = rt.tools;
-            let memory_dir = workspace.path().join("memory");
+            let state_dir = workspace.state_dir();
             let summarizer = config.provider.model_overrides.summarizer.as_deref();
             let summarize = engine::make_summarize_fn(role_provider(&provider, summarizer));
 
@@ -85,8 +85,8 @@ async fn main() {
             let context = config.effective_context();
             let handle = match context.engine {
                 EngineKind::Flat => {
-                    let sessions_dir = workspace.path().join("sessions");
-                    let engine = engine::flat::FlatSession::new(sessions_dir, memory_dir, context)
+                    let sessions_dir = workspace.sessions_dir();
+                    let engine = engine::flat::FlatSession::new(sessions_dir, state_dir, context)
                         .unwrap_or_else(|e| {
                             error!("Failed to initialize flat session: {e}");
                             std::process::exit(1);
@@ -102,10 +102,10 @@ async fn main() {
                     )
                 }
                 EngineKind::Lcm => {
-                    let db_path = memory_dir.join("lcm.db");
+                    let db_path = state_dir.join("lcm.db");
                     let engine = engine::lcm::LcmEngine::new(
                         &db_path,
-                        memory_dir,
+                        state_dir,
                         context,
                         summarize.clone(),
                     )

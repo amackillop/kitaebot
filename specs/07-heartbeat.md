@@ -33,7 +33,7 @@ The first tick fires immediately on daemon startup.
    shared session is deliberate — the completions API is stateless, and the
    full history goes with every request regardless of which model reads it.
 4. **Finish**: On success, `heartbeat::finish()` appends the response to
-   `memory/HISTORY.md` with a UTC timestamp. A finish write failure is logged
+   `HISTORY.md` with a UTC timestamp. A finish write failure is logged
    but does not fail the heartbeat.
 
 Because `/heartbeat` routes through the `Command` dispatch branch (not the
@@ -70,7 +70,7 @@ that need attention:
 
 ### History Logging
 
-Responses are appended to `memory/HISTORY.md`:
+Responses are appended to `HISTORY.md`:
 
 ```
 [2024-02-21T14:30:00Z] Heartbeat: Checked project builds - all passing.

@@ -44,9 +44,9 @@ Existing solutions (nanobot, OpenClaw) are feature-rich but complex. Kitaebot pr
 │  ┌────────────────────────────────────────────────────┐  │
 │  │            ~/.local/share/kitaebot                 │  │
 │  │                                                    │  │
-│  │  session.json       memory/         SOUL.md        │  │
-│  │  (unified)          └── HISTORY.md  AGENTS.md      │  │
-│  │                                     HEARTBEAT.md   │  │
+│  │  sessions/          memory/         SOUL.md        │  │
+│  │  state/             └── MEMORY.md   AGENTS.md      │  │
+│  │  HISTORY.md                         HEARTBEAT.md   │  │
 │  │                                     config.toml    │  │
 │  └────────────────────────────────────────────────────┘  │
 │                                                          │
@@ -130,7 +130,7 @@ All channels follow the same pattern: construct a message, send it through `Agen
 1. Internal timer fires (configurable interval, default 30 minutes)
 2. Sends `/heartbeat` through `AgentHandle` — processed as a slash command
 3. Command handler reads HEARTBEAT.md, builds prompt, runs agent turn
-4. Result appended to `memory/HISTORY.md`
+4. Result appended to `HISTORY.md`
 
 ## Design Principles
 

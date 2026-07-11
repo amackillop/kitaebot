@@ -575,7 +575,7 @@ pub struct LcmExpand {
     conn: Arc<Mutex<Connection>>,
     active_id: Arc<AtomicI64>,
     /// Directory holding externalized payloads
-    /// (`memory/lcm/payloads`). Raw messages store `<file>`
+    /// (`state/lcm/payloads`). Raw messages store `<file>`
     /// references; expansion reads the original bytes back from here.
     payloads_dir: PathBuf,
 }

@@ -155,9 +155,9 @@ mod tests {
     }
 
     fn spawn_agent(ws: &Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
-        let sessions_dir = ws.path().join("sessions");
-        let memory_dir = ws.path().join("memory");
-        let engine = FlatSession::new(sessions_dir, memory_dir, ctx()).unwrap();
+        let sessions_dir = ws.sessions_dir();
+        let state_dir = ws.state_dir();
+        let engine = FlatSession::new(sessions_dir, state_dir, ctx()).unwrap();
         let summarize = make_summarize_fn(provider.clone());
         AgentHandle::spawn(
             ws.clone(),

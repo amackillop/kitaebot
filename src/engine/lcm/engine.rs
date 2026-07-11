@@ -9,7 +9,7 @@
 //! messages with recall guidance.
 //!
 //! Oversized user and tool messages are intercepted at ingest: the
-//! raw payload goes to `memory/lcm/payloads/<file_id>` on disk, a
+//! raw payload goes to `state/lcm/payloads/<file_id>` on disk, a
 //! `large_files` row records its metadata, and `messages.content`
 //! stores a compact `<file>` reference with an exploration summary
 //! (see `explore.rs`). The reference plus the on-disk payload
@@ -18,7 +18,7 @@
 //! the lower `context.tool_output_tokens` with a free head+tail
 //! excerpt.
 //!
-//! Active session persistence reuses `memory/active_session` — the
+//! Active session persistence reuses `state/active_session` — the
 //! same plain-text file flat sessions write to, so switching engines
 //! preserves the user's last session.
 //!
@@ -77,7 +77,7 @@ pub struct LcmEngine {
     /// session without holding a reference to the engine. Updated
     /// atomically on every successful [`switch_session`] call.
     active_id: Arc<AtomicI64>,
-    memory_dir: PathBuf,
+    state_dir: PathBuf,
     ctx: ContextConfig,
     /// Async compaction in flight (soft-threshold path). Set when a
     /// turn crosses the soft threshold without crossing the hard
@@ -97,7 +97,7 @@ pub struct LcmEngine {
 impl LcmEngine {
     /// Open or create the LCM database at `db_path`.
     ///
-    /// Restores the active session from `memory/active_session` (or
+    /// Restores the active session from `state/active_session` (or
     /// falls back to `"general"`), ensuring a `conversations` row
     /// exists for it.
     ///
@@ -107,12 +107,12 @@ impl LcmEngine {
     /// opened or the active conversation row cannot be created.
     pub fn new(
         db_path: &Path,
-        memory_dir: PathBuf,
+        state_dir: PathBuf,
         ctx: ContextConfig,
         summarize: SummarizeFn,
     ) -> Result<Self, EngineError> {
         let conn = schema::open(db_path)?;
-        let active_name = read_active_session(&memory_dir).unwrap_or_else(|| "general".into());
+        let active_name = read_active_session(&state_dir).unwrap_or_else(|| "general".into());
         let conversation_id = ensure_conversation(&conn, &active_name)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -120,7 +120,7 @@ impl LcmEngine {
             active_name,
             conversation_id,
             active_id: Arc::new(AtomicI64::new(conversation_id)),
-            memory_dir,
+            state_dir,
             ctx,
             pending_compaction: None,
             summarize,
@@ -247,10 +247,10 @@ impl LcmEngine {
 
     /// Directory holding externalized payloads.
     fn payloads_dir(&self) -> PathBuf {
-        self.memory_dir.join("lcm").join("payloads")
+        self.state_dir.join("lcm").join("payloads")
     }
 
-    /// Write `content` to `memory/lcm/payloads/<file_id>`, generate
+    /// Write `content` to `state/lcm/payloads/<file_id>`, generate
     /// its exploration summary, and return the `<file>` reference
     /// plus the metadata row for `large_files`.
     async fn externalize(
@@ -525,7 +525,7 @@ impl ContextEngine for LcmEngine {
         self.active_name = sanitized;
         self.conversation_id = id;
         self.active_id.store(id, Ordering::Release);
-        persist_active_session(&self.memory_dir, &self.active_name);
+        persist_active_session(&self.state_dir, &self.active_name);
         Ok(())
     }
 
@@ -1002,17 +1002,17 @@ pub(super) fn desanitize_name(stem: &str) -> String {
 
 // ── Active session persistence ──────────────────────────────────────
 
-fn read_active_session(memory_dir: &Path) -> Option<String> {
-    let path = memory_dir.join("active_session");
+fn read_active_session(state_dir: &Path) -> Option<String> {
+    let path = state_dir.join("active_session");
     fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
-fn persist_active_session(memory_dir: &Path, name: &str) {
-    let path = memory_dir.join("active_session");
-    let tmp = memory_dir.join("active_session.tmp");
+fn persist_active_session(state_dir: &Path, name: &str) {
+    let path = state_dir.join("active_session");
+    let tmp = state_dir.join("active_session.tmp");
     if fs::write(&tmp, name).is_ok() {
         let _ = fs::rename(&tmp, &path);
     }
@@ -1055,10 +1055,9 @@ mod tests {
     fn temp_engine_with_ctx(ctx: ContextConfig) -> (LcmEngine, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("lcm.db");
-        let memory_dir = dir.path().join("memory");
-        fs::create_dir_all(&memory_dir).unwrap();
-        let engine =
-            LcmEngine::new(&db_path, memory_dir, ctx, canned_summarize("summary")).unwrap();
+        let state_dir = dir.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let engine = LcmEngine::new(&db_path, state_dir, ctx, canned_summarize("summary")).unwrap();
         (engine, dir)
     }
 
@@ -1118,7 +1117,7 @@ mod tests {
         // Raw payload is on disk, lossless.
         let on_disk = fs::read_to_string(
             dir.path()
-                .join("memory")
+                .join("state")
                 .join("lcm")
                 .join("payloads")
                 .join(&file_id),
@@ -1246,7 +1245,7 @@ mod tests {
         let file_id = explore::file_id(&framed);
         let on_disk = fs::read_to_string(
             dir.path()
-                .join("memory")
+                .join("state")
                 .join("lcm")
                 .join("payloads")
                 .join(&file_id),
@@ -1264,15 +1263,15 @@ mod tests {
     #[tokio::test]
     async fn oversized_tool_output_externalized_without_summarizer() {
         let dir = tempfile::tempdir().unwrap();
-        let memory_dir = dir.path().join("memory");
-        fs::create_dir_all(&memory_dir).unwrap();
+        let state_dir = dir.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
         let ctx = ContextConfig {
             tool_output_tokens: 10,
             ..ContextConfig::default()
         };
         let mut engine = LcmEngine::new(
             &dir.path().join("lcm.db"),
-            memory_dir,
+            state_dir,
             ctx,
             panicking_summarize(),
         )
@@ -1560,13 +1559,13 @@ mod tests {
     async fn switch_session_persists_active_name() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("lcm.db");
-        let memory_dir = dir.path().join("memory");
-        fs::create_dir_all(&memory_dir).unwrap();
+        let state_dir = dir.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
 
         {
             let mut engine = LcmEngine::new(
                 &db_path,
-                memory_dir.clone(),
+                state_dir.clone(),
                 ContextConfig::default(),
                 canned_summarize("summary"),
             )
@@ -1576,7 +1575,7 @@ mod tests {
 
         let engine = LcmEngine::new(
             &db_path,
-            memory_dir,
+            state_dir,
             ContextConfig::default(),
             canned_summarize("summary"),
         )

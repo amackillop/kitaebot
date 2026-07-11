@@ -254,6 +254,7 @@ in
         "d /var/lib/kitaebot 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/memory 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/projects 0750 kitaebot kitaebot -"
+        "d /var/lib/kitaebot/state 0750 kitaebot kitaebot -"
         "L+ /var/lib/kitaebot/config.toml - - - - ${configFile}"
         "L+ /var/lib/kitaebot/SOUL.md - - - - ${cfg.promptsDir}/SOUL.md"
         "L+ /var/lib/kitaebot/AGENTS.md - - - - ${cfg.promptsDir}/AGENTS.md"

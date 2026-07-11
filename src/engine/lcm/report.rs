@@ -176,11 +176,11 @@ mod tests {
         let mut ctx = ContextConfig::default();
         // 10-token threshold so a small payload externalizes.
         ctx.lcm.large_file_threshold = 10;
-        let memory_dir = dir.path().join("memory");
-        std::fs::create_dir_all(&memory_dir).unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
         let mut engine = LcmEngine::new(
             &dir.path().join("lcm.db"),
-            memory_dir,
+            state_dir,
             ctx,
             canned_summarize("summary"),
         )

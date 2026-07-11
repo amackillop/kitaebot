@@ -26,13 +26,20 @@ Resolved via fallback chain:
 ├── AGENTS.md                # Agent instructions (Nix-provisioned)
 ├── USER.md                  # User profile (Nix-provisioned, optional)
 ├── HEARTBEAT.md             # Periodic task definitions (Nix-provisioned)
+├── HISTORY.md               # Heartbeat execution log
 │
-├── sessions/                # Session storage
-│   └── session.json         # Unified session (all channels)
+├── sessions/                # Flat-engine session storage
+│   └── <name>.json          # One file per session
 │
-├── memory/                  # Shared long-term memory
-│   ├── HISTORY.md           # Heartbeat execution log
-│   └── github_poll_state.json  # GitHub channel poll cursor
+├── memory/                  # Memory subsystem (spec 21)
+│   ├── MEMORY.md            # Index, injected into the system prompt
+│   └── topics/              # On-demand topic files
+│
+├── state/                   # Machine-owned runtime state
+│   ├── active_session       # Last active session name
+│   ├── lcm.db               # LCM engine store (+ lcm/ payloads)
+│   ├── github_poll_state.json  # GitHub channel poll cursor
+│   └── linear_poll_state.json  # Linear channel poll cursor
 │
 └── projects/                # User's working area
 ```
@@ -40,7 +47,8 @@ Resolved via fallback chain:
 ### Initialization
 
 `Workspace::init()` resolves the path and delegates to `init_at()`, which
-creates the directory tree: workspace root, `sessions/`, `memory/`, `projects/`.
+creates the directory tree: workspace root, `sessions/`, `memory/`,
+`projects/`, `state/`.
 
 Prompt files (`SOUL.md`, `AGENTS.md`, `USER.md`, `HEARTBEAT.md`) and
 `config.toml` are **not** created by the Rust binary. They are provisioned
@@ -70,16 +78,18 @@ changing them requires a rebuild and restart regardless.
 | Method | Returns |
 |--------|---------|
 | `path()` | Workspace root |
-| `session_path()` | `sessions/session.json` |
+| `sessions_dir()` | `sessions/` |
+| `state_dir()` | `state/` |
 | `heartbeat_path()` | `HEARTBEAT.md` |
-| `history_path()` | `memory/HISTORY.md` |
-| `github_poll_state_path()` | `memory/github_poll_state.json` |
+| `history_path()` | `HISTORY.md` |
+| `github_poll_state_path()` | `state/github_poll_state.json` |
+| `linear_poll_state_path()` | `state/linear_poll_state.json` |
 
 ## Boundaries
 
 ### Owns
 
-- Directory structure creation (`sessions/`, `memory/`, `projects/`)
+- Directory structure creation (`sessions/`, `memory/`, `projects/`, `state/`)
 - Path resolution (env var / XDG fallback)
 - System prompt assembly (concatenation of prompt files)
 - Path helpers for well-known files

@@ -258,9 +258,9 @@ mod tests {
         notifier: Option<Arc<Notifier>>,
         max_iterations: usize,
     ) -> AgentHandle {
-        let sessions_dir = ws.path().join("sessions");
-        let memory_dir = ws.path().join("memory");
-        let engine = FlatSession::new(sessions_dir, memory_dir, ContextConfig::default()).unwrap();
+        let sessions_dir = ws.sessions_dir();
+        let state_dir = ws.state_dir();
+        let engine = FlatSession::new(sessions_dir, state_dir, ContextConfig::default()).unwrap();
         let summarize = make_summarize_fn(provider.clone());
         AgentHandle::spawn(
             ws,
@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(r2.unwrap().content, "second");
 
         // Verify on disk: each session has exactly one user message.
-        let sessions = ws.path().join("sessions");
+        let sessions = ws.sessions_dir();
         let general = std::fs::read_to_string(sessions.join("general.json")).unwrap();
         let github = std::fs::read_to_string(sessions.join("owner--repo.json")).unwrap();
         assert!(general.contains("socket msg"));

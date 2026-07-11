@@ -47,6 +47,7 @@ impl Workspace {
         mk(&path.join("sessions"))?;
         mk(&path.join("memory"))?;
         mk(&path.join("projects"))?;
+        mk(&path.join("state"))?;
 
         let system_prompt = read_system_prompt(&path);
         Ok(Self {
@@ -60,6 +61,17 @@ impl Workspace {
         &self.root
     }
 
+    /// Directory holding per-session storage.
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.root.join("sessions")
+    }
+
+    /// Directory holding machine-owned runtime state (engine store,
+    /// channel poll cursors).
+    pub fn state_dir(&self) -> PathBuf {
+        self.root.join("state")
+    }
+
     /// Path to the heartbeat task file.
     pub fn heartbeat_path(&self) -> PathBuf {
         self.root.join("HEARTBEAT.md")
@@ -67,17 +79,17 @@ impl Workspace {
 
     /// Path to the heartbeat history log.
     pub fn history_path(&self) -> PathBuf {
-        self.root.join("memory/HISTORY.md")
+        self.root.join("HISTORY.md")
     }
 
     /// Path to the GitHub poll state file.
     pub fn github_poll_state_path(&self) -> PathBuf {
-        self.root.join("memory/github_poll_state.json")
+        self.state_dir().join("github_poll_state.json")
     }
 
     /// Path to the Linear poll state file.
     pub fn linear_poll_state_path(&self) -> PathBuf {
-        self.root.join("memory/linear_poll_state.json")
+        self.state_dir().join("linear_poll_state.json")
     }
 
     /// The system prompt, read once at workspace init.
@@ -138,6 +150,7 @@ mod tests {
         assert!(ws.path().join("sessions").is_dir());
         assert!(ws.path().join("memory").is_dir());
         assert!(ws.path().join("projects").is_dir());
+        assert!(ws.path().join("state").is_dir());
     }
 
     #[test]

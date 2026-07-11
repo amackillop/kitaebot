@@ -92,7 +92,7 @@ pub fn prepare(workspace: &Workspace) -> Result<Prepared, HeartbeatError> {
     Ok(Prepared::Ready(build_prompt(&tasks)))
 }
 
-/// Append a timestamped response to `memory/HISTORY.md`.
+/// Append a timestamped response to `HISTORY.md` in the workspace root.
 pub fn finish(workspace: &Workspace, response: &str) -> Result<(), HeartbeatError> {
     append_history(&workspace.history_path(), response).map_err(HeartbeatError::WriteHistory)
 }

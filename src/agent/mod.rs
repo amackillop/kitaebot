@@ -485,10 +485,10 @@ mod tests {
         #[allow(deprecated)]
         let base = dir.into_path();
         let sessions = base.join("sessions");
-        let memory = base.join("memory");
+        let state = base.join("state");
         std::fs::create_dir_all(&sessions).unwrap();
-        std::fs::create_dir_all(&memory).unwrap();
-        FlatSession::new(sessions, memory, ContextConfig::default()).unwrap()
+        std::fs::create_dir_all(&state).unwrap();
+        FlatSession::new(sessions, state, ContextConfig::default()).unwrap()
     }
 
     fn test_summarize(provider: &Arc<MockProvider>) -> SummarizeFn {
@@ -1038,9 +1038,9 @@ mod tests {
         let summarize = test_summarize(&provider);
 
         let sessions_dir = dir.path().join("sessions");
-        let memory_dir = dir.path().join("memory");
+        let state_dir = dir.path().join("state");
         let mut engine =
-            FlatSession::new(sessions_dir, memory_dir, ContextConfig::default()).unwrap();
+            FlatSession::new(sessions_dir, state_dir, ContextConfig::default()).unwrap();
 
         let result = process_message(
             &mut engine,

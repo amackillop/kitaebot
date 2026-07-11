@@ -491,7 +491,7 @@ attribute is omitted and `large_files.path` records the payload's on-disk
 location instead.
 
 **Externalization at ingest**: the oversized raw payload is written to disk
-under `memory/lcm/payloads/<file_id>` and the `messages.content` row stores
+under `state/lcm/payloads/<file_id>` and the `messages.content` row stores
 the `<file>` reference, not the raw bytes. `lcm_expand` reads from disk
 when recovering originals.
 
@@ -903,7 +903,7 @@ Backend selection happens at startup. Changing `context.engine` requires a
 restart. The old backend's data remains on disk but is not used.
 
 Sessions live under `<workspace>/sessions/<name>.json` for the flat
-engine and under `<workspace>/memory/lcm.db` for LCM. Both paths are
+engine and under `<workspace>/state/lcm.db` for LCM. Both paths are
 derived from the workspace root rather than configured separately.
 
 The cheaper summarization model called for by phase 4 (large file
@@ -912,7 +912,7 @@ handling) is configured via `provider.model_overrides.summarizer`
 
 ### Active Session Persistence
 
-The active session name is written to `memory/active_session` (plain text,
+The active session name is written to `state/active_session` (plain text,
 atomic write). On startup, the engine reads this file to restore the last
 active session. If the file is missing the engine falls back to `general`.
 For LCM, an unknown name simply creates a new conversation row.
@@ -995,7 +995,7 @@ For LCM, an unknown name simply creates a new conversation row.
 - No session deletion
 - `lcm_expand` restricted to sub-agents (enforced via `ToolScope`)
 - Routed envelopes (GitHub/Linear session hints) rewrite the
-  `memory/active_session` file on switch: a crash mid-turn restores the
+  `state/active_session` file on switch: a crash mid-turn restores the
   routed session, not the one the user last selected via `/project`
 - Async compaction requires the actor to check for pending results before each
   `assemble()` call
