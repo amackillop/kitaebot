@@ -255,18 +255,13 @@ async fn send(writer: &mut OwnedWriteHalf, msg: &ServerMsg) -> Result<(), std::i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ContextConfig;
     use crate::provider::MockProvider;
+    use crate::test_support::{TestAgent, workspace};
     use crate::tools::Tools;
     use crate::types::Response;
-    use crate::workspace::Workspace;
     use std::sync::Arc;
     use tokio::io::BufReader as TokioBufReader;
     use tokio::net::unix::OwnedWriteHalf as ClientWriteHalf;
-
-    fn ctx() -> ContextConfig {
-        ContextConfig::default()
-    }
 
     // ── Test harness ────────────────────────────────────────────────
 
@@ -341,34 +336,12 @@ mod tests {
         tempfile::TempDir,
         tempfile::TempDir,
     ) {
-        let ws_dir = tempfile::tempdir().unwrap();
-        let ws = Workspace::init_at(ws_dir.path().to_path_buf()).unwrap();
-
-        let ws = Arc::new(ws);
+        let (ws_dir, ws) = workspace();
         let provider = Arc::new(MockProvider::new(responses));
-        let sessions_dir = ws.sessions_dir();
-        let state_dir = ws.state_dir();
-        let engine = crate::engine::flat::FlatSession::new(sessions_dir, state_dir, ctx()).unwrap();
-        let summarize = crate::engine::make_summarize_fn(provider.clone());
-        let distiller = Arc::new(crate::distill::Distiller::new(
-            &Tools::default(),
-            ws.path(),
-            40_000,
-            1,
-        ));
-        let handle = AgentHandle::spawn(
-            ws.clone(),
-            provider.clone(),
-            provider.clone(),
-            provider,
-            Arc::new(tools),
-            distiller,
-            5,
-            8192,
-            engine,
-            summarize,
-            None,
-        );
+        let handle = TestAgent::new(ws, provider)
+            .tools(tools)
+            .max_iterations(5)
+            .spawn();
 
         let sock_dir = tempfile::tempdir().unwrap();
         let sock_path = sock_dir.path().join("test.sock");

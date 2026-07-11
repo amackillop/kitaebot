@@ -708,41 +708,13 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_posts_reply_as_comment() {
-        use crate::config::ContextConfig;
         use crate::provider::MockProvider;
-        use crate::tools::Tools;
+        use crate::test_support::{TestAgent, workspace};
         use crate::types::Response;
-        use crate::workspace::Workspace;
 
-        let dir = tempfile::tempdir().unwrap();
-        let ws = Arc::new(Workspace::init_at(dir.path().to_path_buf()).unwrap());
+        let (_dir, ws) = workspace();
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text("a plan".into()))]));
-        let engine = crate::engine::flat::FlatSession::new(
-            ws.sessions_dir(),
-            ws.state_dir(),
-            ContextConfig::default(),
-        )
-        .unwrap();
-        let summarize = crate::engine::make_summarize_fn(provider.clone());
-        let distiller = Arc::new(crate::distill::Distiller::new(
-            &Tools::default(),
-            ws.path(),
-            40_000,
-            1,
-        ));
-        let handle = AgentHandle::spawn(
-            ws,
-            provider.clone(),
-            provider.clone(),
-            provider,
-            Arc::new(Tools::default()),
-            distiller,
-            1,
-            8192,
-            engine,
-            summarize,
-            None,
-        );
+        let handle = TestAgent::new(ws, provider).spawn();
 
         let sent = Arc::new(Mutex::new(Vec::new()));
         let ch = channel(comment_client(vec![Ok(())], sent.clone()));

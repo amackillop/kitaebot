@@ -23,6 +23,8 @@ mod session;
 mod socket;
 mod stats;
 mod telegram;
+#[cfg(test)]
+mod test_support;
 mod time;
 mod tools;
 mod types;

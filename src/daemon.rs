@@ -136,48 +136,13 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ContextConfig;
-    use crate::engine::flat::FlatSession;
-    use crate::engine::make_summarize_fn;
     use crate::provider::MockProvider;
-    use crate::tools::Tools;
+    use crate::test_support::{TestAgent, workspace};
     use crate::types::Response;
     use std::sync::Arc;
 
-    fn ctx() -> ContextConfig {
-        ContextConfig::default()
-    }
-
-    fn workspace() -> (tempfile::TempDir, Arc<Workspace>) {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        (dir, Arc::new(ws))
-    }
-
     fn spawn_agent(ws: &Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
-        let sessions_dir = ws.sessions_dir();
-        let state_dir = ws.state_dir();
-        let engine = FlatSession::new(sessions_dir, state_dir, ctx()).unwrap();
-        let summarize = make_summarize_fn(provider.clone());
-        let distiller = Arc::new(crate::distill::Distiller::new(
-            &Tools::default(),
-            ws.path(),
-            40_000,
-            1,
-        ));
-        AgentHandle::spawn(
-            ws.clone(),
-            provider.clone(),
-            provider.clone(),
-            provider,
-            Arc::new(Tools::default()),
-            distiller,
-            1,
-            8192,
-            engine,
-            summarize,
-            None,
-        )
+        TestAgent::new(ws.clone(), provider).spawn()
     }
 
     /// Socket path in a temp dir — avoids collisions and `/run` dependency.

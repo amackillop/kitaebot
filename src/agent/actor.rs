@@ -230,18 +230,10 @@ mod tests {
     use super::*;
     use crate::agent::AgentHandle;
     use crate::agent::envelope::ChannelSource;
-    use crate::config::ContextConfig;
-    use crate::engine::flat::FlatSession;
-    use crate::engine::make_summarize_fn;
     use crate::provider::MockProvider;
+    use crate::test_support::{TestAgent, workspace};
     use crate::types::Response;
     use tokio_util::sync::CancellationToken;
-
-    fn workspace() -> (tempfile::TempDir, Arc<Workspace>) {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        (dir, Arc::new(ws))
-    }
 
     fn spawn_agent(ws: Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
         spawn_agent_with(ws, provider, Tools::default(), None, 1)
@@ -272,31 +264,14 @@ mod tests {
         notifier: Option<Arc<Notifier>>,
         max_iterations: usize,
     ) -> AgentHandle {
-        let sessions_dir = ws.sessions_dir();
-        let state_dir = ws.state_dir();
-        let engine = FlatSession::new(sessions_dir, state_dir, ContextConfig::default()).unwrap();
-        let summarize = make_summarize_fn(provider.clone());
-        // Threshold far above any test transcript, so /heartbeat tests
-        // never trip the distillation gate.
-        let distiller = Arc::new(crate::distill::Distiller::new(
-            &Tools::default(),
-            ws.path(),
-            40_000,
-            1,
-        ));
-        AgentHandle::spawn(
-            ws,
-            provider.clone(),
-            heartbeat_provider,
-            provider,
-            Arc::new(tools),
-            distiller,
-            max_iterations,
-            8192,
-            engine,
-            summarize,
-            notifier,
-        )
+        let mut builder = TestAgent::new(ws, provider)
+            .heartbeat_provider(heartbeat_provider)
+            .tools(tools)
+            .max_iterations(max_iterations);
+        if let Some(notifier) = notifier {
+            builder = builder.notifier(notifier);
+        }
+        builder.spawn()
     }
 
     #[tokio::test]

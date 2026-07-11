@@ -232,11 +232,9 @@ mod tests {
     use super::*;
     use crate::clients::RawResponse;
     use crate::clients::telegram::{ApiResponse, Chat, TelegramClient, TgMessage, Update};
-    use crate::config::ContextConfig;
     use crate::provider::MockProvider;
-    use crate::tools::Tools;
+    use crate::test_support::{TestAgent, workspace};
     use crate::types::Response as AgentResponse;
-    use crate::workspace::Workspace;
 
     // -- Fake Telegram state for channel tests --
 
@@ -369,10 +367,6 @@ mod tests {
 
     const CHAT_ID: i64 = 42;
 
-    fn ctx() -> ContextConfig {
-        ContextConfig::default()
-    }
-
     fn channel(state: &Arc<FakeTelegram>) -> TelegramChannel {
         TelegramChannel::new(fake_client(state), CHAT_ID)
     }
@@ -380,33 +374,9 @@ mod tests {
     fn spawn_handle(
         responses: Vec<Result<AgentResponse, crate::error::ProviderError>>,
     ) -> (AgentHandle, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        let ws = Arc::new(ws);
+        let (dir, ws) = workspace();
         let provider = Arc::new(MockProvider::new(responses));
-        let sessions_dir = ws.sessions_dir();
-        let state_dir = ws.state_dir();
-        let engine = crate::engine::flat::FlatSession::new(sessions_dir, state_dir, ctx()).unwrap();
-        let summarize = crate::engine::make_summarize_fn(provider.clone());
-        let distiller = Arc::new(crate::distill::Distiller::new(
-            &Tools::default(),
-            ws.path(),
-            40_000,
-            1,
-        ));
-        let handle = AgentHandle::spawn(
-            ws,
-            provider.clone(),
-            provider.clone(),
-            provider,
-            Arc::new(Tools::default()),
-            distiller,
-            1,
-            8192,
-            engine,
-            summarize,
-            None,
-        );
+        let handle = TestAgent::new(ws, provider).spawn();
         (handle, dir)
     }
 
