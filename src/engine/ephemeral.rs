@@ -2,6 +2,7 @@
 //!
 //! See `specs/19-sub-agents.md` for the design.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::error::EngineError;
@@ -128,6 +129,23 @@ impl ContextEngine for EphemeralSession {
     async fn list_sessions(&self) -> Result<Vec<SessionInfo>, EngineError> {
         Ok(Vec::new())
     }
+
+    async fn pending_distill_tokens(
+        &self,
+        _since: &BTreeMap<String, u64>,
+    ) -> Result<BTreeMap<String, u64>, EngineError> {
+        // Single-turn context, never distilled.
+        Ok(BTreeMap::new())
+    }
+
+    async fn transcript_since(
+        &self,
+        _session: &str,
+        _after: u64,
+        _max_tokens: u64,
+    ) -> Result<Vec<Message>, EngineError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +235,32 @@ mod tests {
         let event = engine.compact_if_needed(&noop_summarize()).await.unwrap();
         assert!(event.is_none());
         assert_eq!(engine.stats().message_count, 1);
+    }
+
+    #[tokio::test]
+    async fn distillation_is_a_noop() {
+        let mut engine = EphemeralSession::new(20_000);
+        engine
+            .push_message(Message::User {
+                content: "x".repeat(10_000),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            engine
+                .pending_distill_tokens(&BTreeMap::new())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            engine
+                .transcript_since("ephemeral", 0, u64::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

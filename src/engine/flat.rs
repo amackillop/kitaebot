@@ -4,6 +4,7 @@
 //! The active session name is persisted to `state/active_session` so
 //! it survives daemon restarts.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -124,6 +125,20 @@ impl FlatSession {
     /// Path to the JSON file for a given session name.
     fn path_for(&self, name: &str) -> PathBuf {
         session_path(&self.sessions_dir, name)
+    }
+
+    /// A session's messages: in-memory when active (sees unsaved
+    /// pushes), otherwise loaded from disk. An unreadable file yields
+    /// an empty span rather than failing the whole distill pass.
+    #[allow(dead_code)]
+    fn session_messages(&self, name: &str) -> Vec<Message> {
+        if name == self.active_name {
+            self.session.messages().to_vec()
+        } else {
+            Session::load(&self.path_for(name))
+                .map(|s| s.messages().to_vec())
+                .unwrap_or_default()
+        }
     }
 }
 
@@ -322,6 +337,55 @@ impl ContextEngine for FlatSession {
 
         sessions.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(sessions)
+    }
+
+    async fn pending_distill_tokens(
+        &self,
+        since: &BTreeMap<String, u64>,
+    ) -> Result<BTreeMap<String, u64>, EngineError> {
+        // Positions are message indices, which reset on the flat
+        // engine's destructive compaction: a session distilled then
+        // compacted can under-report. Best-effort by design (spec 21);
+        // LCM is the sound path.
+        let mut out = BTreeMap::new();
+        for info in self.list_sessions().await? {
+            let msgs = self.session_messages(&info.name);
+            let after =
+                usize::try_from(since.get(&info.name).copied().unwrap_or(0)).unwrap_or(usize::MAX);
+            let chars: usize = msgs
+                .get(after..)
+                .unwrap_or(&[])
+                .iter()
+                .map(Message::char_count)
+                .sum();
+            let tokens = estimate_tokens_from_chars(chars);
+            if tokens > 0 {
+                out.insert(info.name, u64::try_from(tokens).unwrap_or(u64::MAX));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn transcript_since(
+        &self,
+        session: &str,
+        after: u64,
+        max_tokens: u64,
+    ) -> Result<Vec<Message>, EngineError> {
+        let msgs = self.session_messages(session);
+        let after = usize::try_from(after).unwrap_or(usize::MAX);
+        let mut out = Vec::new();
+        let mut total: u64 = 0;
+        for msg in msgs.get(after..).unwrap_or(&[]) {
+            let tokens =
+                u64::try_from(estimate_tokens_from_chars(msg.char_count())).unwrap_or(u64::MAX);
+            if !out.is_empty() && total + tokens > max_tokens {
+                break;
+            }
+            out.push(msg.clone());
+            total += tokens;
+        }
+        Ok(out)
     }
 }
 
@@ -814,6 +878,77 @@ mod tests {
         let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"general"));
         assert!(names.contains(&"beta"));
+    }
+
+    // ── Distillation tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pending_distill_tokens_sums_undistilled_per_session() {
+        let mut engine = temp_engine(ContextConfig::default());
+        engine
+            .push_message(Message::User {
+                content: "a".repeat(400),
+            })
+            .await
+            .unwrap();
+
+        // No watermark: the whole session is pending.
+        let pending = engine
+            .pending_distill_tokens(&BTreeMap::new())
+            .await
+            .unwrap();
+        assert!(pending.get("general").copied().unwrap_or(0) > 0);
+
+        // Watermark past the only message: nothing pending.
+        let mut since = BTreeMap::new();
+        since.insert("general".to_string(), 1);
+        let pending = engine.pending_distill_tokens(&since).await.unwrap();
+        assert!(!pending.contains_key("general"));
+    }
+
+    #[tokio::test]
+    async fn transcript_since_returns_span_after_watermark() {
+        let mut engine = temp_engine(ContextConfig::default());
+        engine
+            .push_message(Message::User {
+                content: "first".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::Assistant {
+                content: "second".into(),
+            })
+            .await
+            .unwrap();
+
+        let span = engine
+            .transcript_since("general", 1, u64::MAX)
+            .await
+            .unwrap();
+        assert_eq!(span.len(), 1);
+        assert!(matches!(&span[0], Message::Assistant { content } if content == "second"));
+    }
+
+    #[tokio::test]
+    async fn transcript_since_clamps_but_makes_progress() {
+        let mut engine = temp_engine(ContextConfig::default());
+        engine
+            .push_message(Message::User {
+                content: "a".repeat(400),
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::User {
+                content: "b".repeat(400),
+            })
+            .await
+            .unwrap();
+
+        // Zero budget still yields the head event.
+        let span = engine.transcript_since("general", 0, 0).await.unwrap();
+        assert_eq!(span.len(), 1);
     }
 
     // ── Report tests ────────────────────────────────────────────────

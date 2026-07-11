@@ -26,12 +26,13 @@
 //! because GitHub channel routing produces `owner/repo` strings; the
 //! sanitization keeps them as legal `conversations.name` values.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -533,6 +534,29 @@ impl ContextEngine for LcmEngine {
         let conn = Arc::clone(&self.conn);
         run_blocking(conn, list_sessions_sync).await
     }
+
+    async fn pending_distill_tokens(
+        &self,
+        since: &BTreeMap<String, u64>,
+    ) -> Result<BTreeMap<String, u64>, EngineError> {
+        let conn = Arc::clone(&self.conn);
+        let since = since.clone();
+        run_blocking(conn, move |c| pending_distill_tokens_sync(c, &since)).await
+    }
+
+    async fn transcript_since(
+        &self,
+        session: &str,
+        after: u64,
+        max_tokens: u64,
+    ) -> Result<Vec<Message>, EngineError> {
+        let conn = Arc::clone(&self.conn);
+        let stem = sanitize_name(session);
+        run_blocking(conn, move |c| {
+            transcript_since_sync(c, &stem, after, max_tokens)
+        })
+        .await
+    }
 }
 
 /// Run a blocking DB closure on Tokio's blocking pool.
@@ -676,6 +700,94 @@ fn list_sessions_sync(conn: &mut Connection) -> Result<Vec<SessionInfo>, EngineE
     let mut out = Vec::new();
     for r in rows {
         out.push(r.map_err(|e| storage_err(&e))?);
+    }
+    Ok(out)
+}
+
+/// Sum each conversation's undistilled `token_count` for the distill
+/// gate. seq is monotonic and raw rows survive compaction, so the
+/// count is a faithful high-water regardless of DAG state.
+#[allow(dead_code)]
+fn pending_distill_tokens_sync(
+    conn: &Connection,
+    since: &BTreeMap<String, u64>,
+) -> Result<BTreeMap<String, u64>, EngineError> {
+    let convs: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT conversation_id, name FROM conversations")
+            .map_err(|e| storage_err(&e))?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| storage_err(&e))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| storage_err(&e))?
+    };
+
+    let mut out = BTreeMap::new();
+    for (id, stem) in convs {
+        let name = desanitize_name(&stem);
+        let watermark = i64::try_from(since.get(&name).copied().unwrap_or(0)).unwrap_or(i64::MAX);
+        let sum: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(token_count), 0) FROM messages \
+                 WHERE conversation_id = ?1 AND seq >= ?2",
+                params![id, watermark],
+                |r| r.get(0),
+            )
+            .map_err(|e| storage_err(&e))?;
+        if sum > 0 {
+            out.insert(name, u64::try_from(sum).unwrap_or(u64::MAX));
+        }
+    }
+    Ok(out)
+}
+
+/// Reconstruct one conversation's undistilled span, oldest first,
+/// clamped to `max_tokens` (at least one event when any are pending).
+/// A missing conversation yields an empty span.
+#[allow(dead_code)]
+fn transcript_since_sync(
+    conn: &Connection,
+    stem: &str,
+    after: u64,
+    max_tokens: u64,
+) -> Result<Vec<Message>, EngineError> {
+    let conversation_id: Option<i64> = conn
+        .query_row(
+            "SELECT conversation_id FROM conversations WHERE name = ?1",
+            [stem],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| storage_err(&e))?;
+    let Some(conversation_id) = conversation_id else {
+        return Ok(Vec::new());
+    };
+    let after = i64::try_from(after).unwrap_or(i64::MAX);
+
+    let rows: Vec<(i64, String, String, i64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT message_id, role, content, token_count FROM messages \
+                 WHERE conversation_id = ?1 AND seq >= ?2 ORDER BY seq",
+            )
+            .map_err(|e| storage_err(&e))?;
+        stmt.query_map(params![conversation_id, after], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|e| storage_err(&e))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| storage_err(&e))?
+    };
+
+    let mut out = Vec::new();
+    let mut total: u64 = 0;
+    for (id, role, content, tokens) in rows {
+        let tokens = u64::try_from(tokens).unwrap_or(0);
+        if !out.is_empty() && total + tokens > max_tokens {
+            break;
+        }
+        out.push(reconstruct_message(conn, id, &role, content)?);
+        total += tokens;
     }
     Ok(out)
 }
@@ -1613,6 +1725,87 @@ mod tests {
 
         let beta = sessions.iter().find(|s| s.name == "beta").unwrap();
         assert_eq!(beta.message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn pending_distill_tokens_sums_undistilled_per_session() {
+        let (mut engine, _dir) = temp_engine();
+        engine
+            .push_message(Message::User {
+                content: "g".repeat(40),
+            })
+            .await
+            .unwrap();
+        engine.switch_session("beta").await.unwrap();
+        engine
+            .push_message(Message::User {
+                content: "b".repeat(40),
+            })
+            .await
+            .unwrap();
+
+        // Empty watermarks: every session counts from the start.
+        let all = engine
+            .pending_distill_tokens(&BTreeMap::new())
+            .await
+            .unwrap();
+        assert!(all.get("general").copied().unwrap_or(0) > 0);
+        assert!(all.get("beta").copied().unwrap_or(0) > 0);
+
+        // Watermark at the high-water omits a caught-up session.
+        let caught_up = BTreeMap::from([("beta".to_string(), 1)]);
+        let pending = engine.pending_distill_tokens(&caught_up).await.unwrap();
+        assert!(!pending.contains_key("beta"));
+        assert!(pending.contains_key("general"));
+    }
+
+    #[tokio::test]
+    async fn transcript_since_returns_span_after_watermark() {
+        let (mut engine, _dir) = temp_engine();
+        for i in 0..3 {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i}"),
+                })
+                .await
+                .unwrap();
+        }
+
+        let span = engine
+            .transcript_since("general", 1, u64::MAX)
+            .await
+            .unwrap();
+        assert_eq!(span.len(), 2);
+        assert!(matches!(&span[0], Message::User { content } if content == "m1"));
+        assert!(matches!(&span[1], Message::User { content } if content == "m2"));
+
+        // At the high-water, nothing pending.
+        let empty = engine
+            .transcript_since("general", 3, u64::MAX)
+            .await
+            .unwrap();
+        assert!(empty.is_empty());
+
+        // Unknown session yields an empty span.
+        let missing = engine.transcript_since("nope", 0, u64::MAX).await.unwrap();
+        assert!(missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transcript_since_clamps_but_makes_progress() {
+        let (mut engine, _dir) = temp_engine();
+        for i in 0..3 {
+            engine
+                .push_message(Message::User {
+                    content: format!("message number {i}"),
+                })
+                .await
+                .unwrap();
+        }
+
+        // A zero budget still yields the head so the watermark can advance.
+        let span = engine.transcript_since("general", 0, 0).await.unwrap();
+        assert_eq!(span.len(), 1);
     }
 
     #[tokio::test]

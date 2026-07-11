@@ -12,6 +12,7 @@ pub mod ephemeral;
 pub mod flat;
 pub mod lcm;
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -160,6 +161,40 @@ pub trait ContextEngine: Send + Sync {
 
     /// List all available sessions.
     fn list_sessions(&self) -> impl Future<Output = Result<Vec<SessionInfo>, EngineError>> + Send;
+
+    /// Undistilled token totals per session, for the memory
+    /// distillation gate (spec 21).
+    ///
+    /// For each session, sums the stored `token_count` of every event
+    /// at or beyond that session's watermark in `since` (a session
+    /// missing from the map counts from its first event). Sessions
+    /// with no pending events are omitted. Reads counts only, never
+    /// content, so the heartbeat can probe cheaply before spending an
+    /// LLM turn. Ephemeral history is not durable and yields an empty
+    /// map.
+    // Wired by the distillation heartbeat duty (spec 21).
+    #[allow(dead_code)]
+    fn pending_distill_tokens(
+        &self,
+        since: &BTreeMap<String, u64>,
+    ) -> impl Future<Output = Result<BTreeMap<String, u64>, EngineError>> + Send;
+
+    /// Events for `session` at or beyond position `after`, oldest
+    /// first, for a distillation pass (spec 21).
+    ///
+    /// The span is clamped so its summed `token_count` stays within
+    /// `max_tokens`, always returning at least one event when any are
+    /// pending so an oversized head cannot stall progress. Positions
+    /// are dense, so the caller advances the watermark to
+    /// `after + returned.len()`. Ephemeral history is not durable and
+    /// yields an empty vec.
+    #[allow(dead_code)]
+    fn transcript_since(
+        &self,
+        session: &str,
+        after: u64,
+        max_tokens: u64,
+    ) -> impl Future<Output = Result<Vec<Message>, EngineError>> + Send;
 }
 
 /// Role-setting system prompt for every summarization call. The
