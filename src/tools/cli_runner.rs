@@ -128,7 +128,7 @@ async fn exec_cmd(
 /// Spawn and wait, piping `stdin` into the child when present.
 async fn run(cmd: &mut Command, stdin: Option<&str>) -> std::io::Result<std::process::Output> {
     let Some(input) = stdin else {
-        return cmd.output().await;
+        return cmd.stdin(Stdio::null()).output().await;
     };
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
