@@ -87,6 +87,8 @@ pub struct ModelOverrides {
     pub summarizer: Option<String>,
     /// Model for heartbeat turns.
     pub heartbeat: Option<String>,
+    /// Model for memory distillation turns.
+    pub memory: Option<String>,
 }
 
 /// `OpenAI`-compatible chat completions API.
@@ -168,6 +170,12 @@ pub struct MemoryConfig {
     /// system prompt each root turn. Content beyond it is truncated.
     /// Must be > 0.
     pub index_cap_bytes: usize,
+    /// Undistilled tokens, summed across all sessions, that must
+    /// accumulate before the heartbeat folds them into memory. A
+    /// mechanical gate: no LLM runs until the total is reached. Sized
+    /// below the distiller's window so a triggered pass fits in one
+    /// turn. Must be > 0.
+    pub distill_threshold_tokens: u64,
 }
 
 /// Telegram channel settings.
@@ -442,6 +450,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             index_cap_bytes: 8192,
+            distill_threshold_tokens: 40_000,
         }
     }
 }
@@ -563,6 +572,11 @@ impl Config {
         if self.memory.index_cap_bytes == 0 {
             return Err(ConfigError::Invalid(
                 "memory index_cap_bytes must be > 0".into(),
+            ));
+        }
+        if self.memory.distill_threshold_tokens == 0 {
+            return Err(ConfigError::Invalid(
+                "memory distill_threshold_tokens must be > 0".into(),
             ));
         }
         if self.provider.max_tokens == 0 {
@@ -729,6 +743,7 @@ timeout_secs = 120
         assert!(cfg.provider.model_overrides.worker.is_none());
         assert!(cfg.provider.model_overrides.summarizer.is_none());
         assert!(cfg.provider.model_overrides.heartbeat.is_none());
+        assert!(cfg.provider.model_overrides.memory.is_none());
     }
 
     #[test]
@@ -740,6 +755,7 @@ explore = \"cheap/explore\"
 worker = \"mid/worker\"
 summarizer = \"cheap/summarizer\"
 heartbeat = \"cheap/heartbeat\"
+memory = \"cheap/memory\"
 ",
         )
         .unwrap();
@@ -748,6 +764,7 @@ heartbeat = \"cheap/heartbeat\"
         assert_eq!(overrides.worker.as_deref(), Some("mid/worker"));
         assert_eq!(overrides.summarizer.as_deref(), Some("cheap/summarizer"));
         assert_eq!(overrides.heartbeat.as_deref(), Some("cheap/heartbeat"));
+        assert_eq!(overrides.memory.as_deref(), Some("cheap/memory"));
     }
 
     #[test]
@@ -808,17 +825,26 @@ heartbeat = \"cheap/heartbeat\"
     fn memory_defaults() {
         let cfg = load_toml("").unwrap();
         assert_eq!(cfg.memory.index_cap_bytes, 8192);
+        assert_eq!(cfg.memory.distill_threshold_tokens, 40_000);
     }
 
     #[test]
     fn memory_parse() {
-        let cfg = load_toml("[memory]\nindex_cap_bytes = 4096\n").unwrap();
+        let cfg = load_toml("[memory]\nindex_cap_bytes = 4096\ndistill_threshold_tokens = 20000\n")
+            .unwrap();
         assert_eq!(cfg.memory.index_cap_bytes, 4096);
+        assert_eq!(cfg.memory.distill_threshold_tokens, 20_000);
     }
 
     #[test]
     fn memory_reject_zero_cap() {
         let result = load_toml("[memory]\nindex_cap_bytes = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn memory_reject_zero_distill_threshold() {
+        let result = load_toml("[memory]\ndistill_threshold_tokens = 0\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 

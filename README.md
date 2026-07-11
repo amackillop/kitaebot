@@ -199,6 +199,7 @@ kitaebot = {
     };
     memory = {
       index_cap_bytes = 8192;                    # Byte cap on the injected MEMORY.md index
+      distill_threshold_tokens = 40000;          # Undistilled tokens across all sessions before the heartbeat distills
     };
     provider = {
       api = "openrouter";                        # openrouter | openai | groq | together | mistral
@@ -210,6 +211,7 @@ kitaebot = {
         worker = "mid/model";
         summarizer = "cheap/model";
         heartbeat = "cheap/model";
+        memory = "strong/model";                   # Distilled facts persist and inject every turn; don't skimp
       };
     };
     socket = {
