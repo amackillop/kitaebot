@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod daemon;
 mod dispatch;
+mod distill;
 mod engine;
 mod error;
 mod github_channel;

@@ -98,6 +98,13 @@ impl Workspace {
         self.state_dir().join("linear_poll_state.json")
     }
 
+    /// Path to the memory distillation state file (spec 21).
+    // Consumed once the heartbeat wires distillation.
+    #[allow(dead_code)]
+    pub fn distillation_state_path(&self) -> PathBuf {
+        self.state_dir().join("distillation_state.json")
+    }
+
     /// The system prompt, read once at workspace init.
     ///
     /// Prompt files are provisioned via Nix, so changes require a
