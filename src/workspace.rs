@@ -46,6 +46,7 @@ impl Workspace {
         mk(&path)?;
         mk(&path.join("sessions"))?;
         mk(&path.join("memory"))?;
+        mk(&path.join("memory/topics"))?;
         mk(&path.join("projects"))?;
         mk(&path.join("state"))?;
 
@@ -154,6 +155,7 @@ mod tests {
 
         assert!(ws.path().join("sessions").is_dir());
         assert!(ws.path().join("memory").is_dir());
+        assert!(ws.path().join("memory/topics").is_dir());
         assert!(ws.path().join("projects").is_dir());
         assert!(ws.path().join("state").is_dir());
     }
