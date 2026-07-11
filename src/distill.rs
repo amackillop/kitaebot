@@ -428,6 +428,7 @@ mod run_tests {
     use crate::engine::{AssembledContext, CompactionEvent, ContextStats, SessionInfo, ToolScope};
     use crate::error::{EngineError, ProviderError};
     use crate::provider::MockProvider;
+    use crate::test_support::workspace;
     use crate::tools::Tool;
     use crate::types::Response;
 
@@ -509,15 +510,9 @@ mod run_tests {
         })
     }
 
-    fn workspace() -> (Workspace, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        (ws, dir)
-    }
-
     #[tokio::test]
     async fn gate_closed_makes_no_call_and_no_write() {
-        let (ws, _dir) = workspace();
+        let (_dir, ws) = workspace();
         let engine = FakeEngine {
             pending: BTreeMap::from([("general".into(), 10)]),
             transcripts: BTreeMap::new(),
@@ -545,7 +540,7 @@ mod run_tests {
 
     #[tokio::test]
     async fn gate_open_runs_pass_and_advances_watermarks() {
-        let (ws, _dir) = workspace();
+        let (_dir, ws) = workspace();
         let messages = vec![
             Message::User {
                 content: "remember the canary is a quokka".into(),
@@ -586,7 +581,7 @@ mod run_tests {
 
     #[tokio::test]
     async fn failed_turn_leaves_watermarks_untouched() {
-        let (ws, _dir) = workspace();
+        let (_dir, ws) = workspace();
         let engine = FakeEngine {
             pending: BTreeMap::from([("general".into(), 1500)]),
             transcripts: BTreeMap::from([(

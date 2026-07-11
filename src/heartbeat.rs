@@ -127,6 +127,7 @@ fn append_history(path: &std::path::Path, response: &str) -> Result<(), std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::workspace;
 
     #[test]
     fn parse_finds_unchecked_tasks() {
@@ -185,12 +186,6 @@ mod tests {
     }
 
     // -- prepare tests --
-
-    fn workspace() -> (tempfile::TempDir, Workspace) {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-        (dir, ws)
-    }
 
     #[test]
     fn prepare_skips_when_no_heartbeat_file() {
