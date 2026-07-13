@@ -357,7 +357,10 @@ fn format_new_issue(issue: &Issue, repo: &str) -> String {
         s,
         "\nAnalyze the task and reply with a review-ready implementation plan \
          in markdown. Do not implement anything yet — your reply will be \
-         posted as a comment on the ticket for approval."
+         posted as a comment on the ticket for approval. If this workflow \
+         has a plan-review state, move the ticket there with \
+         the linear_set_state tool (it lists the available states); \
+         otherwise leave the state as-is."
     );
     s
 }
@@ -376,13 +379,15 @@ fn format_comment(issue: &Issue, repo: &str, author: &str, email: &str, body: &s
     let _ = writeln!(s, "\n{body}");
     let _ = writeln!(
         s,
-        "\nIf this approves your plan, execute it end-to-end: clone or update \
-         the repo, create a branch named {branch} (the ticket id in the branch \
-         name links the PR to the issue), implement, test, commit, push, and \
-         open a PR. On success reply with one line at most; the PR links \
-         itself to the ticket. Be detailed only if something failed or \
-         needs a decision. If the comment is feedback instead, revise your \
-         plan and reply with the updated plan."
+        "\nIf this approves your plan, execute it end-to-end: move the ticket \
+         to an in-progress state with the linear_set_state tool if the \
+         workflow has one, then clone or update the repo, create a branch \
+         named {branch} (the ticket id in the branch name links the PR to \
+         the issue), implement, test, commit, push, and open a PR. On \
+         success reply with one line at most; the PR links itself to the \
+         ticket. Be detailed only if something failed or needs a decision. \
+         If the comment is feedback instead, revise your plan and reply \
+         with the updated plan."
     );
     s
 }
@@ -477,6 +482,7 @@ mod tests {
         assert!(msg.contains("It is broken"));
         assert!(msg.contains("[Alice] please prioritize"));
         assert!(msg.contains("Do not implement anything yet"));
+        assert!(msg.contains("linear_set_state"));
     }
 
     #[test]
@@ -518,6 +524,7 @@ mod tests {
         let msg = &dispatches[0].message;
         assert!(msg.contains("approved, go ahead"));
         assert!(msg.contains("kitaebot_mdk-1_<short-summary>"));
+        assert!(msg.contains("in-progress state with the linear_set_state tool"));
     }
 
     #[test]
