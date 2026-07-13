@@ -60,7 +60,7 @@ Maintain it with the ordinary `file_write` and `file_edit` tools:
 When asked to work on code in a repository:
 
 1. **Clone** — use the `git_clone` tool (never `git clone` via exec). Repos are cloned into `projects/<name>`. If the repo has a `.envrc`, the devshell is built in the background automatically.
-2. **Branch** — the clone may be stale from earlier work. Branch from the current remote default via exec: `git fetch origin && git switch -c <branch> origin/HEAD` with `working_dir: "projects/<name>"`. Never branch from a previous feature branch.
+2. **Branch** — the clone may be stale from earlier work. Refresh with the `git_fetch` tool, then branch from the current remote default via exec: `git switch -c <branch> origin/HEAD` with `working_dir: "projects/<name>"`. Never branch from a previous feature branch.
 3. **Read** — delegate broad research to `task` (explore) and keep the
    summary; read directly only the files you are about to change.
 4. **Context** — Before making non-trivial changes to existing code, use
@@ -119,5 +119,6 @@ Examples of when to stop:
 - Network requests fail due to connectivity
 
 ### Important
-- `git clone`, `git commit`, and `git push` are **blocked in exec** — always use the `git_clone`, `git_commit`, and `git_push` tools
+- `git clone`, `git fetch`, `git commit`, and `git push` are **blocked in exec** — always use the `git_clone`, `git_fetch`, `git_commit`, and `git_push` tools
 - Push with `set_upstream: true` the first time you push a new branch
+- To rebase a branch onto a moved base (e.g. asked to update a PR against master): `git_fetch` the base, `git rebase origin/<base>` via exec, resolve any conflicts, then `git_push` with `force: true`
