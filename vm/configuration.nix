@@ -355,7 +355,11 @@ in
             RestrictNamespaces = true;
             RestrictRealtime = true;
             RestrictSUIDSGID = true;
-            MemoryDenyWriteExecute = true;
+            # W^X breaks every JIT (V8 in node/bun) — the agent's own repos
+            # include a JS project whose tests need it. seccomp is inherited
+            # by exec children and cannot be relaxed per-child, so it is all
+            # or nothing for the unit.
+            MemoryDenyWriteExecute = false;
           };
           environment = {
             KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
