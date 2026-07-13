@@ -6,22 +6,13 @@
 //! PR head SHA, so leftover state from a previous review can never
 //! block the next one and review turns never touch in-progress work.
 
-use std::path::Path;
-
 use crate::error::ToolError;
 use crate::tools::git::GitCli;
-use crate::tools::git::url::validate_name;
+use crate::tools::git::checkout;
 
 /// Workspace-relative checkout directory for `owner/repo`.
 pub(super) fn checkout_rel_path(nwo: &str) -> Result<String, ToolError> {
-    let (owner, repo) = nwo
-        .split_once('/')
-        .ok_or_else(|| ToolError::InvalidArguments(format!("expected owner/repo, got: {nwo}")))?;
-    Ok(format!(
-        "reviews/{}/{}",
-        validate_name(owner)?,
-        validate_name(repo)?
-    ))
+    checkout::rel_path("reviews", nwo)
 }
 
 /// Clone the repo if needed, fetch the PR head and base, and
@@ -62,19 +53,11 @@ async fn prepare_at(
         )));
     }
 
-    let dir = git.workspace_root().join(rel);
-    if !dir.join(".git").is_dir() {
-        let parent = dir.parent().expect("rel path has parent components");
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("create {}: {e}", parent.display())))?;
-        let name = rel.rsplit('/').next().expect("rsplit yields at least one");
-        run(git, &["clone", url, name], parent, true).await?;
-    }
+    let dir = checkout::ensure_cloned(git, url, rel).await?;
 
     let pull_ref = format!("pull/{pr_number}/head");
-    run(git, &["fetch", "origin", base, &pull_ref], &dir, true).await?;
-    run(
+    checkout::run(git, &["fetch", "origin", base, &pull_ref], &dir, true).await?;
+    checkout::run(
         git,
         &["checkout", "--force", "--detach", head_sha],
         &dir,
@@ -84,52 +67,24 @@ async fn prepare_at(
     Ok(())
 }
 
-async fn run(
-    git: &GitCli,
-    args: &[&str],
-    cwd: &Path,
-    authenticated: bool,
-) -> Result<(), ToolError> {
-    let call = git.prepare_git(args, cwd);
-    git.exec_git(call, authenticated).await?.format().map(drop)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::secrets::Secret;
     use crate::tools::DirenvCache;
 
     // ── checkout_rel_path ───────────────────────────────────────────
+    // Path validation lives in `checkout::rel_path`; this only confirms
+    // the review prefix is threaded through.
 
     #[test]
-    fn rel_path_for_valid_nwo() {
+    fn rel_path_uses_reviews_prefix() {
         assert_eq!(
             checkout_rel_path("owner/repo").unwrap(),
             "reviews/owner/repo"
         );
-    }
-
-    #[test]
-    fn rel_path_rejects_missing_slash() {
-        assert!(checkout_rel_path("just-a-repo").is_err());
-    }
-
-    #[test]
-    fn rel_path_rejects_extra_segments() {
-        assert!(checkout_rel_path("a/b/c").is_err());
-    }
-
-    #[test]
-    fn rel_path_rejects_traversal() {
-        assert!(checkout_rel_path("../escape").is_err());
-        assert!(checkout_rel_path("owner/..").is_err());
-    }
-
-    #[test]
-    fn rel_path_rejects_option_shaped_segments() {
-        assert!(checkout_rel_path("-flag/repo").is_err());
-        assert!(checkout_rel_path("owner/-flag").is_err());
     }
 
     // ── prepare_at argument validation ──────────────────────────────

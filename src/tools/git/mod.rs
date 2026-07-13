@@ -4,6 +4,7 @@
 //! token but no GitHub-specific CLI. Auth uses a temporary `GIT_ASKPASS`
 //! script injected for the duration of one command.
 
+pub(crate) mod checkout;
 mod commit;
 pub(crate) mod git_cli;
 mod git_clone;
