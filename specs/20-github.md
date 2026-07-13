@@ -76,8 +76,11 @@ self-reviews anyway).
 ### Access control
 
 The bot owner (`github.owner`) is always trusted. Additional users can be
-granted access via `github.trusted_users`. Both are case-insensitive.
-Untrusted items are logged and skipped.
+granted access via `github.trusted_users`, and bot apps (e.g. code-review
+bots) via `github.trusted_bots`. All are case-insensitive; a trailing
+`[bot]` suffix on a login is stripped before matching the bot list, since
+the REST API appends it and GraphQL does not. Untrusted items are logged
+and skipped.
 
 - **Feedback path**: trust is checked on the review/comment author.
 - **Review-request path**: trust is checked on the **PR author** — the
@@ -268,6 +271,7 @@ replying to stale code.
 | `github.poll_interval_secs` | `300` | Seconds between poll cycles |
 | `github.owner` | — | Bot owner's GitHub username (required when enabled) |
 | `github.trusted_users` | `[]` | Additional trusted GitHub usernames |
+| `github.trusted_bots` | `[]` | Bot app logins whose PR feedback to act on |
 
 There is no separate flag for the review-request trigger: the trust
 check on the PR author already gates who can put code in front of the

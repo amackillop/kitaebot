@@ -262,8 +262,7 @@ async fn feedback_pass(
     bot_login: &str,
     last_poll: &str,
 ) -> Result<usize, ToolError> {
-    let owner = &config.owner;
-    let trusted_users = &config.trusted_users;
+    let trust = Trust::new(config);
     let prs = list_bot_prs(gh).await?;
     let mut count = 0;
 
@@ -280,7 +279,7 @@ async fn feedback_pass(
             if review.submitted_at.as_str() <= last_poll {
                 continue;
             }
-            if !is_trusted(&review.author.login, owner, trusted_users) {
+            if !trust.allows(&review.author.login) {
                 warn!(
                     author = %review.author.login,
                     "Skipping review from untrusted user"
@@ -305,7 +304,7 @@ async fn feedback_pass(
             if comment.created_at.as_str() <= last_poll {
                 continue;
             }
-            if !is_trusted(&comment.author.login, owner, trusted_users) {
+            if !trust.allows(&comment.author.login) {
                 warn!(
                     author = %comment.author.login,
                     "Skipping comment from untrusted user"
@@ -330,7 +329,7 @@ async fn feedback_pass(
             if dc.created_at.as_str() <= last_poll {
                 continue;
             }
-            if !is_trusted(&dc.user.login, owner, trusted_users) {
+            if !trust.allows(&dc.user.login) {
                 warn!(
                     author = %dc.user.login,
                     "Skipping diff comment from untrusted user"
@@ -385,13 +384,8 @@ async fn review_request_pass(
         }
     }
 
-    let dispatches = decide_review_requests(
-        &candidates,
-        &state.reviewed,
-        bot_login,
-        &config.owner,
-        &config.trusted_users,
-    );
+    let dispatches =
+        decide_review_requests(&candidates, &state.reviewed, bot_login, &Trust::new(config));
 
     let mut count = 0;
     for d in dispatches {
@@ -466,8 +460,7 @@ async fn tracked_pass(
         &snapshots,
         &state.reviewed,
         bot_login,
-        &config.owner,
-        &config.trusted_users,
+        &Trust::new(config),
         &state.last_poll,
     );
 
@@ -534,12 +527,34 @@ async fn send(handle: &AgentHandle, pr_number: u32, repo: &str, session: String,
     }
 }
 
-/// Check if a user is trusted (owner or in `trusted_users` list).
-fn is_trusted(login: &str, owner: &str, trusted_users: &[String]) -> bool {
-    if login.eq_ignore_ascii_case(owner) {
-        return true;
+/// Who the channel acts on: the owner, listed human users, and listed
+/// bot apps. Bot logins carry a `[bot]` suffix in the REST API but not
+/// in GraphQL, so the suffix is stripped before matching the bot list.
+struct Trust<'a> {
+    owner: &'a str,
+    users: &'a [String],
+    bots: &'a [String],
+}
+
+impl<'a> Trust<'a> {
+    fn new(config: &'a GithubConfig) -> Self {
+        Self {
+            owner: &config.owner,
+            users: &config.trusted_users,
+            bots: &config.trusted_bots,
+        }
     }
-    trusted_users.iter().any(|u| u.eq_ignore_ascii_case(login))
+
+    fn allows(&self, login: &str) -> bool {
+        if login.eq_ignore_ascii_case(self.owner) {
+            return true;
+        }
+        if self.users.iter().any(|u| u.eq_ignore_ascii_case(login)) {
+            return true;
+        }
+        let bot = login.strip_suffix("[bot]").unwrap_or(login);
+        self.bots.iter().any(|b| b.eq_ignore_ascii_case(bot))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -558,8 +573,7 @@ fn decide_review_requests(
     candidates: &[ReviewCandidate],
     reviewed: &BTreeMap<String, String>,
     bot_login: &str,
-    owner: &str,
-    trusted_users: &[String],
+    trust: &Trust,
 ) -> Vec<ReviewDispatch> {
     let mut dispatches = Vec::new();
     for candidate in candidates {
@@ -570,7 +584,7 @@ fn decide_review_requests(
         if pr.author.login == bot_login {
             continue;
         }
-        if !is_trusted(&pr.author.login, owner, trusted_users) {
+        if !trust.allows(&pr.author.login) {
             warn!(
                 pr = %key,
                 author = %pr.author.login,
@@ -611,8 +625,7 @@ fn decide_tracked(
     snapshots: &[TrackedSnapshot],
     reviewed: &BTreeMap<String, String>,
     bot_login: &str,
-    owner: &str,
-    trusted_users: &[String],
+    trust: &Trust,
     last_poll: &str,
 ) -> (Vec<ReviewDispatch>, Vec<String>) {
     let mut dispatches = Vec::new();
@@ -629,7 +642,7 @@ fn decide_tracked(
         };
 
         let pushed = &s.view.head_ref_oid != prev_sha;
-        let comments = tracked_comments(s, bot_login, owner, trusted_users, last_poll);
+        let comments = tracked_comments(s, bot_login, trust, last_poll);
         if !pushed && comments.is_empty() {
             continue;
         }
@@ -664,15 +677,14 @@ fn decide_tracked(
 fn tracked_comments(
     s: &TrackedSnapshot,
     bot_login: &str,
-    owner: &str,
-    trusted_users: &[String],
+    trust: &Trust,
     last_poll: &str,
 ) -> Vec<String> {
     let mut items = Vec::new();
     for c in &s.view.comments {
         if c.author.login == bot_login
             || c.created_at.as_str() <= last_poll
-            || !is_trusted(&c.author.login, owner, trusted_users)
+            || !trust.allows(&c.author.login)
         {
             continue;
         }
@@ -681,7 +693,7 @@ fn tracked_comments(
     for dc in &s.diff_comments {
         if dc.user.login == bot_login
             || dc.created_at.as_str() <= last_poll
-            || !is_trusted(&dc.user.login, owner, trusted_users)
+            || !trust.allows(&dc.user.login)
         {
             continue;
         }
@@ -1287,7 +1299,8 @@ mod tests {
     fn review_request_dispatched_for_trusted_author() {
         let candidates = vec![candidate("owner/repo", 42, "alice", "abc123")];
         let reviewed = BTreeMap::new();
-        let dispatches = decide_review_requests(&candidates, &reviewed, "bot", "alice", &[]);
+        let dispatches =
+            decide_review_requests(&candidates, &reviewed, "bot", &trust("alice", &[], &[]));
 
         assert_eq!(dispatches.len(), 1);
         let d = &dispatches[0];
@@ -1320,14 +1333,24 @@ mod tests {
     #[test]
     fn review_request_skips_bot_authored_pr() {
         let candidates = vec![candidate("owner/repo", 1, "bot", "abc")];
-        let dispatches = decide_review_requests(&candidates, &BTreeMap::new(), "bot", "owner", &[]);
+        let dispatches = decide_review_requests(
+            &candidates,
+            &BTreeMap::new(),
+            "bot",
+            &trust("owner", &[], &[]),
+        );
         assert!(dispatches.is_empty());
     }
 
     #[test]
     fn review_request_skips_untrusted_author() {
         let candidates = vec![candidate("owner/repo", 1, "mallory", "abc")];
-        let dispatches = decide_review_requests(&candidates, &BTreeMap::new(), "bot", "owner", &[]);
+        let dispatches = decide_review_requests(
+            &candidates,
+            &BTreeMap::new(),
+            "bot",
+            &trust("owner", &[], &[]),
+        );
         assert!(dispatches.is_empty());
     }
 
@@ -1343,14 +1366,20 @@ mod tests {
             ("owner/repo#1".to_string(), "same-sha".to_string()),
             ("owner/repo#2".to_string(), "old-sha".to_string()),
         ]);
-        let dispatches = decide_review_requests(&candidates, &reviewed, "bot", "alice", &[]);
+        let dispatches =
+            decide_review_requests(&candidates, &reviewed, "bot", &trust("alice", &[], &[]));
         assert!(dispatches.is_empty());
     }
 
     #[test]
     fn review_request_skips_invalid_repo_name() {
         let candidates = vec![candidate("-flag/repo", 1, "alice", "abc")];
-        let dispatches = decide_review_requests(&candidates, &BTreeMap::new(), "bot", "alice", &[]);
+        let dispatches = decide_review_requests(
+            &candidates,
+            &BTreeMap::new(),
+            "bot",
+            &trust("alice", &[], &[]),
+        );
         assert!(dispatches.is_empty());
     }
 
@@ -1363,7 +1392,8 @@ mod tests {
     fn review_request_omits_empty_body() {
         let mut c = candidate("o/r", 3, "alice", "abc");
         c.pr.body = String::new();
-        let dispatches = decide_review_requests(&[c], &BTreeMap::new(), "bot", "alice", &[]);
+        let dispatches =
+            decide_review_requests(&[c], &BTreeMap::new(), "bot", &trust("alice", &[], &[]));
         assert_eq!(dispatches.len(), 1);
         assert!(!dispatches[0].message.contains("PR description:"));
     }
@@ -1411,7 +1441,13 @@ mod tests {
         let mut map = reviewed("o/r#1", "abc");
         map.insert("o/r#2".to_string(), "abc".to_string());
 
-        let (dispatches, prunes) = decide_tracked(&snapshots, &map, "bot", "alice", &[], LAST_POLL);
+        let (dispatches, prunes) = decide_tracked(
+            &snapshots,
+            &map,
+            "bot",
+            &trust("alice", &[], &[]),
+            LAST_POLL,
+        );
         assert!(dispatches.is_empty());
         assert_eq!(prunes, vec!["o/r#1", "o/r#2"]);
     }
@@ -1423,8 +1459,7 @@ mod tests {
             &snapshots,
             &reviewed("o/r#1", "abc"),
             "bot",
-            "alice",
-            &[],
+            &trust("alice", &[], &[]),
             LAST_POLL,
         );
         assert!(dispatches.is_empty());
@@ -1438,8 +1473,7 @@ mod tests {
             &snapshots,
             &reviewed("o/r#1", "old"),
             "bot",
-            "alice",
-            &[],
+            &trust("alice", &[], &[]),
             LAST_POLL,
         );
 
@@ -1485,8 +1519,7 @@ mod tests {
             &[s],
             &reviewed("o/r#1", "abc"),
             "bot",
-            "alice",
-            &[],
+            &trust("alice", &[], &[]),
             LAST_POLL,
         );
 
@@ -1521,8 +1554,7 @@ mod tests {
             &[s],
             &reviewed("o/r#1", "old"),
             "bot",
-            "alice",
-            &[],
+            &trust("alice", &[], &[]),
             LAST_POLL,
         );
 
@@ -1541,8 +1573,7 @@ mod tests {
             &snapshots,
             &reviewed("-flag/repo#1", "old"),
             "bot",
-            "alice",
-            &[],
+            &trust("alice", &[], &[]),
             LAST_POLL,
         );
         assert!(dispatches.is_empty());
@@ -1566,8 +1597,7 @@ mod tests {
             &[s],
             &reviewed("o/r#1", "abc"),
             "bot",
-            "alice",
-            &[],
+            &trust("alice", &[], &[]),
             LAST_POLL,
         );
         assert!(dispatches.is_empty());
@@ -1584,32 +1614,47 @@ mod tests {
         assert_eq!(parse_tracking_key("owner/repo#nan"), None);
     }
 
-    #[test]
-    fn is_trusted_owner_always_allowed() {
-        let owner = "alice";
-        let trusted: Vec<String> = vec![];
-        assert!(is_trusted("alice", owner, &trusted));
-        assert!(is_trusted("ALICE", owner, &trusted));
+    fn trust<'a>(owner: &'a str, users: &'a [String], bots: &'a [String]) -> Trust<'a> {
+        Trust { owner, users, bots }
     }
 
     #[test]
-    fn is_trusted_filters_untrusted_users() {
-        let owner = "alice";
-        let trusted = vec!["bob".to_string(), "charlie".to_string()];
-        assert!(is_trusted("alice", owner, &trusted));
-        assert!(is_trusted("bob", owner, &trusted));
-        assert!(is_trusted("charlie", owner, &trusted));
-        assert!(!is_trusted("eve", owner, &trusted));
-        assert!(!is_trusted("mallory", owner, &trusted));
+    fn trust_owner_always_allowed() {
+        let t = trust("alice", &[], &[]);
+        assert!(t.allows("alice"));
+        assert!(t.allows("ALICE"));
     }
 
     #[test]
-    fn is_trusted_case_insensitive() {
-        let owner = "Alice";
-        let trusted = vec!["BOB".to_string()];
-        assert!(is_trusted("alice", owner, &trusted));
-        assert!(is_trusted("ALICE", owner, &trusted));
-        assert!(is_trusted("bob", owner, &trusted));
-        assert!(is_trusted("Bob", owner, &trusted));
+    fn trust_filters_untrusted_users() {
+        let users = vec!["bob".to_string(), "charlie".to_string()];
+        let t = trust("alice", &users, &[]);
+        assert!(t.allows("alice"));
+        assert!(t.allows("bob"));
+        assert!(t.allows("charlie"));
+        assert!(!t.allows("eve"));
+        assert!(!t.allows("mallory"));
+    }
+
+    #[test]
+    fn trust_case_insensitive() {
+        let users = vec!["BOB".to_string()];
+        let t = trust("Alice", &users, &[]);
+        assert!(t.allows("alice"));
+        assert!(t.allows("ALICE"));
+        assert!(t.allows("bob"));
+        assert!(t.allows("Bob"));
+    }
+
+    #[test]
+    fn trust_allows_bots_ignoring_bot_suffix() {
+        let bots = vec!["chatgpt-codex-connector".to_string()];
+        let t = trust("alice", &[], &bots);
+        // GraphQL exposes the bare slug; REST appends `[bot]`.
+        assert!(t.allows("chatgpt-codex-connector"));
+        assert!(t.allows("chatgpt-codex-connector[bot]"));
+        assert!(t.allows("Chatgpt-Codex-Connector[bot]"));
+        assert!(!t.allows("some-other-bot[bot]"));
+        assert!(!t.allows("mallory"));
     }
 }

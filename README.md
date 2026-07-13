@@ -188,6 +188,7 @@ kitaebot = {
       poll_interval_secs = 300;            # 5 minutes between PR polls
       owner = "amackillop";                # Required when enabled
       trusted_users = [];                  # Additional allowed users
+      trusted_bots = [];                   # Bot apps whose PR feedback to act on
     };
     linear = {
       enabled = true;

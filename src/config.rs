@@ -293,6 +293,9 @@ pub struct GithubConfig {
     pub owner: String,
     /// Additional GitHub usernames allowed to interact with the bot.
     pub trusted_users: Vec<String>,
+    /// GitHub App bot logins whose PR feedback the bot acts on. Matched
+    /// case-insensitively; a trailing `[bot]` suffix is ignored.
+    pub trusted_bots: Vec<String>,
 }
 
 /// Linear channel settings.
@@ -434,6 +437,7 @@ impl Default for GithubConfig {
             poll_interval_secs: 300,
             owner: String::new(),
             trusted_users: Vec::new(),
+            trusted_bots: Vec::new(),
         }
     }
 }
@@ -1098,6 +1102,7 @@ memory = \"cheap/memory\"
         assert_eq!(cfg.github.poll_interval_secs, 300);
         assert!(cfg.github.owner.is_empty());
         assert!(cfg.github.trusted_users.is_empty());
+        assert!(cfg.github.trusted_bots.is_empty());
     }
 
     #[test]
@@ -1118,6 +1123,16 @@ memory = \"cheap/memory\"
         assert!(cfg.github.enabled);
         assert_eq!(cfg.github.owner, "alice");
         assert_eq!(cfg.github.trusted_users, vec!["bob"]);
+    }
+
+    #[test]
+    fn github_parse_trusted_bots() {
+        let cfg = load_toml(
+            "[github]\nenabled = true\nowner = \"alice\"\n\
+             trusted_bots = [\"chatgpt-codex-connector\"]\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.github.trusted_bots, vec!["chatgpt-codex-connector"]);
     }
 
     #[test]
