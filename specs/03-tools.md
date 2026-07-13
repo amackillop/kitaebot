@@ -114,8 +114,9 @@ Executes commands via `bash -c` within the workspace.
    socket), port scanning (`nmap`, `masscan`), secret harvesting
    (`~/.ssh/id_*`, `~/.aws/`), GPG keyring access, process control
    (`kill -9`), cron persistence, kernel modules, firewall manipulation,
-   injection/escape (`LD_PRELOAD`, `nsenter`), and git/gh operations that
-   must use dedicated tools.
+   injection/escape (`LD_PRELOAD`, `nsenter`), credential probing
+   (`gh auth`, `~/.git-credentials`, `credential.helper=` injection), and
+   git/gh operations that must use dedicated tools.
 
 2. **Shell-aware structural layer** — tokenizes with `shlex`, strips env var
    prefixes and path prefixes, matches binary+subcommand. Catches bypass

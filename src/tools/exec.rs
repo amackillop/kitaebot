@@ -357,6 +357,22 @@ const DENY_RULES: &[DenyRule] = &[
         pattern: r"\bcat\b.*\.config/gh/",
         guidance: "gh CLI config is not accessible",
     },
+    // Credential probing and guardrail bypass. The GitHub token reaches
+    // git only through the GIT_ASKPASS helper the git_* tools inject;
+    // reading it, or installing a credential helper that would, works
+    // around that boundary.
+    DenyRule {
+        pattern: r"credential\.helper=",
+        guidance: "credential helpers are managed — use the git_fetch and git_push tools",
+    },
+    DenyRule {
+        pattern: r"\bgh\b\s+auth\b",
+        guidance: "gh auth is not accessible",
+    },
+    DenyRule {
+        pattern: r"\.git-credentials\b",
+        guidance: "credentials are not accessible",
+    },
     // ── Nix ──────────────────────────────────────────────────────────
     // Remote flake references — catch-all across all subcommands.
     // The agent must add dependencies as flake inputs, not fetch ad-hoc.
@@ -653,6 +669,11 @@ const COMMAND_DENY_RULES: &[CommandDeny] = &[
         guidance: "use the git_commit tool",
     },
     CommandDeny {
+        binary: "gh",
+        subcommand: Some("auth"),
+        guidance: "gh auth is not accessible",
+    },
+    CommandDeny {
         binary: "nix",
         subcommand: Some("profile"),
         guidance: "use nix develop or nix-shell for ephemeral environments",
@@ -944,6 +965,23 @@ mod tests {
     fn test_deny_gh_config_read() {
         assert_blocked("cat .config/gh/hosts.yml");
         assert_blocked("cat ~/.config/gh/hosts.yml");
+    }
+
+    #[test]
+    fn test_deny_credential_probing() {
+        // Reading the token store.
+        assert_blocked("cat ~/.git-credentials");
+        assert_blocked("head -3 ~/.git-credentials");
+        // Reading the token via gh, including env-prefix and path bypasses.
+        assert_blocked("gh auth status");
+        assert_blocked("gh auth token");
+        assert_blocked("FOO=bar gh auth token");
+        assert_blocked("/usr/bin/gh auth token");
+        // Installing a helper that would leak it — the PR #623 bypass.
+        assert_blocked(
+            "git -c credential.helper='!f() { echo password=$(cat /tmp/gh-token); }; f' fetch origin master",
+        );
+        assert_blocked("git config credential.helper=store");
     }
 
     #[test]
