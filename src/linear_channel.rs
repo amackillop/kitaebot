@@ -9,6 +9,8 @@
 //! formatting, and poll-state persistence. The poll loop is the thin
 //! effectful shell on top.
 
+mod execution_checkout;
+
 use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::path::Path;
@@ -24,6 +26,7 @@ use crate::agent::envelope::ChannelSource;
 use crate::clients::linear::{Issue, LinearClient};
 use crate::error::LinearError;
 use crate::time::now_iso8601;
+use crate::tools::git::GitCli;
 
 // ---------------------------------------------------------------------------
 // Channel
@@ -37,14 +40,23 @@ pub struct LinearChannel {
     client: LinearClient,
     interval: Duration,
     trusted_users: Vec<String>,
+    /// Prepares a fresh base checkout for execution turns. `None` when
+    /// the GitHub token is unavailable (agent clones for itself).
+    git: Option<GitCli>,
 }
 
 impl LinearChannel {
-    pub fn new(client: LinearClient, interval: Duration, trusted_users: Vec<String>) -> Self {
+    pub fn new(
+        client: LinearClient,
+        interval: Duration,
+        trusted_users: Vec<String>,
+        git: Option<GitCli>,
+    ) -> Self {
         Self {
             client,
             interval,
             trusted_users,
+            git,
         }
     }
 
@@ -132,17 +144,45 @@ pub async fn poll_loop(channel: &LinearChannel, handle: &AgentHandle, state_path
     }
 }
 
+/// Guidance when no fresh checkout could be prepared for the agent.
+const CLONE_YOURSELF: &str = "Clone or update the repo yourself before branching.";
+
+/// Prepare a fresh base checkout for an execution turn and describe it
+/// for the agent, or `None` when the turn needs no checkout.
+async fn checkout_note(channel: &LinearChannel, d: &Dispatch) -> Option<String> {
+    if !d.needs_checkout {
+        return None;
+    }
+    let Some(git) = &channel.git else {
+        return Some(CLONE_YOURSELF.into());
+    };
+    match execution_checkout::prepare(git, &d.repo).await {
+        Ok(rel) => Some(format!(
+            "A fresh checkout at the default branch is ready at {rel} \
+             (use working_dir: \"{rel}\"). Branch from there; do not clone."
+        )),
+        Err(e) => {
+            warn!(identifier = %d.identifier, "execution checkout prep failed: {e}");
+            Some(CLONE_YOURSELF.into())
+        }
+    }
+}
+
 /// Run one agent turn and post the reply (or error) as a comment.
 async fn dispatch(channel: &LinearChannel, handle: &AgentHandle, d: Dispatch) {
     let cancel = CancellationToken::new();
     let source = ChannelSource::Linear {
         issue: d.identifier.clone(),
     };
+    let message = match checkout_note(channel, &d).await {
+        Some(note) => format!("{}\n\n{note}", d.message),
+        None => d.message.clone(),
+    };
     // Route per-repo (the issue's owner/repo label): the actor switches
     // to that session for the turn, so all of a repo's tickets — and its
     // GitHub PRs, which use the same key — share one session.
     let body = match handle
-        .send_message(source, d.message, Some(d.repo.clone()), None, cancel)
+        .send_message(source, message, Some(d.repo.clone()), None, cancel)
         .await
     {
         Ok(reply) => {
@@ -239,6 +279,10 @@ pub struct Dispatch {
     pub repo: String,
     /// Message for the agent.
     pub message: String,
+    /// Whether a fresh base checkout is prepared before the turn.
+    /// True for comment turns (which may execute), false for the
+    /// plan-only new-issue announcement.
+    pub needs_checkout: bool,
 }
 
 /// Decide what to dispatch for one poll tick.
@@ -271,6 +315,7 @@ pub fn decide_events(
                 identifier: issue.identifier.clone(),
                 repo: repo.to_string(),
                 message: format_new_issue(issue, repo),
+                needs_checkout: false,
             });
             announced.insert(issue.identifier.clone());
             continue;
@@ -301,6 +346,7 @@ pub fn decide_events(
                 identifier: issue.identifier.clone(),
                 repo: repo.to_string(),
                 message: format_comment(issue, repo, &user.name, &user.email, &comment.body),
+                needs_checkout: true,
             });
         }
     }
@@ -381,13 +427,12 @@ fn format_comment(issue: &Issue, repo: &str, author: &str, email: &str, body: &s
         s,
         "\nIf this approves your plan, execute it end-to-end: move the ticket \
          to an in-progress state with the linear_set_state tool if the \
-         workflow has one, then clone or update the repo, create a branch \
-         named {branch} (the ticket id in the branch name links the PR to \
-         the issue), implement, test, commit, push, and open a PR. On \
-         success reply with one line at most; the PR links itself to the \
-         ticket. Be detailed only if something failed or needs a decision. \
-         If the comment is feedback instead, revise your plan and reply \
-         with the updated plan."
+         workflow has one, then create a branch named {branch} (the ticket \
+         id in the branch name links the PR to the issue), implement, test, \
+         commit, push, and open a PR. On success reply with one line at \
+         most; the PR links itself to the ticket. Be detailed only if \
+         something failed or needs a decision. If the comment is feedback \
+         instead, revise your plan and reply with the updated plan."
     );
     s
 }
@@ -455,6 +500,7 @@ mod tests {
         assert_eq!(dispatches[0].issue_id, "id-MDK-1");
         assert_eq!(dispatches[0].repo, "owner/repo");
         assert!(dispatches[0].message.contains("assigned to you"));
+        assert!(!dispatches[0].needs_checkout);
         assert!(next.announced_issues.contains("MDK-1"));
         assert_eq!(next.last_poll, NOW);
 
@@ -521,6 +567,7 @@ mod tests {
         let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), NOW);
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0].repo, "owner/repo");
+        assert!(dispatches[0].needs_checkout);
         let msg = &dispatches[0].message;
         assert!(msg.contains("approved, go ahead"));
         assert!(msg.contains("kitaebot_mdk-1_<short-summary>"));
@@ -671,7 +718,7 @@ mod tests {
     }
 
     fn channel(client: LinearClient) -> LinearChannel {
-        LinearChannel::new(client, Duration::from_secs(120), trusted())
+        LinearChannel::new(client, Duration::from_secs(120), trusted(), None)
     }
 
     #[test]
@@ -734,6 +781,7 @@ mod tests {
                 identifier: "MDK-1".into(),
                 repo: "owner/repo".into(),
                 message: "new issue".into(),
+                needs_checkout: false,
             },
         )
         .await;
@@ -741,5 +789,30 @@ mod tests {
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0], "a plan");
+    }
+
+    #[tokio::test]
+    async fn checkout_note_reflects_need_and_missing_git() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let ch = channel(comment_client(vec![], sent));
+
+        let plan = Dispatch {
+            issue_id: "i1".into(),
+            identifier: "MDK-1".into(),
+            repo: "owner/repo".into(),
+            message: "plan".into(),
+            needs_checkout: false,
+        };
+        assert!(checkout_note(&ch, &plan).await.is_none());
+
+        let exec = Dispatch {
+            needs_checkout: true,
+            ..plan
+        };
+        // No git wired: the agent is told to clone for itself.
+        assert_eq!(
+            checkout_note(&ch, &exec).await.as_deref(),
+            Some(CLONE_YOURSELF)
+        );
     }
 }

@@ -94,6 +94,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             client,
             Duration::from_secs(config.linear.poll_interval_secs),
             config.linear.trusted_users.clone(),
+            git_cli.clone(),
         ))
     } else {
         None
@@ -213,6 +214,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             linear_client,
             Duration::from_secs(config.linear.poll_interval_secs),
             config.linear.trusted_users.clone(),
+            git_cli.clone(),
         ))
     } else {
         None
