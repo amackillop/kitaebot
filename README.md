@@ -55,6 +55,7 @@ Typed tools replace a generic shell. The LLM declares intent via parameters inst
 | `web_search` | LLM-powered web search (Perplexity) |
 | `git_clone` | Clone a repository (auto-warms direnv cache) |
 | `git_commit` | Commit staged changes |
+| `git_fetch` | Fetch refs from a remote |
 | `git_push` | Push commits to a remote |
 | `github_pr_create` | Create a pull request |
 | `github_pr_list` | List pull requests |

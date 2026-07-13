@@ -303,19 +303,20 @@ dependency.
 
 ### Git Tools
 
-Three tools wrapping the `git` binary. Gated behind `git.enabled` in config.
+Four tools wrapping the `git` binary. Gated behind `git.enabled` in config.
 `git.trusted_repos` lists repos (`owner/repo` or `owner/*`, case-insensitive)
 whose `.envrc` may be trusted on clone — see [Direnv Cache](#direnv-cache).
 
 `GitCli<R>` holds the GitHub PAT, workspace root, co-authors, and an optional
 direnv cache. The token is injected via a temporary `GIT_ASKPASS` helper script
 (0o700 permissions, deleted on drop) for authenticated operations. Commits do
-not need authentication; clone and push do.
+not need authentication; clone, fetch, and push do.
 
 | Tool | Description |
 |------|-------------|
 | `git_clone` | Clone a repository into the workspace. For repos in `git.trusted_repos`, runs `direnv allow` synchronously then warms the direnv cache in the background. |
 | `git_commit` | Commit staged changes with co-author trailers. |
+| `git_fetch` | Fetch refs from a remote. Fetch a base branch before rebasing onto it. |
 | `git_push` | Push commits to a remote. |
 
 All tools take `repo_dir` (relative to workspace root) and validate it via

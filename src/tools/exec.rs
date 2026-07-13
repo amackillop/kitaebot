@@ -339,6 +339,10 @@ const DENY_RULES: &[DenyRule] = &[
         guidance: "use the git_push tool",
     },
     DenyRule {
+        pattern: r"\bgit\b\s+fetch\b",
+        guidance: "use the git_fetch tool",
+    },
+    DenyRule {
         pattern: r"\bgit\b\s+commit\b",
         guidance: "use the git_commit tool",
     },
@@ -637,6 +641,11 @@ const COMMAND_DENY_RULES: &[CommandDeny] = &[
         binary: "git",
         subcommand: Some("push"),
         guidance: "use the git_push tool",
+    },
+    CommandDeny {
+        binary: "git",
+        subcommand: Some("fetch"),
+        guidance: "use the git_fetch tool",
     },
     CommandDeny {
         binary: "git",
@@ -946,6 +955,10 @@ mod tests {
         assert_eq!(
             blocked_reason("git push origin main"),
             Some("use the git_push tool"),
+        );
+        assert_eq!(
+            blocked_reason("git fetch origin main"),
+            Some("use the git_fetch tool"),
         );
         assert_eq!(
             blocked_reason("git commit -m 'fix'"),
