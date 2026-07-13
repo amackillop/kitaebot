@@ -43,6 +43,16 @@ const COMMENT_CREATE_MUTATION: &str = "\
 mutation($issueId: String!, $body: String!) { \
 commentCreate(input: { issueId: $issueId, body: $body }) { success } }";
 
+/// Resolve an issue (by UUID or human identifier) to its internal id
+/// and its team's workflow states.
+const ISSUE_STATES_QUERY: &str = "\
+query($id: String!) { issue(id: $id) { \
+id team { states(first: 50) { nodes { id name } } } } }";
+
+const ISSUE_UPDATE_STATE_MUTATION: &str = "\
+mutation($id: String!, $stateId: String!) { \
+issueUpdate(id: $id, input: { stateId: $stateId }) { success } }";
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -158,6 +168,55 @@ impl LinearClient {
             ))
         }
     }
+
+    /// Move an issue to the workflow state named `state_name`
+    /// (case-insensitive).
+    ///
+    /// A workflow that has no such state is not an error: the outcome
+    /// reports the available state names so the caller can adapt. Only
+    /// transport and API-level failures surface as [`LinearError`].
+    pub async fn set_state(
+        &self,
+        issue: &str,
+        state_name: &str,
+    ) -> Result<SetStateOutcome, LinearError> {
+        let variables = serde_json::json!({ "id": issue });
+        let data: IssueStatesData = self.request(ISSUE_STATES_QUERY, Some(variables)).await?;
+        let states = data.issue.team.states.nodes;
+
+        let matched = states
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(state_name))
+            .map(|s| (s.id.clone(), s.name.clone()));
+
+        let Some((state_id, name)) = matched else {
+            return Ok(SetStateOutcome::NoSuchState {
+                available: states.into_iter().map(|s| s.name).collect(),
+            });
+        };
+
+        let variables = serde_json::json!({ "id": data.issue.id, "stateId": state_id });
+        let update: IssueUpdateData = self
+            .request(ISSUE_UPDATE_STATE_MUTATION, Some(variables))
+            .await?;
+        if update.issue_update.success {
+            Ok(SetStateOutcome::Moved { state: name })
+        } else {
+            Err(LinearError::Api(
+                "issueUpdate returned success=false".into(),
+            ))
+        }
+    }
+}
+
+/// Result of a [`LinearClient::set_state`] call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetStateOutcome {
+    /// The issue was moved; carries the canonical state name.
+    Moved { state: String },
+    /// The workflow has no state by that name; carries the available
+    /// names so the caller can pick a valid one or leave the state.
+    NoSuchState { available: Vec<String> },
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +295,39 @@ struct CommentCreatePayload {
     success: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct IssueStatesData {
+    issue: IssueStates,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueStates {
+    id: String,
+    team: TeamStates,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamStates {
+    states: Nodes<WorkflowState>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct WorkflowState {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueUpdateData {
+    issue_update: IssueUpdatePayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueUpdatePayload {
+    success: bool,
+}
+
 /// Generic GraphQL connection: `{ nodes: [...] }`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Nodes<T> {
@@ -292,6 +384,8 @@ pub struct CommentUser {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     fn raw(status: u16, body: &str) -> RawResponse {
@@ -416,5 +510,84 @@ mod tests {
             LinearClient::from_fn(|_body| async { Err(LinearError::Network("boom".into())) });
         let err = client.viewer().await.unwrap_err();
         assert!(matches!(err, LinearError::Network(_)));
+    }
+
+    const STATES_JSON: &str = r#"{"data":{"issue":{"id":"uuid-1","team":{"states":{"nodes":[
+        {"id":"s-todo","name":"Todo"},
+        {"id":"s-prog","name":"In Progress"}
+    ]}}}}}"#;
+
+    /// Fake client routing on the GraphQL op: the states query returns
+    /// `STATES_JSON`; `issueUpdate` returns `update`; every request body
+    /// is captured for assertions.
+    fn state_client(
+        update: &'static str,
+        sent: Arc<Mutex<Vec<serde_json::Value>>>,
+    ) -> LinearClient {
+        LinearClient::from_fn(move |body| {
+            let sent = Arc::clone(&sent);
+            async move {
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let is_update = req["query"].as_str().unwrap().contains("issueUpdate");
+                sent.lock().unwrap().push(req);
+                let payload = if is_update { update } else { STATES_JSON };
+                Ok(RawResponse {
+                    status: 200,
+                    body: payload.as_bytes().to_vec(),
+                })
+            }
+        })
+    }
+
+    const UPDATE_OK: &str = r#"{"data":{"issueUpdate":{"success":true}}}"#;
+
+    #[tokio::test]
+    async fn set_state_moves_when_state_matches_case_insensitive() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let client = state_client(UPDATE_OK, sent.clone());
+
+        let outcome = client.set_state("MDK-1", "in progress").await.unwrap();
+
+        assert_eq!(
+            outcome,
+            SetStateOutcome::Moved {
+                state: "In Progress".into()
+            }
+        );
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        // The update targets the resolved UUID and the matched state id.
+        assert_eq!(sent[1]["variables"]["id"], "uuid-1");
+        assert_eq!(sent[1]["variables"]["stateId"], "s-prog");
+    }
+
+    #[tokio::test]
+    async fn set_state_reports_available_without_updating() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let client = state_client(UPDATE_OK, sent.clone());
+
+        let outcome = client.set_state("MDK-1", "Plan Review").await.unwrap();
+
+        assert_eq!(
+            outcome,
+            SetStateOutcome::NoSuchState {
+                available: vec!["Todo".into(), "In Progress".into()]
+            }
+        );
+        // Only the lookup ran — no issueUpdate.
+        assert_eq!(sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn set_state_update_failure_is_api_error() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let client = state_client(
+            r#"{"data":{"issueUpdate":{"success":false}}}"#,
+            sent.clone(),
+        );
+
+        let err = client.set_state("MDK-1", "Todo").await.unwrap_err();
+
+        assert!(matches!(err, LinearError::Api(_)));
     }
 }

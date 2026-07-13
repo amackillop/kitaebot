@@ -42,7 +42,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::telegram::TelegramClient;
     use crate::notify::NotifyTool;
     use crate::secrets::load_secret;
-    use crate::tools::{DirenvCache, git, github, network};
+    use crate::tools::{DirenvCache, git, github, linear, network};
 
     let direnv_cache = DirenvCache::new();
     let mut tools = Tools::local(workspace, config, direnv_cache.clone());
@@ -88,8 +88,10 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             error!("Failed to load Linear credentials: {e}");
             std::process::exit(1);
         });
+        let client = LinearClient::new(key);
+        tools.extend(linear::build(client.clone()));
         Some(LinearChannel::new(
-            LinearClient::new(key),
+            client,
             Duration::from_secs(config.linear.poll_interval_secs),
             config.linear.trusted_users.clone(),
         ))
@@ -151,7 +153,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::telegram::TelegramClient;
     use crate::notify::NotifyTool;
     use crate::secrets::{Secret, load_secret};
-    use crate::tools::{DirenvCache, git, github};
+    use crate::tools::{DirenvCache, git, github, linear};
 
     let client = CompletionsClient::new(
         config.provider.api.endpoint().to_string(),
@@ -205,8 +207,10 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     };
 
     let linear = if config.linear.enabled {
+        let linear_client = LinearClient::new(Secret::placeholder());
+        tools.extend(linear::build(linear_client.clone()));
         Some(LinearChannel::new(
-            LinearClient::new(Secret::placeholder()),
+            linear_client,
             Duration::from_secs(config.linear.poll_interval_secs),
             config.linear.trusted_users.clone(),
         ))
