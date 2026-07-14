@@ -22,8 +22,9 @@ use crate::engine::ephemeral::EphemeralSession;
 use crate::error::ToolError;
 use crate::provider::Provider;
 use crate::tools::{Tool, ToolCtx, Tools};
+use crate::usage::{self, TurnRecord, UsageLedger};
 
-use super::run_turn;
+use super::run_turn_metered;
 
 /// Allowlist for the `explore` type: read-only research.
 ///
@@ -142,9 +143,11 @@ pub(crate) struct TaskTool<P: Provider> {
     explore: AgentType,
     worker: AgentType,
     max_iterations: usize,
+    usage_ledger: Option<Arc<UsageLedger>>,
 }
 
 impl<P: Provider> TaskTool<P> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         explore_provider: Arc<P>,
         worker_provider: Arc<P>,
@@ -152,6 +155,7 @@ impl<P: Provider> TaskTool<P> {
         explore: AgentType,
         worker: AgentType,
         max_iterations: usize,
+        usage_ledger: Option<Arc<UsageLedger>>,
     ) -> Self {
         Self {
             explore_provider,
@@ -160,6 +164,7 @@ impl<P: Provider> TaskTool<P> {
             explore,
             worker,
             max_iterations,
+            usage_ledger,
         }
     }
 }
@@ -218,7 +223,7 @@ impl<P: Provider> Tool for TaskTool<P> {
                 activity: ctx.activity.as_ref().map(|parent| forward(parent, label)),
                 cancel: ctx.cancel.clone(),
             };
-            run_turn(
+            let (output, usage) = run_turn_metered(
                 &mut engine,
                 &self.summarize,
                 &agent.system_prompt,
@@ -230,8 +235,18 @@ impl<P: Provider> Tool for TaskTool<P> {
             )
             .instrument(tracing::info_span!("subagent", agent = label))
             .await
-            .map(super::TurnOutput::into_text)
-            .map_err(|e| ToolError::ExecutionFailed(format!("sub-agent failed: {e}")))
+            .map_err(|e| ToolError::ExecutionFailed(format!("sub-agent failed: {e}")))?;
+            // No conversation of its own: the row is tagged by agent type.
+            usage::record_turn(
+                self.usage_ledger.as_deref(),
+                &TurnRecord {
+                    session: "subagent",
+                    source: label,
+                    model: provider.model(),
+                    usage,
+                },
+            );
+            Ok(output.into_text())
         })
     }
 }
@@ -306,6 +321,7 @@ mod tests {
             agent_type(explore),
             agent_type(worker),
             max_iterations,
+            None,
         )
     }
 
@@ -391,6 +407,7 @@ mod tests {
             agent_type(Tools::default()),
             agent_type(mock_tools()),
             5,
+            None,
         );
         let result = tool
             .execute(
@@ -417,6 +434,7 @@ mod tests {
             agent_type(Tools::default()),
             agent_type(Tools::default()),
             5,
+            None,
         );
 
         let explored = tool
@@ -495,6 +513,7 @@ mod tests {
             agent_type(Tools::default()),
             agent_type(Tools::default()),
             5,
+            None,
         );
         let ctx = ToolCtx::default();
         ctx.cancel.cancel();

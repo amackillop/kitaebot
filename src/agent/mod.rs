@@ -83,7 +83,7 @@ fn policy_halt_msg(reasons: &[String]) -> String {
 /// Shared by all root channels (telegram, socket, heartbeat). Prepends
 /// the memory index (spec 21) to the cached system prompt, read fresh so
 /// runtime writes take effect on the next turn. Sub-agents call
-/// [`run_turn`] directly and are excluded by design.
+/// [`run_turn_metered`] directly and are excluded by design.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_message_metered(
     engine: &mut impl ContextEngine,
@@ -156,21 +156,9 @@ impl TurnUsage {
     }
 }
 
-/// Run a single turn of the agent loop.
-///
-/// Pushes the user message onto the session, sends the history (with system
-/// prompt prepended) to the provider, and appends assistant/tool messages.
-/// The system prompt is read once at workspace init; prompt files are
-/// Nix-provisioned, so changes require a restart.
-///
-/// Emits one INFO summary event per turn: outcome, iterations, tool
-/// calls, last observed prompt tokens, and duration.
-///
-/// # Errors
-/// Returns error if max iterations reached or provider fails
-///
-/// Exposed crate-internally so sub-agents (spec 19) run the exact
-/// same loop against an ephemeral child context.
+/// Test-only wrapper over [`run_turn_metered`] discarding the billed
+/// usage, so the turn-loop tests stay off the tuple return.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_turn(
     engine: &mut impl ContextEngine,
@@ -196,8 +184,23 @@ pub(crate) async fn run_turn(
     .map(|(output, _usage)| output)
 }
 
-/// Like [`run_turn`] but also returns the turn's billed [`TurnUsage`],
-/// for callers that record cost to the ledger.
+/// Run a single turn of the agent loop, returning its outcome and the
+/// billed [`TurnUsage`] so callers can record cost to the usage ledger.
+///
+/// Pushes the user message onto the session, sends the history (with system
+/// prompt prepended) to the provider, and appends assistant/tool messages.
+/// The system prompt is assembled once at workspace init: the persona is
+/// compiled in (`include_str!`), only the operator `USER.md` is read from
+/// disk, so prompt changes need a restart (a rebuild for the persona).
+///
+/// Emits one INFO summary event per turn: outcome, iterations, tool
+/// calls, last observed prompt tokens, and duration.
+///
+/// Exposed crate-internally so sub-agents (spec 19) run the exact
+/// same loop against an ephemeral child context.
+///
+/// # Errors
+/// Returns error if max iterations reached or provider fails
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_turn_metered(
     engine: &mut impl ContextEngine,

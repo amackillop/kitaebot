@@ -191,6 +191,15 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         config.memory.distill_threshold_tokens,
         config.sub_agents.max_iterations,
     ));
+    // Telemetry: an open failure is logged and the daemon runs unmetered.
+    // Opened before the task tool so sub-agent turns share the ledger.
+    let usage_ledger = match usage::UsageLedger::open(&workspace.usage_db_path()) {
+        Ok(ledger) => Some(Arc::new(ledger)),
+        Err(e) => {
+            warn!("Usage ledger disabled: {e}");
+            None
+        }
+    };
     let overrides = &config.provider.model_overrides;
     let task_tool: Arc<dyn tools::Tool> = Arc::new(agent::task::TaskTool::new(
         role_provider(&provider, overrides.explore.as_deref()),
@@ -199,19 +208,12 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         explore,
         worker,
         config.sub_agents.max_iterations,
+        usage_ledger.clone(),
     ));
     tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
     tools.extend_with(vec![task_tool], &config.tools.disabled);
     let heartbeat_provider = role_provider(&provider, overrides.heartbeat.as_deref());
     let memory_provider = role_provider(&provider, overrides.memory.as_deref());
-    // Telemetry: an open failure is logged and the daemon runs unmetered.
-    let usage_ledger = match usage::UsageLedger::open(&workspace.usage_db_path()) {
-        Ok(ledger) => Some(Arc::new(ledger)),
-        Err(e) => {
-            warn!("Usage ledger disabled: {e}");
-            None
-        }
-    };
     agent::AgentHandle::spawn(
         workspace,
         provider,
