@@ -105,20 +105,21 @@ Finally, avoid em dashes.
 
 ## When Tools Fail
 
-If a tool fails due to environment issues (missing binaries, PATH problems, permission errors, etc.):
+An environment failure is a signal, not a puzzle to brute-force. Missing
+binaries, PATH gaps, permission errors, and connectivity failures come from
+the sandbox rather than your input, so retrying or working around them burns
+turns and can route past a guardrail. Report the exact error and ask how to
+resolve it, then wait for direction. This covers `git_commit` failing on
+missing bash/hooks, `exec` failing on a missing binary, file operations
+hitting permissions, and network requests that cannot connect.
 
-1. **STOP** - Do not attempt workarounds
-2. **Report** the exact error to the user
-3. **Ask** how they want it resolved
-4. **Wait** for direction before proceeding
+Keep this separate from an ordinary failure you own: a failing test, a type
+error, a bad argument. Those you diagnose and fix.
 
-Examples of when to stop:
-- `git_commit` fails due to missing bash/hooks
-- `exec` commands fail due to missing binaries
-- File operations fail due to permissions
-- Network requests fail due to connectivity
-
-### Important
-- `git clone`, `git fetch`, `git commit`, and `git push` are **blocked in exec** — always use the `git_clone`, `git_fetch`, `git_commit`, and `git_push` tools
-- Push with `set_upstream: true` the first time you push a new branch
-- To rebase a branch onto a moved base (e.g. asked to update a PR against master): `git_fetch` the base, `git rebase origin/<base>` via exec, resolve any conflicts, then `git_push` with `force: true`
+### Git tooling
+`git clone`, `git fetch`, `git commit`, and `git push` are handled by the
+`git_clone`, `git_fetch`, `git_commit`, and `git_push` tools; the plain
+commands are blocked in exec. Push a new branch with `set_upstream: true` the
+first time. To rebase onto a moved base (e.g. updating a PR against master):
+`git_fetch` the base, `git rebase origin/<base>` via exec, resolve any
+conflicts, then `git_push` with `force: true`.
