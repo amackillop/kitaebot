@@ -33,6 +33,8 @@ pub enum SlashCommand {
     Project { name: Option<String> },
     /// Show session tool usage statistics.
     Stats,
+    /// Show recorded turn cost, broken down by build and model.
+    Usage,
 }
 
 /// The input starts with `/` but doesn't match any known command.
@@ -57,6 +59,7 @@ impl FromStr for SlashCommand {
             ("/heartbeat", "") => Ok(Self::Heartbeat),
             ("/new", "") => Ok(Self::New),
             ("/stats", "") => Ok(Self::Stats),
+            ("/usage", "") => Ok(Self::Usage),
             ("/project", "") => Ok(Self::Project { name: None }),
             ("/project", name) => Ok(Self::Project {
                 name: Some(name.to_string()),
@@ -149,6 +152,13 @@ pub async fn execute(
             .await
             .map(Reply::pre)
             .map_err(|e| e.to_string()),
+        SlashCommand::Usage => match usage_ledger {
+            None => Ok(Reply::text("Usage tracking is disabled.".into())),
+            Some(ledger) => ledger
+                .rows()
+                .map(|rows| Reply::pre(usage::report(&rows)))
+                .map_err(|e| format!("Usage query failed: {e}")),
+        },
     }
 }
 
@@ -299,6 +309,7 @@ mod tests {
         assert_eq!("/heartbeat".parse(), Ok(SlashCommand::Heartbeat));
         assert_eq!("/new".parse(), Ok(SlashCommand::New));
         assert_eq!("/stats".parse(), Ok(SlashCommand::Stats));
+        assert_eq!("/usage".parse(), Ok(SlashCommand::Usage));
     }
 
     #[test]

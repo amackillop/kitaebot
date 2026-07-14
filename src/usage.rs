@@ -8,6 +8,9 @@
 //! This is telemetry, not core state: a write failure is logged by the
 //! caller and never fails the turn.
 
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -60,6 +63,26 @@ impl UsageLedger {
         })
     }
 
+    /// Read every recorded turn, projected to the columns the report
+    /// aggregates. The ledger is prunable, so an unbounded read is fine.
+    pub fn rows(&self) -> rusqlite::Result<Vec<TurnRow>> {
+        let conn = self.conn.lock().expect("usage ledger mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT git_sha, model, prompt_tokens, completion_tokens, cost FROM turns")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(TurnRow {
+                    git_sha: r.get(0)?,
+                    model: r.get(1)?,
+                    prompt_tokens: r.get::<_, i64>(2)?.cast_unsigned(),
+                    completion_tokens: r.get::<_, i64>(3)?.cast_unsigned(),
+                    cost: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Append one turn.
     pub fn record(&self, turn: &TurnRecord) -> rusqlite::Result<()> {
         let conn = self.conn.lock().expect("usage ledger mutex poisoned");
@@ -90,6 +113,165 @@ pub fn record_turn(ledger: Option<&UsageLedger>, record: &TurnRecord) {
         && let Err(e) = ledger.record(record)
     {
         warn!("Failed to record turn usage: {e}");
+    }
+}
+
+/// One ledger row projected to the columns [`report`] aggregates.
+pub struct TurnRow {
+    pub git_sha: Option<String>,
+    pub model: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cost: Option<f64>,
+}
+
+/// Running totals over a group of turns.
+#[derive(Default, Clone)]
+struct Agg {
+    turns: u64,
+    tokens: u64,
+    cost: f64,
+    /// At least one turn in the group reported a cost. When false the
+    /// cost column shows "-": the provider never billed, so 0 would lie.
+    metered: bool,
+}
+
+impl Agg {
+    fn add(&mut self, row: &TurnRow) {
+        self.turns += 1;
+        self.tokens += row.prompt_tokens + row.completion_tokens;
+        if let Some(cost) = row.cost {
+            self.cost += cost;
+            self.metered = true;
+        }
+    }
+}
+
+/// Group turns by `key`, sorted by cost then tokens, both descending.
+fn group_by(rows: &[TurnRow], key: impl Fn(&TurnRow) -> String) -> Vec<(String, Agg)> {
+    let mut groups: BTreeMap<String, Agg> = BTreeMap::new();
+    for row in rows {
+        groups.entry(key(row)).or_default().add(row);
+    }
+    let mut sorted: Vec<_> = groups.into_iter().collect();
+    sorted.sort_by(|a, b| {
+        b.1.cost
+            .partial_cmp(&a.1.cost)
+            .unwrap_or(Ordering::Equal)
+            .then(b.1.tokens.cmp(&a.1.tokens))
+    });
+    sorted
+}
+
+/// Render the `/usage` report: totals, then a per-build and per-model
+/// breakdown. The per-build view is the point — it attributes a cost
+/// shift to the change that shipped it.
+pub fn report(rows: &[TurnRow]) -> String {
+    if rows.is_empty() {
+        return "No usage recorded yet.".to_string();
+    }
+
+    let mut total = Agg::default();
+    for row in rows {
+        total.add(row);
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Usage ({} turns, {})\n",
+        total.turns,
+        fmt_cost(total.cost, total.metered),
+    );
+
+    let build = group_by(rows, |r| {
+        r.git_sha
+            .as_deref()
+            .map_or("unknown".to_string(), short_sha)
+    });
+    write_table(&mut out, "By Build", "Build", &build, true);
+
+    let model = group_by(rows, |r| r.model.clone());
+    write_table(&mut out, "By Model", "Model", &model, false);
+
+    out
+}
+
+/// A per-group table. `per_turn` adds a $/turn column (useful per build,
+/// noise per model).
+fn write_table(
+    out: &mut String,
+    title: &str,
+    label: &str,
+    groups: &[(String, Agg)],
+    per_turn: bool,
+) {
+    let _ = writeln!(out, "{title}\n");
+    if per_turn {
+        let _ = writeln!(
+            out,
+            "{label:<24} {:>6} {:>10} {:>12} {:>10}",
+            "Turns", "Tokens", "Cost", "$/turn"
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "{label:<24} {:>6} {:>10} {:>12}",
+            "Turns", "Tokens", "Cost"
+        );
+    }
+    for (name, agg) in groups {
+        let cost = fmt_cost(agg.cost, agg.metered);
+        if per_turn {
+            let per = if agg.metered && agg.turns > 0 {
+                #[allow(clippy::cast_precision_loss)]
+                let turns = agg.turns as f64;
+                format!("${:.4}", agg.cost / turns)
+            } else {
+                "-".to_string()
+            };
+            let _ = writeln!(
+                out,
+                "{name:<24} {:>6} {:>10} {cost:>12} {per:>10}",
+                agg.turns,
+                fmt_count(agg.tokens),
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "{name:<24} {:>6} {:>10} {cost:>12}",
+                agg.turns,
+                fmt_count(agg.tokens),
+            );
+        }
+    }
+    out.push('\n');
+}
+
+/// First 7 hex characters, matching git's short-SHA convention.
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+/// `$0.0000`, or `-` when the group was never billed a cost.
+fn fmt_cost(cost: f64, metered: bool) -> String {
+    if metered {
+        format!("${cost:.4}")
+    } else {
+        "-".to_string()
+    }
+}
+
+/// Compact token count: `1.2M`, `500.0K`, or the raw number below 1K.
+fn fmt_count(n: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let f = n as f64;
+    if n >= 1_000_000 {
+        format!("{:.1}M", f / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", f / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -197,5 +379,84 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 3);
+    }
+
+    fn row(sha: Option<&str>, model: &str, tokens: u64, cost: Option<f64>) -> TurnRow {
+        TurnRow {
+            git_sha: sha.map(String::from),
+            model: model.to_string(),
+            prompt_tokens: tokens,
+            completion_tokens: 0,
+            cost,
+        }
+    }
+
+    #[test]
+    fn report_empty_is_a_notice() {
+        assert_eq!(report(&[]), "No usage recorded yet.");
+    }
+
+    #[test]
+    fn report_totals_and_groups() {
+        let rows = vec![
+            row(Some("abcdef1234"), "glm", 1000, Some(0.01)),
+            row(Some("abcdef1234"), "kimi", 500, Some(0.02)),
+            row(Some("9999999999"), "glm", 2000, Some(0.05)),
+        ];
+        let out = report(&rows);
+        // Header total: 3 turns, summed cost.
+        assert!(out.contains("Usage (3 turns, $0.0800)"));
+        // Short SHA, not the full hash.
+        assert!(out.contains("abcdef1"));
+        assert!(!out.contains("abcdef1234"));
+        // Both axes present.
+        assert!(out.contains("By Build"));
+        assert!(out.contains("By Model"));
+        // Per-model aggregation folds the two glm rows.
+        assert!(out.contains("glm"));
+        assert!(out.contains("kimi"));
+    }
+
+    #[test]
+    fn report_unmetered_shows_dash() {
+        let out = report(&[row(None, "local", 10, None)]);
+        assert!(out.contains("Usage (1 turns, -)"));
+        assert!(out.contains("unknown"));
+    }
+
+    #[test]
+    fn rows_round_trip_through_the_ledger() {
+        let (_dir, ledger) = open_temp();
+        ledger
+            .record(&TurnRecord {
+                session: "s",
+                source: "socket",
+                model: "m",
+                usage: TurnUsage {
+                    calls: 1,
+                    prompt_tokens: 42,
+                    completion_tokens: 8,
+                    cost: Some(0.5),
+                },
+            })
+            .unwrap();
+        let rows = ledger.rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].prompt_tokens, 42);
+        assert_eq!(rows[0].completion_tokens, 8);
+        assert_eq!(rows[0].cost, Some(0.5));
+    }
+
+    #[test]
+    fn fmt_count_scales() {
+        assert_eq!(fmt_count(999), "999");
+        assert_eq!(fmt_count(1_500), "1.5K");
+        assert_eq!(fmt_count(2_400_000), "2.4M");
+    }
+
+    #[test]
+    fn short_sha_takes_seven() {
+        assert_eq!(short_sha("0123456789abcdef"), "0123456");
+        assert_eq!(short_sha("abc"), "abc");
     }
 }
