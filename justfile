@@ -64,7 +64,11 @@ fmt-nix:
 fix:
     cargo clippy --fix --allow-dirty --allow-staged
 
-SSH_OPTS := "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+# -F /dev/null: ignore ~/.ssh/config and the system config, both of which
+# are nix-store symlinks that map to nobody in the sandbox user namespace
+# and make ssh abort ("Bad owner or permissions"). Everything the VM
+# connection needs is passed explicitly below.
+SSH_OPTS := "-F /dev/null -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
 # Build the VM (uses Determinate Nix binary cache)
 #
