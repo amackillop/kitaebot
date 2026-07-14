@@ -27,6 +27,10 @@ pub(super) async fn prepare(git: &GitCli, nwo: &str) -> Result<String, ToolError
     Ok(rel)
 }
 
+/// In-repo caches the per-turn clean must not touch: re-provisioning
+/// them costs far more than tolerating a stale entry.
+const KEPT_CACHES: &[&str] = &[".direnv", "node_modules", "target", ".venv"];
+
 /// URL-parametrized body of [`prepare`], so tests can use `file://`.
 async fn prepare_at(git: &GitCli, url: &str, rel: &str) -> Result<(), ToolError> {
     let dir = checkout::ensure_cloned(git, url, rel).await?;
@@ -38,9 +42,12 @@ async fn prepare_at(git: &GitCli, url: &str, rel: &str) -> Result<(), ToolError>
         false,
     )
     .await?;
-    // checkout --force only discards tracked changes; drop untracked and
-    // ignored leftovers too so the base is truly clean.
-    checkout::run(git, &["clean", "-fdx"], &dir, false).await?;
+    // Sweep untracked and ignored leftovers, but keep the caches.
+    let mut clean = vec!["clean", "-fdx"];
+    for kept in KEPT_CACHES {
+        clean.extend(["-e", kept]);
+    }
+    checkout::run(git, &clean, &dir, false).await?;
     Ok(())
 }
 
@@ -141,5 +148,45 @@ mod tests {
             "base v2\n"
         );
         assert!(!checkout.join("leftover.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn prepare_preserves_devshell_caches() {
+        let workspace = tempfile::tempdir().unwrap();
+        let origin = tempfile::tempdir().unwrap();
+        fixture_origin(origin.path());
+        let git = GitCli::new(Secret::test("fake"), workspace.path(), DirenvCache::new());
+        let url = format!("file://{}", origin.path().display());
+
+        prepare_at(&git, &url, "projects/o/r").await.unwrap();
+
+        // An earlier turn provisioned the devShell caches and left junk.
+        let checkout = workspace.path().join("projects/o/r");
+        std::fs::create_dir(checkout.join("node_modules")).unwrap();
+        std::fs::write(checkout.join("node_modules/dep.js"), "cached\n").unwrap();
+        std::fs::create_dir(checkout.join(".direnv")).unwrap();
+        std::fs::write(checkout.join(".direnv/env"), "cached\n").unwrap();
+        std::fs::create_dir(checkout.join("target")).unwrap();
+        std::fs::write(checkout.join("target/lib.rlib"), "cached\n").unwrap();
+        std::fs::write(checkout.join("stale.log"), "junk\n").unwrap();
+
+        prepare_at(&git, &url, "projects/o/r").await.unwrap();
+
+        assert!(
+            checkout.join("node_modules/dep.js").exists(),
+            "node_modules must survive the clean"
+        );
+        assert!(
+            checkout.join(".direnv/env").exists(),
+            ".direnv must survive the clean"
+        );
+        assert!(
+            checkout.join("target/lib.rlib").exists(),
+            "target must survive the clean"
+        );
+        assert!(
+            !checkout.join("stale.log").exists(),
+            "unrelated leftovers are still swept"
+        );
     }
 }
