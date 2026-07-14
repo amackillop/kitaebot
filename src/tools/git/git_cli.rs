@@ -7,19 +7,21 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::error::ToolError;
 use crate::secrets::Secret;
-use crate::tools::DirenvCache;
 use crate::tools::cli_runner::{self, CmdOutput, SubprocessCall};
+use crate::tools::{DirenvCache, direnv};
 
 /// Shared context for git tools.
 #[derive(Clone)]
 pub struct GitCli {
     pub(super) token: Secret,
     pub(super) workspace_root: PathBuf,
-    direnv_cache: DirenvCache,
+    pub(super) direnv_cache: DirenvCache,
+    /// Repos (`owner/repo` or `owner/*`) whose `.envrc` may be trusted.
+    pub(super) trusted_repos: Vec<String>,
 }
 
 impl GitCli {
@@ -27,11 +29,32 @@ impl GitCli {
         token: Secret,
         workspace_root: impl Into<PathBuf>,
         direnv_cache: DirenvCache,
+        trusted_repos: Vec<String>,
     ) -> Self {
         Self {
             token,
             workspace_root: workspace_root.into(),
             direnv_cache,
+            trusted_repos,
+        }
+    }
+
+    /// Trust and warm the devShell of a prepared checkout.
+    ///
+    /// No-op without an `.envrc` or when origin is not in
+    /// `trusted_repos`. Best-effort: a failed warm degrades to
+    /// no-devshell, which exec already tolerates.
+    pub async fn warm_devshell(&self, dir: &Path) {
+        if !dir.join(".envrc").exists() {
+            return;
+        }
+        if !super::origin_trusted(dir, &self.trusted_repos).await {
+            debug!(dir = %dir.display(), "origin not in trusted_repos; skipping devshell warm");
+            return;
+        }
+        direnv::allow(dir).await;
+        if let Err(e) = self.direnv_cache.get(dir).await {
+            warn!(dir = %dir.display(), error = %e, "devshell warm failed");
         }
     }
 

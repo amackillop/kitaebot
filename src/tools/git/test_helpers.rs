@@ -14,7 +14,7 @@ pub fn stub_git_cli_with_repo() -> (GitCli, String) {
     std::fs::create_dir_all(dir.path().join(repo).join(".git")).unwrap();
     let path = dir.into_path();
     (
-        GitCli::new(Secret::test("fake"), &path, DirenvCache::new()),
+        GitCli::new(Secret::test("fake"), &path, DirenvCache::new(), Vec::new()),
         repo.to_string(),
     )
 }

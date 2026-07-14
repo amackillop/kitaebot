@@ -72,9 +72,9 @@ pub(crate) fn resolve_repo_dir(
 /// is in `trusted`. Reads `git config --get remote.origin.url`; an
 /// unreadable or unparseable remote counts as untrusted.
 ///
-/// Lets [`crate::tools::exec`] re-`direnv allow` a trusted repo's `.envrc`
-/// after a pull rewrote it (trust is content-bound, so a pull silently
-/// revokes it), without re-deriving the nwo from a clone URL it never saw.
+/// Gates every trust decision made after a clone exists — exec's
+/// re-`direnv allow` and [`GitCli::warm_devshell`] — so no caller ever
+/// re-derives the nwo from a clone URL it never saw.
 pub(crate) async fn origin_trusted(dir: &Path, trusted: &[String]) -> bool {
     origin_nwo(dir)
         .await
@@ -107,17 +107,18 @@ pub(crate) fn build(
     config: &crate::config::GitConfig,
     direnv: DirenvCache,
 ) -> Vec<Arc<dyn Tool>> {
-    let git = GitCli::new(token, workspace.path(), direnv.clone());
+    let git = GitCli::new(
+        token,
+        workspace.path(),
+        direnv,
+        config.trusted_repos.clone(),
+    );
 
     vec![
         Arc::new(Commit::new(git.clone(), config.co_authors.clone())),
         Arc::new(Push(git.clone())),
         Arc::new(Fetch(git.clone())),
-        Arc::new(GitClone {
-            git,
-            direnv,
-            trusted_repos: config.trusted_repos.clone(),
-        }),
+        Arc::new(GitClone { git }),
     ]
 }
 

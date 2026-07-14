@@ -48,6 +48,9 @@ async fn prepare_at(git: &GitCli, url: &str, rel: &str) -> Result<(), ToolError>
         clean.extend(["-e", kept]);
     }
     checkout::run(git, &clean, &dir, false).await?;
+    // Provision the devShell (trust + dependency install) before the
+    // turn starts, so exec finds a working toolchain immediately.
+    git.warm_devshell(&dir).await;
     Ok(())
 }
 
@@ -105,7 +108,12 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let origin = tempfile::tempdir().unwrap();
         let sha = fixture_origin(origin.path());
-        let git = GitCli::new(Secret::test("fake"), workspace.path(), DirenvCache::new());
+        let git = GitCli::new(
+            Secret::test("fake"),
+            workspace.path(),
+            DirenvCache::new(),
+            Vec::new(),
+        );
         let url = format!("file://{}", origin.path().display());
 
         prepare_at(&git, &url, "projects/o/r").await.unwrap();
@@ -124,7 +132,12 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let origin = tempfile::tempdir().unwrap();
         fixture_origin(origin.path());
-        let git = GitCli::new(Secret::test("fake"), workspace.path(), DirenvCache::new());
+        let git = GitCli::new(
+            Secret::test("fake"),
+            workspace.path(),
+            DirenvCache::new(),
+            Vec::new(),
+        );
         let url = format!("file://{}", origin.path().display());
 
         prepare_at(&git, &url, "projects/o/r").await.unwrap();
@@ -155,7 +168,12 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let origin = tempfile::tempdir().unwrap();
         fixture_origin(origin.path());
-        let git = GitCli::new(Secret::test("fake"), workspace.path(), DirenvCache::new());
+        let git = GitCli::new(
+            Secret::test("fake"),
+            workspace.path(),
+            DirenvCache::new(),
+            Vec::new(),
+        );
         let url = format!("file://{}", origin.path().display());
 
         prepare_at(&git, &url, "projects/o/r").await.unwrap();

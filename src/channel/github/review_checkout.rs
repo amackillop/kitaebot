@@ -64,6 +64,8 @@ async fn prepare_at(
         false,
     )
     .await?;
+    // Provision the devShell so review turns can build and test.
+    git.warm_devshell(&dir).await;
     Ok(())
 }
 
@@ -91,7 +93,12 @@ mod tests {
 
     fn stub_git() -> (GitCli, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let cli = GitCli::new(Secret::test("fake"), dir.path(), DirenvCache::new());
+        let cli = GitCli::new(
+            Secret::test("fake"),
+            dir.path(),
+            DirenvCache::new(),
+            Vec::new(),
+        );
         (cli, dir)
     }
 
@@ -165,7 +172,12 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let origin = tempfile::tempdir().unwrap();
         let sha = fixture_origin(origin.path());
-        let git = GitCli::new(Secret::test("fake"), workspace.path(), DirenvCache::new());
+        let git = GitCli::new(
+            Secret::test("fake"),
+            workspace.path(),
+            DirenvCache::new(),
+            Vec::new(),
+        );
         let url = format!("file://{}", origin.path().display());
 
         prepare_at(&git, &url, "reviews/o/r", 1, &sha, "main")
@@ -190,7 +202,12 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let origin = tempfile::tempdir().unwrap();
         let sha = fixture_origin(origin.path());
-        let git = GitCli::new(Secret::test("fake"), workspace.path(), DirenvCache::new());
+        let git = GitCli::new(
+            Secret::test("fake"),
+            workspace.path(),
+            DirenvCache::new(),
+            Vec::new(),
+        );
         let url = format!("file://{}", origin.path().display());
 
         prepare_at(&git, &url, "reviews/o/r", 1, &sha, "main")

@@ -70,10 +70,14 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         }
         // The channel prepares review checkouts itself, even when the
         // git tools are disabled.
-        let git_cli = config
-            .github
-            .enabled
-            .then(|| GitCli::new(token.clone(), workspace.path(), direnv_cache.clone()));
+        let git_cli = config.github.enabled.then(|| {
+            GitCli::new(
+                token.clone(),
+                workspace.path(),
+                direnv_cache.clone(),
+                config.git.trusted_repos.clone(),
+            )
+        });
         let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
             tools.extend(github::build(gh.clone()));
@@ -179,10 +183,14 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         }
         // The channel prepares review checkouts itself, even when the
         // git tools are disabled.
-        let git_cli = config
-            .github
-            .enabled
-            .then(|| GitCli::new(token.clone(), workspace.path(), direnv_cache.clone()));
+        let git_cli = config.github.enabled.then(|| {
+            GitCli::new(
+                token.clone(),
+                workspace.path(),
+                direnv_cache.clone(),
+                config.git.trusted_repos.clone(),
+            )
+        });
         let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
             tools.extend(github::build(gh.clone()));

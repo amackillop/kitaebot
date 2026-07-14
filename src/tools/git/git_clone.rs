@@ -28,9 +28,6 @@ struct Args {
 
 pub struct GitClone {
     pub git: GitCli,
-    pub direnv: DirenvCache,
-    /// Repos (`owner/repo` or `owner/*`) whose `.envrc` may be trusted.
-    pub trusted_repos: Vec<String>,
 }
 
 impl Tool for GitClone {
@@ -111,14 +108,14 @@ impl GitClone {
             // repos; an unresolvable nwo counts as untrusted.
             let trusted = nwo
                 .as_deref()
-                .is_some_and(|n| is_trusted_repo(n, &self.trusted_repos));
+                .is_some_and(|n| is_trusted_repo(n, &self.git.trusted_repos));
             if trusted {
                 // Trust the .envrc synchronously so that any subsequent exec
                 // call (which may race with the background warm) can already
                 // run `direnv export json` successfully.
                 direnv::allow(&target).await;
 
-                warm_direnv_cache(self.direnv.clone(), target);
+                warm_direnv_cache(self.git.direnv_cache.clone(), target);
                 let _ = write!(
                     output,
                     "\nDetected .envrc — warming direnv cache in the background. \
@@ -159,11 +156,7 @@ mod tests {
 
     fn stub_clone() -> (GitClone, String) {
         let (git, repo) = stub_git_cli_with_repo();
-        let tool = GitClone {
-            git,
-            direnv: DirenvCache::new(),
-            trusted_repos: Vec::new(),
-        };
+        let tool = GitClone { git };
         (tool, repo)
     }
 
