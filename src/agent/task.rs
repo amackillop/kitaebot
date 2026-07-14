@@ -61,17 +61,9 @@ const WORKER_TOOLS: &[&str] = &[
 /// result. Matching it means expansion output survives untruncated.
 const SUB_AGENT_TOOL_OUTPUT_TOKENS: usize = 20_000;
 
-const EXPLORE_PROMPT: &str = "You are a research agent. Your job is to \
-find information and report back.\n\nBe concise and specific. Include \
-file paths, line numbers, and code snippets when relevant. Do not \
-speculate — only report what you find.\n\nReturn your findings as a \
-direct answer to the task. Your response will be read by another \
-agent, not a human.";
+const EXPLORE_PROMPT: &str = include_str!("../prompts/explore.md");
 
-const WORKER_PROMPT: &str = "You are a task agent. Complete the \
-assigned task and report what you did.\n\nBe concise. Describe what \
-you changed and why. Include file paths and relevant details. Your \
-response will be read by another agent, not a human.";
+const WORKER_PROMPT: &str = include_str!("../prompts/worker.md");
 
 /// A sub-agent type: system prompt plus prebuilt tool set.
 pub(crate) struct AgentType {
@@ -113,7 +105,8 @@ fn compose_prompt(role: &str, workspace_dir: &Path, tools: &Tools) -> String {
         .map(|d| d.function.name)
         .collect();
     format!(
-        "{role}\n\n# Environment\nWorking directory: {}\nAvailable tools: {}",
+        "{}\n\n# Environment\nWorking directory: {}\nAvailable tools: {}",
+        role.trim_end(),
         workspace_dir.display(),
         names.join(", "),
     )
