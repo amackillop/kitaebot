@@ -11,6 +11,7 @@
 pub mod ephemeral;
 pub mod flat;
 pub mod lcm;
+pub(crate) mod stats;
 
 use std::collections::BTreeMap;
 use std::future::Future;

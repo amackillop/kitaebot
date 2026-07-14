@@ -18,7 +18,6 @@ mod safety;
 mod sandbox;
 mod secrets;
 mod session;
-mod stats;
 #[cfg(test)]
 mod test_support;
 mod time;

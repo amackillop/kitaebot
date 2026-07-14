@@ -19,7 +19,7 @@ use super::engine::{desanitize_name, reconstruct_message, storage_err};
 /// Build the full `/stats` report: shared tool tables + health section.
 pub(super) fn report_sync(conn: &Connection) -> Result<String, EngineError> {
     let sessions = all_conversation_messages(conn)?;
-    let mut out = crate::stats::render(&sessions);
+    let mut out = crate::engine::stats::render(&sessions);
     out.push_str(&health_section(conn)?);
     Ok(out)
 }
@@ -142,7 +142,7 @@ fn health_section(conn: &Connection) -> Result<String, EngineError> {
     writeln!(
         out,
         "\nLarge files: {file_count} ({})",
-        crate::stats::format_bytes(file_bytes),
+        crate::engine::stats::format_bytes(file_bytes),
     )
     .unwrap();
 

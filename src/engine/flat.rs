@@ -265,7 +265,7 @@ impl ContextEngine for FlatSession {
             sessions.push(self.session.messages().to_vec());
         }
 
-        Ok(crate::stats::render(&sessions))
+        Ok(super::stats::render(&sessions))
     }
 
     fn active_session(&self) -> &str {

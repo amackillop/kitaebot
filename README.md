@@ -286,6 +286,7 @@ src/
 ├── engine/              Context engines (ContextEngine trait)
 │   ├── flat.rs          Per-name JSON sessions, whole-history compaction
 │   ├── ephemeral.rs     In-memory engine for sub-agents (never compacts)
+│   ├── stats.rs         Pure /stats report core (ContextEngine::report)
 │   └── lcm/             Hierarchical compaction over SQLite (lcm_* tools)
 ├── provider/            LLM abstraction (completions, wire format, mock)
 ├── tools/               Tool trait + implementations
@@ -318,7 +319,6 @@ src/
 ├── activity.rs          Structured turn events for observability
 ├── workspace.rs         Workspace init + system prompt assembly
 ├── time.rs              ISO 8601 timestamps (Hinnant algorithm)
-├── stats.rs             Conversation statistics
 ├── types.rs             Domain types (Message, ToolCall, Response)
 ├── error.rs             Algebraic error types
 └── prompts/             SOUL.md, AGENTS.md (compiled in via include_str!)

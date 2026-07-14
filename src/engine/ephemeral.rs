@@ -112,7 +112,7 @@ impl ContextEngine for EphemeralSession {
 
     async fn report(&self) -> Result<String, EngineError> {
         // Unreachable in practice: children get no slash commands.
-        Ok(crate::stats::render(std::slice::from_ref(&self.messages)))
+        Ok(super::stats::render(std::slice::from_ref(&self.messages)))
     }
 
     // The trait ties the lifetime to &self; the literal is incidental.

@@ -880,7 +880,7 @@ mod tests {
     /// when `Blocked` was misclassified as success.
     #[tokio::test]
     async fn stored_tool_results_round_trip_stats_classification() {
-        use crate::stats::{FailureKind, classify_failure};
+        use crate::engine::stats::{FailureKind, classify_failure};
 
         let cases: Vec<(Result<String, ToolError>, Option<FailureKind>)> = vec![
             (Ok("plain output".into()), None),
