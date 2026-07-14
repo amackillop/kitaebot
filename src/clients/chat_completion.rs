@@ -179,6 +179,9 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// Charged cost in USD; only `OpenRouter` reports it, and only
+    /// when usage accounting is requested.
+    pub cost: Option<f64>,
 }
 
 /// Breakdown of prompt tokens; carries prompt-cache hits.

@@ -118,7 +118,13 @@ pub async fn process_message(
 struct TurnStats {
     iterations: usize,
     tool_calls: usize,
+    /// Last observed prompt size — the live context, not a sum.
     prompt_tokens: Option<usize>,
+    /// Tokens generated across every call in the turn.
+    completion_tokens: usize,
+    /// Charged cost of the turn in USD, summed across calls; `None`
+    /// when the provider reports no cost (non-`OpenRouter`).
+    cost: Option<f64>,
 }
 
 /// Run a single turn of the agent loop.
@@ -175,6 +181,8 @@ pub(crate) async fn run_turn(
             iterations = stats.iterations,
             tool_calls = stats.tool_calls,
             prompt_tokens = stats.prompt_tokens,
+            completion_tokens = stats.completion_tokens,
+            cost = stats.cost,
             ?elapsed,
             "Turn summary"
         ),
@@ -184,6 +192,8 @@ pub(crate) async fn run_turn(
             iterations = stats.iterations,
             tool_calls = stats.tool_calls,
             prompt_tokens = stats.prompt_tokens,
+            completion_tokens = stats.completion_tokens,
+            cost = stats.cost,
             ?elapsed,
             "Turn summary"
         ),
@@ -252,9 +262,14 @@ async fn turn_loop(
         .await?
         .map_err(Error::Provider)?;
 
-        if let Some(prompt_tokens) = outcome.prompt_tokens {
+        let usage = outcome.usage;
+        if let Some(prompt_tokens) = usage.prompt_tokens {
             engine.observe_tokens(prompt_tokens as usize);
             stats.prompt_tokens = Some(prompt_tokens as usize);
+        }
+        stats.completion_tokens += usage.completion_tokens as usize;
+        if let Some(cost) = usage.cost {
+            stats.cost = Some(stats.cost.unwrap_or(0.0) + cost);
         }
 
         match outcome.response {

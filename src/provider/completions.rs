@@ -15,7 +15,7 @@ use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
 use super::wire::WireMessage;
 
-use super::{ChatOutcome, Provider};
+use super::{CallUsage, ChatOutcome, Provider};
 
 /// Retries after the initial attempt for transient failures.
 const MAX_RETRIES: u32 = 3;
@@ -156,10 +156,17 @@ impl Provider for CompletionsProvider {
                 "Usage"
             );
         }
-        let prompt_tokens = response.usage.as_ref().map(|u| u.prompt_tokens);
+        let usage = response
+            .usage
+            .as_ref()
+            .map_or_else(CallUsage::default, |u| CallUsage {
+                prompt_tokens: Some(u.prompt_tokens),
+                completion_tokens: u.completion_tokens,
+                cost: u.cost,
+            });
         Ok(ChatOutcome {
             response: Self::parse_response(response)?,
-            prompt_tokens,
+            usage,
         })
     }
 }
@@ -274,24 +281,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_surfaces_prompt_tokens_from_usage() {
+    async fn chat_surfaces_usage_including_cost() {
         let client = CompletionsClient::from_fn(|_body| async {
             Ok(crate::clients::RawResponse {
                 status: 200,
                 body: br#"{
                     "choices":[{"message":{"content":"hi"}}],
-                    "usage":{"prompt_tokens":42,"completion_tokens":7}
+                    "usage":{"prompt_tokens":42,"completion_tokens":7,"cost":0.0013}
                 }"#
                 .to_vec(),
             })
         });
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
         let outcome = provider.chat(&[], &[]).await.unwrap();
-        assert_eq!(outcome.prompt_tokens, Some(42));
+        assert_eq!(outcome.usage.prompt_tokens, Some(42));
+        assert_eq!(outcome.usage.completion_tokens, 7);
+        assert_eq!(outcome.usage.cost, Some(0.0013));
     }
 
     #[tokio::test]
-    async fn chat_without_usage_has_no_prompt_tokens() {
+    async fn chat_without_usage_is_empty() {
         let client = CompletionsClient::from_fn(|_body| async {
             Ok(crate::clients::RawResponse {
                 status: 200,
@@ -300,7 +309,8 @@ mod tests {
         });
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
         let outcome = provider.chat(&[], &[]).await.unwrap();
-        assert_eq!(outcome.prompt_tokens, None);
+        assert_eq!(outcome.usage.prompt_tokens, None);
+        assert_eq!(outcome.usage.cost, None);
     }
 
     #[test]

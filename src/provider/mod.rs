@@ -22,11 +22,21 @@ use crate::types::{Message, Response, ToolDefinition};
 pub struct ChatOutcome {
     /// The model's reply.
     pub response: Response,
-    /// Prompt size of the request as counted by the provider's
-    /// tokenizer, when the API reports usage. Ground truth for
-    /// context size — includes system prompt and tool schemas that
-    /// char-based estimates miss.
+    /// Usage as reported by the provider for this call.
+    pub usage: CallUsage,
+}
+
+/// Per-call usage reported by the provider, when it reports any.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CallUsage {
+    /// Prompt size as counted by the provider's tokenizer, when the API
+    /// reports usage. Ground truth for context size — includes system
+    /// prompt and tool schemas that char-based estimates miss.
     pub prompt_tokens: Option<u32>,
+    /// Tokens generated in the reply.
+    pub completion_tokens: u32,
+    /// Charged cost in USD; `OpenRouter` only, `None` elsewhere.
+    pub cost: Option<f64>,
 }
 
 /// LLM provider abstraction.
