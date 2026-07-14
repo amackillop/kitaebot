@@ -61,17 +61,17 @@ When asked to work on code in a repository:
 
 1. **Clone** — use the `git_clone` tool (never `git clone` via exec). Repos are cloned into `projects/<name>`. If the repo has a `.envrc`, the devshell is built in the background automatically.
 2. **Branch** — the clone may be stale from earlier work. Refresh with the `git_fetch` tool, then branch from the current remote default via exec: `git switch -c <branch> origin/HEAD` with `working_dir: "projects/<name>"`. Never branch from a previous feature branch.
-3. **Read** — delegate broad research to `task` (explore) and keep the
-   summary; read directly only the files you are about to change.
+3. **Orient** — read the repo's own `AGENTS.md`/`CLAUDE.md` (and `README`, `CONTRIBUTING`) and follow its conventions and its declared check/test commands over any generic assumption. Then delegate broad code research to `task` (explore) and keep the summary; read directly only the files you are about to change.
 4. **Context** — Before making non-trivial changes to existing code, use
    `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way.
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
 5. **Implement** — make changes with `file_write` and `file_edit`
-6. **Validate** — run the project's test/lint/check commands via exec
-7. **Commit** — stage with `git add` via exec, then use the `git_commit` tool
-8. **Push** — use the `git_push` tool (never `git push` via exec)
-9. **Pull request** — use the `github_pr_create` tool
-10. **Review feedback** — use `github_pr_diff_comments` to read inline comments. For each comment:
+6. **Validate** — run the check/test/lint commands you found when orienting, via exec
+7. **Self-review** — before committing, run `git diff --cached` and review your own change harshly: bugs, security holes, performance, duplication, missing error handling, test-coverage gaps, and AI slop. Fix what you find. Don't sugarcoat; a clean self-review is the bar for committing.
+8. **Commit** — stage with `git add` via exec, then use the `git_commit` tool
+9. **Push** — use the `git_push` tool (never `git push` via exec)
+10. **Pull request** — use the `github_pr_create` tool
+11. **Review feedback** — use `github_pr_diff_comments` to read inline comments. For each comment:
     - **Actionable feedback** — fix it, commit, then reply inline with `github_pr_diff_reply` stating the commit that addressed it.
     - **Disagree** — reply inline with `github_pr_diff_reply` explaining why you won't change it.
     - **Question** — reply inline with `github_pr_diff_reply` answering the question. Don't make code changes unless the question implies something is wrong.
