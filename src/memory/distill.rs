@@ -103,7 +103,7 @@ const DISTILL_TOOLS: &[&str] = &[
 /// files back and must not truncate them.
 const DISTILL_TOOL_OUTPUT_TOKENS: usize = 20_000;
 
-const DISTILL_PROMPT: &str = include_str!("prompts/distill.md");
+const DISTILL_PROMPT: &str = include_str!("../prompts/distill.md");
 
 /// The distiller worker: a fixed system prompt plus the memory-editing
 /// tool set, mirroring the sub-agent construction in `agent::task`. It

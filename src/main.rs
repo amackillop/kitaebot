@@ -5,7 +5,6 @@ mod commands;
 mod config;
 mod daemon;
 mod dispatch;
-mod distill;
 mod engine;
 mod error;
 mod github_channel;
@@ -189,7 +188,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     // The distiller mirrors a worker: built from the base registry
     // (memory-editing tools only) and capped at the sub-agent iteration
     // budget, before root engine tools and the task tool are merged in.
-    let distiller = Arc::new(distill::Distiller::new(
+    let distiller = Arc::new(memory::distill::Distiller::new(
         &tools,
         workspace.path(),
         config.memory.distill_threshold_tokens,

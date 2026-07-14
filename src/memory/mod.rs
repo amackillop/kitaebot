@@ -6,6 +6,8 @@
 //! without a tool call. Detail lives in `memory/topics/*.md`, reached on
 //! demand with the ordinary file tools.
 
+pub mod distill;
+
 use std::path::Path;
 
 use tracing::warn;

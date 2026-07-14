@@ -12,8 +12,8 @@ use tracing::{Instrument, error, field, info_span};
 
 use crate::commands;
 use crate::dispatch::{Input, Reply};
-use crate::distill::Distiller;
 use crate::engine::{ContextEngine, SummarizeFn};
+use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::tools::Tools;

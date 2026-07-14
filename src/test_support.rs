@@ -10,9 +10,9 @@ use tempfile::TempDir;
 
 use crate::agent::AgentHandle;
 use crate::config::ContextConfig;
-use crate::distill::Distiller;
 use crate::engine::flat::FlatSession;
 use crate::engine::make_summarize_fn;
+use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::MockProvider;
 use crate::tools::Tools;

@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::activity::Activity;
 use crate::dispatch::Reply;
-use crate::distill::Distiller;
 use crate::engine::{ContextEngine, SummarizeFn};
+use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::tools::Tools;

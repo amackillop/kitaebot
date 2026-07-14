@@ -10,9 +10,9 @@ use tracing::error;
 
 use crate::agent;
 use crate::dispatch::Reply;
-use crate::distill::{self, Distiller};
 use crate::engine::{ContextEngine, SummarizeFn};
 use crate::heartbeat;
+use crate::memory::distill::{self, Distiller};
 use crate::provider::Provider;
 use crate::tools::Tools;
 use crate::workspace::Workspace;
