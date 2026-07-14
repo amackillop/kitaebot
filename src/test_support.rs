@@ -94,6 +94,7 @@ impl TestAgent {
             engine,
             summarize,
             self.notifier,
+            None,
         )
     }
 }

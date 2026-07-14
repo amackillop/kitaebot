@@ -114,6 +114,11 @@ impl Workspace {
         self.state_dir().join("distillation_state.json")
     }
 
+    /// Path to the per-turn usage ledger.
+    pub fn usage_db_path(&self) -> PathBuf {
+        self.state_dir().join("usage.db")
+    }
+
     /// The system prompt, assembled once at workspace init.
     ///
     /// The persona is compiled in; USER.md is provisioned via Nix and

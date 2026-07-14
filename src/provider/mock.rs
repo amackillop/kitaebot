@@ -49,6 +49,11 @@ impl Provider for MockProvider {
             usage: self.usage,
         })
     }
+
+    #[allow(clippy::unnecessary_literal_bound)] // trait ties the return to &self
+    fn model(&self) -> &str {
+        "mock"
+    }
 }
 
 #[cfg(test)]

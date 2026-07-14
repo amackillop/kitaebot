@@ -23,6 +23,7 @@ mod test_support;
 mod time;
 mod tools;
 mod types;
+mod usage;
 mod workspace;
 
 use std::sync::Arc;
@@ -203,6 +204,14 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     tools.extend_with(vec![task_tool], &config.tools.disabled);
     let heartbeat_provider = role_provider(&provider, overrides.heartbeat.as_deref());
     let memory_provider = role_provider(&provider, overrides.memory.as_deref());
+    // Telemetry: an open failure is logged and the daemon runs unmetered.
+    let usage_ledger = match usage::UsageLedger::open(&workspace.usage_db_path()) {
+        Ok(ledger) => Some(Arc::new(ledger)),
+        Err(e) => {
+            warn!("Usage ledger disabled: {e}");
+            None
+        }
+    };
     agent::AgentHandle::spawn(
         workspace,
         provider,
@@ -215,5 +224,6 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         engine,
         summarize,
         notifier,
+        usage_ledger,
     )
 }

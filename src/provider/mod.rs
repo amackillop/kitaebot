@@ -57,4 +57,8 @@ pub trait Provider: Send + Sync {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> impl Future<Output = Result<ChatOutcome, ProviderError>> + Send;
+
+    /// The model this provider sends requests as; recorded per turn in
+    /// the usage ledger.
+    fn model(&self) -> &str;
 }

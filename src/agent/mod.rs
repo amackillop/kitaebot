@@ -95,12 +95,41 @@ pub async fn process_message(
     memory_index_cap: usize,
     ctx: &ToolCtx,
 ) -> Result<TurnOutput, Error> {
+    process_message_metered(
+        engine,
+        summarize,
+        workspace,
+        user_message,
+        provider,
+        tools,
+        max_iterations,
+        memory_index_cap,
+        ctx,
+    )
+    .await
+    .map(|(output, _usage)| output)
+}
+
+/// Like [`process_message`] but also returns the turn's billed
+/// [`TurnUsage`], for the actor to record to the usage ledger.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_message_metered(
+    engine: &mut impl ContextEngine,
+    summarize: &SummarizeFn,
+    workspace: &Workspace,
+    user_message: &str,
+    provider: &impl Provider,
+    tools: &Tools,
+    max_iterations: usize,
+    memory_index_cap: usize,
+    ctx: &ToolCtx,
+) -> Result<(TurnOutput, TurnUsage), Error> {
     let system_prompt =
         match crate::memory::index_segment(&workspace.memory_dir(), memory_index_cap) {
             Some(index) => format!("{}\n{index}", workspace.system_prompt()),
             None => workspace.system_prompt().to_string(),
         };
-    run_turn(
+    run_turn_metered(
         engine,
         summarize,
         &system_prompt,

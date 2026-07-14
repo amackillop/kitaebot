@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use tracing::{Instrument, error, field, info_span};
+use tracing::{Instrument, error, field, info_span, warn};
 
 use crate::commands;
 use crate::dispatch::{Input, Reply};
@@ -17,6 +17,7 @@ use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::tools::Tools;
+use crate::usage::{TurnRecord, UsageLedger};
 use crate::workspace::Workspace;
 use tokio::sync::mpsc;
 
@@ -38,6 +39,7 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     engine: E,
     summarize: SummarizeFn,
     notifier: Option<Arc<Notifier>>,
+    usage_ledger: Option<Arc<UsageLedger>>,
     /// Monotonic turn counter, the `id` field of the per-turn log span.
     turn_seq: u64,
 }
@@ -57,6 +59,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         engine: E,
         summarize: SummarizeFn,
         notifier: Option<Arc<Notifier>>,
+        usage_ledger: Option<Arc<UsageLedger>>,
     ) -> Self {
         Self {
             rx,
@@ -71,6 +74,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             engine,
             summarize,
             notifier,
+            usage_ledger,
             turn_seq: 0,
         }
     }
@@ -173,7 +177,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         }
 
         let tagged = format!("[{}]: {text}", envelope.source);
-        let result = super::process_message(
+        let metered = super::process_message_metered(
             &mut self.engine,
             &self.summarize,
             &self.workspace,
@@ -188,6 +192,22 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             },
         )
         .await;
+
+        // Record billed usage before unwrapping. Best-effort telemetry:
+        // a ledger write never fails the turn.
+        if let (Ok((_, usage)), Some(ledger)) = (&metered, &self.usage_ledger) {
+            let source = envelope.source.to_string();
+            if let Err(e) = ledger.record(&TurnRecord {
+                session: target,
+                source: &source,
+                model: self.provider.model(),
+                usage: *usage,
+            }) {
+                warn!("Failed to record turn usage: {e}");
+            }
+        }
+
+        let result = metered.map(|(output, _usage)| output);
 
         // A policy halt is an Ok reply, so the Err hook in `handle`
         // never sees it. Alert here where the outcome is still typed.

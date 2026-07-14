@@ -16,6 +16,7 @@ use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::tools::Tools;
+use crate::usage::UsageLedger;
 use crate::workspace::Workspace;
 
 use super::actor::Agent;
@@ -47,6 +48,7 @@ impl AgentHandle {
         engine: E,
         summarize: SummarizeFn,
         notifier: Option<Arc<Notifier>>,
+        usage_ledger: Option<Arc<UsageLedger>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(32);
         let actor = Agent::new(
@@ -62,6 +64,7 @@ impl AgentHandle {
             engine,
             summarize,
             notifier,
+            usage_ledger,
         );
         tokio::spawn(actor.run());
         Self { tx }

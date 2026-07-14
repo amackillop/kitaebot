@@ -169,6 +169,10 @@ impl Provider for CompletionsProvider {
             usage,
         })
     }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 fn into_tool_call(tc: ApiToolCall) -> ToolCall {
