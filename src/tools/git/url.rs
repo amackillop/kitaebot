@@ -68,6 +68,22 @@ pub(crate) fn extract_nwo(url: &str) -> Option<String> {
     }
 }
 
+/// Check whether `nwo` (`owner/repo`) is in the trusted list.
+///
+/// Entries are exact `owner/repo` matches or `owner/*` wildcards,
+/// case-insensitive.
+pub(crate) fn is_trusted_repo(nwo: &str, trusted: &[String]) -> bool {
+    let Some((owner, _)) = nwo.split_once('/') else {
+        return false;
+    };
+    trusted.iter().any(|entry| {
+        entry.eq_ignore_ascii_case(nwo)
+            || entry
+                .strip_suffix("/*")
+                .is_some_and(|o| o.eq_ignore_ascii_case(owner))
+    })
+}
+
 /// Validate a user-provided directory name.
 ///
 /// Rejects path traversal, absolute paths, and slashes.
@@ -176,6 +192,41 @@ mod tests {
         assert_eq!(extract_nwo("https://github.com/repo"), None);
         assert_eq!(extract_nwo("https://github.com/a/b/c"), None);
         assert_eq!(extract_nwo("not-a-url"), None);
+    }
+
+    // ── Trust matching ──────────────────────────────────────────────
+
+    fn list(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn trusted_repo_exact_match() {
+        assert!(is_trusted_repo("owner/repo", &list(&["owner/repo"])));
+        assert!(!is_trusted_repo("owner/other", &list(&["owner/repo"])));
+        assert!(!is_trusted_repo("owner/repo", &[]));
+    }
+
+    #[test]
+    fn trusted_repo_case_insensitive() {
+        assert!(is_trusted_repo("Owner/Repo", &list(&["owner/repo"])));
+        assert!(is_trusted_repo("owner/repo", &list(&["OWNER/REPO"])));
+    }
+
+    #[test]
+    fn trusted_repo_owner_wildcard() {
+        let trusted = list(&["owner/*"]);
+        assert!(is_trusted_repo("owner/anything", &trusted));
+        assert!(is_trusted_repo("OWNER/anything", &trusted));
+        assert!(!is_trusted_repo("other/anything", &trusted));
+    }
+
+    #[test]
+    fn trusted_repo_rejects_malformed_nwo() {
+        assert!(!is_trusted_repo(
+            "no-slash",
+            &list(&["no-slash", "owner/*"])
+        ));
     }
 
     // ── Name validation ─────────────────────────────────────────────

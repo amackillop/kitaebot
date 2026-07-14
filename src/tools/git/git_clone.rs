@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use schemars::JsonSchema;
@@ -10,11 +10,11 @@ use serde::Deserialize;
 use tracing::debug;
 
 use super::git_cli::GitCli;
-use super::url::{extract_nwo, extract_repo_name, to_https_url, validate_name};
+use super::url::{extract_nwo, extract_repo_name, is_trusted_repo, to_https_url, validate_name};
 use super::{Tool, ToolCtx};
 use crate::error::ToolError;
-use crate::tools::DirenvCache;
-use crate::tools::cli_runner::{self, SubprocessCall};
+use crate::tools::cli_runner::SubprocessCall;
+use crate::tools::{DirenvCache, direnv};
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -116,7 +116,7 @@ impl GitClone {
                 // Trust the .envrc synchronously so that any subsequent exec
                 // call (which may race with the background warm) can already
                 // run `direnv export json` successfully.
-                direnv_allow(&target).await;
+                direnv::allow(&target).await;
 
                 warm_direnv_cache(self.direnv.clone(), target);
                 let _ = write!(
@@ -135,37 +135,6 @@ impl GitClone {
         }
 
         Ok(output)
-    }
-}
-
-/// Check whether `nwo` (`owner/repo`) is in the trusted list.
-/// Entries are exact `owner/repo` matches or `owner/*` wildcards,
-/// case-insensitive.
-fn is_trusted_repo(nwo: &str, trusted: &[String]) -> bool {
-    let Some((owner, _)) = nwo.split_once('/') else {
-        return false;
-    };
-    trusted.iter().any(|entry| {
-        entry.eq_ignore_ascii_case(nwo)
-            || entry
-                .strip_suffix("/*")
-                .is_some_and(|o| o.eq_ignore_ascii_case(owner))
-    })
-}
-
-/// Run `direnv allow` for a directory. Must complete before any
-/// `direnv export json` call so the `.envrc` is trusted.
-async fn direnv_allow(dir: &Path) {
-    let call = SubprocessCall {
-        binary: "direnv",
-        args: vec!["allow".into()],
-        cwd: dir.to_path_buf(),
-        env: crate::tools::safe_env().collect(),
-        timeout_secs: Some(10),
-        stdin: None,
-    };
-    if let Err(e) = cli_runner::exec(&call).await {
-        debug!(dir = %dir.display(), error = %e, "direnv allow failed");
     }
 }
 
@@ -232,39 +201,6 @@ mod tests {
         let (tool, _) = stub_clone();
         let result = tool.prepare("https://github.com/owner/repo.git", Some("../escape"));
         assert!(result.is_err());
-    }
-
-    fn list(entries: &[&str]) -> Vec<String> {
-        entries.iter().map(ToString::to_string).collect()
-    }
-
-    #[test]
-    fn trusted_repo_exact_match() {
-        assert!(is_trusted_repo("owner/repo", &list(&["owner/repo"])));
-        assert!(!is_trusted_repo("owner/other", &list(&["owner/repo"])));
-        assert!(!is_trusted_repo("owner/repo", &[]));
-    }
-
-    #[test]
-    fn trusted_repo_case_insensitive() {
-        assert!(is_trusted_repo("Owner/Repo", &list(&["owner/repo"])));
-        assert!(is_trusted_repo("owner/repo", &list(&["OWNER/REPO"])));
-    }
-
-    #[test]
-    fn trusted_repo_owner_wildcard() {
-        let trusted = list(&["owner/*"]);
-        assert!(is_trusted_repo("owner/anything", &trusted));
-        assert!(is_trusted_repo("OWNER/anything", &trusted));
-        assert!(!is_trusted_repo("other/anything", &trusted));
-    }
-
-    #[test]
-    fn trusted_repo_rejects_malformed_nwo() {
-        assert!(!is_trusted_repo(
-            "no-slash",
-            &list(&["no-slash", "owner/*"])
-        ));
     }
 
     #[tokio::test]

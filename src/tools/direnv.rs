@@ -28,6 +28,43 @@ use super::cli_runner::{self, SubprocessCall};
 /// Cached environment variables from a direnv evaluation.
 pub type DirenvEnv = Arc<HashMap<String, String>>;
 
+/// Why a direnv evaluation did not yield an environment.
+#[derive(Debug)]
+pub enum DirenvError {
+    /// `.envrc` exists but is not allowed: never allowed, or its content
+    /// changed since it was, so direnv revoked trust. Recoverable by
+    /// re-running `direnv allow` (see [`allow`]) for a trusted repo.
+    Blocked,
+    /// direnv failed for some other reason.
+    Failed(String),
+}
+
+impl std::fmt::Display for DirenvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Blocked => write!(f, ".envrc is not allowed"),
+            Self::Failed(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+/// Run `direnv allow` for a directory, trusting its current `.envrc`
+/// content. Must complete before a `direnv export json` call can load a
+/// devshell. Best-effort: a failure is logged, not propagated.
+pub async fn allow(dir: &Path) {
+    let call = SubprocessCall {
+        binary: "direnv",
+        args: vec!["allow".into()],
+        cwd: dir.to_path_buf(),
+        env: crate::tools::safe_env().collect(),
+        timeout_secs: Some(10),
+        stdin: None,
+    };
+    if let Err(e) = cli_runner::exec(&call).await {
+        debug!(dir = %dir.display(), error = %e, "direnv allow failed");
+    }
+}
+
 /// Filesystem fingerprint for cache invalidation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fingerprint {
@@ -74,8 +111,9 @@ impl DirenvCache {
     /// Returns cached direnv env for `dir`, evaluating on cache miss.
     ///
     /// Returns `Ok(None)` if no `.envrc` exists (one `stat` call).
-    /// Returns `Err` if `direnv export json` fails.
-    pub async fn get(&self, dir: &Path) -> Result<Option<DirenvEnv>, String> {
+    /// Returns [`DirenvError::Blocked`] when the `.envrc` is not allowed,
+    /// [`DirenvError::Failed`] on any other error.
+    pub async fn get(&self, dir: &Path) -> Result<Option<DirenvEnv>, DirenvError> {
         // Fast path: no .envrc means no direnv to evaluate.
         if !dir.join(".envrc").exists() {
             return Ok(None);
@@ -164,7 +202,7 @@ impl DirenvCache {
 }
 
 /// Run `direnv export json` and parse the result.
-async fn evaluate_direnv(dir: &Path) -> Result<HashMap<String, String>, String> {
+async fn evaluate_direnv(dir: &Path) -> Result<HashMap<String, String>, DirenvError> {
     debug!(dir = %dir.display(), "Evaluating direnv");
 
     let call = SubprocessCall {
@@ -178,14 +216,18 @@ async fn evaluate_direnv(dir: &Path) -> Result<HashMap<String, String>, String> 
 
     let output = cli_runner::exec(&call)
         .await
-        .map_err(|e| format!("direnv exec failed: {e}"))?;
+        .map_err(|e| DirenvError::Failed(format!("direnv exec failed: {e}")))?;
 
     if output.exit_code != 0 {
-        return Err(format!(
-            "direnv export json exited {}: {}",
+        let stderr = output.stderr.trim();
+        // direnv reports a revoked/never-granted approval as "is blocked".
+        if stderr.contains("is blocked") {
+            return Err(DirenvError::Blocked);
+        }
+        return Err(DirenvError::Failed(format!(
+            "direnv export json exited {}: {stderr}",
             output.exit_code,
-            output.stderr.trim(),
-        ));
+        )));
     }
 
     // direnv outputs nothing when there's no .envrc or it's not allowed.
@@ -195,8 +237,8 @@ async fn evaluate_direnv(dir: &Path) -> Result<HashMap<String, String>, String> 
     }
 
     // direnv export json returns { "VAR": "value", "UNSET_VAR": null }
-    let raw: HashMap<String, Option<String>> =
-        serde_json::from_str(stdout).map_err(|e| format!("direnv json parse failed: {e}"))?;
+    let raw: HashMap<String, Option<String>> = serde_json::from_str(stdout)
+        .map_err(|e| DirenvError::Failed(format!("direnv json parse failed: {e}")))?;
 
     // Filter out nulls (variables direnv wants to unset — irrelevant since
     // we build the subprocess env from scratch, not from the current process).
@@ -406,13 +448,34 @@ mod tests {
 
         // First call fails.
         let err = cache.get(dir.path()).await.unwrap_err();
-        assert!(err.contains("boom"), "error should contain stderr: {err}");
+        assert!(
+            matches!(&err, DirenvError::Failed(m) if m.contains("boom")),
+            "error should carry stderr: {err}"
+        );
 
         // Second call must retry (not return a cached failure).
         let err2 = cache.get(dir.path()).await.unwrap_err();
         assert!(
-            err2.contains("boom"),
+            matches!(&err2, DirenvError::Failed(m) if m.contains("boom")),
             "retry should re-invoke direnv: {err2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_envrc_is_distinguished() {
+        let _lock = ENV_LOCK.lock().await;
+        let _fake = FakeDirenv::install(
+            "echo 'direnv: error /x/.envrc is blocked. Run `direnv allow`.' >&2; exit 1",
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
+
+        let cache = DirenvCache::new();
+        let err = cache.get(dir.path()).await.unwrap_err();
+        assert!(
+            matches!(err, DirenvError::Blocked),
+            "a blocked .envrc must report Blocked, not Failed: {err}"
         );
     }
 }

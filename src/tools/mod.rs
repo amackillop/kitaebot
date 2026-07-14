@@ -216,7 +216,12 @@ impl Tools {
         let guard = path::PathGuard::new(workspace.path());
 
         vec![
-            Arc::new(Exec::new(workspace.path(), &config.tools.exec, direnv)),
+            Arc::new(Exec::new(
+                workspace.path(),
+                &config.tools.exec,
+                direnv,
+                config.git.trusted_repos.clone(),
+            )),
             Arc::new(FileRead::new(guard.clone())),
             Arc::new(FileWrite::new(guard.clone())),
             Arc::new(FileEdit::new(guard.clone())),

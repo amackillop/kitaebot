@@ -68,6 +68,38 @@ pub(crate) fn resolve_repo_dir(
     Ok(resolved)
 }
 
+/// Whether the checkout at `dir` has an `origin` remote whose `owner/repo`
+/// is in `trusted`. Reads `git config --get remote.origin.url`; an
+/// unreadable or unparseable remote counts as untrusted.
+///
+/// Lets [`crate::tools::exec`] re-`direnv allow` a trusted repo's `.envrc`
+/// after a pull rewrote it (trust is content-bound, so a pull silently
+/// revokes it), without re-deriving the nwo from a clone URL it never saw.
+pub(crate) async fn origin_trusted(dir: &Path, trusted: &[String]) -> bool {
+    origin_nwo(dir)
+        .await
+        .is_some_and(|nwo| url::is_trusted_repo(&nwo, trusted))
+}
+
+async fn origin_nwo(dir: &Path) -> Option<String> {
+    use crate::tools::cli_runner::{self, SubprocessCall};
+
+    let call = SubprocessCall {
+        binary: "git",
+        args: vec!["config".into(), "--get".into(), "remote.origin.url".into()],
+        cwd: dir.to_path_buf(),
+        env: crate::tools::safe_env().collect(),
+        timeout_secs: Some(10),
+        stdin: None,
+    };
+    let out = cli_runner::exec(&call).await.ok()?;
+    if out.exit_code != 0 {
+        return None;
+    }
+    let https = url::to_https_url(out.stdout.trim()).ok()?;
+    url::extract_nwo(&https)
+}
+
 /// Build the git tools. Returns an empty vec when no token is provided.
 pub(crate) fn build(
     token: Secret,
