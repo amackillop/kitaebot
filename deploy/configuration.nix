@@ -64,12 +64,14 @@ in
         trusted_repos = [
           "amackillop/kitaebot"
           "CumuloGlobal/open-money"
+          "CumuloGlobal/unhuman"
         ];
       };
       github = {
         enabled = true;
         owner = "amackillop";
         trusted_users = [ ];
+        trusted_bots = [ "chatgpt-codex-connector" ];
       };
       linear = {
         enabled = true;
