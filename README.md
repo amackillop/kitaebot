@@ -319,12 +319,13 @@ src/
 ├── time.rs              ISO 8601 timestamps (Hinnant algorithm)
 ├── stats.rs             Conversation statistics
 ├── types.rs             Domain types (Message, ToolCall, Response)
-└── error.rs             Algebraic error types
+├── error.rs             Algebraic error types
+└── prompts/             SOUL.md, AGENTS.md (compiled in via include_str!)
 vm/
 ├── configuration.nix    NixOS module (systemd service, egress filter, hardening)
 ├── test-egress.nix      NixOS VM integration test for egress filter
 ├── test-fixtures/       Test fixture data
-└── prompts/             SOUL.md, AGENTS.md, HEARTBEAT.md, USER.md
+└── prompts/             USER.md, HEARTBEAT.md (operator files, provisioned)
 nix/
 └── lightpanda.nix       Headless browser package
 deploy/

@@ -11,7 +11,18 @@ use crate::error::WorkspaceError;
 
 const ENV_VAR: &str = "KITAEBOT_WORKSPACE";
 const APP_NAME: &str = "kitaebot";
-const SYSTEM_PROMPTS: [&str; 3] = ["SOUL.md", "AGENTS.md", "USER.md"];
+
+/// The agent's persona and workflow, embedded at build time so they
+/// are versioned with the code that references their tools and cannot
+/// go missing at runtime.
+const PRODUCT_PROMPT: &str = concat!(
+    include_str!("prompts/SOUL.md"),
+    "\n",
+    include_str!("prompts/AGENTS.md"),
+);
+
+/// Operator preferences, provisioned into the workspace. Optional.
+const USER_PROMPT: &str = "USER.md";
 
 /// An initialized workspace directory.
 ///
@@ -36,8 +47,8 @@ impl Workspace {
 
     /// Initialize the workspace at an explicit path.
     ///
-    /// Creates the directory tree. Prompt files (SOUL.md, AGENTS.md, etc.)
-    /// are expected to be provisioned externally (e.g. via Nix tmpfiles).
+    /// Creates the directory tree. The persona and workflow are compiled
+    /// in; only USER.md is read from the workspace (provisioned via Nix).
     pub fn init_at(path: PathBuf) -> Result<Self, WorkspaceError> {
         let mk = |dir: &Path| {
             fs::create_dir_all(dir).map_err(|e| WorkspaceError::Init(dir.to_path_buf(), e))
@@ -103,33 +114,28 @@ impl Workspace {
         self.state_dir().join("distillation_state.json")
     }
 
-    /// The system prompt, read once at workspace init.
+    /// The system prompt, assembled once at workspace init.
     ///
-    /// Prompt files are provisioned via Nix, so changes require a
-    /// restart anyway; caching avoids re-reading three files per turn.
+    /// The persona is compiled in; USER.md is provisioned via Nix and
+    /// changes require a restart anyway, so caching avoids re-reading it
+    /// per turn.
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
     }
 }
 
-/// Concatenate [`SYSTEM_PROMPTS`] into a single system prompt.
-/// Missing files emit a warning.
+/// Assemble the system prompt: the compiled-in persona plus the
+/// operator's optional USER.md.
 fn read_system_prompt(root: &Path) -> String {
-    let mut prompt = String::new();
+    let mut prompt = PRODUCT_PROMPT.to_string();
 
-    for name in SYSTEM_PROMPTS {
-        match fs::read_to_string(root.join(name)) {
-            Ok(content) => {
-                if !prompt.is_empty() {
-                    prompt.push('\n');
-                }
-                prompt.push_str(&content);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::warn!("{name} not found in workspace");
-            }
-            Err(e) => tracing::warn!("failed to read {name}: {e}"),
+    match fs::read_to_string(root.join(USER_PROMPT)) {
+        Ok(content) => {
+            prompt.push('\n');
+            prompt.push_str(&content);
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("failed to read {USER_PROMPT}: {e}"),
     }
 
     prompt
@@ -166,16 +172,25 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_concatenates_all_files() {
+    fn system_prompt_embeds_persona_and_appends_user() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("SOUL.md"), "# Soul\n").unwrap();
-        fs::write(dir.path().join("AGENTS.md"), "# Agents\n").unwrap();
         fs::write(dir.path().join("USER.md"), "# User Preferences\n").unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
 
         let prompt = ws.system_prompt();
         assert!(prompt.contains("# Soul"));
-        assert!(prompt.contains("# Agents"));
+        assert!(prompt.contains("# Agent Instructions"));
         assert!(prompt.contains("# User Preferences"));
+    }
+
+    #[test]
+    fn system_prompt_without_user_is_persona_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+
+        let prompt = ws.system_prompt();
+        assert!(prompt.contains("# Soul"));
+        assert!(prompt.contains("# Agent Instructions"));
+        assert!(!prompt.contains("# User Preferences"));
     }
 }

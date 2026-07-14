@@ -37,10 +37,13 @@
 
         # Source filter composed from per-kind predicates. Crane's
         # default keeps Rust artifacts only; we also need `.sql` files
-        # so `include_str!("schema.sql")` resolves inside the sandbox.
+        # and the `src/prompts/*.md` prompt files so `include_str!`
+        # resolves inside the sandbox.
         cargoSrcFilter = path: type: craneLib.filterCargoSources path type;
         sqlSrcFilter = path: _type: builtins.match ".*\\.sql$" path != null;
-        srcFilter = path: type: (cargoSrcFilter path type) || (sqlSrcFilter path type);
+        promptSrcFilter = path: _type: builtins.match ".*/prompts/.*\\.md$" path != null;
+        srcFilter =
+          path: type: (cargoSrcFilter path type) || (sqlSrcFilter path type) || (promptSrcFilter path type);
 
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
