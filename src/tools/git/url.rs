@@ -31,24 +31,6 @@ pub(crate) fn to_https_url(url: &str) -> Result<String, ToolError> {
     )))
 }
 
-/// Extract the repository name from an HTTPS URL.
-///
-/// `https://github.com/owner/repo.git` → `repo`
-/// `https://github.com/owner/repo` → `repo`
-pub(crate) fn extract_repo_name(url: &str) -> Result<String, ToolError> {
-    let path = url
-        .strip_prefix("https://")
-        .unwrap_or(url)
-        .trim_end_matches('/')
-        .trim_end_matches(".git");
-
-    path.rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .ok_or_else(|| ToolError::InvalidArguments(format!("cannot extract repo name from: {url}")))
-}
-
 /// Extract `owner/repo` from an HTTPS URL.
 ///
 /// `https://github.com/owner/repo.git` → `owner/repo`. The host is
@@ -133,32 +115,6 @@ mod tests {
     #[test]
     fn unsupported_scheme_rejected() {
         assert!(to_https_url("ftp://example.com/repo").is_err());
-    }
-
-    // ── Repo name extraction ────────────────────────────────────────
-
-    #[test]
-    fn extract_name_with_git_suffix() {
-        assert_eq!(
-            extract_repo_name("https://github.com/owner/repo.git").unwrap(),
-            "repo"
-        );
-    }
-
-    #[test]
-    fn extract_name_without_git_suffix() {
-        assert_eq!(
-            extract_repo_name("https://github.com/owner/repo").unwrap(),
-            "repo"
-        );
-    }
-
-    #[test]
-    fn extract_name_trailing_slash() {
-        assert_eq!(
-            extract_repo_name("https://github.com/owner/repo/").unwrap(),
-            "repo"
-        );
     }
 
     // ── Name-with-owner extraction ──────────────────────────────────
