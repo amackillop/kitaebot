@@ -104,6 +104,9 @@
           // {
             inherit cargoArtifacts;
             doCheck = false; # Tests run in checks.test with mock-network
+            # Stamp the build's git revision into the binary (usage ledger).
+            # dirtyRev is stable per-commit; source edits force a rebuild anyway.
+            GIT_SHA = self.rev or self.dirtyRev or "unknown";
           }
         );
 
