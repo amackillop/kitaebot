@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 use crate::activity::{self, Activity};
 use crate::engine::{ContextEngine, SummarizeFn};
 use crate::error::{Error, ToolError};
-use crate::provider::Provider;
+use crate::provider::{CallUsage, Provider};
 use crate::safety;
 use crate::tools::{ToolCtx, Tools, truncate_output};
 use crate::types::{Message, Response, ToolCall};
@@ -120,11 +120,39 @@ struct TurnStats {
     tool_calls: usize,
     /// Last observed prompt size — the live context, not a sum.
     prompt_tokens: Option<usize>,
-    /// Tokens generated across every call in the turn.
-    completion_tokens: usize,
-    /// Charged cost of the turn in USD, summed across calls; `None`
-    /// when the provider reports no cost (non-`OpenRouter`).
-    cost: Option<f64>,
+    /// Billed tokens and cost, summed across the turn's calls.
+    usage: TurnUsage,
+}
+
+/// Billed usage for one turn, summed across its provider calls.
+///
+/// A turn is many calls (one per tool-round), so a single call's
+/// numbers say nothing about the turn. This is the per-turn total the
+/// ledger records.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TurnUsage {
+    /// Provider calls made during the turn.
+    pub calls: u32,
+    /// Prompt tokens billed, summed across calls.
+    pub prompt_tokens: u64,
+    /// Tokens generated, summed across calls.
+    pub completion_tokens: u64,
+    /// Charged cost in USD, summed across calls; `None` when no call
+    /// reported a cost (non-`OpenRouter`).
+    pub cost: Option<f64>,
+}
+
+impl TurnUsage {
+    fn add_call(&mut self, call: CallUsage) {
+        self.calls += 1;
+        if let Some(prompt) = call.prompt_tokens {
+            self.prompt_tokens += u64::from(prompt);
+        }
+        self.completion_tokens += u64::from(call.completion_tokens);
+        if let Some(cost) = call.cost {
+            self.cost = Some(self.cost.unwrap_or(0.0) + cost);
+        }
+    }
 }
 
 /// Run a single turn of the agent loop.
@@ -153,6 +181,33 @@ pub(crate) async fn run_turn(
     max_iterations: usize,
     ctx: &ToolCtx,
 ) -> Result<TurnOutput, Error> {
+    run_turn_metered(
+        engine,
+        summarize,
+        system_prompt,
+        user_message,
+        provider,
+        tools,
+        max_iterations,
+        ctx,
+    )
+    .await
+    .map(|(output, _usage)| output)
+}
+
+/// Like [`run_turn`] but also returns the turn's billed [`TurnUsage`],
+/// for callers that record cost to the ledger.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_turn_metered(
+    engine: &mut impl ContextEngine,
+    summarize: &SummarizeFn,
+    system_prompt: &str,
+    user_message: &str,
+    provider: &impl Provider,
+    tools: &Tools,
+    max_iterations: usize,
+    ctx: &ToolCtx,
+) -> Result<(TurnOutput, TurnUsage), Error> {
     let started = std::time::Instant::now();
     let mut stats = TurnStats::default();
     let result = turn_loop(
@@ -181,8 +236,9 @@ pub(crate) async fn run_turn(
             iterations = stats.iterations,
             tool_calls = stats.tool_calls,
             prompt_tokens = stats.prompt_tokens,
-            completion_tokens = stats.completion_tokens,
-            cost = stats.cost,
+            calls = stats.usage.calls,
+            completion_tokens = stats.usage.completion_tokens,
+            cost = stats.usage.cost,
             ?elapsed,
             "Turn summary"
         ),
@@ -192,13 +248,14 @@ pub(crate) async fn run_turn(
             iterations = stats.iterations,
             tool_calls = stats.tool_calls,
             prompt_tokens = stats.prompt_tokens,
-            completion_tokens = stats.completion_tokens,
-            cost = stats.cost,
+            calls = stats.usage.calls,
+            completion_tokens = stats.usage.completion_tokens,
+            cost = stats.usage.cost,
             ?elapsed,
             "Turn summary"
         ),
     }
-    result
+    result.map(|output| (output, stats.usage))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -262,15 +319,12 @@ async fn turn_loop(
         .await?
         .map_err(Error::Provider)?;
 
-        let usage = outcome.usage;
-        if let Some(prompt_tokens) = usage.prompt_tokens {
+        let call = outcome.usage;
+        if let Some(prompt_tokens) = call.prompt_tokens {
             engine.observe_tokens(prompt_tokens as usize);
             stats.prompt_tokens = Some(prompt_tokens as usize);
         }
-        stats.completion_tokens += usage.completion_tokens as usize;
-        if let Some(cost) = usage.cost {
-            stats.cost = Some(stats.cost.unwrap_or(0.0) + cost);
-        }
+        stats.usage.add_call(call);
 
         match outcome.response {
             Response::Text(content) => {
@@ -474,6 +528,39 @@ mod tests {
             activity: Some(tx.clone()),
             ..ToolCtx::default()
         }
+    }
+
+    #[test]
+    fn turn_usage_sums_calls_tokens_and_cost() {
+        let mut usage = TurnUsage::default();
+        usage.add_call(CallUsage {
+            prompt_tokens: Some(100),
+            completion_tokens: 20,
+            cost: Some(0.001),
+        });
+        // A call with no usage still counts, contributes nothing else.
+        usage.add_call(CallUsage::default());
+        usage.add_call(CallUsage {
+            prompt_tokens: Some(50),
+            completion_tokens: 10,
+            cost: Some(0.002),
+        });
+        assert_eq!(usage.calls, 3);
+        assert_eq!(usage.prompt_tokens, 150);
+        assert_eq!(usage.completion_tokens, 30);
+        assert_eq!(usage.cost, Some(0.003));
+    }
+
+    #[test]
+    fn turn_usage_cost_stays_none_without_any() {
+        let mut usage = TurnUsage::default();
+        usage.add_call(CallUsage {
+            prompt_tokens: Some(10),
+            completion_tokens: 5,
+            cost: None,
+        });
+        assert_eq!(usage.calls, 1);
+        assert_eq!(usage.cost, None);
     }
 
     fn text(s: &str) -> Response {
