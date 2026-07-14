@@ -177,6 +177,13 @@ in
         "flakehub.com"
         "api.perplexity.ai"
         "api.linear.app"
+        # Package registries: devShells fetch project dependencies here.
+        "npmjs.org"
+        "yarnpkg.com"
+        "crates.io"
+        "pypi.org"
+        "pythonhosted.org"
+        "rubygems.org"
       ];
       description = "Domains the kitaebot process may connect to. All others blocked.";
     };
