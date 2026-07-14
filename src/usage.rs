@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use rusqlite::{Connection, params};
+use tracing::warn;
 
 use crate::agent::TurnUsage;
 
@@ -79,6 +80,16 @@ impl UsageLedger {
             ],
         )?;
         Ok(())
+    }
+}
+
+/// Record a turn to the ledger if one is configured. A write failure is
+/// logged, never propagated — telemetry must not fail the turn.
+pub fn record_turn(ledger: Option<&UsageLedger>, record: &TurnRecord) {
+    if let Some(ledger) = ledger
+        && let Err(e) = ledger.record(record)
+    {
+        warn!("Failed to record turn usage: {e}");
     }
 }
 

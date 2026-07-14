@@ -77,41 +77,13 @@ fn policy_halt_msg(reasons: &[String]) -> String {
     msg
 }
 
-/// Run a single turn: compact if needed, push user message, loop until done.
+/// Run a single root turn, returning its outcome and billed
+/// [`TurnUsage`] so the caller can record the cost to the usage ledger.
 ///
 /// Shared by all root channels (telegram, socket, heartbeat). Prepends
 /// the memory index (spec 21) to the cached system prompt, read fresh so
 /// runtime writes take effect on the next turn. Sub-agents call
 /// [`run_turn`] directly and are excluded by design.
-#[allow(clippy::too_many_arguments)]
-pub async fn process_message(
-    engine: &mut impl ContextEngine,
-    summarize: &SummarizeFn,
-    workspace: &Workspace,
-    user_message: &str,
-    provider: &impl Provider,
-    tools: &Tools,
-    max_iterations: usize,
-    memory_index_cap: usize,
-    ctx: &ToolCtx,
-) -> Result<TurnOutput, Error> {
-    process_message_metered(
-        engine,
-        summarize,
-        workspace,
-        user_message,
-        provider,
-        tools,
-        max_iterations,
-        memory_index_cap,
-        ctx,
-    )
-    .await
-    .map(|(output, _usage)| output)
-}
-
-/// Like [`process_message`] but also returns the turn's billed
-/// [`TurnUsage`], for the actor to record to the usage ledger.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_message_metered(
     engine: &mut impl ContextEngine,
@@ -1182,7 +1154,7 @@ mod tests {
         let mut engine =
             FlatSession::new(sessions_dir, state_dir, ContextConfig::default()).unwrap();
 
-        let result = process_message(
+        let result = process_message_metered(
             &mut engine,
             &summarize,
             &workspace,

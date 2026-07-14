@@ -15,6 +15,7 @@ use crate::heartbeat;
 use crate::memory::distill::{self, Distiller};
 use crate::provider::Provider;
 use crate::tools::Tools;
+use crate::usage::{self, TurnRecord, UsageLedger};
 use crate::workspace::Workspace;
 
 /// A recognized slash command.
@@ -84,6 +85,7 @@ pub async fn execute(
     distiller: &Distiller,
     max_iterations: usize,
     memory_index_cap: usize,
+    usage_ledger: Option<&UsageLedger>,
 ) -> Result<Reply, String> {
     match cmd {
         SlashCommand::Compact => match engine.force_compact(summarize).await {
@@ -120,60 +122,19 @@ pub async fn execute(
             )))
         }
         SlashCommand::Heartbeat => {
-            // The task-review turn. May be skipped when there are no
-            // standing tasks; distillation below runs regardless.
-            let review = match heartbeat::prepare(workspace) {
-                Ok(heartbeat::Prepared::Ready(prompt)) => {
-                    let output = agent::process_message(
-                        engine,
-                        summarize,
-                        workspace,
-                        &prompt,
-                        heartbeat_provider,
-                        tools,
-                        max_iterations,
-                        memory_index_cap,
-                        &crate::tools::ToolCtx::default(),
-                    )
-                    .await
-                    .map_err(|e| format!("Heartbeat failed: {e}"))?;
-                    let response = output.into_text();
-                    if let Err(e) = heartbeat::finish(workspace, &response) {
-                        error!("Failed to write heartbeat history: {e}");
-                    }
-                    response
-                }
-                Ok(heartbeat::Prepared::Skipped(reason)) => format!("Skipped: {reason}"),
-                Err(e) => return Err(format!("Heartbeat failed: {e}")),
-            };
-
-            // Distillation is independent of the review: it folds
-            // accumulated session history into memory whenever the
-            // mechanical gate opens, even with no review tasks. A
-            // failure is logged, not fatal — the review reply stands.
-            let mut state = distill::DistillState::load(&workspace.distillation_state_path());
-            match distill::run(
+            heartbeat_cycle(
                 engine,
-                distiller,
-                memory_provider,
                 summarize,
                 workspace,
-                &mut state,
+                heartbeat_provider,
+                memory_provider,
+                tools,
+                distiller,
+                max_iterations,
+                memory_index_cap,
+                usage_ledger,
             )
             .await
-            {
-                Ok(Some(summary)) => {
-                    if let Err(e) = heartbeat::finish(workspace, &format!("Distilled: {summary}")) {
-                        error!("Failed to write distillation history: {e}");
-                    }
-                    Ok(Reply::text(format!("{review}\n\nDistilled: {summary}")))
-                }
-                Ok(None) => Ok(Reply::text(review)),
-                Err(e) => {
-                    error!("Distillation failed: {e}");
-                    Ok(Reply::text(review))
-                }
-            }
         }
         SlashCommand::New => {
             engine.clear().await.map_err(|e| e.to_string())?;
@@ -188,6 +149,100 @@ pub async fn execute(
             .await
             .map(Reply::pre)
             .map_err(|e| e.to_string()),
+    }
+}
+
+/// Run the heartbeat cycle: the optional task-review turn followed by
+/// the independent distillation pass. Both turns bill against the active
+/// session in the usage ledger.
+#[allow(clippy::too_many_arguments)]
+async fn heartbeat_cycle(
+    engine: &mut impl ContextEngine,
+    summarize: &SummarizeFn,
+    workspace: &Workspace,
+    heartbeat_provider: &impl Provider,
+    memory_provider: &impl Provider,
+    tools: &Tools,
+    distiller: &Distiller,
+    max_iterations: usize,
+    memory_index_cap: usize,
+    usage_ledger: Option<&UsageLedger>,
+) -> Result<Reply, String> {
+    // The session the heartbeat runs on; both turns below bill against
+    // it in the ledger.
+    let session = engine.active_session().to_string();
+
+    // The task-review turn. May be skipped when there are no standing
+    // tasks; distillation below runs regardless.
+    let review = match heartbeat::prepare(workspace) {
+        Ok(heartbeat::Prepared::Ready(prompt)) => {
+            let (output, usage) = agent::process_message_metered(
+                engine,
+                summarize,
+                workspace,
+                &prompt,
+                heartbeat_provider,
+                tools,
+                max_iterations,
+                memory_index_cap,
+                &crate::tools::ToolCtx::default(),
+            )
+            .await
+            .map_err(|e| format!("Heartbeat failed: {e}"))?;
+            usage::record_turn(
+                usage_ledger,
+                &TurnRecord {
+                    session: &session,
+                    source: "Heartbeat",
+                    model: heartbeat_provider.model(),
+                    usage,
+                },
+            );
+            let response = output.into_text();
+            if let Err(e) = heartbeat::finish(workspace, &response) {
+                error!("Failed to write heartbeat history: {e}");
+            }
+            response
+        }
+        Ok(heartbeat::Prepared::Skipped(reason)) => format!("Skipped: {reason}"),
+        Err(e) => return Err(format!("Heartbeat failed: {e}")),
+    };
+
+    // Distillation is independent of the review: it folds accumulated
+    // session history into memory whenever the mechanical gate opens,
+    // even with no review tasks. A failure is logged, not fatal — the
+    // review reply stands.
+    let mut state = distill::DistillState::load(&workspace.distillation_state_path());
+    match distill::run(
+        engine,
+        distiller,
+        memory_provider,
+        summarize,
+        workspace,
+        &mut state,
+    )
+    .await
+    {
+        Ok(Some((summary, usage))) => {
+            usage::record_turn(
+                usage_ledger,
+                &TurnRecord {
+                    session: &session,
+                    source: "distill",
+                    model: memory_provider.model(),
+                    usage,
+                },
+            );
+            if let Err(e) = heartbeat::finish(workspace, &format!("Distilled: {summary}")) {
+                error!("Failed to write distillation history: {e}");
+            }
+            Ok(Reply::text(format!("{review}\n\nDistilled: {summary}")))
+        }
+        Ok(None) => Ok(Reply::text(review)),
+        Err(e) => {
+            error!("Distillation failed: {e}");
+            Ok(Reply::text(review))
+        }
     }
 }
 

@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use tracing::{Instrument, error, field, info_span, warn};
+use tracing::{Instrument, error, field, info_span};
 
 use crate::commands;
 use crate::dispatch::{Input, Reply};
@@ -17,7 +17,7 @@ use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::tools::Tools;
-use crate::usage::{TurnRecord, UsageLedger};
+use crate::usage::{self, TurnRecord, UsageLedger};
 use crate::workspace::Workspace;
 use tokio::sync::mpsc;
 
@@ -128,6 +128,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                     &self.distiller,
                     self.max_iterations,
                     self.memory_index_cap,
+                    self.usage_ledger.as_deref(),
                 )
                 .await
             }
@@ -193,18 +194,18 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         )
         .await;
 
-        // Record billed usage before unwrapping. Best-effort telemetry:
-        // a ledger write never fails the turn.
-        if let (Ok((_, usage)), Some(ledger)) = (&metered, &self.usage_ledger) {
+        // Record billed usage before unwrapping the turn output.
+        if let Ok((_, usage)) = &metered {
             let source = envelope.source.to_string();
-            if let Err(e) = ledger.record(&TurnRecord {
-                session: target,
-                source: &source,
-                model: self.provider.model(),
-                usage: *usage,
-            }) {
-                warn!("Failed to record turn usage: {e}");
-            }
+            usage::record_turn(
+                self.usage_ledger.as_deref(),
+                &TurnRecord {
+                    session: target,
+                    source: &source,
+                    model: self.provider.model(),
+                    usage: *usage,
+                },
+            );
         }
 
         let result = metered.map(|(output, _usage)| output);
