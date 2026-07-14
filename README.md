@@ -304,10 +304,11 @@ src/
 ├── secrets.rs           systemd credential loading
 ├── session.rs           Atomic JSON persistence
 ├── config.rs            TOML config with validation
-├── telegram.rs          Telegram Bot API channel
-├── socket.rs            Unix socket NDJSON channel
-├── github_channel.rs    GitHub PR polling channel
-├── linear_channel.rs    Linear issue polling channel
+├── channel/             Channels the agent talks through (spec 10)
+│   ├── socket.rs        Unix socket NDJSON channel
+│   ├── telegram.rs      Telegram Bot API channel
+│   ├── github.rs        GitHub PR polling channel (+ review_checkout)
+│   └── linear.rs        Linear issue polling channel (+ execution_checkout)
 ├── notify.rs            notify tool + Telegram push batching
 ├── daemon.rs            Event loop (select over enabled channels)
 ├── dispatch.rs          Input classification and Reply type

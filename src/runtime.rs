@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use tracing::error;
 
+use crate::channel::linear::LinearChannel;
+use crate::channel::telegram::TelegramChannel;
 use crate::config::Config;
-use crate::linear_channel::LinearChannel;
 use crate::notify::Notifier;
 use crate::provider::CompletionsProvider;
-use crate::telegram::TelegramChannel;
 use crate::tools::Tools;
 use crate::tools::git::GitCli;
 use crate::tools::github::GhCli;

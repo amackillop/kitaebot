@@ -20,12 +20,12 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::agent::AgentHandle;
+use crate::channel::github;
+use crate::channel::linear::{self, LinearChannel};
+use crate::channel::socket;
+use crate::channel::telegram::{self, TelegramChannel};
 use crate::config::GithubConfig;
-use crate::github_channel;
 use crate::heartbeat;
-use crate::linear_channel::{self, LinearChannel};
-use crate::socket;
-use crate::telegram::{self, TelegramChannel};
 use crate::tools::git::GitCli;
 use crate::tools::github::GhCli;
 use crate::workspace::Workspace;
@@ -89,7 +89,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         // Some exactly when `github.enabled`.
         match gh_cli.filter(|_| github.enabled).zip(git_cli) {
             Some((gh, git)) => {
-                github_channel::poll_loop(gh, git, github, handle, &state_path).await;
+                github::poll_loop(gh, git, github, handle, &state_path).await;
             }
             None => std::future::pending().await,
         }
@@ -99,7 +99,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     let linear_loop = async {
         match linear {
             Some(ch) => {
-                linear_channel::poll_loop(ch, handle, &linear_state_path).await;
+                linear::poll_loop(ch, handle, &linear_state_path).await;
             }
             None => std::future::pending().await,
         }

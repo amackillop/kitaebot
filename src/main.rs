@@ -1,5 +1,6 @@
 mod activity;
 mod agent;
+mod channel;
 mod clients;
 mod commands;
 mod config;
@@ -7,9 +8,7 @@ mod daemon;
 mod dispatch;
 mod engine;
 mod error;
-mod github_channel;
 mod heartbeat;
-mod linear_channel;
 mod memory;
 mod notify;
 mod provider;
@@ -19,9 +18,7 @@ mod safety;
 mod sandbox;
 mod secrets;
 mod session;
-mod socket;
 mod stats;
-mod telegram;
 #[cfg(test)]
 mod test_support;
 mod time;
