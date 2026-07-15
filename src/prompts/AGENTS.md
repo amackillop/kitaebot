@@ -116,6 +116,10 @@ hitting permissions, and network requests that cannot connect.
 Keep this separate from an ordinary failure you own: a failing test, a type
 error, a bad argument. Those you diagnose and fix.
 
+A policy block is an answer, not a hypothesis to test: never run a command
+to check whether it is blocked, and never re-run a blocked command hoping
+for a different result. Repeated blocks halt the turn.
+
 ### Git tooling
 `git clone`, `git fetch`, `git commit`, and `git push` are handled by the
 `git_clone`, `git_fetch`, `git_commit`, and `git_push` tools; the plain
