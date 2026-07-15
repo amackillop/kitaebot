@@ -87,6 +87,14 @@ pub fn gate_open(total: u64, threshold: u64) -> bool {
     total >= threshold
 }
 
+/// Whether a pass respects the token gate. Heartbeats enforce it;
+/// `/distill` bypasses it to force a pass on demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    Enforce,
+    Bypass,
+}
+
 /// Tool set the distiller uses to read and rewrite the memory index and
 /// topic files. No exec, no network: it only folds transcripts into
 /// `memory/`.
@@ -155,6 +163,8 @@ impl Distiller {
 ///
 /// Returns the pass summary paired with its billed [`TurnUsage`] so the
 /// caller can record the cost; `None` when the gate is closed.
+/// [`Gate::Bypass`] skips the threshold check, but an empty backlog
+/// still yields `None` — there is nothing to fold.
 pub async fn run<P: Provider, E: ContextEngine>(
     engine: &E,
     distiller: &Distiller,
@@ -162,10 +172,11 @@ pub async fn run<P: Provider, E: ContextEngine>(
     summarize: &SummarizeFn,
     workspace: &Workspace,
     state: &mut DistillState,
+    gate: Gate,
 ) -> Result<Option<(String, TurnUsage)>, Error> {
     let pending = engine.pending_distill_tokens(&state.watermarks).await?;
     let total = total_pending(&pending);
-    if !gate_open(total, distiller.threshold) {
+    if gate == Gate::Enforce && !gate_open(total, distiller.threshold) {
         info!(total, distiller.threshold, "Distillation gate closed");
         return Ok(None);
     }
@@ -516,6 +527,7 @@ mod run_tests {
             &noop_summarize(),
             &ws,
             &mut state,
+            Gate::Enforce,
         )
         .await
         .unwrap();
@@ -524,6 +536,69 @@ mod run_tests {
         assert_eq!(provider.call_count(), 0);
         assert!(state.watermarks.is_empty());
         assert!(!ws.distillation_state_path().exists());
+    }
+
+    #[tokio::test]
+    async fn bypass_runs_pass_below_threshold() {
+        let (_dir, ws) = workspace();
+        let engine = FakeEngine {
+            pending: BTreeMap::from([("general".into(), 10)]),
+            transcripts: BTreeMap::from([(
+                "general".into(),
+                vec![Message::User {
+                    content: "small backlog".into(),
+                }],
+            )]),
+        };
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            "forced pass".into(),
+        ))]));
+        let distiller = Distiller::new(&Tools::default(), ws.path(), 1000, 5);
+        let mut state = DistillState::default();
+
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Bypass,
+        )
+        .await
+        .unwrap();
+
+        let (summary, _usage) = out.expect("bypass forces a pass");
+        assert_eq!(summary, "forced pass");
+        assert_eq!(provider.call_count(), 1);
+        assert_eq!(state.watermarks.get("general"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn bypass_with_empty_backlog_makes_no_call() {
+        let (_dir, ws) = workspace();
+        let engine = FakeEngine {
+            pending: BTreeMap::new(),
+            transcripts: BTreeMap::new(),
+        };
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let distiller = Distiller::new(&Tools::default(), ws.path(), 1000, 5);
+        let mut state = DistillState::default();
+
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Bypass,
+        )
+        .await
+        .unwrap();
+
+        assert!(out.is_none());
+        assert_eq!(provider.call_count(), 0);
     }
 
     #[tokio::test]
@@ -554,6 +629,7 @@ mod run_tests {
             &noop_summarize(),
             &ws,
             &mut state,
+            Gate::Enforce,
         )
         .await
         .unwrap();
@@ -591,6 +667,7 @@ mod run_tests {
             &noop_summarize(),
             &ws,
             &mut state,
+            Gate::Enforce,
         )
         .await;
 

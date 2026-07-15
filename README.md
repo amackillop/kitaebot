@@ -313,7 +313,7 @@ src/
 ├── notify.rs            notify tool + Telegram push batching
 ├── daemon.rs            Event loop (select over enabled channels)
 ├── dispatch.rs          Input classification and Reply type
-├── commands.rs          Slash commands (/new, /context, /compact, /heartbeat, /stats)
+├── commands.rs          Slash commands (/new, /context, /compact, /heartbeat, /distill, /stats)
 ├── heartbeat.rs         Periodic heartbeat channel (timer + prepare/finish)
 ├── runtime.rs           Provider/tools/channels assembly
 ├── activity.rs          Structured turn events for observability

@@ -26,6 +26,8 @@ pub enum SlashCommand {
     Compact,
     /// Display token usage.
     Context,
+    /// Force a memory distillation pass, bypassing the token gate.
+    Distill,
     /// Trigger a one-shot heartbeat cycle.
     Heartbeat,
     /// Clear session and start fresh.
@@ -57,6 +59,7 @@ impl FromStr for SlashCommand {
         match (head, arg) {
             ("/compact", "") => Ok(Self::Compact),
             ("/context", "") => Ok(Self::Context),
+            ("/distill", "") => Ok(Self::Distill),
             ("/heartbeat", "") => Ok(Self::Heartbeat),
             ("/new", "") => Ok(Self::New),
             ("/stats", "") => Ok(Self::Stats),
@@ -124,6 +127,25 @@ pub async fn execute(
                 stats.message_count,
                 engine.active_session(),
             )))
+        }
+        SlashCommand::Distill => {
+            let session = engine.active_session().to_string();
+            let pass = distill_pass(
+                &*engine,
+                summarize,
+                workspace,
+                memory_provider,
+                distiller,
+                usage_ledger,
+                &session,
+                distill::Gate::Bypass,
+            )
+            .await
+            .map_err(|e| format!("Distillation failed: {e}"))?;
+            match pass {
+                Some(summary) => Ok(Reply::text(format!("Distilled: {summary}"))),
+                None => Ok(Reply::text("Nothing to distill.".into())),
+            }
         }
         SlashCommand::Heartbeat => {
             heartbeat_cycle(
@@ -223,38 +245,68 @@ async fn heartbeat_cycle(
     // session history into memory whenever the mechanical gate opens,
     // even with no review tasks. A failure is logged, not fatal — the
     // review reply stands.
-    let mut state = distill::DistillState::load(&workspace.distillation_state_path());
-    match distill::run(
-        engine,
-        distiller,
-        memory_provider,
+    let pass = distill_pass(
+        &*engine,
         summarize,
         workspace,
-        &mut state,
+        memory_provider,
+        distiller,
+        usage_ledger,
+        &session,
+        distill::Gate::Enforce,
     )
-    .await
-    {
-        Ok(Some((summary, usage))) => {
-            usage::record_turn(
-                usage_ledger,
-                &TurnRecord {
-                    session: &session,
-                    source: "distill",
-                    model: memory_provider.model(),
-                    usage,
-                },
-            );
-            if let Err(e) = heartbeat::finish(workspace, &format!("Distilled: {summary}")) {
-                error!("Failed to write distillation history: {e}");
-            }
-            Ok(Reply::text(format!("{review}\n\nDistilled: {summary}")))
-        }
+    .await;
+    match pass {
+        Ok(Some(summary)) => Ok(Reply::text(format!("{review}\n\nDistilled: {summary}"))),
         Ok(None) => Ok(Reply::text(review)),
         Err(e) => {
             error!("Distillation failed: {e}");
             Ok(Reply::text(review))
         }
     }
+}
+
+/// Run one distillation pass plus its bookkeeping: bill the turn to
+/// `session` in the ledger and append the result to HISTORY.md.
+/// Returns the pass summary, or `None` when no pass ran.
+#[allow(clippy::too_many_arguments)]
+async fn distill_pass(
+    engine: &impl ContextEngine,
+    summarize: &SummarizeFn,
+    workspace: &Workspace,
+    memory_provider: &impl Provider,
+    distiller: &Distiller,
+    usage_ledger: Option<&UsageLedger>,
+    session: &str,
+    gate: distill::Gate,
+) -> Result<Option<String>, String> {
+    let mut state = distill::DistillState::load(&workspace.distillation_state_path());
+    let out = distill::run(
+        engine,
+        distiller,
+        memory_provider,
+        summarize,
+        workspace,
+        &mut state,
+        gate,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(out.map(|(summary, usage)| {
+        usage::record_turn(
+            usage_ledger,
+            &TurnRecord {
+                session,
+                source: "distill",
+                model: memory_provider.model(),
+                usage,
+            },
+        );
+        if let Err(e) = heartbeat::finish(workspace, &format!("Distilled: {summary}")) {
+            error!("Failed to write distillation history: {e}");
+        }
+        summary
+    }))
 }
 
 /// Dispatch `/project` with or without a name argument.
@@ -396,6 +448,7 @@ mod tests {
     fn parse_known_commands() {
         assert_eq!("/compact".parse(), Ok(SlashCommand::Compact));
         assert_eq!("/context".parse(), Ok(SlashCommand::Context));
+        assert_eq!("/distill".parse(), Ok(SlashCommand::Distill));
         assert_eq!("/heartbeat".parse(), Ok(SlashCommand::Heartbeat));
         assert_eq!("/new".parse(), Ok(SlashCommand::New));
         assert_eq!("/stats".parse(), Ok(SlashCommand::Stats));
