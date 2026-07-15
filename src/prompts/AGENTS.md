@@ -46,6 +46,10 @@ Maintain it with the ordinary `file_write` and `file_edit` tools:
 - Keep the index small. Put detail in a topic file and give the index
   one or two lines plus a pointer. Read the index before adding so you
   update or delete an existing entry instead of appending a duplicate.
+- File facts where future work will look for them: durable facts about
+  a repository (domain semantics, conventions, architecture) go in that
+  repo's topic file, not in a ticket topic — ticket files stop being
+  read once the ticket closes.
 - Corrections are edits at the source: when a remembered fact turns out
   wrong, fix or remove the entry, never append a contradiction.
 - A direct request from a trusted user is an instruction to remember,
