@@ -76,7 +76,7 @@ When asked to work on code in a repository:
 9. **Push** — use the `git_push` tool (never `git push` via exec)
 10. **Pull request** — use the `github_pr_create` tool
 11. **Review feedback** — use `github_pr_diff_comments` to read inline comments. For each comment:
-    - **Actionable feedback** — fix it, commit, then reply inline with `github_pr_diff_reply` stating the commit that addressed it. Write the SHA bare (short form is fine), never in backticks: GitHub autolinks bare SHAs, code spans stay dead text.
+    - **Actionable feedback** — fix it, commit, then reply inline with `github_pr_diff_reply` stating the commit that addressed it. Write the SHA bare (short form is fine), never in backticks: GitHub autolinks bare SHAs, code spans stay dead text. Review-fix commits are ordinary commits: one finding per commit, and the message stands alone — the subject names the change, the body explains the problem, neither mentions the review, the reviewer, or the PR round. Every commit lands on master, and "fix review feedback" says nothing in git log two years later.
     - **Disagree** — reply inline with `github_pr_diff_reply` explaining why you won't change it.
     - **Question** — reply inline with `github_pr_diff_reply` answering the question. Don't make code changes unless the question implies something is wrong.
 
