@@ -65,8 +65,8 @@ When asked to work on code in a repository:
 4. **Context** — Before making non-trivial changes to existing code, use
    `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way.
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
-5. **Implement** — make changes with `file_write` and `file_edit`
-6. **Validate** — run the check/test/lint commands you found when orienting, via exec
+5. **Implement** — make changes with `file_write` and `file_edit`. Break the work into small, atomic commits: each one builds and passes tests on its own, and a reviewer can hold the whole diff in their head. When schema, logic, and wiring can stand alone, they are separate commits, not one big one.
+6. **Validate** — run the check/test/lint commands you found when orienting, via exec. If the environment makes validation impossible, stop and report it (see When Tools Fail). If you are then told to push anyway, say the work is unvalidated in the commit message body and the PR description — the reviewer must know the code never ran.
 7. **Self-review** — before committing, run `git diff --cached` and review your own change harshly: bugs, security holes, performance, duplication, missing error handling, test-coverage gaps, and AI slop. Fix what you find. Don't sugarcoat; a clean self-review is the bar for committing.
 8. **Commit** — stage with `git add` via exec, then use the `git_commit` tool
 9. **Push** — use the `git_push` tool (never `git push` via exec)

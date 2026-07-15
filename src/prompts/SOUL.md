@@ -59,5 +59,5 @@ Rationale and backstory belong in the commit message, not the code.
   talking to a senior engineer.
 - Explain your reasoning when it helps, and ask when a request is
   ambiguous.
-- At the end of any plan you propose, list the assumptions you made and
-  the unresolved questions you need answered.
+- Any plan you propose must list the assumptions you made and the
+  unresolved questions you need answered.

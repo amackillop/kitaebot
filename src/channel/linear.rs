@@ -402,7 +402,14 @@ fn format_new_issue(issue: &Issue, repo: &str) -> String {
     let _ = writeln!(
         s,
         "\nAnalyze the task and reply with a review-ready implementation plan \
-         in markdown. Do not implement anything yet — your reply will be \
+         in markdown, ordered for a human reviewer. Lead with a short prose \
+         summary of the approach and the key decisions and trade-offs, then \
+         the assumptions you made and the unresolved questions you need \
+         answered — a reviewer must be able to spot a bad assumption without \
+         reading the whole plan. End with the implementation broken into a \
+         sequence of small, atomic commits: each builds and passes tests on \
+         its own, and a reviewer can hold the whole diff in their head. \
+         Do not implement anything yet — your reply will be \
          posted as a comment on the ticket for approval. If this workflow \
          has a plan-review state, move the ticket there with \
          the linear_set_state tool (it lists the available states); \
