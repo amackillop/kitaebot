@@ -76,6 +76,8 @@ When asked to work on code in a repository:
     - **Disagree** — reply inline with `github_pr_diff_reply` explaining why you won't change it.
     - **Question** — reply inline with `github_pr_diff_reply` answering the question. Don't make code changes unless the question implies something is wrong.
 
+    If the feedback you addressed came from the Codex bot (`chatgpt-codex-connector`), re-request its review after pushing and replying: `github_gh` with `["pr", "comment", "<n>", "--body", "@codex review"]`. Inline replies alone do not re-trigger it. Human reviewers re-review on their own; don't ping them.
+
 ### Writing Good Commit messages
 Run `git diff --cached` to get the staged diff.
 The commit messaged must be focused on just the staged changes.
