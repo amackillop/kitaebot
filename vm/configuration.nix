@@ -339,7 +339,9 @@ in
             # Syscalls
             SystemCallFilter = [
               "@system-service"
+              # @privileged contains @chown; re-allow it, libuv needs fchown
               "~@privileged"
+              "@chown"
             ];
             SystemCallArchitectures = "native";
 
