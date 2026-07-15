@@ -10,7 +10,8 @@ use tracing::error;
 
 use crate::agent;
 use crate::dispatch::Reply;
-use crate::engine::{ContextEngine, SummarizeFn};
+use crate::engine::names::sanitize_name;
+use crate::engine::{ContextEngine, SessionInfo, SummarizeFn};
 use crate::heartbeat;
 use crate::memory::distill::{self, Distiller};
 use crate::provider::Provider;
@@ -264,12 +265,17 @@ async fn project(engine: &mut impl ContextEngine, name: Option<String>) -> Resul
     }
 }
 
-async fn list_projects(engine: &mut impl ContextEngine) -> Result<Reply, String> {
-    let sessions = engine.list_sessions().await.map_err(|e| e.to_string())?;
-    let active = engine.active_session();
+/// Render the session list, marking the active one. Names are compared
+/// in sanitized space: engines list desanitized names but report the
+/// active session in stored (sanitized) form.
+fn render_sessions(sessions: &[SessionInfo], active: &str) -> String {
     let mut out = String::new();
-    for s in &sessions {
-        let marker = if s.name == active { "* " } else { "  " };
+    for s in sessions {
+        let marker = if sanitize_name(&s.name) == active {
+            "* "
+        } else {
+            "  "
+        };
         let _ = writeln!(
             out,
             "{marker}{} ({} messages, ~{} tokens)",
@@ -279,11 +285,28 @@ async fn list_projects(engine: &mut impl ContextEngine) -> Result<Reply, String>
     if out.is_empty() {
         out.push_str("No sessions.\n");
     }
+    out
+}
+
+async fn list_projects(engine: &mut impl ContextEngine) -> Result<Reply, String> {
+    let sessions = engine.list_sessions().await.map_err(|e| e.to_string())?;
+    let out = render_sessions(&sessions, engine.active_session());
     Ok(Reply::pre(out))
 }
 
+/// Switch to an existing session. A name that matches no session is an
+/// error, not a create: /project is navigation, and a typo silently
+/// spawning a fresh session strands the user outside their context.
+/// Sessions are created by channel routing, never from here.
 async fn switch_project(engine: &mut impl ContextEngine, name: &str) -> Result<Reply, String> {
-    // Filename sanitization (`/`, `..`, null bytes) is the engine's job.
+    let sessions = engine.list_sessions().await.map_err(|e| e.to_string())?;
+    let target = sanitize_name(name);
+    if !sessions.iter().any(|s| sanitize_name(&s.name) == target) {
+        return Err(format!(
+            "No session '{name}'. Sessions:\n{}",
+            render_sessions(&sessions, engine.active_session()),
+        ));
+    }
     engine
         .switch_session(name)
         .await
@@ -301,6 +324,73 @@ async fn switch_project(engine: &mut impl ContextEngine, name: &str) -> Result<R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ContextConfig;
+    use crate::engine::flat::FlatSession;
+    use crate::types::Message;
+
+    async fn engine_with_sessions(dir: &std::path::Path, names: &[&str]) -> FlatSession {
+        let sessions_dir = dir.join("sessions");
+        let state_dir = dir.join("state");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let mut engine =
+            FlatSession::new(sessions_dir, state_dir, ContextConfig::default()).unwrap();
+        for name in names {
+            engine.switch_session(name).await.unwrap();
+            engine
+                .push_message(Message::User {
+                    content: "hi".into(),
+                })
+                .await
+                .unwrap();
+            engine.save().await.unwrap();
+        }
+        engine
+    }
+
+    #[tokio::test]
+    async fn switch_project_rejects_unknown_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_sessions(dir.path(), &["general"]).await;
+
+        let err = switch_project(&mut engine, "open-money").await.unwrap_err();
+        assert!(err.contains("No session 'open-money'"), "{err}");
+        assert!(err.contains("general"), "{err}");
+        // The typo must not create a session.
+        let sessions = engine.list_sessions().await.unwrap();
+        assert!(!sessions.iter().any(|s| s.name.contains("open-money")));
+        assert_eq!(engine.active_session(), "general");
+    }
+
+    #[tokio::test]
+    async fn switch_project_accepts_existing_repo_style_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine =
+            engine_with_sessions(dir.path(), &["CumuloGlobal/open-money", "general"]).await;
+
+        let reply = switch_project(&mut engine, "CumuloGlobal/open-money")
+            .await
+            .unwrap();
+        assert_eq!(engine.active_session(), "CumuloGlobal--open-money");
+        assert!(reply.content.contains("Switched to"), "{}", reply.content);
+    }
+
+    #[tokio::test]
+    async fn list_projects_marks_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine =
+            engine_with_sessions(dir.path(), &["CumuloGlobal/open-money", "general"]).await;
+        engine
+            .switch_session("CumuloGlobal/open-money")
+            .await
+            .unwrap();
+
+        let reply = list_projects(&mut engine).await.unwrap();
+        assert!(reply.preformatted);
+        let out = reply.content;
+        assert!(out.contains("* CumuloGlobal/open-money"), "{out}");
+        assert!(out.contains("  general"), "{out}");
+    }
 
     #[test]
     fn parse_known_commands() {
