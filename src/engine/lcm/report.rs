@@ -14,7 +14,8 @@ use rusqlite::Connection;
 use crate::error::EngineError;
 use crate::types::Message;
 
-use super::engine::{desanitize_name, reconstruct_message, storage_err};
+use super::super::names::desanitize_name;
+use super::engine::{reconstruct_message, storage_err};
 
 /// Build the full `/stats` report: shared tool tables + health section.
 pub(super) fn report_sync(conn: &Connection) -> Result<String, EngineError> {

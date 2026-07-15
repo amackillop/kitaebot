@@ -41,6 +41,7 @@ use crate::error::EngineError;
 use crate::tools::Tool;
 use crate::types::{Message, ToolCall, ToolFunction, estimate_tokens};
 
+use super::super::names::{desanitize_name, sanitize_name};
 use super::super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
     ToolScope,
@@ -1095,19 +1096,6 @@ fn ensure_conversation(conn: &Connection, name: &str) -> Result<i64, EngineError
 
 pub(super) fn storage_err(e: &rusqlite::Error) -> EngineError {
     EngineError::Storage(e.to_string())
-}
-
-// ── Name sanitization ───────────────────────────────────────────────
-//
-// Mirrors `engine::flat`. Kept as a duplicate for now — when a third
-// engine needs the same logic, lift into `engine::names`.
-
-fn sanitize_name(name: &str) -> String {
-    name.replace('\0', "").replace("..", "").replace('/', "--")
-}
-
-pub(super) fn desanitize_name(stem: &str) -> String {
-    stem.replace("--", "/")
 }
 
 // ── Active session persistence ──────────────────────────────────────

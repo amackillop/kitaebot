@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use tracing::info;
 
+use super::names::{desanitize_name, sanitize_name};
 use crate::config::ContextConfig;
 use crate::error::EngineError;
 use crate::session::Session;
@@ -386,21 +387,6 @@ impl ContextEngine for FlatSession {
         }
         Ok(out)
     }
-}
-
-// ── Name sanitization ───────────────────────────────────────────────
-
-/// Sanitize a session name for use as a filename.
-///
-/// `/` becomes `--` so repo-style names like `owner/repo` map to
-/// `owner--repo.json`. Null bytes and `..` are stripped entirely.
-fn sanitize_name(name: &str) -> String {
-    name.replace('\0', "").replace("..", "").replace('/', "--")
-}
-
-/// Reverse the sanitization to recover the original name.
-fn desanitize_name(stem: &str) -> String {
-    stem.replace("--", "/")
 }
 
 // ── Active session persistence ──────────────────────────────────────
@@ -1009,41 +995,5 @@ mod tests {
         assert!(report.contains("exec"));
         assert!(report.contains("file_read"));
         assert!(report.contains("git status"));
-    }
-
-    // ── Name sanitization tests ─────────────────────────────────────
-
-    #[test]
-    fn sanitize_slashes() {
-        assert_eq!(sanitize_name("owner/repo"), "owner--repo");
-    }
-
-    #[test]
-    fn sanitize_double_dots() {
-        // `..` stripped, then `/` becomes `--`.
-        assert_eq!(sanitize_name("../evil"), "--evil");
-        // "a/../b" -> strip ".." -> "a//b" -> replace "/" -> "a----b"
-        assert_eq!(sanitize_name("a/../b"), "a----b");
-    }
-
-    #[test]
-    fn sanitize_null_bytes() {
-        assert_eq!(sanitize_name("foo\0bar"), "foobar");
-    }
-
-    #[test]
-    fn desanitize_reverses_slashes() {
-        assert_eq!(desanitize_name("owner--repo"), "owner/repo");
-    }
-
-    #[test]
-    fn sanitize_roundtrip() {
-        let name = "owner/repo";
-        assert_eq!(desanitize_name(&sanitize_name(name)), name);
-    }
-
-    #[test]
-    fn sanitize_plain_name_unchanged() {
-        assert_eq!(sanitize_name("general"), "general");
     }
 }
