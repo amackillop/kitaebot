@@ -65,7 +65,7 @@ When asked to work on code in a repository:
 4. **Context** — Before making non-trivial changes to existing code, use
    `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way.
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
-5. **Implement** — make changes with `file_write` and `file_edit`. Break the work into small, atomic commits: each one builds and passes tests on its own, and a reviewer can hold the whole diff in their head. When schema, logic, and wiring can stand alone, they are separate commits, not one big one.
+5. **Implement** — make changes with `file_write` and `file_edit`. Break the work into small, atomic commits: each one builds and passes tests on its own, and a reviewer can hold the whole diff in their head. When schema, logic, and wiring can stand alone, they are separate commits, not one big one. Before writing a helper (normalizer, formatter, parser), grep for an existing one — repos accumulate copies and review will flag the duplicate. When modeling a new status or enum, find how the same file or module already models one and copy that pattern; an existing closed union beats a fresh `| string`.
 6. **Validate** — run the check/test/lint commands you found when orienting, via exec. If the environment makes validation impossible, stop and report it (see When Tools Fail). If you are then told to push anyway, say the work is unvalidated in the commit message body and the PR description — the reviewer must know the code never ran.
 7. **Self-review** — before committing, run `git diff --cached` and review your own change harshly: bugs, security holes, performance, duplication, missing error handling, test-coverage gaps, and AI slop. Fix what you find. Don't sugarcoat; a clean self-review is the bar for committing.
 8. **Commit** — stage with `git add` via exec, then use the `git_commit` tool
@@ -75,6 +75,8 @@ When asked to work on code in a repository:
     - **Actionable feedback** — fix it, commit, then reply inline with `github_pr_diff_reply` stating the commit that addressed it. Write the SHA bare (short form is fine), never in backticks: GitHub autolinks bare SHAs, code spans stay dead text.
     - **Disagree** — reply inline with `github_pr_diff_reply` explaining why you won't change it.
     - **Question** — reply inline with `github_pr_diff_reply` answering the question. Don't make code changes unless the question implies something is wrong.
+
+    When a second round of feedback lands on the same block of code, stop patching: re-read the whole block and redesign it. Guards and special cases accreted comment-by-comment produce code nobody would write from scratch.
 
     If the feedback you addressed came from the Codex bot (`chatgpt-codex-connector`), re-request its review after pushing and replying: `github_gh` with `["pr", "comment", "<n>", "--body", "@codex review"]`. Inline replies alone do not re-trigger it. Human reviewers re-review on their own; don't ping them.
 
