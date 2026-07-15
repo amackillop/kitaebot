@@ -60,9 +60,10 @@ const BLOCKED: &str = "command blocked by policy";
 /// Rules with specific guidance tell the LLM *what to do instead* when
 /// a command is blocked. Generic rules use the default message.
 const DENY_RULES: &[DenyRule] = &[
-    // Destructive file operations
+    // Destructive file operations. Only recursive rm is blocked;
+    // single-file deletes (rm, rm -f) are routine cleanup.
     DenyRule {
-        pattern: r"rm\s+-[rf]",
+        pattern: r"\brm\b[^|;&\n]*\s-(-recursive\b|[a-zA-Z]*[rR])",
         guidance: BLOCKED,
     },
     DenyRule {
@@ -834,6 +835,11 @@ mod tests {
     fn test_deny_destructive() {
         assert_blocked("rm -rf /");
         assert_blocked("rm -r foo");
+        assert_blocked("rm -fr foo");
+        assert_blocked("rm -Rf foo");
+        assert_blocked("rm --recursive foo");
+        assert_blocked("rm -f -r foo");
+        assert_blocked("rm foo -r");
         assert_blocked("find . -name '*.log' -delete");
         assert_blocked("find /tmp -exec rm {} \\;");
         assert_blocked("shred secret.txt");
@@ -1048,6 +1054,14 @@ mod tests {
         assert_allowed("git reset --hard origin/main");
         assert_allowed("git reset --hard HEAD~3");
         assert_allowed("find / -name justfile 2>/dev/null");
+        assert_allowed("rm stale.log");
+        assert_allowed("rm -f stale.log");
+        assert_allowed("rm -fv stale.log");
+        assert_allowed("rm --force stale.log");
+        assert_allowed("rm my-report.txt");
+        // Separator bounds the flag scan: the -r belongs to grep.
+        assert_allowed("rm stale.log && grep -r TODO .");
+        assert_allowed("confirm -rf");
     }
 
     #[test]
