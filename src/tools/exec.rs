@@ -378,16 +378,19 @@ const DENY_RULES: &[DenyRule] = &[
     // ── Nix ──────────────────────────────────────────────────────────
     // Remote flake references — catch-all across all subcommands.
     // The agent must add dependencies as flake inputs, not fetch ad-hoc.
+    // nix must sit in command position: \bnix\b alone also matches
+    // /nix/store paths, so any store-path binary with a URL argument
+    // would trip the rule.
     DenyRule {
-        pattern: r"\bnix\b.*\b(github|gitlab|sourcehut):",
+        pattern: r"(^|[|;&\n])\s*nix\s.*\b(github|gitlab|sourcehut):",
         guidance: "remote flakes not permitted — add as a flake input",
     },
     DenyRule {
-        pattern: r"\bnix\b.*https?://",
+        pattern: r"(^|[|;&\n])\s*nix\s.*https?://",
         guidance: "remote flakes not permitted — add as a flake input",
     },
     DenyRule {
-        pattern: r"\bnix\b.*git\+",
+        pattern: r"(^|[|;&\n])\s*nix\s.*git\+",
         guidance: "remote flakes not permitted — add as a flake input",
     },
     // System rebuild
@@ -1293,6 +1296,8 @@ mod tests {
         assert_blocked("nix build https://example.com/flake.tar.gz");
         assert_blocked("nix develop git+https://example.com/repo");
         assert_blocked("nix build git+ssh://example.com/repo");
+        assert_blocked("true && nix run https://example.com/flake");
+        assert_blocked("echo x; nix build github:owner/repo");
     }
 
     #[test]
@@ -1316,6 +1321,11 @@ mod tests {
         assert_allowed("nix eval --json .#attr");
         assert_allowed("nix log .#package");
         assert_allowed("nix flake metadata");
+        // Store-path binaries with URL arguments are not flake fetches.
+        assert_allowed(
+            "/nix/store/abc-pnpm/bin/pnpm config set registry https://registry.npmjs.org",
+        );
+        assert_allowed("/nix/store/abc-node/bin/node -e 'fetch(\"https://example.com\")'");
     }
 
     // ── Shell-aware command parser ────────────────────────────────────
