@@ -9,7 +9,6 @@
 //! caller and never fails the turn.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Mutex;
@@ -67,8 +66,10 @@ impl UsageLedger {
     /// aggregates. The ledger is prunable, so an unbounded read is fine.
     pub fn rows(&self) -> rusqlite::Result<Vec<TurnRow>> {
         let conn = self.conn.lock().expect("usage ledger mutex poisoned");
-        let mut stmt = conn
-            .prepare("SELECT git_sha, model, prompt_tokens, completion_tokens, cost FROM turns")?;
+        let mut stmt = conn.prepare(
+            "SELECT git_sha, model, prompt_tokens, completion_tokens, cost
+                 FROM turns ORDER BY id",
+        )?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(TurnRow {
@@ -147,20 +148,21 @@ impl Agg {
     }
 }
 
-/// Group turns by `key`, sorted by cost then tokens, both descending.
+/// Group turns by `key` in first-seen order. Rows arrive in insertion
+/// order, so first-seen is chronological.
 fn group_by(rows: &[TurnRow], key: impl Fn(&TurnRow) -> String) -> Vec<(String, Agg)> {
-    let mut groups: BTreeMap<String, Agg> = BTreeMap::new();
+    let mut groups: Vec<(String, Agg)> = Vec::new();
     for row in rows {
-        groups.entry(key(row)).or_default().add(row);
+        let k = key(row);
+        if let Some((_, agg)) = groups.iter_mut().find(|(name, _)| *name == k) {
+            agg.add(row);
+        } else {
+            let mut agg = Agg::default();
+            agg.add(row);
+            groups.push((k, agg));
+        }
     }
-    let mut sorted: Vec<_> = groups.into_iter().collect();
-    sorted.sort_by(|a, b| {
-        b.1.cost
-            .partial_cmp(&a.1.cost)
-            .unwrap_or(Ordering::Equal)
-            .then(b.1.tokens.cmp(&a.1.tokens))
-    });
-    sorted
+    groups
 }
 
 /// Render the `/usage` report: totals, then a per-build and per-model
@@ -184,6 +186,7 @@ pub fn report(rows: &[TurnRow]) -> String {
         fmt_cost(total.cost, total.metered),
     );
 
+    // Chronological: a cost shift reads as a timeline of deploys.
     let build = group_by(rows, |r| {
         r.git_sha
             .as_deref()
@@ -191,7 +194,13 @@ pub fn report(rows: &[TurnRow]) -> String {
     });
     write_table(&mut out, "By Build", "Build", &build, true);
 
-    let model = group_by(rows, |r| r.model.clone());
+    let mut model = group_by(rows, |r| r.model.clone());
+    model.sort_by(|a, b| {
+        b.1.cost
+            .partial_cmp(&a.1.cost)
+            .unwrap_or(Ordering::Equal)
+            .then(b.1.tokens.cmp(&a.1.tokens))
+    });
     write_table(&mut out, "By Model", "Model", &model, false);
 
     out
@@ -415,6 +424,19 @@ mod tests {
         // Per-model aggregation folds the two glm rows.
         assert!(out.contains("glm"));
         assert!(out.contains("kimi"));
+    }
+
+    #[test]
+    fn builds_listed_chronologically_not_by_cost() {
+        // The older build costs more; it must still come first.
+        let rows = vec![
+            row(Some("aaaaaaa111"), "glm", 100, Some(0.90)),
+            row(Some("bbbbbbb222"), "glm", 100, Some(0.01)),
+        ];
+        let out = report(&rows);
+        let old = out.find("aaaaaaa").unwrap();
+        let new = out.find("bbbbbbb").unwrap();
+        assert!(old < new);
     }
 
     #[test]
