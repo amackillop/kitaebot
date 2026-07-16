@@ -7,6 +7,7 @@
 //!
 //! [`ContextEngine::report`]: crate::engine::ContextEngine::report
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 
@@ -160,19 +161,19 @@ fn analyze(sessions: &[Vec<Message>]) -> Report {
 
     let sorted_stats = |map: HashMap<String, ToolStats>| {
         let mut v: Vec<_> = map.into_iter().collect();
-        v.sort_by(|a, b| b.1.total_output_bytes.cmp(&a.1.total_output_bytes));
+        v.sort_by_key(|(_, s)| Reverse(s.total_output_bytes));
         v
     };
 
     let sorted_counts = |map: HashMap<String, u64>| {
         let mut v: Vec<_> = map.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|(_, n)| Reverse(*n));
         v
     };
 
     let sorted_errors = |map: HashMap<ToolErrorKey, u64>| {
         let mut v: Vec<_> = map.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|(_, n)| Reverse(*n));
         v
     };
 
@@ -282,11 +283,10 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
 
 fn format_table(out: &mut String, rows: &[(String, ToolStats)]) {
     for (name, stats) in rows {
-        let avg = if stats.calls > 0 {
-            stats.total_output_bytes / stats.calls
-        } else {
-            0
-        };
+        let avg = stats
+            .total_output_bytes
+            .checked_div(stats.calls)
+            .unwrap_or(0);
         writeln!(
             out,
             "{:<20} {:>6}   {:>14}   {:>10}",

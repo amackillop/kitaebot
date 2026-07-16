@@ -725,7 +725,7 @@ mod tests {
     }
 
     fn channel(client: LinearClient) -> LinearChannel {
-        LinearChannel::new(client, Duration::from_secs(120), trusted(), None)
+        LinearChannel::new(client, Duration::from_mins(2), trusted(), None)
     }
 
     #[test]

@@ -113,11 +113,9 @@ pub async fn execute(
         },
         SlashCommand::Context => {
             let stats = engine.stats();
-            let pct = if stats.budget > 0 {
-                stats.token_estimate * 100 / stats.budget
-            } else {
-                0
-            };
+            let pct = (stats.token_estimate * 100)
+                .checked_div(stats.budget)
+                .unwrap_or(0);
             Ok(Reply::text(format!(
                 "Context: {} / {} tokens ({pct}%)\n\
                  Messages: {}\n\

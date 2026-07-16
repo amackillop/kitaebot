@@ -162,7 +162,7 @@ mod tests {
         run_with_shutdown(
             &ws,
             &handle,
-            Duration::from_secs(3600), // large interval — only the immediate first tick matters
+            Duration::from_hours(1), // large interval — only the immediate first tick matters
             None,
             None,
             None,
@@ -230,7 +230,7 @@ mod tests {
         run_with_shutdown(
             &ws,
             &handle,
-            Duration::from_secs(3600),
+            Duration::from_hours(1),
             None,
             None,
             None,
