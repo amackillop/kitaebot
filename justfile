@@ -136,6 +136,11 @@ vm-logs:
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost \
         journalctl --output cat -f _SYSTEMD_UNIT=kitaebot.service + _SYSTEMD_UNIT=tinyproxy.service + _TRANSPORT=kernel
 
+# Dump the last N log lines and exit (non-interactive; for scripts and tools)
+vm-logs-dump lines="200":
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost \
+        journalctl --output cat --no-pager -n {{lines}} _SYSTEMD_UNIT=kitaebot.service + _SYSTEMD_UNIT=tinyproxy.service + _TRANSPORT=kernel
+
 # Chat with the daemon via SSH socket forwarding
 chat *flags: (vm-run flags)
     #!/usr/bin/env bash
