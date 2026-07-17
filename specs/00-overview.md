@@ -93,6 +93,7 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [19](19-sub-agents.md) | Sub-Agents | Task delegation with isolated child contexts |
 | [20](20-github.md) | GitHub Channel | PR feedback polling and review requests |
 | [21](21-memory.md) | Memory | Durable cross-session knowledge: index, topics, distillation |
+| [22](22-mcp.md) | MCP Client | External MCP stdio servers as tools (bkb, Grafana) |
 
 ## Data Flow
 
