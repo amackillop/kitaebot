@@ -72,11 +72,27 @@ remembered decision about the current task pre-anchoring a plan review —
 is already excluded by memory discipline: in-progress task state is
 session state, never memory (AGENTS.md, Memory section).
 
-The reviewer's system prompt sets an adversarial stance (find what is
-wrong, do not affirm), names the seed categories (see Findings), demands
-findings anchored to file/line, and mandates the findings block that ends
-every response. It explicitly instructs: judge the diff against the
-stated intent; flag anything beyond the stated intent as scope creep.
+The reviewer's system prompt sets the stance and the bar. Stance: judge
+the artifact against its stated intent; flag anything beyond that intent
+as scope creep; matter-of-fact tone, findings anchored to file/line, at
+most a paragraph per finding, no code chunks over three lines. The bar
+is a finding-eligibility test, adapted per gate — a finding qualifies
+only if it:
+
+- was introduced by the change under review; pre-existing problems are
+  not findings (commit and series gates; at the plan gate the plan
+  itself is the artifact and the test does not apply),
+- is discrete and actionable, not a general complaint about the
+  codebase,
+- does not demand rigor absent from the rest of the codebase,
+- does not rest on unstated assumptions about the author's intent, and
+- passes the author-would-fix test: the author, made aware, would want
+  to fix it.
+
+Speculation that a change "might disrupt" something elsewhere does not
+qualify without evidence. The prompt also names the seed categories
+(see Findings) and mandates the findings block that ends every
+response.
 
 A distinct type rather than a packed `explore` prompt because: the
 adversarial role belongs at system-prompt level where it cannot be
@@ -130,7 +146,9 @@ and the reviewer requests specific files via `file_read`.
 The parent handles findings like human review feedback: only `must-fix`
 findings oblige action; `should-fix` is the parent's judgment; `nit` is
 recorded and freely ignored. The parent may dispute any finding with a
-reason. The gates are **prompted, not enforced**: `git_commit` and
+reason. The verdict is recorded signal, not mechanism — an `incorrect`
+verdict blocks nothing by itself, but a push whose series review said
+`incorrect` is a fact the ledger keeps. The gates are **prompted, not enforced**: `git_commit` and
 `git_push` do not verify a review happened. A mechanical block on an
 LLM-mediated step invites the halt-loop failure mode the deny-list
 already demonstrated; the ledger measures skipped gates instead, and
@@ -166,27 +184,45 @@ data.
 
 ### Findings contract
 
-The reviewer ends every response with a fenced block:
+The reviewer ends every response with a fenced block holding one JSON
+object:
 
 ````
 ```findings
-{"category": "duplicate-helper", "severity": "must-fix", "file": "src/x.rs", "line": 42, "note": "normalize_path already exists in util.rs"}
+{
+  "verdict": "incorrect",
+  "confidence": 0.9,
+  "explanation": "<1-3 sentences justifying the verdict>",
+  "findings": [
+    {"category": "duplicate-helper", "severity": "must-fix",
+     "confidence": 0.8, "file": "src/x.rs", "line": 42,
+     "note": "normalize_path already exists in util.rs"}
+  ]
+}
 ```
 ````
 
-One JSON object per line; an empty block means clean. `severity` is one
-of `must-fix`, `should-fix`, `nit`. `category` is free-text, seeded by
-the reviewer prompt with the initial taxonomy: `duplicate-helper`,
-`hallucinated-api`, `unneeded-guard`, `assertion-free-test`,
-`swallowed-error`, `comment-noise`, `scope-creep`, `stringly-typed`,
-`wrong-approach`, `bad-decomposition`. Free-text so real categories can
-emerge from data; consolidation is a later, informed decision.
+`verdict` is `correct` or `incorrect` — whether the artifact is free of
+blocking issues, ignoring nits. It gives the parent a one-bit summary it
+can act on without weighing individual findings, and gives the ledger a
+per-invocation outcome to correlate against later escapes. An empty `findings` array with a
+`correct` verdict is the clean outcome. `confidence` (0.0–1.0, on the
+verdict and on each finding) lets the parent weigh a hesitant must-fix
+differently from a certain one and gives the ledger a calibration
+signal. `severity` is one of `must-fix`, `should-fix`, `nit`.
+`category` is free-text, seeded by the reviewer prompt with the initial
+taxonomy: `duplicate-helper`, `hallucinated-api`, `unneeded-guard`,
+`assertion-free-test`, `swallowed-error`, `comment-noise`,
+`scope-creep`, `stringly-typed`, `wrong-approach`, `bad-decomposition`.
+Free-text so real categories can emerge from data; consolidation is a
+later, informed decision.
 
 The `task` tool, for the `reviewer` type only, parses the block after the
-sub-agent returns and records one ledger row per line — mechanically, no
-model cooperation required. The full response text is returned to the
-parent unchanged either way. A malformed block or line logs a warning and
-skips the row; it never fails the review.
+sub-agent returns and records one ledger row per finding plus one review
+row for the invocation's verdict — mechanically, no model cooperation
+required. The full response text is returned to the parent unchanged
+either way. A malformed block or entry logs a warning and skips the
+affected rows; it never fails the review.
 
 ### The ledger
 
@@ -202,8 +238,16 @@ SQLite at `state/review.db`, following the `state/usage.db` pattern
 | `source` | `self` \| `human` \| `bot` |
 | `category` | Free-text category |
 | `severity` | `must-fix` \| `should-fix` \| `nit` (self only) |
+| `confidence` | 0.0–1.0, nullable (self only) |
 | `file`, `line` | Location, nullable |
 | `note` | The finding text |
+
+A second table, `reviews`, records one row per gate invocation: `ts`,
+`repo`, `gate`, `git_ref`, `verdict`, `confidence`. It answers what
+finding rows cannot: whether a gate ran at all — a pushed series with no
+series-review row is a skipped gate, which is how "the ledger measures
+skipped gates" is actually mechanized — and how verdicts correlate with
+eventual escapes.
 
 Two write paths:
 
