@@ -57,8 +57,9 @@ output (the originals remain on disk).
 
 Output requirements:
 - Plain text only. No preamble, headings, or markdown formatting.
-- Track file operations (created, modified, deleted, renamed) with \
-file paths and current status.
+- Include a \"Files:\" line tracking file operations (created, \
+modified, deleted, renamed). Each entry: the path plus a short clause \
+on why it matters, e.g. \"src/exec.rs (modified: added retry wrapper)\".
 - If no file operations appear, include exactly: \"Files: none\".
 - End with exactly: \"Expand for details about: <comma-separated list \
 of what was dropped or compressed>\".";
@@ -83,8 +84,9 @@ and lcm_expand if details are needed.
 
 Output requirements:
 - Plain text only. No preamble, headings, or markdown formatting.
-- Track file operations (created, modified, deleted, renamed) with \
-file paths and current status.
+- Include a \"Files:\" line tracking file operations (created, \
+modified, deleted, renamed). Each entry: the path plus a short clause \
+on why it matters, e.g. \"src/exec.rs (modified: added retry wrapper)\".
 - If no file operations appear, include exactly: \"Files: none\".
 - End with exactly: \"Expand for details about: <comma-separated list \
 of what was dropped or compressed>\".";

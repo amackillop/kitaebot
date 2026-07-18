@@ -39,8 +39,9 @@ messages, so nothing important should be lost.
 
 Output requirements:
 - Plain text only. No preamble, headings, or markdown formatting.
-- Track file operations (created, modified, deleted, renamed) with \
-file paths and current status.
+- Include a \"Files:\" line tracking file operations (created, \
+modified, deleted, renamed). Each entry: the path plus a short clause \
+on why it matters, e.g. \"src/exec.rs (modified: added retry wrapper)\".
 - If no file operations appear, include exactly: \"Files: none\".";
 
 /// Flat session engine with per-name JSON files.
