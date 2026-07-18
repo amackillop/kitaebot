@@ -72,13 +72,17 @@ impl Tool for FileEdit {
 
             let Some((rung, spans)) = find_matches(&content, &args.old_string) else {
                 return Err(ToolError::ExecutionFailed(format!(
-                    "no match found for old_string in {}",
-                    args.path
+                    "no match found for old_string in {path}; the file may have \
+                     changed since you read it. Current content:\n{content}",
+                    path = args.path,
                 )));
             };
 
-            let result = match spans.as_slice() {
-                [only] => splice(&content, only.start, only.len, &args.new_string),
+            let (result, edited_at) = match spans.as_slice() {
+                [only] => (
+                    splice(&content, only.start, only.len, &args.new_string),
+                    only.start,
+                ),
                 many => {
                     return Err(ToolError::ExecutionFailed(ambiguous_message(
                         rung, many, &content, &args.path,
@@ -89,7 +93,8 @@ impl Tool for FileEdit {
             std::fs::write(&resolved, &result)
                 .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
 
-            Ok(format!("Edited {}", args.path))
+            let echo = echo_region(&result, edited_at, args.new_string.len());
+            Ok(format!("Edited {}:\n{echo}", args.path))
         })
     }
 }
@@ -179,6 +184,34 @@ fn ambiguous_message(rung: &str, spans: &[Span], content: &str, path: &str) -> S
 /// 1-based line number of a byte position.
 fn line_of(content: &str, pos: usize) -> usize {
     content[..pos].bytes().filter(|&b| b == b'\n').count() + 1
+}
+
+/// Context lines on each side of an edited region in the success echo.
+const CONTEXT_LINES: usize = 3;
+
+/// Render the region at `[start, start + len)` with line numbers and
+/// context, in `file_read`'s `line\tcontent` format.
+fn echo_region(content: &str, start: usize, len: usize) -> String {
+    use std::fmt::Write;
+
+    let first = line_of(content, start);
+    let last = if len == 0 {
+        first
+    } else {
+        line_of(content, start + len - 1)
+    };
+    let from = first.saturating_sub(CONTEXT_LINES).max(1);
+    let to = last + CONTEXT_LINES;
+
+    content
+        .lines()
+        .enumerate()
+        .skip(from - 1)
+        .take(to - from + 1)
+        .fold(String::new(), |mut acc, (i, line)| {
+            let _ = writeln!(acc, "{}\t{line}", i + 1);
+            acc
+        })
 }
 
 /// Strip trailing whitespace only.
@@ -279,10 +312,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_match_error() {
+    async fn no_match_error_carries_snapshot() {
         let (_dir, tool) = setup("hello world");
         let result = edit(&tool, "missing", "x").await;
-        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+        match result {
+            Err(ToolError::ExecutionFailed(msg)) => {
+                assert!(msg.contains("may have changed since you read it"), "{msg}");
+                assert!(msg.contains("hello world"), "{msg}");
+            }
+            other => panic!("expected ExecutionFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn success_echoes_region_with_context() {
+        let (_dir, tool) = setup("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n");
+        let result = edit(&tool, "l5", "changed").await.unwrap();
+        // Edited line plus three lines of context each side, numbered.
+        assert!(result.contains("2\tl2"), "{result}");
+        assert!(result.contains("5\tchanged"), "{result}");
+        assert!(result.contains("8\tl8"), "{result}");
+        assert!(!result.contains("1\tl1"), "{result}");
+        assert!(!result.contains("9\tl9"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn echo_clamps_at_file_start() {
+        let (_dir, tool) = setup("l1\nl2\n");
+        let result = edit(&tool, "l1", "first").await.unwrap();
+        assert!(result.contains("1\tfirst"), "{result}");
+        assert!(result.contains("2\tl2"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn deletion_echoes_around_the_cut() {
+        let (dir, tool) = setup("keep1\ngone\nkeep2\n");
+        let result = edit(&tool, "gone\n", "").await.unwrap();
+        assert_eq!(read(&dir), "keep1\nkeep2\n");
+        assert!(result.contains("1\tkeep1"), "{result}");
+        assert!(result.contains("2\tkeep2"), "{result}");
     }
 
     #[tokio::test]
