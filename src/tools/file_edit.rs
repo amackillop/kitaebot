@@ -20,10 +20,15 @@ use crate::error::ToolError;
 struct Args {
     /// File path relative to the workspace.
     path: String,
-    /// The exact string to find. Must match exactly once.
+    /// The exact string to find. Must match exactly once, unless
+    /// `replace_all` is set.
     old_string: String,
     /// The replacement string. Empty string deletes the match.
     new_string: String,
+    /// Replace every exact occurrence of `old_string`. Only applies to
+    /// exact matches; fuzzy matches always require a unique target.
+    #[serde(default)]
+    replace_all: bool,
 }
 
 /// Tool that performs find-and-replace edits on workspace files.
@@ -43,7 +48,10 @@ impl Tool for FileEdit {
     }
 
     fn description(&self) -> &'static str {
-        "Find and replace a string in a file (must match exactly once)"
+        "Find and replace a string in a file. old_string must match exactly \
+         once; set replace_all to replace every exact occurrence instead. \
+         Whitespace and typographic-punctuation differences are tolerated \
+         when the match is unique."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -78,10 +86,16 @@ impl Tool for FileEdit {
                 )));
             };
 
-            let (result, edited_at) = match spans.as_slice() {
+            let (result, edited_at, replaced) = match spans.as_slice() {
                 [only] => (
                     splice(&content, only.start, only.len, &args.new_string),
                     only.start,
+                    1,
+                ),
+                many if rung == Rung::Exact && args.replace_all => (
+                    splice_all(&content, many, &args.new_string),
+                    many[0].start,
+                    many.len(),
                 ),
                 many => {
                     return Err(ToolError::ExecutionFailed(ambiguous_message(
@@ -94,7 +108,14 @@ impl Tool for FileEdit {
                 .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
 
             let echo = echo_region(&result, edited_at, args.new_string.len());
-            Ok(format!("Edited {}:\n{echo}", args.path))
+            if replaced > 1 {
+                Ok(format!(
+                    "Edited {} ({replaced} replacements):\n{echo}",
+                    args.path
+                ))
+            } else {
+                Ok(format!("Edited {}:\n{echo}", args.path))
+            }
         })
     }
 }
@@ -103,6 +124,22 @@ impl Tool for FileEdit {
 struct Span {
     start: usize,
     len: usize,
+}
+
+/// The ladder rung that decided a match.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rung {
+    Exact,
+    Fuzzy(&'static str),
+}
+
+impl Rung {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Fuzzy(name) => name,
+        }
+    }
 }
 
 type Normalizer = fn(&str) -> String;
@@ -114,9 +151,9 @@ const FUZZY_RUNGS: [(&str, Normalizer); 3] = [
     ("unicode-folded", fold_line),
 ];
 
-/// Walk the match ladder. Returns the deciding rung's name and every
-/// span it produced, or `None` when no rung matches.
-fn find_matches(content: &str, old: &str) -> Option<(&'static str, Vec<Span>)> {
+/// Walk the match ladder. Returns the deciding rung and every span it
+/// produced, or `None` when no rung matches.
+fn find_matches(content: &str, old: &str) -> Option<(Rung, Vec<Span>)> {
     let exact: Vec<Span> = content
         .match_indices(old)
         .map(|(start, m)| Span {
@@ -125,11 +162,11 @@ fn find_matches(content: &str, old: &str) -> Option<(&'static str, Vec<Span>)> {
         })
         .collect();
     if !exact.is_empty() {
-        return Some(("exact", exact));
+        return Some((Rung::Exact, exact));
     }
     FUZZY_RUNGS.iter().find_map(|&(name, normalize)| {
         let spans = window_spans(content, old, normalize);
-        (!spans.is_empty()).then_some((name, spans))
+        (!spans.is_empty()).then_some((Rung::Fuzzy(name), spans))
     })
 }
 
@@ -168,16 +205,21 @@ fn window_spans(content: &str, old: &str, normalize: Normalizer) -> Vec<Span> {
 }
 
 /// Error text for a rung that matched more than once.
-fn ambiguous_message(rung: &str, spans: &[Span], content: &str, path: &str) -> String {
+fn ambiguous_message(rung: Rung, spans: &[Span], content: &str, path: &str) -> String {
     let lines: Vec<String> = spans
         .iter()
         .map(|s| line_of(content, s.start).to_string())
         .collect();
+    let suggestion = match rung {
+        Rung::Exact => "add surrounding context to make it unique, or set replace_all",
+        Rung::Fuzzy(_) => "add surrounding context to make it unique",
+    };
     format!(
         "{count} matches for old_string in {path} at lines {lines} ({rung} match); \
-         add surrounding context to make it unique",
+         {suggestion}",
         count = spans.len(),
         lines = lines.join(", "),
+        rung = rung.name(),
     )
 }
 
@@ -240,6 +282,17 @@ fn fold_unicode(s: &str) -> String {
             other => other,
         })
         .collect()
+}
+
+/// Replace every span with `replacement`. Spans arrive ascending and
+/// non-overlapping from `match_indices`; splicing back-to-front keeps
+/// earlier offsets valid.
+fn splice_all(content: &str, spans: &[Span], replacement: &str) -> String {
+    let mut result = content.to_string();
+    for span in spans.iter().rev() {
+        result.replace_range(span.start..span.start + span.len, replacement);
+    }
+    result
 }
 
 /// Replace `len` bytes at `pos` with `replacement`.
@@ -403,6 +456,64 @@ mod tests {
                 assert!(msg.contains("2 matches"), "{msg}");
                 assert!(msg.contains("whitespace-flexible match"), "{msg}");
                 assert!(msg.contains("lines 1, 2"), "{msg}");
+            }
+            other => panic!("expected ExecutionFailed, got {other:?}"),
+        }
+    }
+
+    async fn edit_all(
+        tool: &FileEdit,
+        old_string: &str,
+        new_string: &str,
+    ) -> Result<String, ToolError> {
+        tool.execute(
+            serde_json::json!({
+                "path": "test.txt",
+                "old_string": old_string,
+                "new_string": new_string,
+                "replace_all": true
+            }),
+            ToolCtx::default(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn replace_all_replaces_every_exact_match() {
+        let (dir, tool) = setup("a b\na c\na d\n");
+        let result = edit_all(&tool, "a ", "x ").await.unwrap();
+        assert_eq!(read(&dir), "x b\nx c\nx d\n");
+        assert!(result.contains("3 replacements"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn replace_all_with_single_match_behaves_normally() {
+        let (dir, tool) = setup("hello world");
+        let result = edit_all(&tool, "world", "rust").await.unwrap();
+        assert_eq!(read(&dir), "hello rust");
+        assert!(!result.contains("replacements"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn replace_all_never_applies_to_fuzzy_matches() {
+        let (_dir, tool) = setup("foo( 1 );\nfoo(  1 );\n");
+        let result = edit_all(&tool, "foo(   1 );", "bar( 1 );").await;
+        match result {
+            Err(ToolError::ExecutionFailed(msg)) => {
+                assert!(msg.contains("2 matches"), "{msg}");
+                assert!(!msg.contains("or set replace_all"), "{msg}");
+            }
+            other => panic!("expected ExecutionFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ambiguous_exact_match_suggests_replace_all() {
+        let (_dir, tool) = setup("a\nb\na\n");
+        let result = edit(&tool, "a", "x").await;
+        match result {
+            Err(ToolError::ExecutionFailed(msg)) => {
+                assert!(msg.contains("or set replace_all"), "{msg}");
             }
             other => panic!("expected ExecutionFailed, got {other:?}"),
         }
