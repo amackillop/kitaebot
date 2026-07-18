@@ -614,9 +614,12 @@ construction.
 When a chunk needs summarizing, the engine attempts three levels in order. If a
 level fails to reduce token count (output >= input), it escalates to the next.
 Output under 500 characters is rejected as degenerate and escalates the same
-way: a chunk worth compacting is thousands of tokens, and a few-line summary
-of it is a model failure, not compression. The escalation ladder is the retry
-mechanism — no per-level retries — and level 3's 512-token truncation yields
+way — a few-line summary of a chunk worth compacting is a model failure, not
+compression. The floor applies only to inputs of at least four times its size
+(~2,000 estimated characters): a small residual chunk can honestly summarize
+to under the floor, and rejecting that wastes two LLM calls to end at level-3
+passthrough. The escalation ladder is the retry mechanism — no per-level
+retries — and for floor-gated inputs level 3's 512-token truncation yields
 strictly more content than any degenerate summary it replaces.
 
 | Level | Strategy | Target tokens | LLM? |

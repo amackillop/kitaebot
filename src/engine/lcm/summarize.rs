@@ -1,11 +1,13 @@
 //! Three-level summarization escalation.
 //!
 //! When LCM compacts a chunk of context, it tries up to three
-//! strategies in order. A strategy "fails" when the LLM call errors or
+//! strategies in order. A strategy "fails" when the LLM call errors,
 //! when its output is no smaller than its input (no point keeping a
-//! summary that costs as many tokens as the originals). Escalation
-//! falls through to the next level, and the deterministic level is
-//! guaranteed to converge.
+//! summary that costs as many tokens as the originals), or when its
+//! output falls under the degenerate floor (a few-line summary of a
+//! chunk worth compacting is a model failure, not compression).
+//! Escalation falls through to the next level, and the deterministic
+//! level is guaranteed to converge.
 //!
 //! | Level | Strategy                                          | LLM? |
 //! |-------|---------------------------------------------------|------|
@@ -91,6 +93,15 @@ of what was dropped or compressed>\".";
 /// 512 tokens at the `chars / 4` heuristic is roughly 2048 characters.
 pub const LEVEL_3_TOKEN_BUDGET: usize = 512;
 
+/// LLM output under this many characters is rejected as degenerate.
+pub const DEGENERATE_FLOOR_CHARS: usize = 500;
+
+/// The degenerate floor only applies to inputs of at least this many
+/// estimated characters. A small residual chunk can honestly summarize
+/// to under the floor; rejecting that wastes two LLM calls to end at
+/// level-3 passthrough.
+pub const DEGENERATE_FLOOR_MIN_INPUT_CHARS: usize = 4 * DEGENERATE_FLOOR_CHARS;
+
 /// Which level produced a summary. Recorded on the summary row so
 /// we can see the level distribution in production.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,8 +159,7 @@ pub async fn summarize_with_escalation(
     // Level 1: prose with specifics.
     match summarize(LEVEL_1_PROMPT, messages).await {
         Ok(content) => {
-            let output_tokens = estimate_tokens(&content);
-            if output_tokens < input_tokens {
+            if let Some(output_tokens) = accept(&content, input_tokens) {
                 debug!(input_tokens, output_tokens, "level 1 summary accepted");
                 return EscalationOutcome {
                     content,
@@ -160,7 +170,8 @@ pub async fn summarize_with_escalation(
             }
             warn!(
                 input_tokens,
-                output_tokens, "level 1 summary not smaller than input; escalating"
+                output_chars = content.len(),
+                "level 1 summary too long or degenerate; escalating"
             );
         }
         Err(e) => warn!(error = %e, "level 1 summarization failed; escalating"),
@@ -169,8 +180,7 @@ pub async fn summarize_with_escalation(
     // Level 2: terse bullets.
     match summarize(LEVEL_2_PROMPT, messages).await {
         Ok(content) => {
-            let output_tokens = estimate_tokens(&content);
-            if output_tokens < input_tokens {
+            if let Some(output_tokens) = accept(&content, input_tokens) {
                 debug!(input_tokens, output_tokens, "level 2 summary accepted");
                 return EscalationOutcome {
                     content,
@@ -181,7 +191,8 @@ pub async fn summarize_with_escalation(
             }
             warn!(
                 input_tokens,
-                output_tokens, "level 2 summary not smaller than input; escalating"
+                output_chars = content.len(),
+                "level 2 summary too long or degenerate; escalating"
             );
         }
         Err(e) => warn!(error = %e, "level 2 summarization failed; escalating"),
@@ -197,6 +208,22 @@ pub async fn summarize_with_escalation(
         input_tokens,
         output_tokens,
     }
+}
+
+/// Accept an LLM summary only when it actually compresses: smaller
+/// than the input, and above the degenerate floor when the input is
+/// big enough for the floor to be meaningful. Returns the output token
+/// estimate on acceptance.
+fn accept(content: &str, input_tokens: usize) -> Option<usize> {
+    let output_tokens = estimate_tokens(content);
+    if output_tokens >= input_tokens {
+        return None;
+    }
+    let input_chars = input_tokens * 4;
+    if content.len() < DEGENERATE_FLOOR_CHARS && input_chars >= DEGENERATE_FLOOR_MIN_INPUT_CHARS {
+        return None;
+    }
+    Some(output_tokens)
 }
 
 /// Format the messages and truncate to `max_tokens`, appending a note
@@ -279,13 +306,19 @@ mod tests {
         assert_eq!(estimate_messages_tokens(&messages), 30);
     }
 
+    /// A summary that clears the degenerate floor.
+    fn plausible_summary(seed: &str) -> String {
+        seed.repeat(DEGENERATE_FLOOR_CHARS / seed.len() + 1)
+    }
+
     #[tokio::test]
     async fn level_1_succeeds_when_output_is_smaller() {
         let big_input = "x".repeat(4000); // ~1000 tokens
-        let (summarize, log) = programmable_summarize(vec![Ok("tiny summary".to_string())]);
+        let summary = plausible_summary("real summary ");
+        let (summarize, log) = programmable_summarize(vec![Ok(summary.clone())]);
         let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
         assert_eq!(outcome.level, EscalationLevel::Normal);
-        assert_eq!(outcome.content, "tiny summary");
+        assert_eq!(outcome.content, summary);
         assert!(outcome.output_tokens < outcome.input_tokens);
         let prompts = log.lock().unwrap().clone();
         assert_eq!(prompts.len(), 1);
@@ -296,11 +329,11 @@ mod tests {
     async fn level_1_too_large_falls_through_to_level_2() {
         let big_input = "x".repeat(4000);
         let bloated = "y".repeat(8000); // larger than input
-        let (summarize, log) =
-            programmable_summarize(vec![Ok(bloated), Ok("tight bullets".to_string())]);
+        let bullets = plausible_summary("tight bullets ");
+        let (summarize, log) = programmable_summarize(vec![Ok(bloated), Ok(bullets.clone())]);
         let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
         assert_eq!(outcome.level, EscalationLevel::Aggressive);
-        assert_eq!(outcome.content, "tight bullets");
+        assert_eq!(outcome.content, bullets);
         let prompts = log.lock().unwrap().clone();
         assert_eq!(prompts, vec![LEVEL_1_PROMPT, LEVEL_2_PROMPT]);
     }
@@ -308,15 +341,48 @@ mod tests {
     #[tokio::test]
     async fn level_1_error_falls_through_to_level_2() {
         let big_input = "x".repeat(4000);
-        let (summarize, log) = programmable_summarize(vec![
-            Err(ProviderError::RateLimited),
-            Ok("recovered".to_string()),
-        ]);
+        let recovered = plausible_summary("recovered ");
+        let (summarize, log) =
+            programmable_summarize(vec![Err(ProviderError::RateLimited), Ok(recovered.clone())]);
         let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
         assert_eq!(outcome.level, EscalationLevel::Aggressive);
-        assert_eq!(outcome.content, "recovered");
+        assert_eq!(outcome.content, recovered);
         let prompts = log.lock().unwrap().clone();
         assert_eq!(prompts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn degenerate_level_1_escalates() {
+        let big_input = "x".repeat(4000);
+        let bullets = plausible_summary("bullets ");
+        let (summarize, log) =
+            programmable_summarize(vec![Ok("stub".to_string()), Ok(bullets.clone())]);
+        let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
+        assert_eq!(outcome.level, EscalationLevel::Aggressive);
+        assert_eq!(outcome.content, bullets);
+        let prompts = log.lock().unwrap().clone();
+        assert_eq!(prompts, vec![LEVEL_1_PROMPT, LEVEL_2_PROMPT]);
+    }
+
+    #[tokio::test]
+    async fn degenerate_both_levels_falls_to_truncation() {
+        let big_input = "x".repeat(4000);
+        let (summarize, _log) =
+            programmable_summarize(vec![Ok("a".to_string()), Ok("b".to_string())]);
+        let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
+        assert_eq!(outcome.level, EscalationLevel::Deterministic);
+        assert!(outcome.content.contains("[Truncated from"));
+    }
+
+    #[tokio::test]
+    async fn small_chunk_short_summary_is_accepted() {
+        // Input under DEGENERATE_FLOOR_MIN_INPUT_CHARS: the floor is
+        // inactive and a short-but-honest summary passes at level 1.
+        let small_input = "x".repeat(1200);
+        let (summarize, _log) = programmable_summarize(vec![Ok("short but honest".to_string())]);
+        let outcome = summarize_with_escalation(&[user(&small_input)], &summarize).await;
+        assert_eq!(outcome.level, EscalationLevel::Normal);
+        assert_eq!(outcome.content, "short but honest");
     }
 
     #[tokio::test]
