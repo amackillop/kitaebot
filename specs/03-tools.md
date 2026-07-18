@@ -214,23 +214,60 @@ byte count written.
 
 ### `file_edit` — Find-and-Replace Edit
 
+A failed edit is the most expensive tool error in the loop: the model
+re-reads, re-guesses, and often re-fails. The contract below spends its
+complexity on making failures recoverable in the same turn.
+
 **Parameters:**
 
 | Param | Type | Required | Notes |
 |-------|------|----------|-------|
 | `path` | String | yes | Relative to workspace |
-| `old_string` | String | yes | Must be non-empty, must match exactly once |
+| `old_string` | String | yes | Must be non-empty |
 | `new_string` | String | yes | Replacement (empty = delete) |
+| `replace_all` | Bool | no | Replace every exact match (default false) |
 
-**Two-tier matching:**
+**Match ladder** — four rungs tried in order; the first rung that
+produces at least one match decides the outcome:
 
-1. **Exact**: `match_indices(old_string)`. If 1 match, use it. If >1, error
-   with count. If 0, fallback.
-2. **Whitespace-flexible**: Normalize both file and search string (collapse
-   whitespace runs, trim trailing), sliding window comparison. Must match
-   exactly once.
+1. **Exact**: byte-for-byte `match_indices(old_string)`.
+2. **Trailing-whitespace-insensitive**: line-by-line comparison with
+   trailing whitespace stripped from both sides.
+3. **Whitespace-flexible**: collapse whitespace runs, trim trailing,
+   sliding-window comparison.
+4. **Unicode-folded**: rung 3's normalization plus folding typographic
+   confusables to ASCII on both sides — curly quotes to straight,
+   en/em dashes to hyphen, non-breaking space to plain space.
 
-Splices replacement into the original file at the matched position.
+Rungs are ordered least- to most-aggressive so the most faithful match
+wins. Matching runs against normalized views, but the splice always
+replaces the corresponding span of the *original* bytes, and
+`new_string` is inserted verbatim — normalization never rewrites file
+content it wasn't asked to touch.
+
+**Match-count semantics** on the deciding rung:
+
+- Exactly one match: edit applies.
+- Multiple matches, rung 1, `replace_all: true`: all replaced.
+- Multiple matches otherwise: error naming the rung, the count, and
+  the line number of each match, suggesting more surrounding context
+  (or `replace_all` when the matches were exact). `replace_all` never
+  applies to fuzzy rungs — fuzzy matching exists to absorb copy noise
+  around one target, not to bulk-edit text the model didn't write
+  precisely.
+- Zero matches on all four rungs: stale-read failure, below.
+
+**Success result**: the edited region echoed with line numbers and
+three lines of context on each side — the model sees the applied state
+without a follow-up read and gets line anchors for subsequent edits.
+For `replace_all`, the match count plus the first edited region.
+
+**Stale-read failure**: when no rung matches, the error carries a hint
+that the file may have changed since it was read, followed by the
+file's current content. Recovery becomes a same-turn re-issue of the
+edit against fresh content instead of a read round-trip. The snapshot
+is not truncated at the tool layer; it rides the standard tool-output
+pipeline, where the engines own size policy.
 
 ---
 
@@ -437,6 +474,8 @@ and `flake.lock` — two `stat` calls per lookup.
 | Command on deny list | `Blocked { operation, guidance }` | Friendly message to LLM explaining what to use instead |
 | Exec timeout | `Timeout` | Process killed, error returned to LLM |
 | Tool runtime error | `ExecutionFailed` | Error text returned to LLM |
+| `file_edit` no match | `ExecutionFailed` | Error carries stale-read hint + current file content (see tool section) |
+| `file_edit` ambiguous match | `ExecutionFailed` | Error lists rung, count, and match line numbers |
 
 All errors are surfaced to the LLM as text. The LLM decides how to proceed.
 The agent loop's policy gate escalates repeated `Blocked` errors (see
@@ -459,4 +498,8 @@ and a valid GitHub PAT loaded from credentials.
 
 ## Open Questions
 
-None currently.
+- **Read-before-edit precondition**: opencode-style enforcement
+  (reject edits to files not yet read this session) would prevent
+  blind edits but needs per-session read tracking in the harness. The
+  stale-read failure snapshot already covers the recovery path;
+  deferred until blind edits show up in practice.
