@@ -1,7 +1,9 @@
 //! File editing tool.
 //!
-//! Find-and-replace editing with exact-once matching. Falls back to
-//! whitespace-flexible matching when an exact match fails.
+//! Find-and-replace editing with a four-rung match ladder: exact,
+//! trailing-whitespace-insensitive, whitespace-flexible, and
+//! Unicode-folded. Rungs are ordered least- to most-aggressive; the
+//! first rung with at least one match decides the outcome.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -68,16 +70,20 @@ impl Tool for FileEdit {
             let content = std::fs::read_to_string(&resolved)
                 .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
 
-            let result = match exact_replace(&content, &args.old_string, &args.new_string) {
-                Ok(replaced) => replaced,
-                Err(Some(msg)) => return Err(ToolError::ExecutionFailed(msg)),
-                Err(None) => flexible_replace(&content, &args.old_string, &args.new_string)
-                    .ok_or_else(|| {
-                        ToolError::ExecutionFailed(format!(
-                            "no match found for old_string in {}",
-                            args.path
-                        ))
-                    })?,
+            let Some((rung, spans)) = find_matches(&content, &args.old_string) else {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "no match found for old_string in {}",
+                    args.path
+                )));
+            };
+
+            let result = match spans.as_slice() {
+                [only] => splice(&content, only.start, only.len, &args.new_string),
+                many => {
+                    return Err(ToolError::ExecutionFailed(ambiguous_message(
+                        rung, many, &content, &args.path,
+                    )));
+                }
             };
 
             std::fs::write(&resolved, &result)
@@ -88,67 +94,119 @@ impl Tool for FileEdit {
     }
 }
 
-/// Try exact `match_indices`. Returns `Ok(new_content)` if exactly one match,
-/// `Err(None)` if zero matches (caller should try flexible), `Err(Some(msg))`
-/// if multiple matches (caller should report to LLM).
-fn exact_replace(content: &str, old: &str, new: &str) -> Result<String, Option<String>> {
-    let mut iter = content.match_indices(old);
-    let first = iter.next();
-    match (first, iter.next()) {
-        (None, _) => Err(None),
-        (Some((pos, _)), None) => Ok(splice(content, pos, old.len(), new)),
-        _ => {
-            let count = 2 + iter.count();
-            Err(Some(format!("{count} matches found, expected exactly 1")))
-        }
-    }
+/// A matched byte range in the original content.
+struct Span {
+    start: usize,
+    len: usize,
 }
 
-/// Whitespace-flexible fallback. Normalizes whitespace in both the content
-/// and search string, then finds a unique match via sliding window over
-/// the original content's lines.
-fn flexible_replace(content: &str, old: &str, new: &str) -> Option<String> {
-    let needle_lines: Vec<String> = old.lines().map(normalize_line).collect();
-    if needle_lines.is_empty() {
-        return None;
+type Normalizer = fn(&str) -> String;
+
+/// Fuzzy rungs in escalation order, least- to most-aggressive.
+const FUZZY_RUNGS: [(&str, Normalizer); 3] = [
+    ("trailing-whitespace-insensitive", strip_trailing),
+    ("whitespace-flexible", normalize_line),
+    ("unicode-folded", fold_line),
+];
+
+/// Walk the match ladder. Returns the deciding rung's name and every
+/// span it produced, or `None` when no rung matches.
+fn find_matches(content: &str, old: &str) -> Option<(&'static str, Vec<Span>)> {
+    let exact: Vec<Span> = content
+        .match_indices(old)
+        .map(|(start, m)| Span {
+            start,
+            len: m.len(),
+        })
+        .collect();
+    if !exact.is_empty() {
+        return Some(("exact", exact));
+    }
+    FUZZY_RUNGS.iter().find_map(|&(name, normalize)| {
+        let spans = window_spans(content, old, normalize);
+        (!spans.is_empty()).then_some((name, spans))
+    })
+}
+
+/// Line-window matching under a normalizer. Comparison runs on
+/// normalized views; the returned spans address the original bytes, so
+/// the splice never rewrites content it wasn't asked to touch.
+fn window_spans(content: &str, old: &str, normalize: Normalizer) -> Vec<Span> {
+    let needle: Vec<String> = old.lines().map(normalize).collect();
+    if needle.is_empty() {
+        return Vec::new();
     }
 
-    let content_lines: Vec<&str> = content.lines().collect();
-    let window = needle_lines.len();
+    let lines: Vec<&str> = content.lines().collect();
+    let window = needle.len();
 
-    let mut matches = (0..content_lines.len().saturating_sub(window - 1)).filter(|&start| {
-        content_lines[start..start + window]
-            .iter()
-            .zip(&needle_lines)
-            .all(|(c, n)| normalize_line(c) == *n)
-    });
+    (0..lines.len().saturating_sub(window - 1))
+        .filter(|&start| {
+            lines[start..start + window]
+                .iter()
+                .zip(&needle)
+                .all(|(c, n)| normalize(c) == *n)
+        })
+        .map(|start| {
+            let start_byte = lines[..start].iter().map(|l| l.len() + 1).sum::<usize>();
+            let len = lines[start..start + window]
+                .iter()
+                .enumerate()
+                .map(|(i, l)| l.len() + usize::from(start + i + 1 < lines.len()))
+                .sum();
+            Span {
+                start: start_byte,
+                len,
+            }
+        })
+        .collect()
+}
 
-    let start_line = matches.next()?;
-
-    // Must be exactly one match.
-    if matches.next().is_some() {
-        return None;
-    }
-
-    let end_line = start_line + window;
-
-    let start_byte = content_lines[..start_line]
+/// Error text for a rung that matched more than once.
+fn ambiguous_message(rung: &str, spans: &[Span], content: &str, path: &str) -> String {
+    let lines: Vec<String> = spans
         .iter()
-        .map(|l| l.len() + 1)
-        .sum::<usize>();
+        .map(|s| line_of(content, s.start).to_string())
+        .collect();
+    format!(
+        "{count} matches for old_string in {path} at lines {lines} ({rung} match); \
+         add surrounding context to make it unique",
+        count = spans.len(),
+        lines = lines.join(", "),
+    )
+}
 
-    let match_byte_len: usize = content_lines[start_line..end_line]
-        .iter()
-        .enumerate()
-        .map(|(i, l)| l.len() + usize::from(start_line + i + 1 < content_lines.len()))
-        .sum();
+/// 1-based line number of a byte position.
+fn line_of(content: &str, pos: usize) -> usize {
+    content[..pos].bytes().filter(|&b| b == b'\n').count() + 1
+}
 
-    Some(splice(content, start_byte, match_byte_len, new))
+/// Strip trailing whitespace only.
+fn strip_trailing(s: &str) -> String {
+    s.trim_end().to_string()
 }
 
 /// Collapse whitespace runs to single space, trim trailing whitespace.
 fn normalize_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Fold typographic confusables to ASCII, then collapse whitespace.
+fn fold_line(s: &str) -> String {
+    normalize_line(&fold_unicode(s))
+}
+
+/// Map curly quotes, en/em dashes, and non-breaking spaces to ASCII.
+fn fold_unicode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            '\u{2013}' | '\u{2014}' => '-',
+            '\u{00A0}' => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 /// Replace `len` bytes at `pos` with `replacement`.
@@ -175,20 +233,26 @@ mod tests {
         std::fs::read_to_string(dir.path().join("test.txt")).unwrap()
     }
 
+    async fn edit(
+        tool: &FileEdit,
+        old_string: &str,
+        new_string: &str,
+    ) -> Result<String, ToolError> {
+        tool.execute(
+            serde_json::json!({
+                "path": "test.txt",
+                "old_string": old_string,
+                "new_string": new_string
+            }),
+            ToolCtx::default(),
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn single_replace() {
         let (dir, tool) = setup("hello world");
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "path": "test.txt",
-                    "old_string": "world",
-                    "new_string": "rust"
-                }),
-                ToolCtx::default(),
-            )
-            .await
-            .unwrap();
+        let result = edit(&tool, "world", "rust").await.unwrap();
         assert!(result.contains("Edited"));
         assert_eq!(read(&dir), "hello rust");
     }
@@ -196,34 +260,20 @@ mod tests {
     #[tokio::test]
     async fn delete_via_empty_new_string() {
         let (dir, tool) = setup("hello cruel world");
-        tool.execute(
-            serde_json::json!({
-                "path": "test.txt",
-                "old_string": "cruel ",
-                "new_string": ""
-            }),
-            ToolCtx::default(),
-        )
-        .await
-        .unwrap();
+        edit(&tool, "cruel ", "").await.unwrap();
         assert_eq!(read(&dir), "hello world");
     }
 
     #[tokio::test]
-    async fn multiple_matches_error() {
-        let (_dir, tool) = setup("aaa");
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "path": "test.txt",
-                    "old_string": "a",
-                    "new_string": "b"
-                }),
-                ToolCtx::default(),
-            )
-            .await;
+    async fn multiple_matches_error_lists_lines() {
+        let (_dir, tool) = setup("a\nb\na\nb\na\n");
+        let result = edit(&tool, "a", "x").await;
         match result {
-            Err(ToolError::ExecutionFailed(msg)) => assert!(msg.contains("3 matches")),
+            Err(ToolError::ExecutionFailed(msg)) => {
+                assert!(msg.contains("3 matches"), "{msg}");
+                assert!(msg.contains("lines 1, 3, 5"), "{msg}");
+                assert!(msg.contains("exact match"), "{msg}");
+            }
             other => panic!("expected ExecutionFailed, got {other:?}"),
         }
     }
@@ -231,29 +281,24 @@ mod tests {
     #[tokio::test]
     async fn no_match_error() {
         let (_dir, tool) = setup("hello world");
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "path": "test.txt",
-                    "old_string": "missing",
-                    "new_string": "x"
-                }),
-                ToolCtx::default(),
-            )
-            .await;
+        let result = edit(&tool, "missing", "x").await;
         assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn trailing_whitespace_rung_matches() {
+        let (dir, tool) = setup("foo();  \nbar();\n");
+        edit(&tool, "foo();\nbar();", "baz();").await.unwrap();
+        assert_eq!(read(&dir), "baz();\n");
     }
 
     #[tokio::test]
     async fn whitespace_flexible_match() {
         let (dir, tool) = setup("fn  main()  {\n    println!(\"hi\");\n}\n");
-        tool.execute(
-            serde_json::json!({
-                "path": "test.txt",
-                "old_string": "fn main() {\n  println!(\"hi\");\n}",
-                "new_string": "fn main() {\n    println!(\"hello\");\n}"
-            }),
-            ToolCtx::default(),
+        edit(
+            &tool,
+            "fn main() {\n  println!(\"hi\");\n}",
+            "fn main() {\n    println!(\"hello\");\n}",
         )
         .await
         .unwrap();
@@ -263,18 +308,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unicode_fold_rung_matches() {
+        let (dir, tool) = setup("let s = \u{201C}hi\u{201D}; // em\u{2014}dash\n");
+        edit(&tool, "let s = \"hi\"; // em-dash", "let s = \"bye\";")
+            .await
+            .unwrap();
+        assert_eq!(read(&dir), "let s = \"bye\";\n");
+    }
+
+    #[tokio::test]
+    async fn exact_match_beats_folded_match() {
+        let (dir, tool) = setup("let a = \u{201C}x\u{201D};\nlet a = \"x\";\n");
+        edit(&tool, "let a = \"x\";", "let a = \"y\";")
+            .await
+            .unwrap();
+        // The exact match on line 2 wins; the curly-quoted line 1 is untouched.
+        assert_eq!(read(&dir), "let a = \u{201C}x\u{201D};\nlet a = \"y\";\n");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_fuzzy_match_errors_with_rung() {
+        let (_dir, tool) = setup("foo( 1 );\nfoo(  1 );\n");
+        let result = edit(&tool, "foo(   1 );", "bar( 1 );").await;
+        match result {
+            Err(ToolError::ExecutionFailed(msg)) => {
+                assert!(msg.contains("2 matches"), "{msg}");
+                assert!(msg.contains("whitespace-flexible match"), "{msg}");
+                assert!(msg.contains("lines 1, 2"), "{msg}");
+            }
+            other => panic!("expected ExecutionFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn empty_old_string_rejected() {
         let (_dir, tool) = setup("content");
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "path": "test.txt",
-                    "old_string": "",
-                    "new_string": "x"
-                }),
-                ToolCtx::default(),
-            )
-            .await;
+        let result = edit(&tool, "", "x").await;
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
     }
 
@@ -283,6 +352,14 @@ mod tests {
         assert_eq!(normalize_line("  foo   bar  "), "foo bar");
         assert_eq!(normalize_line("\tbaz\t\tqux"), "baz qux");
         assert_eq!(normalize_line(""), "");
+    }
+
+    #[test]
+    fn fold_maps_confusables() {
+        assert_eq!(
+            fold_unicode("\u{2018}a\u{2019} \u{201C}b\u{201D} \u{2013}\u{2014}\u{00A0}"),
+            "'a' \"b\" -- "
+        );
     }
 
     #[test]
