@@ -582,6 +582,16 @@ in a long conversation) pays nothing.
 **Protected tail**: the most recent N messages (configurable, default 32) are
 never compacted. They remain as raw messages in the active context.
 
+**Pinned user request**: the newest `user` message is additionally exempt
+from compaction wherever it sits. A long working turn pushes hundreds of
+tool messages through the tail, so without the pin the task statement is
+among the first things summarized — exactly when the turn still needs its
+verbatim wording. Leaf-pass chunk selection skips the pinned row; chunks
+split around it. A newer user message moves the pin and the superseded
+message becomes ordinary compactable history. Oversized user content is
+already externalized at ingest, so the pinned row is small by
+construction.
+
 ##### Two-Phase Compaction
 
 1. **Leaf pass**: select the oldest contiguous raw messages outside the
@@ -603,6 +613,11 @@ never compacted. They remain as raw messages in the active context.
 
 When a chunk needs summarizing, the engine attempts three levels in order. If a
 level fails to reduce token count (output >= input), it escalates to the next.
+Output under 500 characters is rejected as degenerate and escalates the same
+way: a chunk worth compacting is thousands of tokens, and a few-line summary
+of it is a model failure, not compression. The escalation ladder is the retry
+mechanism — no per-level retries — and level 3's 512-token truncation yields
+strictly more content than any degenerate summary it replaces.
 
 | Level | Strategy | Target tokens | LLM? |
 |-------|----------|---------------|------|
@@ -634,8 +649,10 @@ block:
 LCM blocks (L1 and L2) enforce two read-back conventions:
 
 - **`Files:` tracking line** — the summary lists files touched, or
-  includes `Files: none`. Lets future read-back scan for file activity
-  without parsing prose.
+  includes `Files: none`. Each entry carries a short clause on why the
+  file matters (`src/exec.rs — added retry wrapper`), so a path that
+  survives into deep condensed layers still says why to reopen it. Lets
+  future read-back scan for file activity without parsing prose.
 - **`Expand for details about: <...>` trailer** — every LCM summary ends
   with this hook, naming the region the next model should `lcm_grep` or
   `lcm_expand` into if it needs the dropped details.
@@ -693,6 +710,33 @@ size control. Assembly renders whatever `context_items` currently holds.
 Summary text here...
 </summary>
 ```
+
+**Written-files recall**: when the assembled context contains summaries,
+the engine appends a mechanical segment listing the distinct paths passed
+to `file_write`/`file_edit` since the pinned user message, newest first,
+capped at 30:
+
+```
+## Files Written For This Request
+src/agent/mod.rs
+src/tools/direnv.rs
+```
+
+Sessions are long-lived, so the scope is the current request, not the
+session: a session-wide list degrades into "files ever written in this
+repo", going stale across tickets and workspace cleans. The request
+scope targets the one window where recall is actually lost — a long
+turn hard-compacting away its own earlier tool calls. Cross-turn recall
+within a task is git's job (`git status`, `git log`), not context's.
+
+Derived at `assemble()` by querying stored `tool_call` parts for those
+tool names at `seq` greater than the pinned user message, reading the
+`path` argument — the store already holds every call, so no new state
+and no bookkeeping. When nothing after the pin has been compacted the
+raw calls are still visible in context and the segment is omitted.
+Writes made by worker sub-agents (their transcripts never enter the
+store) or via exec redirects are invisible to the query; that is the
+accepted trade for a purely derived list.
 
 **Recall guidance** (appended to system prompt when summaries are present):
 
@@ -971,8 +1015,8 @@ For LCM, an unknown name simply creates a new conversation row.
 | SQLite open/init fails | `EngineError::Storage` | Fatal at startup |
 | Compaction LLM call fails (level 1) | — | Escalate to level 2 (aggressive) |
 | Compaction LLM call fails (level 2) | — | Escalate to level 3 (deterministic truncation) |
-| Compaction LLM output exceeds input (level 1) | — | Escalate to level 2 |
-| Compaction LLM output exceeds input (level 2) | — | Escalate to level 3 |
+| Compaction LLM output exceeds input or degenerate (level 1) | — | Escalate to level 2 |
+| Compaction LLM output exceeds input or degenerate (level 2) | — | Escalate to level 3 |
 | Level 3 deterministic truncation | — | Always succeeds. Guaranteed convergence. |
 | Async compaction fails | — | Logged. Next turn retries via `compact_if_needed`. Context unchanged. |
 | Session not found on switch | — | Created automatically (idempotent) |
@@ -1058,3 +1102,7 @@ Interfaces between this spec and spec 19:
 4. Large file detection heuristic — should the engine intercept all tool
    results, or only `file_read` output? Intercepting all results catches
    cases like `exec` returning large output, but may have false positives.
+5. Pin depth — the pin covers only the newest user message. If work
+   sessions show older-but-live requests being summarized away (e.g. a
+   follow-up instruction arriving mid-task), extend to the last N user
+   messages under a token cap.
