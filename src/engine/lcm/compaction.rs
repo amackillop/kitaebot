@@ -48,9 +48,13 @@ impl LeafChunk {
 /// Load every leaf-eligible chunk for `conversation_id`.
 ///
 /// Eligible = `'message'` items whose ordinal falls outside the last
-/// `cfg.fresh_tail_count` message items. Returns an empty vec when
-/// there are too few messages to pull anything out of the protected
-/// tail.
+/// `cfg.fresh_tail_count` message items, except the newest `user`
+/// message, which is pinned wherever it sits: a long turn pushes
+/// hundreds of tool messages through the tail, and without the pin the
+/// task statement is the first thing summarized precisely when the
+/// turn still needs its verbatim wording. A newer user message moves
+/// the pin. Returns an empty vec when there are too few messages to
+/// pull anything out of the protected tail.
 ///
 /// The result is a list of contiguous chunks each summing to no more
 /// than `cfg.leaf_chunk_tokens` tokens. The last chunk may be smaller.
@@ -93,6 +97,12 @@ pub(super) fn load_leaf_chunks(
 
     let eligible_count = raw.len() - fresh_tail;
 
+    let pinned_ordinal = raw
+        .iter()
+        .filter(|(_, _, role, ..)| role == "user")
+        .map(|(ordinal, ..)| *ordinal)
+        .max();
+
     let mut chunks: Vec<LeafChunk> = Vec::new();
     let mut current = LeafChunk { rows: Vec::new() };
     let mut current_tokens: i64 = 0;
@@ -100,6 +110,18 @@ pub(super) fn load_leaf_chunks(
     for (ordinal, message_id, role, content, token_count, created_at) in
         raw.into_iter().take(eligible_count)
     {
+        if Some(ordinal) == pinned_ordinal {
+            // The write path deletes the chunk's whole ordinal range,
+            // so the pin must split the chunk, not merely be skipped.
+            if !current.rows.is_empty() {
+                chunks.push(std::mem::replace(
+                    &mut current,
+                    LeafChunk { rows: Vec::new() },
+                ));
+                current_tokens = 0;
+            }
+            continue;
+        }
         let message = reconstruct_message(conn, message_id, &role, content)?;
         if !current.rows.is_empty() && current_tokens + token_count > leaf_budget {
             chunks.push(std::mem::replace(
@@ -649,18 +671,23 @@ mod tests {
         (dir, conn)
     }
 
-    fn insert_message(conn: &Connection, seq: i64, content: &str) -> i64 {
+    fn insert_message_with_role(conn: &Connection, seq: i64, role: &str, content: &str) -> i64 {
         conn.execute(
             "INSERT INTO messages(conversation_id, seq, role, content, token_count, created_at) \
-             VALUES (1, ?1, 'user', ?2, ?3, '2025-01-01')",
+             VALUES (1, ?1, ?2, ?3, ?4, '2025-01-01')",
             params![
                 seq,
+                role,
                 content,
                 i64::try_from(estimate_tokens(content)).unwrap()
             ],
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    fn insert_message(conn: &Connection, seq: i64, content: &str) -> i64 {
+        insert_message_with_role(conn, seq, "user", content)
     }
 
     fn insert_context_message(conn: &Connection, ordinal: i64, message_id: i64) {
@@ -825,6 +852,89 @@ mod tests {
             files,
             vec!["file_00000000000000aa", "file_00000000000000bb"],
         );
+    }
+
+    /// Ordinals 0..n with the given roles, all in context.
+    fn seed_conversation(conn: &Connection, roles: &[&str]) {
+        for (i, role) in roles.iter().enumerate() {
+            let seq = i64::try_from(i).unwrap();
+            let id = insert_message_with_role(conn, seq, role, &format!("msg {i}"));
+            insert_context_message(conn, seq, id);
+        }
+    }
+
+    fn chunk_ordinals(chunks: &[LeafChunk]) -> Vec<Vec<i64>> {
+        chunks
+            .iter()
+            .map(|c| c.rows.iter().map(|r| r.ordinal).collect())
+            .collect()
+    }
+
+    fn cfg_with_tail(fresh_tail_count: u32) -> LcmConfig {
+        LcmConfig {
+            fresh_tail_count,
+            ..LcmConfig::default()
+        }
+    }
+
+    #[test]
+    fn newest_user_message_outside_tail_is_pinned_and_splits_chunks() {
+        let (_dir, conn) = fresh_conn();
+        // user, assistant, user, assistant, assistant, assistant; tail=2
+        // -> eligible ordinals 0..=3, newest user message is ordinal 2.
+        seed_conversation(
+            &conn,
+            &[
+                "user",
+                "assistant",
+                "user",
+                "assistant",
+                "assistant",
+                "assistant",
+            ],
+        );
+        let chunks = load_leaf_chunks(&conn, 1, cfg_with_tail(2)).unwrap();
+        // The pin splits the run: [0, 1] and [3]; ordinal 2 is absent so
+        // the write path's range delete cannot swallow it.
+        assert_eq!(chunk_ordinals(&chunks), vec![vec![0, 1], vec![3]]);
+    }
+
+    #[test]
+    fn superseded_user_message_is_compactable() {
+        let (_dir, conn) = fresh_conn();
+        // Two user messages outside the tail: only the newest (1) pins.
+        seed_conversation(
+            &conn,
+            &[
+                "user",
+                "user",
+                "assistant",
+                "assistant",
+                "assistant",
+                "assistant",
+            ],
+        );
+        let chunks = load_leaf_chunks(&conn, 1, cfg_with_tail(2)).unwrap();
+        assert_eq!(chunk_ordinals(&chunks), vec![vec![0], vec![2, 3]]);
+    }
+
+    #[test]
+    fn pin_inside_tail_changes_nothing() {
+        let (_dir, conn) = fresh_conn();
+        // Newest user message (4) sits inside the protected tail.
+        seed_conversation(
+            &conn,
+            &[
+                "assistant",
+                "assistant",
+                "assistant",
+                "assistant",
+                "user",
+                "assistant",
+            ],
+        );
+        let chunks = load_leaf_chunks(&conn, 1, cfg_with_tail(2)).unwrap();
+        assert_eq!(chunk_ordinals(&chunks), vec![vec![0, 1, 2, 3]]);
     }
 
     #[test]
