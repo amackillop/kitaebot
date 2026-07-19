@@ -167,4 +167,4 @@ ask message: (vm-run)
     for i in {1..30}; do
         [ -S "$SOCK" ] && break || sleep 0.1
     done
-    cargo run --bin kchat -- "$SOCK" "{{message}}"
+    cargo run --bin kchat -- "$SOCK" {{quote(message)}}
