@@ -860,11 +860,15 @@ fn assemble_sync(
         .any(|r| matches!(r, AssembleRow::Summary { .. }));
 
     let mut messages = Vec::with_capacity(entries.len() + 1);
-    let system_content = if has_summary {
-        format!("{system_prompt}\n\n{RECALL_GUIDANCE}")
-    } else {
-        system_prompt.to_string()
-    };
+    let mut system_content = system_prompt.to_string();
+    if has_summary {
+        system_content.push_str("\n\n");
+        system_content.push_str(RECALL_GUIDANCE);
+        if let Some(segment) = written_files_segment(conn, conversation_id)? {
+            system_content.push_str("\n\n");
+            system_content.push_str(&segment);
+        }
+    }
     messages.push(Message::System {
         content: system_content,
     });
@@ -894,6 +898,96 @@ fn assemble_sync(
         }
     }
     Ok(AssembledContext { messages })
+}
+
+/// Cap on entries in the written-files recall segment.
+const WRITTEN_FILES_CAP: usize = 30;
+
+const WRITTEN_FILES_HEADER: &str = "## Files Written For This Request";
+
+/// Distinct paths passed to `file_write`/`file_edit` since the newest
+/// user message, newest first, capped at [`WRITTEN_FILES_CAP`].
+///
+/// Scoped to the current request, not the session: sessions are
+/// long-lived, and a session-wide list goes stale across tickets and
+/// workspace cleans. Returns `None` while every message after the pin
+/// is still raw in context — the calls are visible and the segment
+/// would be noise — and `None` when nothing was written.
+fn written_files_segment(
+    conn: &Connection,
+    conversation_id: i64,
+) -> Result<Option<String>, EngineError> {
+    let pinned_seq: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(seq) FROM messages \
+             WHERE conversation_id = ?1 AND role = 'user'",
+            [conversation_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| storage_err(&e))?;
+    let Some(pinned_seq) = pinned_seq else {
+        return Ok(None);
+    };
+
+    let compacted_after_pin: bool = conn
+        .query_row(
+            "SELECT EXISTS( \
+                SELECT 1 FROM messages m \
+                WHERE m.conversation_id = ?1 AND m.seq > ?2 \
+                  AND NOT EXISTS( \
+                    SELECT 1 FROM context_items ci \
+                    WHERE ci.conversation_id = ?1 \
+                      AND ci.item_type = 'message' \
+                      AND ci.message_id = m.message_id))",
+            params![conversation_id, pinned_seq],
+            |r| r.get(0),
+        )
+        .map_err(|e| storage_err(&e))?;
+    if !compacted_after_pin {
+        return Ok(None);
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT mp.tool_input FROM message_parts mp \
+             JOIN messages m ON mp.message_id = m.message_id \
+             WHERE m.conversation_id = ?1 AND m.seq > ?2 \
+               AND mp.part_type = 'tool_call' \
+               AND mp.tool_name IN ('file_write', 'file_edit') \
+             ORDER BY m.seq DESC, mp.ordinal DESC",
+        )
+        .map_err(|e| storage_err(&e))?;
+    let inputs: Vec<String> = stmt
+        .query_map(params![conversation_id, pinned_seq], |r| r.get(0))
+        .map_err(|e| storage_err(&e))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| storage_err(&e))?;
+
+    let mut paths: Vec<String> = Vec::new();
+    for input in inputs {
+        let Some(path) = serde_json::from_str::<serde_json::Value>(&input)
+            .ok()
+            .as_ref()
+            .and_then(|v| v.get("path"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if !paths.contains(&path) {
+            paths.push(path);
+            if paths.len() == WRITTEN_FILES_CAP {
+                break;
+            }
+        }
+    }
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{WRITTEN_FILES_HEADER}\n{}",
+        paths.join("\n")
+    )))
 }
 
 /// Recall guidance appended to the system prompt whenever the assembled
@@ -2262,6 +2356,85 @@ mod tests {
             }
             other => panic!("expected summary system message, got {other:?}"),
         }
+    }
+
+    /// A `ToolCalls` message carrying one `file_write` for `path`,
+    /// padded so compaction chunks have real weight.
+    fn write_call_message(i: usize, path: &str) -> Message {
+        Message::ToolCalls {
+            content: format!("writing {i} {}", "x".repeat(120)),
+            calls: vec![ToolCall::new(
+                format!("c{i}"),
+                ToolFunction {
+                    name: "file_write".into(),
+                    arguments: format!(r#"{{"path":"{path}","content":"data"}}"#),
+                },
+            )],
+        }
+    }
+
+    #[tokio::test]
+    async fn assemble_lists_written_files_after_compaction() {
+        let (mut engine, _dir) = temp_engine();
+        engine
+            .push_message(Message::User {
+                content: "do the task".into(),
+            })
+            .await
+            .unwrap();
+        // 36 write calls after the pin; the oldest 4 leave the tail.
+        // old.rs is written first and again later: it must appear once,
+        // after new.rs (newest first).
+        for i in 0..36 {
+            let path = match i {
+                0..=17 | 30 => "old.rs",
+                _ => "new.rs",
+            };
+            engine
+                .push_message(write_call_message(i, path))
+                .await
+                .unwrap();
+        }
+        engine
+            .force_compact(&canned_summarize(
+                "compact summary that is long enough to pass the level-1 shrink test",
+            ))
+            .await
+            .unwrap();
+
+        let ctx = engine.assemble("SYS").await.unwrap();
+        let Message::System { content } = &ctx.messages[0] else {
+            panic!("expected system message");
+        };
+        assert!(
+            content.contains("## Files Written For This Request"),
+            "{content}"
+        );
+        let new_at = content.find("new.rs").expect("new.rs listed");
+        let old_at = content.find("old.rs").expect("old.rs listed");
+        assert!(new_at < old_at, "newest first: {content}");
+        assert_eq!(content.matches("old.rs").count(), 1, "deduped: {content}");
+    }
+
+    #[tokio::test]
+    async fn written_files_omitted_while_calls_are_still_raw() {
+        let (mut engine, _dir) = temp_engine();
+        engine
+            .push_message(Message::User {
+                content: "do the task".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(write_call_message(0, "a.rs"))
+            .await
+            .unwrap();
+
+        let ctx = engine.assemble("SYS").await.unwrap();
+        let Message::System { content } = &ctx.messages[0] else {
+            panic!("expected system message");
+        };
+        assert!(!content.contains("Files Written"), "{content}");
     }
 
     #[tokio::test]
