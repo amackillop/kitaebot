@@ -15,6 +15,7 @@ use crate::engine::{ContextEngine, SummarizeFn};
 use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;
+use crate::review::ReviewLedger;
 use crate::tools::Tools;
 use crate::usage::UsageLedger;
 use crate::workspace::Workspace;
@@ -49,6 +50,7 @@ impl AgentHandle {
         summarize: SummarizeFn,
         notifier: Option<Arc<Notifier>>,
         usage_ledger: Option<Arc<UsageLedger>>,
+        review_ledger: Option<Arc<ReviewLedger>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(32);
         let actor = Agent::new(
@@ -65,6 +67,7 @@ impl AgentHandle {
             summarize,
             notifier,
             usage_ledger,
+            review_ledger,
         );
         tokio::spawn(actor.run());
         Self { tx }

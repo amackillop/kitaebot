@@ -13,6 +13,7 @@ mod memory;
 mod notify;
 mod provider;
 mod retry;
+mod review;
 mod runtime;
 mod safety;
 mod sandbox;
@@ -200,6 +201,19 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
             None
         }
     };
+    // Telemetry, same contract as the usage ledger: open failure logs
+    // and the pipeline runs unrecorded.
+    let review_ledger = if config.review.enabled {
+        match review::ReviewLedger::open(&workspace.review_db_path()) {
+            Ok(ledger) => Some(Arc::new(ledger)),
+            Err(e) => {
+                warn!("Review ledger disabled: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let overrides = &config.provider.model_overrides;
     let task_tool: Arc<dyn tools::Tool> = Arc::new(agent::task::TaskTool::new(
         agent::task::TypeProviders {
@@ -211,6 +225,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         agent_types,
         config.sub_agents.max_iterations,
         usage_ledger.clone(),
+        review_ledger.clone(),
     ));
     tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
     tools.extend_with(vec![task_tool], &config.tools.disabled);
@@ -229,5 +244,6 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         summarize,
         notifier,
         usage_ledger,
+        review_ledger,
     )
 }

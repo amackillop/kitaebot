@@ -31,6 +31,8 @@ pub struct Config {
     #[serde(default)]
     pub provider: ProviderConfig,
     #[serde(default)]
+    pub review: ReviewConfig,
+    #[serde(default)]
     pub socket: SocketConfig,
     #[serde(default)]
     pub sub_agents: SubAgentsConfig,
@@ -48,6 +50,22 @@ pub struct AgentConfig {
 }
 
 /// Sub-agent settings (spec 19).
+/// Self-review pipeline (spec 23).
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReviewConfig {
+    /// Master switch: opens the review ledger and records reviewer
+    /// findings. Gates are prompted, not enforced; disabling this
+    /// only stops the recording.
+    pub enabled: bool,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SubAgentsConfig {
@@ -740,6 +758,14 @@ timeout_secs = 120
         assert!((cfg.provider.temperature - 0.5).abs() < f32::EPSILON);
         assert_eq!(cfg.agent.max_iterations, 30);
         assert_eq!(cfg.tools.exec.timeout_secs, 120);
+    }
+
+    #[test]
+    fn review_enabled_by_default() {
+        let cfg = load_toml("").unwrap();
+        assert!(cfg.review.enabled);
+        let cfg = load_toml("[review]\nenabled = false\n").unwrap();
+        assert!(!cfg.review.enabled);
     }
 
     #[test]

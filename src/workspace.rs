@@ -119,6 +119,11 @@ impl Workspace {
         self.state_dir().join("usage.db")
     }
 
+    /// Path to the review findings ledger (spec 23).
+    pub fn review_db_path(&self) -> PathBuf {
+        self.state_dir().join("review.db")
+    }
+
     /// The system prompt, assembled once at workspace init.
     ///
     /// The persona is compiled in; USER.md is provisioned via Nix and

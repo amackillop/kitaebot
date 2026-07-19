@@ -95,6 +95,7 @@ impl TestAgent {
             summarize,
             self.notifier,
             None,
+            None,
         )
     }
 }

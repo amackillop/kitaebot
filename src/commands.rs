@@ -15,6 +15,7 @@ use crate::engine::{ContextEngine, SessionInfo, SummarizeFn};
 use crate::heartbeat;
 use crate::memory::distill::{self, Distiller};
 use crate::provider::Provider;
+use crate::review::ReviewLedger;
 use crate::tools::Tools;
 use crate::usage::{self, TurnRecord, UsageLedger};
 use crate::workspace::Workspace;
@@ -38,6 +39,8 @@ pub enum SlashCommand {
     Stats,
     /// Show recorded turn cost, broken down by build and model.
     Usage,
+    /// Show review verdicts and finding counts (spec 23).
+    Findings,
 }
 
 /// The input starts with `/` but doesn't match any known command.
@@ -64,6 +67,7 @@ impl FromStr for SlashCommand {
             ("/new", "") => Ok(Self::New),
             ("/stats", "") => Ok(Self::Stats),
             ("/usage", "") => Ok(Self::Usage),
+            ("/findings", "") => Ok(Self::Findings),
             ("/project", "") => Ok(Self::Project { name: None }),
             ("/project", name) => Ok(Self::Project {
                 name: Some(name.to_string()),
@@ -93,6 +97,7 @@ pub async fn execute(
     max_iterations: usize,
     memory_index_cap: usize,
     usage_ledger: Option<&UsageLedger>,
+    review_ledger: Option<&ReviewLedger>,
 ) -> Result<Reply, String> {
     match cmd {
         SlashCommand::Compact => match engine.force_compact(summarize).await {
@@ -179,6 +184,13 @@ pub async fn execute(
                 .rows()
                 .map(|rows| Reply::pre(usage::report(&rows)))
                 .map_err(|e| format!("Usage query failed: {e}")),
+        },
+        SlashCommand::Findings => match review_ledger {
+            None => Ok(Reply::text("Review tracking is disabled.".into())),
+            Some(ledger) => ledger
+                .report()
+                .map(Reply::pre)
+                .map_err(|e| format!("Findings query failed: {e}")),
         },
     }
 }
@@ -451,6 +463,7 @@ mod tests {
         assert_eq!("/new".parse(), Ok(SlashCommand::New));
         assert_eq!("/stats".parse(), Ok(SlashCommand::Stats));
         assert_eq!("/usage".parse(), Ok(SlashCommand::Usage));
+        assert_eq!("/findings".parse(), Ok(SlashCommand::Findings));
     }
 
     #[test]

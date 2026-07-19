@@ -14,13 +14,14 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use tracing::Instrument;
+use tracing::{Instrument, warn};
 
 use crate::activity::Activity;
 use crate::engine::SummarizeFn;
 use crate::engine::ephemeral::EphemeralSession;
 use crate::error::ToolError;
 use crate::provider::Provider;
+use crate::review::{self, ReviewLedger};
 use crate::tools::{Tool, ToolCtx, Tools};
 use crate::usage::{self, TurnRecord, UsageLedger};
 
@@ -169,6 +170,22 @@ struct Args {
     /// for a packed artifact.
     #[serde(default)]
     agent_type: AgentKind,
+    /// Reviewer calls only: ledger context for the gate invocation.
+    /// Ignored for other agent types.
+    #[serde(default)]
+    review: Option<ReviewMeta>,
+}
+
+/// Where a review lands in the ledger. Supplied by the parent when it
+/// dispatches a reviewer; the recording itself is mechanical.
+#[derive(Deserialize, JsonSchema)]
+struct ReviewMeta {
+    /// Repository under review, `owner/repo`.
+    repo: String,
+    /// Which gate: "plan", "commit", or "series".
+    gate: String,
+    /// The ref under review: SHA for commit/series, branch for plan.
+    git_ref: String,
 }
 
 /// Tool that runs a sub-agent turn in an isolated in-memory context.
@@ -181,6 +198,7 @@ pub(crate) struct TaskTool<P: Provider> {
     types: AgentTypes,
     max_iterations: usize,
     usage_ledger: Option<Arc<UsageLedger>>,
+    review_ledger: Option<Arc<ReviewLedger>>,
 }
 
 impl<P: Provider> TaskTool<P> {
@@ -190,6 +208,7 @@ impl<P: Provider> TaskTool<P> {
         types: AgentTypes,
         max_iterations: usize,
         usage_ledger: Option<Arc<UsageLedger>>,
+        review_ledger: Option<Arc<ReviewLedger>>,
     ) -> Self {
         Self {
             providers,
@@ -197,6 +216,7 @@ impl<P: Provider> TaskTool<P> {
             types,
             max_iterations,
             usage_ledger,
+            review_ledger,
         }
     }
 }
@@ -284,8 +304,39 @@ impl<P: Provider> Tool for TaskTool<P> {
                     usage,
                 },
             );
-            Ok(output.into_text())
+            let text = output.into_text();
+            if args.agent_type == AgentKind::Reviewer {
+                record_review(self.review_ledger.as_deref(), args.review.as_ref(), &text);
+            }
+            Ok(text)
         })
+    }
+}
+
+/// Parse a reviewer response's findings block and record it —
+/// mechanically, no model cooperation required. Telemetry only: every
+/// failure is a warning, never a review failure.
+fn record_review(ledger: Option<&ReviewLedger>, meta: Option<&ReviewMeta>, text: &str) {
+    let Some(ledger) = ledger else { return };
+    let Some(output) = review::parse_findings_block(text) else {
+        warn!("reviewer response has no parseable findings block");
+        return;
+    };
+    // A missing meta mislabels the rows but must not drop them: the
+    // category counts are the point.
+    let (repo, gate, git_ref) = meta.map_or(("", "", ""), |m| {
+        (m.repo.as_str(), m.gate.as_str(), m.git_ref.as_str())
+    });
+    if meta.is_none() {
+        warn!("reviewer call carried no review metadata; recording unlabeled");
+    }
+    let record = review::GateRecord {
+        repo,
+        gate,
+        git_ref,
+    };
+    if let Err(e) = ledger.record_review(&record, &output) {
+        warn!("failed to record review: {e}");
     }
 }
 
@@ -369,6 +420,7 @@ mod tests {
                 reviewer: agent_type(Tools::default()),
             },
             max_iterations,
+            None,
             None,
         )
     }
@@ -458,6 +510,7 @@ mod tests {
             },
             5,
             None,
+            None,
         );
         let result = tool
             .execute(
@@ -493,6 +546,7 @@ mod tests {
                 reviewer: agent_type(Tools::default()),
             },
             5,
+            None,
             None,
         );
 
@@ -573,6 +627,7 @@ mod tests {
             },
             5,
             None,
+            None,
         );
         let ctx = ToolCtx::default();
         ctx.cancel.cancel();
@@ -622,6 +677,87 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed(_)));
+    }
+
+    const REVIEW_RESPONSE: &str = "Looks broken.\n```findings\n\
+        {\"verdict\": \"incorrect\", \"confidence\": 0.9, \
+        \"explanation\": \"bug\", \"findings\": [\
+        {\"category\": \"swallowed-error\", \"severity\": \"must-fix\", \
+        \"note\": \"drops err\"}]}\n```";
+
+    fn tool_with_review_ledger(ledger: Arc<crate::review::ReviewLedger>) -> TaskTool<MockProvider> {
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            REVIEW_RESPONSE.to_string(),
+        ))]));
+        TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger),
+        )
+    }
+
+    #[tokio::test]
+    async fn reviewer_output_recorded_to_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger =
+            Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
+        let tool = tool_with_review_ledger(ledger.clone());
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        // The parent still gets the full text, block included.
+        assert!(result.contains("```findings"), "{result}");
+        let report = ledger.report().unwrap();
+        assert!(report.contains("commit"), "{report}");
+        assert!(report.contains("swallowed-error"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn non_reviewer_output_never_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger =
+            Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
+        let tool = tool_with_review_ledger(ledger.clone());
+        // An explore response that happens to contain a findings block
+        // must not land in the ledger.
+        tool.execute(
+            serde_json::json!({"prompt": "research this"}),
+            ToolCtx::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ledger.report().unwrap(), "No reviews recorded.");
+    }
+
+    #[tokio::test]
+    async fn reviewer_without_meta_still_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger =
+            Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
+        let tool = tool_with_review_ledger(ledger.clone());
+        tool.execute(
+            serde_json::json!({"prompt": "review this", "agent_type": "reviewer"}),
+            ToolCtx::default(),
+        )
+        .await
+        .unwrap();
+        let report = ledger.report().unwrap();
+        assert!(report.contains("swallowed-error"), "{report}");
     }
 
     #[tokio::test]

@@ -16,6 +16,7 @@ use crate::engine::{ContextEngine, SummarizeFn};
 use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;
+use crate::review::ReviewLedger;
 use crate::tools::Tools;
 use crate::usage::{self, TurnRecord, UsageLedger};
 use crate::workspace::Workspace;
@@ -40,6 +41,7 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     summarize: SummarizeFn,
     notifier: Option<Arc<Notifier>>,
     usage_ledger: Option<Arc<UsageLedger>>,
+    review_ledger: Option<Arc<ReviewLedger>>,
     /// Monotonic turn counter, the `id` field of the per-turn log span.
     turn_seq: u64,
 }
@@ -60,6 +62,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         summarize: SummarizeFn,
         notifier: Option<Arc<Notifier>>,
         usage_ledger: Option<Arc<UsageLedger>>,
+        review_ledger: Option<Arc<ReviewLedger>>,
     ) -> Self {
         Self {
             rx,
@@ -75,6 +78,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             summarize,
             notifier,
             usage_ledger,
+            review_ledger,
             turn_seq: 0,
         }
     }
@@ -129,6 +133,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                     self.max_iterations,
                     self.memory_index_cap,
                     self.usage_ledger.as_deref(),
+                    self.review_ledger.as_deref(),
                 )
                 .await
             }

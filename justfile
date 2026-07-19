@@ -156,6 +156,10 @@ chat *flags: (vm-run flags)
     cargo run --bin kchat -- "$SOCK"
 
 # Send one message to the daemon and print its reply, then exit
+# Show the review findings report from the running VM
+findings:
+    just ask /findings
+
 ask message: (vm-run)
     #!/usr/bin/env bash
     set -euo pipefail
