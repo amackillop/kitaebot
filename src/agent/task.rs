@@ -54,6 +54,18 @@ const WORKER_TOOLS: &[&str] = &[
     "exec",
 ];
 
+/// Allowlist for the `reviewer` type: explore's tools, and — unlike
+/// explore — no LCM tools either (see `build_agent_types`). Web stays
+/// because verifying a suspected hallucinated API against real
+/// documentation is a core review move (spec 23).
+const REVIEWER_TOOLS: &[&str] = &[
+    "file_read",
+    "glob_search",
+    "grep",
+    "web_fetch",
+    "web_search",
+];
+
 /// Tool output cap (estimated tokens) for sub-agent contexts.
 ///
 /// Deliberately far above the root's `context.tool_output_tokens`:
@@ -66,35 +78,60 @@ const EXPLORE_PROMPT: &str = include_str!("../prompts/explore.md");
 
 const WORKER_PROMPT: &str = include_str!("../prompts/worker.md");
 
+const REVIEWER_PROMPT: &str = include_str!("../prompts/reviewer.md");
+
 /// A sub-agent type: system prompt plus prebuilt tool set.
 pub(crate) struct AgentType {
     system_prompt: String,
     tools: Tools,
 }
 
-/// Build the `explore` and `worker` agent types from the parent's
-/// base registry (post-`tools.disabled`) and the engine's sub-agent
-/// tools. Both children share the engine tool instances; neither can
-/// see `task`, so recursion is structurally impossible.
+/// The three prebuilt sub-agent types.
+pub(crate) struct AgentTypes {
+    pub explore: AgentType,
+    pub worker: AgentType,
+    pub reviewer: AgentType,
+}
+
+/// Per-type providers, resolved from `provider.model_overrides` at
+/// startup.
+pub(crate) struct TypeProviders<P> {
+    pub explore: Arc<P>,
+    pub worker: Arc<P>,
+    pub reviewer: Arc<P>,
+}
+
+/// Build the sub-agent types from the parent's base registry
+/// (post-`tools.disabled`) and the engine's sub-agent tools. Explore
+/// and worker share the engine tool instances; the reviewer gets
+/// none — its independence from the parent's narrative is the design
+/// point, and LCM tools would hand that narrative back (spec 23).
+/// No child can see `task`, so recursion is structurally impossible.
 pub(crate) fn build_agent_types(
     base: &Tools,
     engine_tools: Vec<Arc<dyn Tool>>,
     workspace_dir: &Path,
-) -> (AgentType, AgentType) {
+) -> AgentTypes {
     let mut explore_tools = base.filtered(EXPLORE_TOOLS);
     explore_tools.extend_with(engine_tools.clone(), &[]);
     let mut worker_tools = base.filtered(WORKER_TOOLS);
     worker_tools.extend_with(engine_tools, &[]);
+    let reviewer_tools = base.filtered(REVIEWER_TOOLS);
 
-    let explore = AgentType {
-        system_prompt: compose_prompt(EXPLORE_PROMPT, workspace_dir, &explore_tools),
-        tools: explore_tools,
-    };
-    let worker = AgentType {
-        system_prompt: compose_prompt(WORKER_PROMPT, workspace_dir, &worker_tools),
-        tools: worker_tools,
-    };
-    (explore, worker)
+    AgentTypes {
+        explore: AgentType {
+            system_prompt: compose_prompt(EXPLORE_PROMPT, workspace_dir, &explore_tools),
+            tools: explore_tools,
+        },
+        worker: AgentType {
+            system_prompt: compose_prompt(WORKER_PROMPT, workspace_dir, &worker_tools),
+            tools: worker_tools,
+        },
+        reviewer: AgentType {
+            system_prompt: compose_prompt(REVIEWER_PROMPT, workspace_dir, &reviewer_tools),
+            tools: reviewer_tools,
+        },
+    }
 }
 
 /// Append environment info (working directory, tool names) to a
@@ -119,6 +156,7 @@ enum AgentKind {
     #[default]
     Explore,
     Worker,
+    Reviewer,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -127,7 +165,8 @@ struct Args {
     /// the conversation history; include all necessary context.
     prompt: String,
     /// "explore" (default): read-only research. "worker": can also
-    /// write files and execute commands.
+    /// write files and execute commands. "reviewer": read-only judge
+    /// for a packed artifact.
     #[serde(default)]
     agent_type: AgentKind,
 }
@@ -137,32 +176,25 @@ struct Args {
 /// Generic over the provider because [`Provider`] is not object-safe;
 /// the registry erases the generic behind `Arc<dyn Tool>`.
 pub(crate) struct TaskTool<P: Provider> {
-    explore_provider: Arc<P>,
-    worker_provider: Arc<P>,
+    providers: TypeProviders<P>,
     summarize: SummarizeFn,
-    explore: AgentType,
-    worker: AgentType,
+    types: AgentTypes,
     max_iterations: usize,
     usage_ledger: Option<Arc<UsageLedger>>,
 }
 
 impl<P: Provider> TaskTool<P> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        explore_provider: Arc<P>,
-        worker_provider: Arc<P>,
+        providers: TypeProviders<P>,
         summarize: SummarizeFn,
-        explore: AgentType,
-        worker: AgentType,
+        types: AgentTypes,
         max_iterations: usize,
         usage_ledger: Option<Arc<UsageLedger>>,
     ) -> Self {
         Self {
-            explore_provider,
-            worker_provider,
+            providers,
             summarize,
-            explore,
-            worker,
+            types,
             max_iterations,
             usage_ledger,
         }
@@ -193,7 +225,12 @@ impl<P: Provider> Tool for TaskTool<P> {
         them, not fetch jobs.\n\
         agent_type \"worker\": explore's tools plus file_write, file_edit, \
         and exec. For self-contained mechanical tasks. No git or GitHub \
-        tools."
+        tools.\n\
+        agent_type \"reviewer\": read-only judge for an artifact you pack \
+        into the prompt (a plan, a staged diff with its commit message, or \
+        a branch diff) plus its stated intent. Explore's tools but no \
+        access to compacted history. Returns prose findings ending in a \
+        fenced findings block."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -210,8 +247,9 @@ impl<P: Provider> Tool for TaskTool<P> {
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
             let (agent, provider, label) = match args.agent_type {
-                AgentKind::Explore => (&self.explore, &self.explore_provider, "explore"),
-                AgentKind::Worker => (&self.worker, &self.worker_provider, "worker"),
+                AgentKind::Explore => (&self.types.explore, &self.providers.explore, "explore"),
+                AgentKind::Worker => (&self.types.worker, &self.providers.worker, "worker"),
+                AgentKind::Reviewer => (&self.types.reviewer, &self.providers.reviewer, "reviewer"),
             };
 
             // Fresh context per call, discarded on return. The parent's
@@ -307,6 +345,14 @@ mod tests {
         }
     }
 
+    fn same_provider(provider: &Arc<MockProvider>) -> TypeProviders<MockProvider> {
+        TypeProviders {
+            explore: provider.clone(),
+            worker: provider.clone(),
+            reviewer: provider.clone(),
+        }
+    }
+
     fn task_tool(
         responses: Vec<Result<Response, ProviderError>>,
         explore: Tools,
@@ -315,11 +361,13 @@ mod tests {
     ) -> TaskTool<MockProvider> {
         let provider = Arc::new(MockProvider::new(responses));
         TaskTool::new(
-            provider.clone(),
-            provider,
+            same_provider(&provider),
             noop_summarize(),
-            agent_type(explore),
-            agent_type(worker),
+            AgentTypes {
+                explore: agent_type(explore),
+                worker: agent_type(worker),
+                reviewer: agent_type(Tools::default()),
+            },
             max_iterations,
             None,
         )
@@ -330,7 +378,7 @@ mod tests {
     }
 
     /// Full local tool catalog plus the cfg-gated network names.
-    fn catalog_and_types() -> (Vec<&'static str>, AgentType, AgentType) {
+    fn catalog_and_types() -> (Vec<&'static str>, AgentTypes) {
         let dir = tempfile::tempdir().unwrap();
         let workspace = Workspace::init_at(dir.path().to_path_buf()).unwrap();
         let config = crate::config::Config::load(dir.path()).unwrap();
@@ -340,8 +388,8 @@ mod tests {
         // names are pinned by spec 03.
         names.extend(["web_fetch", "web_search"]);
         let base = Tools::new(local, &[]).unwrap();
-        let (explore, worker) = build_agent_types(&base, Vec::new(), workspace.path());
-        (names, explore, worker)
+        let types = build_agent_types(&base, Vec::new(), workspace.path());
+        (names, types)
     }
 
     fn tool_names(tools: &Tools) -> Vec<String> {
@@ -401,11 +449,13 @@ mod tests {
             Ok(Response::Text("worker done".to_string())),
         ]));
         let tool = TaskTool::new(
-            provider.clone(),
-            provider,
+            same_provider(&provider),
             noop_summarize(),
-            agent_type(Tools::default()),
-            agent_type(mock_tools()),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(mock_tools()),
+                reviewer: agent_type(Tools::default()),
+            },
             5,
             None,
         );
@@ -427,36 +477,43 @@ mod tests {
         let worker_provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
             "from worker provider".to_string(),
         ))]));
+        let reviewer_provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            "from reviewer provider".to_string(),
+        ))]));
         let tool = TaskTool::new(
-            explore_provider.clone(),
-            worker_provider.clone(),
+            TypeProviders {
+                explore: explore_provider.clone(),
+                worker: worker_provider.clone(),
+                reviewer: reviewer_provider.clone(),
+            },
             noop_summarize(),
-            agent_type(Tools::default()),
-            agent_type(Tools::default()),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
             5,
             None,
         );
 
-        let explored = tool
-            .execute(
-                serde_json::json!({"prompt": "x", "agent_type": "explore"}),
-                ToolCtx::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(explored, "from explore provider");
-
-        let worked = tool
-            .execute(
-                serde_json::json!({"prompt": "x", "agent_type": "worker"}),
-                ToolCtx::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(worked, "from worker provider");
+        for (kind, expected) in [
+            ("explore", "from explore provider"),
+            ("worker", "from worker provider"),
+            ("reviewer", "from reviewer provider"),
+        ] {
+            let result = tool
+                .execute(
+                    serde_json::json!({"prompt": "x", "agent_type": kind}),
+                    ToolCtx::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result, expected);
+        }
 
         assert_eq!(explore_provider.call_count(), 1);
         assert_eq!(worker_provider.call_count(), 1);
+        assert_eq!(reviewer_provider.call_count(), 1);
     }
 
     #[tokio::test]
@@ -507,11 +564,13 @@ mod tests {
             "never".to_string(),
         ))]));
         let tool = TaskTool::new(
-            Arc::clone(&provider),
-            Arc::clone(&provider),
+            same_provider(&provider),
             noop_summarize(),
-            agent_type(Tools::default()),
-            agent_type(Tools::default()),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
             5,
             None,
         );
@@ -596,8 +655,12 @@ mod tests {
 
     #[test]
     fn allowlists_reference_real_tools() {
-        let (catalog, _, _) = catalog_and_types();
-        for name in EXPLORE_TOOLS.iter().chain(WORKER_TOOLS) {
+        let (catalog, _) = catalog_and_types();
+        for name in EXPLORE_TOOLS
+            .iter()
+            .chain(WORKER_TOOLS)
+            .chain(REVIEWER_TOOLS)
+        {
             assert!(
                 catalog.contains(name),
                 "allowlist names unknown tool {name}"
@@ -614,6 +677,7 @@ mod tests {
         for name in EXPLORE_TOOLS.iter().chain(WORKER_TOOLS) {
             assert!(desc.contains(name), "description omits {name}");
         }
+        assert!(desc.contains("reviewer"));
     }
 
     #[test]
@@ -624,44 +688,71 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_allowlist_matches_explore() {
+        assert_eq!(REVIEWER_TOOLS, EXPLORE_TOOLS);
+    }
+
+    #[test]
     fn children_never_see_task() {
         let task: Arc<dyn Tool> =
             Arc::new(task_tool(vec![], Tools::default(), Tools::default(), 5));
         let base = Tools::new(vec![task], &[]).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let (explore, worker) = build_agent_types(&base, Vec::new(), dir.path());
-        assert!(!tool_names(&explore.tools).contains(&"task".to_string()));
-        assert!(!tool_names(&worker.tools).contains(&"task".to_string()));
+        let types = build_agent_types(&base, Vec::new(), dir.path());
+        for tools in [
+            &types.explore.tools,
+            &types.worker.tools,
+            &types.reviewer.tools,
+        ] {
+            assert!(!tool_names(tools).contains(&"task".to_string()));
+        }
     }
 
     #[test]
     fn worker_tools_superset_of_explore_tools() {
-        let (_, explore, worker) = catalog_and_types();
-        let worker_names = tool_names(&worker.tools);
-        for name in tool_names(&explore.tools) {
+        let (_, types) = catalog_and_types();
+        let worker_names = tool_names(&types.worker.tools);
+        for name in tool_names(&types.explore.tools) {
             assert!(worker_names.contains(&name), "worker missing {name}");
         }
     }
 
     #[test]
-    fn engine_tools_appended_to_both_types() {
+    fn engine_tools_reach_explore_and_worker_but_not_reviewer() {
         let engine_tool: Arc<dyn Tool> = Arc::new(MockTool::new("engine"));
         let dir = tempfile::tempdir().unwrap();
-        let (explore, worker) = build_agent_types(&Tools::default(), vec![engine_tool], dir.path());
-        assert!(tool_names(&explore.tools).contains(&"mock".to_string()));
-        assert!(tool_names(&worker.tools).contains(&"mock".to_string()));
+        let types = build_agent_types(&Tools::default(), vec![engine_tool], dir.path());
+        assert!(tool_names(&types.explore.tools).contains(&"mock".to_string()));
+        assert!(tool_names(&types.worker.tools).contains(&"mock".to_string()));
+        // The reviewer's independence from the parent's narrative is
+        // the design point: no LCM retrieval tools (spec 23).
+        assert!(!tool_names(&types.reviewer.tools).contains(&"mock".to_string()));
     }
 
     #[test]
     fn prompts_include_environment_block() {
         let engine_tool: Arc<dyn Tool> = Arc::new(MockTool::new("engine"));
         let dir = tempfile::tempdir().unwrap();
-        let (explore, worker) = build_agent_types(&Tools::default(), vec![engine_tool], dir.path());
-        assert!(explore.system_prompt.contains("research agent"));
-        assert!(worker.system_prompt.contains("task agent"));
-        for prompt in [&explore.system_prompt, &worker.system_prompt] {
+        let types = build_agent_types(&Tools::default(), vec![engine_tool], dir.path());
+        assert!(types.explore.system_prompt.contains("research agent"));
+        assert!(types.worker.system_prompt.contains("task agent"));
+        assert!(types.reviewer.system_prompt.contains("code reviewer"));
+        for prompt in [&types.explore.system_prompt, &types.worker.system_prompt] {
             assert!(prompt.contains(&dir.path().display().to_string()));
             assert!(prompt.contains("Available tools: mock"));
         }
+        assert!(
+            types
+                .reviewer
+                .system_prompt
+                .contains(&dir.path().display().to_string())
+        );
+    }
+
+    #[test]
+    fn reviewer_prompt_mandates_findings_block() {
+        assert!(REVIEWER_PROMPT.contains("```findings"));
+        assert!(REVIEWER_PROMPT.contains("verdict"));
+        assert!(REVIEWER_PROMPT.contains("must-fix"));
     }
 }

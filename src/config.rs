@@ -83,6 +83,8 @@ pub struct ModelOverrides {
     pub explore: Option<String>,
     /// Model for `worker` sub-agents (delegated implementation).
     pub worker: Option<String>,
+    /// Model for `reviewer` sub-agents (self-review gates, spec 23).
+    pub reviewer: Option<String>,
     /// Model for context-compaction summaries.
     pub summarizer: Option<String>,
     /// Model for heartbeat turns.
@@ -745,6 +747,7 @@ timeout_secs = 120
         let cfg = load_toml("").unwrap();
         assert!(cfg.provider.model_overrides.explore.is_none());
         assert!(cfg.provider.model_overrides.worker.is_none());
+        assert!(cfg.provider.model_overrides.reviewer.is_none());
         assert!(cfg.provider.model_overrides.summarizer.is_none());
         assert!(cfg.provider.model_overrides.heartbeat.is_none());
         assert!(cfg.provider.model_overrides.memory.is_none());
@@ -757,6 +760,7 @@ timeout_secs = 120
 [provider.model_overrides]
 explore = \"cheap/explore\"
 worker = \"mid/worker\"
+reviewer = \"strong/reviewer\"
 summarizer = \"cheap/summarizer\"
 heartbeat = \"cheap/heartbeat\"
 memory = \"cheap/memory\"
@@ -766,6 +770,7 @@ memory = \"cheap/memory\"
         let overrides = &cfg.provider.model_overrides;
         assert_eq!(overrides.explore.as_deref(), Some("cheap/explore"));
         assert_eq!(overrides.worker.as_deref(), Some("mid/worker"));
+        assert_eq!(overrides.reviewer.as_deref(), Some("strong/reviewer"));
         assert_eq!(overrides.summarizer.as_deref(), Some("cheap/summarizer"));
         assert_eq!(overrides.heartbeat.as_deref(), Some("cheap/heartbeat"));
         assert_eq!(overrides.memory.as_deref(), Some("cheap/memory"));

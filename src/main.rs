@@ -180,7 +180,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     summarize: engine::SummarizeFn,
     notifier: Option<Arc<notify::Notifier>>,
 ) -> agent::AgentHandle {
-    let (explore, worker) =
+    let agent_types =
         agent::task::build_agent_types(&tools, engine.tools(ToolScope::SubAgent), workspace.path());
     // The distiller mirrors a worker: built from the base registry
     // (memory-editing tools only) and capped at the sub-agent iteration
@@ -202,11 +202,13 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     };
     let overrides = &config.provider.model_overrides;
     let task_tool: Arc<dyn tools::Tool> = Arc::new(agent::task::TaskTool::new(
-        role_provider(&provider, overrides.explore.as_deref()),
-        role_provider(&provider, overrides.worker.as_deref()),
+        agent::task::TypeProviders {
+            explore: role_provider(&provider, overrides.explore.as_deref()),
+            worker: role_provider(&provider, overrides.worker.as_deref()),
+            reviewer: role_provider(&provider, overrides.reviewer.as_deref()),
+        },
         summarize.clone(),
-        explore,
-        worker,
+        agent_types,
         config.sub_agents.max_iterations,
         usage_ledger.clone(),
     ));
