@@ -229,6 +229,12 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     ));
     tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
     tools.extend_with(vec![task_tool], &config.tools.disabled);
+    // Root-only: children are built above from the base registry and
+    // no allowlist names it.
+    if let Some(ledger) = &review_ledger {
+        let review_log: Arc<dyn tools::Tool> = Arc::new(review::ReviewLogTool::new(ledger.clone()));
+        tools.extend_with(vec![review_log], &config.tools.disabled);
+    }
     let heartbeat_provider = role_provider(&provider, overrides.heartbeat.as_deref());
     let memory_provider = role_provider(&provider, overrides.memory.as_deref());
     agent::AgentHandle::spawn(

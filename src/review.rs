@@ -7,11 +7,17 @@
 //! logged by the caller and never fails the review.
 
 use std::fmt::Write as _;
+use std::future::Future;
 use std::path::Path;
-use std::sync::Mutex;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
+use schemars::JsonSchema;
 use serde::Deserialize;
+
+use crate::error::ToolError;
+use crate::tools::{Tool, ToolCtx};
 
 /// The parsed findings block from a reviewer response.
 #[derive(Debug, Deserialize, PartialEq)]
@@ -166,6 +172,22 @@ impl ReviewLedger {
         tx.commit()
     }
 
+    /// Record one externally-sourced finding (a human or review-bot
+    /// comment). Severity and confidence stay NULL: those are
+    /// self-review signals.
+    pub fn record_finding(&self, f: &ExternalFinding) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("review ledger mutex poisoned");
+        conn.execute(
+            "INSERT INTO findings
+                 (repo, gate, git_ref, source, category, file, line, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                f.repo, f.gate, f.git_ref, f.source, f.category, f.file, f.line, f.note,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Render the `/findings` report: reviews by gate and verdict,
     /// then finding counts by category split self vs external.
     pub fn report(&self) -> rusqlite::Result<String> {
@@ -207,6 +229,104 @@ impl ReviewLedger {
             let _ = writeln!(out, "{category:<22} {own:>6} {external:>10}");
         }
         Ok(out)
+    }
+}
+
+/// One externally-sourced finding, as recorded by [`ReviewLogTool`].
+pub struct ExternalFinding<'a> {
+    pub repo: &'a str,
+    pub gate: &'a str,
+    pub git_ref: &'a str,
+    pub source: &'a str,
+    pub category: &'a str,
+    pub file: Option<&'a str>,
+    pub line: Option<i64>,
+    pub note: &'a str,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct LogArgs {
+    /// Repository, `owner/repo`.
+    repo: String,
+    /// Where the finding arrived: "plan" for corrections to a posted
+    /// plan, "external" for PR review comments.
+    gate: String,
+    /// What the finding refers to: PR number, SHA, or branch.
+    git_ref: String,
+    /// Who raised it: "human" or "bot".
+    source: String,
+    /// Free-text category. Reuse an existing category name when one
+    /// fits; coin a precise new one when none does.
+    category: String,
+    /// File the comment is anchored to, when it is.
+    #[serde(default)]
+    file: Option<String>,
+    /// Line the comment is anchored to, when it is.
+    #[serde(default)]
+    line: Option<i64>,
+    /// The finding itself, condensed to its substance.
+    note: String,
+}
+
+/// Tool for logging externally-sourced review findings — the escapes
+/// stream (spec 23). Root-only by construction: it appears in no
+/// sub-agent allowlist.
+pub struct ReviewLogTool {
+    ledger: Arc<ReviewLedger>,
+}
+
+impl ReviewLogTool {
+    pub fn new(ledger: Arc<ReviewLedger>) -> Self {
+        Self { ledger }
+    }
+}
+
+impl Tool for ReviewLogTool {
+    fn name(&self) -> &'static str {
+        "review_log"
+    }
+
+    fn description(&self) -> &'static str {
+        "Log one externally-sourced review finding to the findings \
+        ledger. Call it once per inline comment when processing PR \
+        review feedback, and once per correction when a human amends a \
+        posted plan — before acting on the feedback. Do not log your \
+        own reviewer's findings; those are recorded automatically."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::to_value(schemars::schema_for!(LogArgs)).expect("schema serialization failed")
+    }
+
+    fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
+        Box::pin(async move {
+            let args: LogArgs = serde_json::from_value(args)
+                .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+            // 'self' rows are written mechanically by the task tool;
+            // a model-invoked write must not be able to forge them.
+            if args.source == "self" {
+                return Err(ToolError::InvalidArguments(
+                    "source 'self' is reserved for mechanical recording".into(),
+                ));
+            }
+            self.ledger
+                .record_finding(&ExternalFinding {
+                    repo: &args.repo,
+                    gate: &args.gate,
+                    git_ref: &args.git_ref,
+                    source: &args.source,
+                    category: &args.category,
+                    file: args.file.as_deref(),
+                    line: args.line,
+                    note: &args.note,
+                })
+                .map_err(|e| ToolError::ExecutionFailed(format!("review_log: {e}")))?;
+            Ok("Recorded.".to_string())
+        })
     }
 }
 
@@ -305,6 +425,58 @@ mod tests {
     fn empty_report_is_a_notice() {
         let (_dir, ledger) = ledger();
         assert_eq!(ledger.report().unwrap(), "No reviews recorded.");
+    }
+
+    #[tokio::test]
+    async fn review_log_records_external_finding() {
+        let (_dir, ledger) = ledger();
+        let ledger = Arc::new(ledger);
+        let tool = ReviewLogTool::new(ledger.clone());
+        tool.execute(
+            serde_json::json!({
+                "repo": "owner/repo",
+                "gate": "external",
+                "git_ref": "142",
+                "source": "human",
+                "category": "swallowed-error",
+                "file": "src/x.rs",
+                "line": 7,
+                "note": "reviewer caught a dropped Err"
+            }),
+            ToolCtx::default(),
+        )
+        .await
+        .unwrap();
+        let report = ledger.report().unwrap();
+        assert!(report.contains("swallowed-error"), "{report}");
+        // The external column carries it, not self.
+        let row: (i64, i64) = {
+            let conn = ledger.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT SUM(source = 'self'), SUM(source != 'self') FROM findings",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(row, (0, 1));
+    }
+
+    #[tokio::test]
+    async fn review_log_rejects_self_source() {
+        let (_dir, ledger) = ledger();
+        let tool = ReviewLogTool::new(Arc::new(ledger));
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "repo": "o/r", "gate": "external", "git_ref": "1",
+                    "source": "self", "category": "x", "note": "n"
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
     }
 
     #[test]
