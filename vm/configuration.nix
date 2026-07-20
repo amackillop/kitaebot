@@ -177,6 +177,8 @@ in
         "flakehub.com"
         "api.perplexity.ai"
         "api.linear.app"
+        # MCP server backends (spec 22).
+        "bitcoinknowledge.dev"
         # Package registries: devShells fetch project dependencies here.
         "npmjs.org"
         "yarnpkg.com"

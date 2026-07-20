@@ -13,6 +13,7 @@
 { pkgs, ... }:
 let
   lightpanda = pkgs.callPackage ../nix/lightpanda.nix { };
+  bkb-mcp = pkgs.callPackage ../nix/bkb-mcp.nix { };
 in
 {
   kitaebot = {
@@ -35,6 +36,8 @@ in
       which
       lightpanda
       nix
+      # MCP servers (spec 22): spawned by the daemon, resolved via PATH.
+      bkb-mcp
     ];
     gitConfig = {
       name = "kitaebot";
@@ -76,6 +79,14 @@ in
       linear = {
         enabled = true;
         trusted_users = [ "austin@moneydevkit.com" ];
+      };
+
+      # MCP servers (spec 22). bkb is pure knowledge lookup: no side
+      # effects, safe for the read-only sub-agent sets.
+      mcp.servers.bkb = {
+        command = "bkb-mcp";
+        env.BKB_API_URL = "https://bitcoinknowledge.dev";
+        explore = true;
       };
     };
   };

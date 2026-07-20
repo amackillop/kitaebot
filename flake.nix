@@ -97,18 +97,22 @@
           egress = import ./vm/test-egress.nix { inherit pkgs self; };
         };
 
-        packages.lightpanda = pkgs.callPackage ./nix/lightpanda.nix { };
+        packages = {
+          lightpanda = pkgs.callPackage ./nix/lightpanda.nix { };
 
-        packages.default = craneLib.buildPackage (
-          commonArgs
-          // {
-            inherit cargoArtifacts;
-            doCheck = false; # Tests run in checks.test with mock-network
-            # Stamp the build's git revision into the binary (usage ledger).
-            # dirtyRev is stable per-commit; source edits force a rebuild anyway.
-            GIT_SHA = self.rev or self.dirtyRev or "unknown";
-          }
-        );
+          bkb-mcp = pkgs.callPackage ./nix/bkb-mcp.nix { };
+
+          default = craneLib.buildPackage (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              doCheck = false; # Tests run in checks.test with mock-network
+              # Stamp the build's git revision into the binary (usage ledger).
+              # dirtyRev is stable per-commit; source edits force a rebuild anyway.
+              GIT_SHA = self.rev or self.dirtyRev or "unknown";
+            }
+          );
+        };
 
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};
