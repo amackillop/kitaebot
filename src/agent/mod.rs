@@ -115,9 +115,19 @@ pub(crate) async fn process_message_metered(
         provider,
         tools,
         max_iterations,
+        BudgetPolicy::Fail,
         ctx,
     )
     .await
+}
+
+/// What the turn loop does when the iteration cap is hit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BudgetPolicy {
+    /// Return [`Error::MaxIterationsReached`]; the turn is lost.
+    Fail,
+    /// Take one final no-tools completion as a degraded answer.
+    FinalAnswer,
 }
 
 /// Counters for the end-of-turn summary line.
@@ -129,6 +139,9 @@ struct TurnStats {
     prompt_tokens: Option<usize>,
     /// Billed tokens and cost, summed across the turn's calls.
     usage: TurnUsage,
+    /// The iteration cap was hit and the answer came from the
+    /// final-answer squeeze.
+    squeezed: bool,
 }
 
 /// Billed usage for one turn, summed across its provider calls.
@@ -184,6 +197,7 @@ pub(crate) async fn run_turn(
         provider,
         tools,
         max_iterations,
+        BudgetPolicy::Fail,
         ctx,
     )
     .await
@@ -206,7 +220,8 @@ pub(crate) async fn run_turn(
 /// same loop against an ephemeral child context.
 ///
 /// # Errors
-/// Returns error if max iterations reached or provider fails
+/// Returns error if max iterations reached (under [`BudgetPolicy::Fail`])
+/// or provider fails
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_turn_metered(
     engine: &mut impl ContextEngine,
@@ -216,6 +231,7 @@ pub(crate) async fn run_turn_metered(
     provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
+    budget: BudgetPolicy,
     ctx: &ToolCtx,
 ) -> Result<(TurnOutput, TurnUsage), Error> {
     let started = std::time::Instant::now();
@@ -228,6 +244,7 @@ pub(crate) async fn run_turn_metered(
         provider,
         tools,
         max_iterations,
+        budget,
         ctx,
         &mut stats,
     )
@@ -249,6 +266,7 @@ pub(crate) async fn run_turn_metered(
             calls = stats.usage.calls,
             completion_tokens = stats.usage.completion_tokens,
             cost = stats.usage.cost,
+            squeezed = stats.squeezed,
             ?elapsed,
             "Turn summary"
         ),
@@ -261,6 +279,7 @@ pub(crate) async fn run_turn_metered(
             calls = stats.usage.calls,
             completion_tokens = stats.usage.completion_tokens,
             cost = stats.usage.cost,
+            squeezed = stats.squeezed,
             ?elapsed,
             "Turn summary"
         ),
@@ -277,6 +296,7 @@ async fn turn_loop(
     provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
+    budget: BudgetPolicy,
     ctx: &ToolCtx,
     stats: &mut TurnStats,
 ) -> Result<TurnOutput, Error> {
@@ -419,7 +439,65 @@ async fn turn_loop(
     }
 
     activity::emit(activity_tx, Activity::MaxIterations);
-    Err(Error::MaxIterationsReached)
+    match budget {
+        BudgetPolicy::Fail => Err(Error::MaxIterationsReached),
+        BudgetPolicy::FinalAnswer => {
+            final_answer(engine, system_prompt, provider, ctx, stats).await
+        }
+    }
+}
+
+/// The budget-exhausted directive for the final-answer squeeze.
+const FINAL_ANSWER_DIRECTIVE: &str = "Your tool-call budget for this task is \
+    exhausted; no further tool calls will be executed. Reply now with your \
+    final answer from the evidence gathered so far, and state what remains \
+    unverified.";
+
+/// One last no-tools completion after the iteration cap: a degraded
+/// answer beats a lost turn.
+async fn final_answer(
+    engine: &mut impl ContextEngine,
+    system_prompt: &str,
+    provider: &impl Provider,
+    ctx: &ToolCtx,
+    stats: &mut TurnStats,
+) -> Result<TurnOutput, Error> {
+    stats.squeezed = true;
+    engine
+        .push_message(Message::System {
+            content: FINAL_ANSWER_DIRECTIVE.to_string(),
+        })
+        .await?;
+    let assembled = engine.assemble(system_prompt).await?;
+    let outcome = cancellable(
+        provider.chat(&assembled.messages, &[]),
+        &ctx.cancel,
+        ctx.activity.as_ref(),
+    )
+    .await?
+    .map_err(Error::Provider)?;
+
+    let call = outcome.usage;
+    if let Some(prompt_tokens) = call.prompt_tokens {
+        engine.observe_tokens(prompt_tokens as usize);
+        stats.prompt_tokens = Some(prompt_tokens as usize);
+    }
+    stats.usage.add_call(call);
+
+    let content = match outcome.response {
+        Response::Text(content) => content,
+        Response::ToolCalls { content, .. } => {
+            warn!("provider emitted tool calls with none offered; taking content");
+            content
+        }
+    };
+    debug!(content = %truncate_output(&content, LOG_CONTENT_MAX), "Turn finished (squeezed)");
+    engine
+        .push_message(Message::Assistant {
+            content: content.clone(),
+        })
+        .await?;
+    Ok(TurnOutput::Text(content))
 }
 
 // ── Private helpers ─────────────────────────────────────────────────

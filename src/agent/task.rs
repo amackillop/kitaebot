@@ -26,7 +26,7 @@ use crate::tools::mcp::McpTools;
 use crate::tools::{Tool, ToolCtx, Tools};
 use crate::usage::{self, TurnRecord, UsageLedger};
 
-use super::run_turn_metered;
+use super::{BudgetPolicy, run_turn_metered};
 
 /// Allowlist for the `explore` type: read-only research.
 ///
@@ -292,6 +292,10 @@ impl<P: Provider> Tool for TaskTool<P> {
                 activity: ctx.activity.as_ref().map(|parent| forward(parent, label)),
                 cancel: ctx.cancel.clone(),
             };
+            // FinalAnswer: a maxed-out sub-agent returns a degraded
+            // answer instead of erroring, so a reviewer that runs out
+            // of budget still delivers a verdict and its cost is
+            // recorded.
             let (output, usage) = run_turn_metered(
                 &mut engine,
                 &self.summarize,
@@ -300,6 +304,7 @@ impl<P: Provider> Tool for TaskTool<P> {
                 &**provider,
                 &agent.tools,
                 self.max_iterations,
+                BudgetPolicy::FinalAnswer,
                 &child_ctx,
             )
             .instrument(tracing::info_span!("subagent", agent = label))
@@ -654,25 +659,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn max_iterations_surfaces_as_tool_error() {
+    async fn max_iterations_squeezes_final_answer() {
         let max = 3;
-        let tool = task_tool(
-            vec![Ok(mock_tool_calls()); max],
-            mock_tools(),
-            Tools::default(),
-            max,
-        );
-        let err = tool
+        let mut responses = vec![Ok(mock_tool_calls()); max];
+        responses.push(Ok(Response::Text("partial answer".to_string())));
+        let tool = task_tool(responses, mock_tools(), Tools::default(), max);
+        let result = tool
             .execute(
                 serde_json::json!({"prompt": "loop forever"}),
                 ToolCtx::default(),
             )
             .await
-            .unwrap_err();
-        match err {
-            ToolError::ExecutionFailed(msg) => assert!(msg.contains("sub-agent failed")),
-            other => panic!("expected ExecutionFailed, got {other:?}"),
-        }
+            .unwrap();
+        assert_eq!(result, "partial answer");
+    }
+
+    #[tokio::test]
+    async fn squeezed_reviewer_still_records_findings() {
+        let max = 2;
+        let mut responses = vec![Ok(mock_tool_calls()); max];
+        responses.push(Ok(Response::Text(REVIEW_RESPONSE.to_string())));
+        let provider = Arc::new(MockProvider::new(responses));
+        let dir = tempfile::tempdir().unwrap();
+        let ledger =
+            Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            max,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(result.contains("```findings"), "{result}");
+        let report = ledger.report().unwrap();
+        assert!(report.contains("swallowed-error"), "{report}");
     }
 
     #[tokio::test]

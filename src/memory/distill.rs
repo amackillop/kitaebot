@@ -12,7 +12,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
-use crate::agent::{TurnUsage, run_turn_metered};
+use crate::agent::{BudgetPolicy, TurnUsage, run_turn_metered};
 use crate::engine::ephemeral::EphemeralSession;
 use crate::engine::{ContextEngine, SummarizeFn, format_messages_for_summary};
 use crate::error::Error;
@@ -202,6 +202,8 @@ pub async fn run<P: Provider, E: ContextEngine>(
 
     let user_message = build_user_message(workspace, &gathered.spans);
     let mut ephemeral = EphemeralSession::new(DISTILL_TOOL_OUTPUT_TOKENS);
+    // Fail, not FinalAnswer: a half-distilled memory write is worse
+    // than retrying on the next cycle with the backlog carried.
     let (output, usage) = run_turn_metered(
         &mut ephemeral,
         summarize,
@@ -210,6 +212,7 @@ pub async fn run<P: Provider, E: ContextEngine>(
         provider,
         &distiller.tools,
         distiller.max_iterations,
+        BudgetPolicy::Fail,
         &ToolCtx::default(),
     )
     .await?;
