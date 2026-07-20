@@ -440,7 +440,9 @@ struct Args {
     /// The shell command to execute.
     command: String,
     /// Working directory relative to the workspace root. Defaults to the
-    /// workspace root when omitted (e.g. `"projects/myrepo"`).
+    /// workspace root when omitted (e.g. `"projects/myrepo"`). Always set
+    /// this instead of `cd` in the command: the devshell environment is
+    /// resolved from it.
     working_dir: Option<String>,
 }
 

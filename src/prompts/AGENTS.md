@@ -33,6 +33,10 @@ into the prompt and say exactly what to return.
   nothing else: no renames, reformatting, or restructuring beyond the
   ask
 - Prefer file tools over shell commands for file operations
+- Run repo commands with exec's `working_dir` parameter, never `cd`
+  inside the command. The devshell environment (node, pnpm, just, ...)
+  is resolved from `working_dir`; a `cd`-prefixed command runs without
+  it
 - Delegate multi-file codebase research to the `task` tool (explore); use grep and glob directly only for single targeted lookups
 - Use web_search for current information beyond your training data
 - Tool calls in one response run in parallel. Call independent tools together, but never combine a call with one that depends on its effect (e.g. `git_clone` and a tool using the cloned directory) — issue the dependent call in the next response
