@@ -469,28 +469,30 @@ impl Exec {
         }
     }
 
-    /// Resolve the devshell environment for `cwd`.
+    /// Resolve the devshell environment for `cwd` from the nearest
+    /// ancestor `.envrc`, bounded at the workspace root.
     ///
     /// On [`DirenvError::Blocked`] — the `.envrc` was allowed at clone
     /// time but a later pull rewrote it, and direnv's content-bound
     /// approval no longer matches — re-run `direnv allow` for a trusted
     /// repo and retry once. Any other failure degrades to no devshell.
     async fn resolve_direnv(&self, cwd: &Path) -> Option<DirenvEnv> {
-        match self.direnv_cache.get(cwd).await {
+        let dir = nearest_envrc_dir(cwd, &self.workspace_root)?;
+        match self.direnv_cache.get(dir).await {
             Ok(env) => env,
-            Err(DirenvError::Blocked) if git::origin_trusted(cwd, &self.trusted_repos).await => {
-                debug!(dir = %cwd.display(), "direnv trust revoked; re-allowing trusted repo");
-                direnv::allow(cwd).await;
-                match self.direnv_cache.get(cwd).await {
+            Err(DirenvError::Blocked) if git::origin_trusted(dir, &self.trusted_repos).await => {
+                debug!(dir = %dir.display(), "direnv trust revoked; re-allowing trusted repo");
+                direnv::allow(dir).await;
+                match self.direnv_cache.get(dir).await {
                     Ok(env) => env,
                     Err(e) => {
-                        warn!(dir = %cwd.display(), error = %e, "direnv still failing after re-allow");
+                        warn!(dir = %dir.display(), error = %e, "direnv still failing after re-allow");
                         None
                     }
                 }
             }
             Err(e) => {
-                warn!(dir = %cwd.display(), error = %e, "direnv failed, running without devshell");
+                warn!(dir = %dir.display(), error = %e, "direnv failed, running without devshell");
                 None
             }
         }
@@ -643,6 +645,15 @@ fn resolve_working_dir(workspace_root: &Path, dir: Option<&str>) -> Result<PathB
     }
 
     Ok(resolved)
+}
+
+/// Nearest ancestor of `cwd` (inclusive) containing an `.envrc`,
+/// bounded at the workspace root so monorepo subdirs inherit the
+/// repo-root devshell.
+fn nearest_envrc_dir<'a>(cwd: &'a Path, workspace_root: &Path) -> Option<&'a Path> {
+    cwd.ancestors()
+        .take_while(|dir| dir.starts_with(workspace_root))
+        .find(|dir| dir.join(".envrc").exists())
 }
 
 /// Check if command contains path traversal.
@@ -1204,6 +1215,45 @@ mod tests {
             resolve_working_dir(root, Some("/etc")),
             Err(ToolError::Blocked { .. }),
         ));
+    }
+
+    // ── .envrc discovery ──────────────────────────────────────────────
+
+    #[test]
+    fn nearest_envrc_in_cwd() {
+        let ws = tempfile::tempdir().unwrap();
+        let repo = ws.path().join("projects/owner/repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join(".envrc"), "use flake").unwrap();
+        assert_eq!(nearest_envrc_dir(&repo, ws.path()), Some(repo.as_path()));
+    }
+
+    #[test]
+    fn nearest_envrc_walks_to_repo_root() {
+        let ws = tempfile::tempdir().unwrap();
+        let repo = ws.path().join("projects/owner/repo");
+        let pkg = repo.join("packages/pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(repo.join(".envrc"), "use flake").unwrap();
+        assert_eq!(nearest_envrc_dir(&pkg, ws.path()), Some(repo.as_path()));
+    }
+
+    #[test]
+    fn nearest_envrc_none_without_envrc() {
+        let ws = tempfile::tempdir().unwrap();
+        let sub = ws.path().join("projects/owner/repo");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(nearest_envrc_dir(&sub, ws.path()), None);
+    }
+
+    #[test]
+    fn nearest_envrc_bounded_at_workspace_root() {
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::write(outer.path().join(".envrc"), "use flake").unwrap();
+        let ws = outer.path().join("workspace");
+        let sub = ws.join("projects/owner/repo");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(nearest_envrc_dir(&sub, &ws), None);
     }
 
     #[tokio::test]
