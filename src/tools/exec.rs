@@ -15,8 +15,6 @@
 //! - Authenticated git operations (`git clone`, `git push`) — must use the dedicated GitHub tools
 //! - `gh` CLI config reads (token may persist to disk)
 //!
-//! Path traversal (`../`) is also blocked to confine execution to the workspace.
-//!
 //! These are heuristics, not a sandbox. A determined attacker can bypass them.
 //! Real isolation requires OS-level sandboxing (namespaces, seccomp, landlock).
 
@@ -523,14 +521,6 @@ impl Tool for Exec {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-            if has_path_traversal(&args.command) {
-                warn!(command = %args.command, "Path traversal detected");
-                return Err(ToolError::Blocked {
-                    operation: args.command,
-                    guidance: "path traversal detected".into(),
-                });
-            }
-
             if let Some(guidance) = blocked_reason(&args.command) {
                 warn!(command = %args.command, guidance, "Command blocked");
                 return Err(ToolError::Blocked {
@@ -656,11 +646,6 @@ fn nearest_envrc_dir<'a>(cwd: &'a Path, workspace_root: &Path) -> Option<&'a Pat
     cwd.ancestors()
         .take_while(|dir| dir.starts_with(workspace_root))
         .find(|dir| dir.join(".envrc").exists())
-}
-
-/// Check if command contains path traversal.
-fn has_path_traversal(cmd: &str) -> bool {
-    cmd.contains("../")
 }
 
 /// Check if command matches any deny pattern. Returns the guidance
@@ -1080,15 +1065,6 @@ mod tests {
         assert_allowed("confirm -rf");
     }
 
-    #[test]
-    fn test_path_traversal() {
-        assert!(has_path_traversal("cat ../secret"));
-        assert!(has_path_traversal("ls ../../"));
-
-        assert!(!has_path_traversal("ls ./foo"));
-        assert!(!has_path_traversal("cat /etc/passwd"));
-    }
-
     #[tokio::test]
     async fn test_exec_simple_command() {
         let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new(), Vec::new());
@@ -1144,14 +1120,6 @@ mod tests {
         // Never use a genuinely destructive command here — if the deny list has
         // a bug, execute() will run it for real.
         let args = serde_json::json!({"command": "echo shutdown"});
-        let result = tool.execute(args, ToolCtx::default()).await;
-        assert!(matches!(result, Err(ToolError::Blocked { .. })));
-    }
-
-    #[tokio::test]
-    async fn test_exec_path_traversal_blocked() {
-        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new(), Vec::new());
-        let args = serde_json::json!({"command": "cat ../secret"});
         let result = tool.execute(args, ToolCtx::default()).await;
         assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
