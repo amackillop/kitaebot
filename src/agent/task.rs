@@ -118,6 +118,7 @@ pub(crate) fn build_agent_types(
     engine_tools: Vec<Arc<dyn Tool>>,
     mcp: &McpTools,
     workspace_dir: &Path,
+    max_iterations: usize,
 ) -> AgentTypes {
     let mut explore_tools = base.filtered(EXPLORE_TOOLS);
     explore_tools.extend_with(engine_tools.clone(), &[]);
@@ -130,23 +131,44 @@ pub(crate) fn build_agent_types(
 
     AgentTypes {
         explore: AgentType {
-            system_prompt: compose_prompt(EXPLORE_PROMPT, workspace_dir, &explore_tools),
+            system_prompt: compose_prompt(
+                EXPLORE_PROMPT,
+                workspace_dir,
+                &explore_tools,
+                max_iterations,
+            ),
             tools: explore_tools,
         },
         worker: AgentType {
-            system_prompt: compose_prompt(WORKER_PROMPT, workspace_dir, &worker_tools),
+            system_prompt: compose_prompt(
+                WORKER_PROMPT,
+                workspace_dir,
+                &worker_tools,
+                max_iterations,
+            ),
             tools: worker_tools,
         },
         reviewer: AgentType {
-            system_prompt: compose_prompt(REVIEWER_PROMPT, workspace_dir, &reviewer_tools),
+            system_prompt: compose_prompt(
+                REVIEWER_PROMPT,
+                workspace_dir,
+                &reviewer_tools,
+                max_iterations,
+            ),
             tools: reviewer_tools,
         },
     }
 }
 
-/// Append environment info (working directory, tool names) to a
-/// type's role prompt, mirroring the parent's system prompt assembly.
-fn compose_prompt(role: &str, workspace_dir: &Path, tools: &Tools) -> String {
+/// Append environment info (working directory, iteration budget, tool
+/// names) to a type's role prompt, mirroring the parent's system
+/// prompt assembly.
+fn compose_prompt(
+    role: &str,
+    workspace_dir: &Path,
+    tools: &Tools,
+    max_iterations: usize,
+) -> String {
     let names: Vec<String> = tools
         .definitions()
         .into_iter()
@@ -155,9 +177,11 @@ fn compose_prompt(role: &str, workspace_dir: &Path, tools: &Tools) -> String {
     format!(
         "{}\n\n# Environment\nWorking directory: {}\nRepository checkouts live at projects/<owner>/<repo> (work) or \
         reviews/<owner>/<repo> (review sessions); resolve repo-relative \
-        paths against the checkout root named in your task.\nAvailable tools: {}",
+        paths against the checkout root named in your task.\nIteration budget: {} tool rounds; parallel tool calls within a \
+        round count once.\nAvailable tools: {}",
         role.trim_end(),
         workspace_dir.display(),
+        max_iterations,
         names.join(", "),
     )
 }
@@ -456,7 +480,13 @@ mod tests {
         // names are pinned by spec 03.
         names.extend(["web_fetch", "web_search"]);
         let base = Tools::new(local, &[]).unwrap();
-        let types = build_agent_types(&base, Vec::new(), &McpTools::default(), workspace.path());
+        let types = build_agent_types(
+            &base,
+            Vec::new(),
+            &McpTools::default(),
+            workspace.path(),
+            30,
+        );
         (names, types)
     }
 
@@ -881,7 +911,7 @@ mod tests {
             Arc::new(task_tool(vec![], Tools::default(), Tools::default(), 5));
         let base = Tools::new(vec![task], &[]).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let types = build_agent_types(&base, Vec::new(), &McpTools::default(), dir.path());
+        let types = build_agent_types(&base, Vec::new(), &McpTools::default(), dir.path(), 30);
         for tools in [
             &types.explore.tools,
             &types.worker.tools,
@@ -909,6 +939,7 @@ mod tests {
             vec![engine_tool],
             &McpTools::default(),
             dir.path(),
+            30,
         );
         assert!(tool_names(&types.explore.tools).contains(&"mock".to_string()));
         assert!(tool_names(&types.worker.tools).contains(&"mock".to_string()));
@@ -926,6 +957,7 @@ mod tests {
             vec![engine_tool],
             &McpTools::default(),
             dir.path(),
+            30,
         );
         assert!(types.explore.system_prompt.contains("research agent"));
         assert!(types.worker.system_prompt.contains("task agent"));
@@ -934,14 +966,16 @@ mod tests {
             assert!(prompt.contains(&dir.path().display().to_string()));
             assert!(prompt.contains("Available tools: mock"));
         }
-        // Every type gets the checkout-layout line: sub-agents receive
-        // repo paths and must know where checkouts live.
+        // Every type gets the checkout-layout line and the exact
+        // iteration budget: sub-agents receive repo paths and must not
+        // guess how much room they have.
         for prompt in [
             &types.explore.system_prompt,
             &types.worker.system_prompt,
             &types.reviewer.system_prompt,
         ] {
             assert!(prompt.contains("projects/<owner>/<repo>"));
+            assert!(prompt.contains("Iteration budget: 30 tool rounds"));
         }
         assert!(
             types

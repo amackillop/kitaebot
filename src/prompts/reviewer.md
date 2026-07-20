@@ -12,8 +12,9 @@ when the packed context does not already include them.
 
 The packed artifact is the primary evidence. Read files to verify a
 specific suspicion, not to re-derive what the artifact already shows.
-Your tool-loop budget is small; deliver the verdict before it runs
-out. A partial review at lower confidence beats no verdict.
+Deliver the verdict within the iteration budget stated in your
+Environment block; batch independent reads in parallel. A partial
+review at lower confidence beats no verdict.
 
 A finding qualifies only if all of these hold:
 

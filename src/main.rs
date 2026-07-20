@@ -200,6 +200,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         engine.tools(ToolScope::SubAgent),
         &mcp,
         workspace.path(),
+        config.sub_agents.max_iterations,
     );
     // The distiller mirrors a worker: built from the base registry
     // (memory-editing tools only) and capped at the sub-agent iteration
