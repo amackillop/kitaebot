@@ -1187,6 +1187,63 @@ mod tests {
         ));
     }
 
+    // ── Devshell resolution (fake direnv binary) ─────────────────────
+
+    #[tokio::test]
+    async fn test_exec_devshell_from_monorepo_subdir() {
+        let _lock = crate::test_support::ENV_LOCK.lock().await;
+        let _fake = crate::test_support::FakeDirenv::install(
+            "echo 1 >> \"$PWD/.call-count\"\necho '{\"DEVSHELL_MARKER\": \"hit\"}'",
+        );
+
+        let ws = tempfile::tempdir().unwrap();
+        let repo = ws.path().join("projects/owner/repo");
+        std::fs::create_dir_all(repo.join("packages/pkg")).unwrap();
+        std::fs::write(repo.join(".envrc"), "use flake").unwrap();
+
+        let tool = Exec::new(
+            ws.path(),
+            &ExecConfig::default(),
+            DirenvCache::new(),
+            Vec::new(),
+        );
+        let args = serde_json::json!({
+            "command": "echo marker=$DEVSHELL_MARKER",
+            "working_dir": "projects/owner/repo/packages/pkg",
+        });
+        let result = tool.execute(args, ToolCtx::default()).await.unwrap();
+
+        assert!(
+            result.contains("marker=hit"),
+            "devshell env must reach a child in a repo subdir: {result}"
+        );
+        assert!(
+            repo.join(".call-count").exists(),
+            "direnv must evaluate in the .envrc dir, not the subdir"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exec_no_envrc_runs_bare() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join("projects/owner/repo")).unwrap();
+
+        let tool = Exec::new(
+            ws.path(),
+            &ExecConfig::default(),
+            DirenvCache::new(),
+            Vec::new(),
+        );
+        let args = serde_json::json!({
+            "command": "echo marker=${DEVSHELL_MARKER:-none}",
+            "working_dir": "projects/owner/repo",
+        });
+        let result = tool.execute(args, ToolCtx::default()).await.unwrap();
+
+        assert!(result.contains("marker=none"), "{result}");
+        assert!(result.contains("Exit code: 0"));
+    }
+
     // ── .envrc discovery ──────────────────────────────────────────────
 
     #[test]
