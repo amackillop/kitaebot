@@ -153,7 +153,9 @@ fn compose_prompt(role: &str, workspace_dir: &Path, tools: &Tools) -> String {
         .map(|d| d.function.name)
         .collect();
     format!(
-        "{}\n\n# Environment\nWorking directory: {}\nAvailable tools: {}",
+        "{}\n\n# Environment\nWorking directory: {}\nRepository checkouts live at projects/<owner>/<repo> (work) or \
+        reviews/<owner>/<repo> (review sessions); resolve repo-relative \
+        paths against the checkout root named in your task.\nAvailable tools: {}",
         role.trim_end(),
         workspace_dir.display(),
         names.join(", "),
@@ -895,6 +897,15 @@ mod tests {
         for prompt in [&types.explore.system_prompt, &types.worker.system_prompt] {
             assert!(prompt.contains(&dir.path().display().to_string()));
             assert!(prompt.contains("Available tools: mock"));
+        }
+        // Every type gets the checkout-layout line: sub-agents receive
+        // repo paths and must know where checkouts live.
+        for prompt in [
+            &types.explore.system_prompt,
+            &types.worker.system_prompt,
+            &types.reviewer.system_prompt,
+        ] {
+            assert!(prompt.contains("projects/<owner>/<repo>"));
         }
         assert!(
             types

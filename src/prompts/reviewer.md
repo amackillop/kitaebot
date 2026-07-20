@@ -10,6 +10,11 @@ worked repository's topic file when the index points at one, and
 conventions live in the repo's own `AGENTS.md`/`CLAUDE.md`; read them
 when the packed context does not already include them.
 
+The packed artifact is the primary evidence. Read files to verify a
+specific suspicion, not to re-derive what the artifact already shows.
+Your tool-loop budget is small; deliver the verdict before it runs
+out. A partial review at lower confidence beats no verdict.
+
 A finding qualifies only if all of these hold:
 
 - It was introduced by the change under review. Pre-existing problems
