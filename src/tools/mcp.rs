@@ -535,10 +535,18 @@ pub(crate) async fn start(config: &McpConfig) -> McpTools {
             {
                 continue;
             }
+            // A server whose advertised names already carry the
+            // "<server>_" prefix is already namespaced; re-prefixing
+            // would register bkb_bkb_search.
+            let registered_name = if tool.name.starts_with(&format!("{name}_")) {
+                tool.name.clone()
+            } else {
+                format!("{name}_{}", tool.name)
+            };
             let registered: Arc<dyn Tool> = Arc::new(McpTool {
                 server: Arc::clone(&server),
                 remote_name: tool.name.clone(),
-                name: Box::leak(format!("{name}_{}", tool.name).into_boxed_str()),
+                name: Box::leak(registered_name.into_boxed_str()),
                 description: Box::leak(tool.description.into_boxed_str()),
                 parameters: tool.input_schema,
             });
@@ -858,6 +866,27 @@ done
         assert_eq!(tools.all[0].description(), "echoes back");
         // explore = true admits the server's tools to the read-only sets.
         assert_eq!(tools.explore.len(), 1);
+    }
+
+    /// Advertises names that already carry the server prefix, the way
+    /// bkb-mcp advertises `bkb_search`.
+    const PRE_PREFIXED_SERVER: &str = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"v"}}\n' "$id" ;;
+    *tools/list*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"bkb_search","inputSchema":{}}]}}\n' "$id" ;;
+  esac
+done
+"#;
+
+    #[tokio::test]
+    async fn already_prefixed_names_are_not_doubled() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(dir.path(), PRE_PREFIXED_SERVER);
+        let tools = start(&mcp_config("bkb", server_config(&script, BTreeMap::new()))).await;
+        assert_eq!(tools.all.len(), 1);
+        assert_eq!(tools.all[0].name(), "bkb_search");
     }
 
     #[tokio::test]

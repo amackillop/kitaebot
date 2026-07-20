@@ -77,7 +77,10 @@ earn their tokens.
 
 - Registered names are namespaced `<server>_<tool>` (e.g.
   `bkb_search`, `grafana_query_loki_logs`) so servers cannot collide
-  with each other or shadow built-ins.
+  with each other or shadow built-ins. An advertised name that already
+  starts with `<server>_` is registered as-is — it is already
+  namespaced, and re-prefixing would register `bkb_bkb_search`
+  (bkb-mcp advertises pre-prefixed names).
 - A namespaced name that still collides with an existing tool is
   skipped with a warning; built-ins always win.
 - Name, description, and input schema come from the server's
