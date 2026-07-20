@@ -34,8 +34,7 @@ use engine::{ContextEngine, ToolScope};
 use tracing::{error, info, warn};
 use workspace::Workspace;
 
-#[tokio::main]
-async fn main() {
+fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -43,6 +42,11 @@ async fn main() {
         )
         .with_writer(std::io::stderr)
         .init();
+}
+
+#[tokio::main]
+async fn main() {
+    init_tracing();
 
     let workspace = Workspace::init().unwrap_or_else(|e| {
         error!("Failed to initialize workspace: {e}");
@@ -57,8 +61,11 @@ async fn main() {
     let socket_path = std::path::Path::new(&config.socket.path);
 
     // Load all secrets before sandboxing. After enforcement, credential
-    // files are inaccessible — secrets exist only in memory.
+    // files are inaccessible — secrets exist only in memory. MCP
+    // children also spawn here: their credentials and binaries must
+    // still be readable (spec 22).
     let rt = runtime::build(&config, &workspace);
+    let mcp = tools::mcp::start(&config.mcp).await;
 
     if let Err(e) = sandbox::apply(workspace.path(), socket_path) {
         warn!("Sandbox not applied: {e}");
@@ -96,6 +103,7 @@ async fn main() {
                         workspace.clone(),
                         provider,
                         tools,
+                        mcp,
                         &config,
                         engine,
                         summarize,
@@ -118,6 +126,7 @@ async fn main() {
                         workspace.clone(),
                         provider,
                         tools,
+                        mcp,
                         &config,
                         engine,
                         summarize,
@@ -172,17 +181,26 @@ fn role_provider(
 /// registry *before* root engine tools are merged. Sub-agents get
 /// their engine tools via `ToolScope::SubAgent` (includes
 /// `lcm_expand`); the root gets `ToolScope::Root` (does not).
+#[allow(clippy::too_many_arguments)]
 fn spawn_with_engine<E: ContextEngine + 'static>(
     workspace: Arc<Workspace>,
     provider: Arc<provider::CompletionsProvider>,
     mut tools: tools::Tools,
+    mcp: tools::mcp::McpTools,
     config: &Config,
     engine: E,
     summarize: engine::SummarizeFn,
     notifier: Option<Arc<notify::Notifier>>,
 ) -> agent::AgentHandle {
-    let agent_types =
-        agent::task::build_agent_types(&tools, engine.tools(ToolScope::SubAgent), workspace.path());
+    // Namespacing makes collisions unlikely; if one happens anyway,
+    // the built-in wins and the MCP tool is dropped everywhere.
+    let mcp = mcp.without_collisions(&tools);
+    let agent_types = agent::task::build_agent_types(
+        &tools,
+        engine.tools(ToolScope::SubAgent),
+        &mcp,
+        workspace.path(),
+    );
     // The distiller mirrors a worker: built from the base registry
     // (memory-editing tools only) and capped at the sub-agent iteration
     // budget, before root engine tools and the task tool are merged in.
@@ -229,6 +247,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     ));
     tools.extend_with(engine.tools(ToolScope::Root), &config.tools.disabled);
     tools.extend_with(vec![task_tool], &config.tools.disabled);
+    tools.extend_with(mcp.all, &config.tools.disabled);
     // Root-only: children are built above from the base registry and
     // no allowlist names it.
     if let Some(ledger) = &review_ledger {

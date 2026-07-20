@@ -22,6 +22,7 @@ use crate::engine::ephemeral::EphemeralSession;
 use crate::error::ToolError;
 use crate::provider::Provider;
 use crate::review::{self, ReviewLedger};
+use crate::tools::mcp::McpTools;
 use crate::tools::{Tool, ToolCtx, Tools};
 use crate::usage::{self, TurnRecord, UsageLedger};
 
@@ -103,21 +104,29 @@ pub(crate) struct TypeProviders<P> {
 }
 
 /// Build the sub-agent types from the parent's base registry
-/// (post-`tools.disabled`) and the engine's sub-agent tools. Explore
-/// and worker share the engine tool instances; the reviewer gets
-/// none — its independence from the parent's narrative is the design
-/// point, and LCM tools would hand that narrative back (spec 23).
-/// No child can see `task`, so recursion is structurally impossible.
+/// (post-`tools.disabled`), the engine's sub-agent tools, and the MCP
+/// registrations. Explore and worker share the engine tool instances;
+/// the reviewer gets none — its independence from the parent's
+/// narrative is the design point, and LCM tools would hand that
+/// narrative back (spec 23). The worker takes every MCP tool (it
+/// already holds exec; nothing a server advertises is riskier); the
+/// read-only types take only servers whose config asserts no side
+/// effects (spec 22). No child can see `task`, so recursion is
+/// structurally impossible.
 pub(crate) fn build_agent_types(
     base: &Tools,
     engine_tools: Vec<Arc<dyn Tool>>,
+    mcp: &McpTools,
     workspace_dir: &Path,
 ) -> AgentTypes {
     let mut explore_tools = base.filtered(EXPLORE_TOOLS);
     explore_tools.extend_with(engine_tools.clone(), &[]);
+    explore_tools.extend_with(mcp.explore.clone(), &[]);
     let mut worker_tools = base.filtered(WORKER_TOOLS);
     worker_tools.extend_with(engine_tools, &[]);
-    let reviewer_tools = base.filtered(REVIEWER_TOOLS);
+    worker_tools.extend_with(mcp.all.clone(), &[]);
+    let mut reviewer_tools = base.filtered(REVIEWER_TOOLS);
+    reviewer_tools.extend_with(mcp.explore.clone(), &[]);
 
     AgentTypes {
         explore: AgentType {
@@ -440,7 +449,7 @@ mod tests {
         // names are pinned by spec 03.
         names.extend(["web_fetch", "web_search"]);
         let base = Tools::new(local, &[]).unwrap();
-        let types = build_agent_types(&base, Vec::new(), workspace.path());
+        let types = build_agent_types(&base, Vec::new(), &McpTools::default(), workspace.path());
         (names, types)
     }
 
@@ -834,7 +843,7 @@ mod tests {
             Arc::new(task_tool(vec![], Tools::default(), Tools::default(), 5));
         let base = Tools::new(vec![task], &[]).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let types = build_agent_types(&base, Vec::new(), dir.path());
+        let types = build_agent_types(&base, Vec::new(), &McpTools::default(), dir.path());
         for tools in [
             &types.explore.tools,
             &types.worker.tools,
@@ -857,7 +866,12 @@ mod tests {
     fn engine_tools_reach_explore_and_worker_but_not_reviewer() {
         let engine_tool: Arc<dyn Tool> = Arc::new(MockTool::new("engine"));
         let dir = tempfile::tempdir().unwrap();
-        let types = build_agent_types(&Tools::default(), vec![engine_tool], dir.path());
+        let types = build_agent_types(
+            &Tools::default(),
+            vec![engine_tool],
+            &McpTools::default(),
+            dir.path(),
+        );
         assert!(tool_names(&types.explore.tools).contains(&"mock".to_string()));
         assert!(tool_names(&types.worker.tools).contains(&"mock".to_string()));
         // The reviewer's independence from the parent's narrative is
@@ -869,7 +883,12 @@ mod tests {
     fn prompts_include_environment_block() {
         let engine_tool: Arc<dyn Tool> = Arc::new(MockTool::new("engine"));
         let dir = tempfile::tempdir().unwrap();
-        let types = build_agent_types(&Tools::default(), vec![engine_tool], dir.path());
+        let types = build_agent_types(
+            &Tools::default(),
+            vec![engine_tool],
+            &McpTools::default(),
+            dir.path(),
+        );
         assert!(types.explore.system_prompt.contains("research agent"));
         assert!(types.worker.system_prompt.contains("task agent"));
         assert!(types.reviewer.system_prompt.contains("code reviewer"));

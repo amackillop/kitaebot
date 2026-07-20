@@ -27,6 +27,8 @@ pub struct Config {
     #[serde(default)]
     pub linear: LinearConfig,
     #[serde(default)]
+    pub mcp: McpConfig,
+    #[serde(default)]
     pub memory: MemoryConfig,
     #[serde(default)]
     pub provider: ProviderConfig,
@@ -50,6 +52,56 @@ pub struct AgentConfig {
 }
 
 /// Sub-agent settings (spec 19).
+/// MCP servers (spec 22). No `enabled` flag: an empty `servers` map
+/// means no MCP anywhere — no children, no tools, no cost.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpConfig {
+    /// Spawn + handshake + `tools/list` budget per server, seconds.
+    pub startup_timeout_secs: u64,
+    /// Per-call budget, seconds.
+    pub call_timeout_secs: u64,
+    /// One table per server: `[mcp.servers.<name>]`.
+    pub servers: std::collections::BTreeMap<String, McpServerConfig>,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            startup_timeout_secs: 30,
+            call_timeout_secs: 60,
+            servers: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+/// One MCP server child (spec 22).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerConfig {
+    /// Executable to spawn, resolved via `PATH`.
+    pub command: String,
+    /// Argument vector.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables (literals).
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Env var -> credential name, loaded via `LoadCredential`
+    /// (spec 13). Secrets never appear in config.toml.
+    #[serde(default)]
+    pub env_credentials: std::collections::BTreeMap<String, String>,
+    /// Allowlist of advertised tool names to register; unset = all.
+    /// The schema-size control for servers advertising dozens.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    /// Admit this server's tools to the read-only sub-agent sets
+    /// (explore, reviewer) — the operator asserting the server has no
+    /// side effects.
+    #[serde(default)]
+    pub explore: bool,
+}
+
 /// Self-review pipeline (spec 23).
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -758,6 +810,41 @@ timeout_secs = 120
         assert!((cfg.provider.temperature - 0.5).abs() < f32::EPSILON);
         assert_eq!(cfg.agent.max_iterations, 30);
         assert_eq!(cfg.tools.exec.timeout_secs, 120);
+    }
+
+    #[test]
+    fn mcp_defaults_to_no_servers() {
+        let cfg = load_toml("").unwrap();
+        assert!(cfg.mcp.servers.is_empty());
+        assert_eq!(cfg.mcp.startup_timeout_secs, 30);
+        assert_eq!(cfg.mcp.call_timeout_secs, 60);
+    }
+
+    #[test]
+    fn mcp_server_parses() {
+        let cfg = load_toml(
+            "\
+[mcp.servers.bkb]
+command = \"bkb-mcp\"
+args = [\"--stdio\"]
+explore = true
+tools = [\"search\", \"timeline\"]
+
+[mcp.servers.bkb.env]
+BKB_MODE = \"full\"
+
+[mcp.servers.bkb.env_credentials]
+BKB_API_KEY = \"bkb-api-key\"
+",
+        )
+        .unwrap();
+        let server = &cfg.mcp.servers["bkb"];
+        assert_eq!(server.command, "bkb-mcp");
+        assert_eq!(server.args, vec!["--stdio"]);
+        assert!(server.explore);
+        assert_eq!(server.tools.as_deref().unwrap().len(), 2);
+        assert_eq!(server.env["BKB_MODE"], "full");
+        assert_eq!(server.env_credentials["BKB_API_KEY"], "bkb-api-key");
     }
 
     #[test]

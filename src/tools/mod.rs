@@ -192,6 +192,11 @@ impl Tools {
         }
     }
 
+    /// Whether a tool with this name is registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.iter().any(|t| t.name() == name)
+    }
+
     /// Project this collection onto an allowlist of tool names.
     ///
     /// Names with no matching tool are skipped: an allowlisted tool

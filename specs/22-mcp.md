@@ -93,7 +93,10 @@ read-only by design ([spec 19](19-sub-agents.md)); a server's tools
 enter it only when its config sets `explore = true`, which is the
 operator asserting the server has no side effects. bkb (pure knowledge
 lookup) sets it; Grafana (can create incidents and annotations) does
-not.
+not. The reviewer set ([spec 23](23-self-review.md)) takes the same
+opt-in subset: it is read-only for the same reason explore is, and a
+knowledge server is exactly what lets it verify claims instead of
+guessing.
 
 ### Calls
 
