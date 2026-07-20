@@ -99,3 +99,47 @@ impl TestAgent {
         )
     }
 }
+
+// Tests that shell out to a fake `direnv` must not run concurrently
+// because they modify the process-wide PATH.
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Install a fake `direnv` shell script at the front of PATH.
+/// Restores the original PATH on drop. Hold [`ENV_LOCK`] for the
+/// fake's whole lifetime.
+pub(crate) struct FakeDirenv {
+    _dir: TempDir,
+    original_path: String,
+}
+
+impl FakeDirenv {
+    pub(crate) fn install(body: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let script = bin_dir.join("direnv");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{original_path}", bin_dir.display());
+        // SAFETY: serialised by ENV_LOCK; only one test touches PATH at a time.
+        unsafe { std::env::set_var("PATH", &new_path) };
+
+        Self {
+            _dir: dir,
+            original_path,
+        }
+    }
+}
+
+impl Drop for FakeDirenv {
+    fn drop(&mut self) {
+        unsafe { std::env::set_var("PATH", &self.original_path) };
+    }
+}
