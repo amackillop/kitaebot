@@ -82,7 +82,8 @@ fn policy_halt_msg(reasons: &[String]) -> String {
 ///
 /// Shared by all root channels (telegram, socket, heartbeat). Prepends
 /// the memory index (spec 21) to the cached system prompt, read fresh so
-/// runtime writes take effect on the next turn. Sub-agents call
+/// runtime writes take effect on the next turn, and the review-gates
+/// segment (spec 23) when the pipeline is enabled. Sub-agents call
 /// [`run_turn_metered`] directly and are excluded by design.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_message_metered(
@@ -94,13 +95,18 @@ pub(crate) async fn process_message_metered(
     tools: &Tools,
     max_iterations: usize,
     memory_index_cap: usize,
+    review_gates: bool,
     ctx: &ToolCtx,
 ) -> Result<(TurnOutput, TurnUsage), Error> {
-    let system_prompt =
+    let mut system_prompt =
         match crate::memory::index_segment(&workspace.memory_dir(), memory_index_cap) {
             Some(index) => format!("{}\n{index}", workspace.system_prompt()),
             None => workspace.system_prompt().to_string(),
         };
+    if review_gates {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(crate::review::GATES_SEGMENT);
+    }
     run_turn_metered(
         engine,
         summarize,
@@ -1166,6 +1172,7 @@ mod tests {
             &tools,
             MAX_ITER,
             8192,
+            false,
             &ToolCtx::default(),
         )
         .await;

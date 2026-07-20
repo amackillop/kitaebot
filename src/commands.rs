@@ -162,6 +162,7 @@ pub async fn execute(
                 max_iterations,
                 memory_index_cap,
                 usage_ledger,
+                review_ledger.is_some(),
             )
             .await
         }
@@ -210,6 +211,7 @@ async fn heartbeat_cycle(
     max_iterations: usize,
     memory_index_cap: usize,
     usage_ledger: Option<&UsageLedger>,
+    review_gates: bool,
 ) -> Result<Reply, String> {
     // The session the heartbeat runs on; both turns below bill against
     // it in the ledger.
@@ -228,6 +230,7 @@ async fn heartbeat_cycle(
                 tools,
                 max_iterations,
                 memory_index_cap,
+                review_gates,
                 &crate::tools::ToolCtx::default(),
             )
             .await

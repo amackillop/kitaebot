@@ -77,6 +77,11 @@ pub fn parse_findings_block(text: &str) -> Option<ReviewOutput> {
     serde_json::from_str(body[..end].trim()).ok()
 }
 
+/// The review-gates segment appended to root system prompts when the
+/// pipeline is enabled. Kept out of `AGENTS.md` so a disabled pipeline
+/// leaves no prompt referencing unavailable mechanics.
+pub const GATES_SEGMENT: &str = include_str!("prompts/review-gates.md");
+
 /// Ledger row context for one gate invocation: which repo, which gate
 /// (`plan` | `commit` | `series`), and the ref under review.
 pub struct GateRecord<'a> {
@@ -477,6 +482,20 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn gates_segment_names_the_contract() {
+        assert!(GATES_SEGMENT.starts_with("## Review Gates"));
+        for needle in [
+            "\"plan\"",
+            "\"commit\"",
+            "\"series\"",
+            "review_log",
+            "must-fix",
+        ] {
+            assert!(GATES_SEGMENT.contains(needle), "segment omits {needle}");
+        }
     }
 
     #[test]

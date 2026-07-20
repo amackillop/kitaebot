@@ -192,6 +192,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             &self.tools,
             self.max_iterations,
             self.memory_index_cap,
+            self.review_ledger.is_some(),
             &crate::tools::ToolCtx {
                 activity: envelope.activity_tx.clone(),
                 cancel: envelope.cancel.clone(),
