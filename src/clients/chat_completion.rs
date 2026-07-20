@@ -76,13 +76,14 @@ impl CompletionsClient {
         #[cfg(feature = "mock-network")]
         {
             let _ = (endpoint, api_key);
-            let body = br#"{"choices":[{"message":{"content":"This is a stub response. Compile without mock-network for real API calls."}}]}"#;
+            let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             Self {
                 post: Arc::new(move |_| {
+                    let i = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     Box::pin(async move {
                         Ok(RawResponse {
                             status: 200,
-                            body: body.to_vec(),
+                            body: stub_body(i),
                         })
                     })
                 }),
@@ -112,6 +113,31 @@ impl CompletionsClient {
         let raw = (self.post)(body).await?;
         interpret_response(&raw)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Scripted stub (mock-network)
+// ---------------------------------------------------------------------------
+
+/// The `i`-th stub response body: `KITAEBOT_STUB_RESPONSES` names a file
+/// holding a JSON array of chat-completion bodies, served in request
+/// order. Canned fallback when unset, unreadable, or exhausted.
+#[cfg(feature = "mock-network")]
+fn stub_body(i: usize) -> Vec<u8> {
+    const CANNED: &[u8] = br#"{"choices":[{"message":{"content":"This is a stub response. Compile without mock-network for real API calls."}}]}"#;
+    std::env::var("KITAEBOT_STUB_RESPONSES")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|script| nth_scripted(&script, i))
+        .unwrap_or_else(|| CANNED.to_vec())
+}
+
+/// Parse a JSON array and re-serialize its `i`-th element.
+#[cfg(feature = "mock-network")]
+fn nth_scripted(script: &str, i: usize) -> Option<Vec<u8>> {
+    let bodies: Vec<serde_json::Value> = serde_json::from_str(script).ok()?;
+    let body = bodies.get(i)?;
+    Some(serde_json::to_vec(body).expect("re-serializing parsed JSON"))
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +368,31 @@ mod tests {
     fn interpret_malformed_json() {
         let err = interpret_response(&raw(200, "not json")).unwrap_err();
         assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
+    #[cfg(feature = "mock-network")]
+    #[test]
+    fn nth_scripted_picks_in_order() {
+        let script = r#"[
+            {"choices":[{"message":{"content":"first"}}]},
+            {"choices":[{"message":{"content":"second"}}]}
+        ]"#;
+        let first = nth_scripted(script, 0).unwrap();
+        let second = nth_scripted(script, 1).unwrap();
+        assert!(String::from_utf8(first).unwrap().contains("first"));
+        assert!(String::from_utf8(second).unwrap().contains("second"));
+    }
+
+    #[cfg(feature = "mock-network")]
+    #[test]
+    fn nth_scripted_exhausted_is_none() {
+        assert_eq!(nth_scripted(r#"[{"a":1}]"#, 1), None);
+    }
+
+    #[cfg(feature = "mock-network")]
+    #[test]
+    fn nth_scripted_invalid_json_is_none() {
+        assert_eq!(nth_scripted("not json", 0), None);
     }
 
     #[tokio::test]
