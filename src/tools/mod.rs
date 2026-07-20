@@ -13,6 +13,7 @@ pub(crate) mod github;
 mod glob_search;
 mod grep;
 pub(crate) mod linear;
+pub(crate) mod mcp;
 #[cfg(test)]
 mod mock;
 #[cfg(not(feature = "mock-network"))]
