@@ -241,6 +241,9 @@ SQLite at `state/review.db`, following the `state/usage.db` pattern
 | `confidence` | 0.0–1.0, nullable (self only) |
 | `file`, `line` | Location, nullable |
 | `note` | The finding text |
+| `disposition` | `fixed` \| `disputed` \| `no-action`, nullable (see Disposition tracking) |
+| `disposition_note` | Reason, required for disputes, nullable |
+| `disposed_at` | Timestamp of the disposition, nullable |
 
 A second table, `reviews`, records one row per gate invocation: `ts`,
 `repo`, `gate`, `git_ref`, `verdict`, `confidence`. It answers what
@@ -279,6 +282,62 @@ Reader ships in the same commit as the writer (bin-only crate dead-code
 constraint): a `/findings` command and `just findings` recipe reporting
 counts by category, source, gate, and repo over a time window, mirroring
 `/usage`.
+
+### Disposition tracking
+
+Findings record what a reviewer said; dispositions record what the
+parent did about it. Without them, dispute-rate discounting — the
+mechanism that separates a noisy source from a good one — works by
+hand-filtering, not data. Dispositions are the parent's per-finding
+decision, written after acting on it.
+
+**Vocabulary**: `fixed` | `disputed` | `no-action`. Enum at the tool
+boundary, free text in storage — same rationale as `category` and
+`severity`: a novel value must not invalidate the row carrying it.
+Every value is a factual outcome, not an attitude: `no-action` covers
+both the freely-ignored nit and the answered question — uncontested,
+no code change warranted. Deliberately not `ignored` (an attitude
+word; a parent that just answered a question won't self-describe as
+ignoring it and misfiles the row as `disputed`, inflating the human
+dispute rate) and not a fourth `answered` value (taxonomy no planned
+query distinguishes). A dispute requires a `disposition_note`; the
+note is what makes a dispute auditable rather than a shrug.
+
+**Identity**: a disposition needs a finding to point at, and row ids
+never left the database in v1. Both write paths now surface them:
+`record_review` returns the inserted ids and the task tool appends a
+mechanical trailer to the reviewer text it hands the parent
+(`[ledger: finding ids 12, 13]`; nothing appended for a clean review
+or a disabled ledger), and `review_log` replies `Recorded finding #N.`
+instead of `Recorded.`. Ids reach the parent as ordinary tool output —
+no side channel, and the parent quotes them back verbatim.
+
+**Write path**: a root-only `review_disposition` tool
+(`finding_id`, `disposition`, `note`) that can only annotate existing
+rows — it creates nothing, so it needs no equivalent of `review_log`'s
+`source = 'self'` forgery guard. An unknown id is a tool error, not a
+silent no-op: a hallucinated id must be visible to the model that
+produced it. Model-reported by necessity — only the parent knows
+whether it fixed or disputed — which is the same trust level as
+`review_log`.
+
+**Reading**: `/findings` gains a dispositions-by-source section:
+total, fixed, disputed, no-action, pending (`disposition IS NULL`) per
+source. Dispute rate per source is the query this whole mechanism
+exists to answer; pending rate is the free byproduct that measures
+disposition discipline itself.
+
+**Enforcement**: prompted, not enforced, same doctrine as the gates.
+The review-gates segment instructs a `review_disposition` call after
+acting on each finding. Findings left pending forever are the failure
+mode; the pending column makes it measurable, and a mechanical nag
+(heartbeat duty) is built only if the data shows prompting is not
+enough.
+
+**Migration**: `state/review.db` predates these columns, so `open()`
+adds them via guarded `ALTER TABLE` (checked against
+`pragma_table_info`) — `CREATE TABLE IF NOT EXISTS` never alters an
+existing table.
 
 ### Workflow integration
 
@@ -374,11 +433,6 @@ that references an unavailable mechanism is worse than none.
 
 ## Open Questions
 
-- **Disposition tracking**: should the parent's fix/dispute decision be
-  recorded per finding (a `review_log` update call)? V1 records findings
-  only, but the dispute-rate discounting above needs dispositions to
-  work — until they exist, noisy external categories are filtered by
-  hand, not data. Likely the first post-v1 addition.
 - **Category consolidation**: when does free-text collapse into an enum,
   and does the reviewer prompt's seed list get regenerated from ledger
   data mechanically or by hand?
