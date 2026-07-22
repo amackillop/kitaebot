@@ -128,9 +128,17 @@ impl ReviewLedger {
                  confidence  REAL,
                  file        TEXT,
                  line        INTEGER,
-                 note        TEXT NOT NULL
+                 note        TEXT NOT NULL,
+                 disposition      TEXT,
+                 disposition_note TEXT,
+                 disposed_at      TEXT
              );",
         )?;
+        // Deployed ledgers predate the disposition columns, and
+        // CREATE TABLE IF NOT EXISTS never alters an existing table.
+        for column in ["disposition", "disposition_note", "disposed_at"] {
+            add_column_if_missing(&conn, "findings", column)?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -138,8 +146,13 @@ impl ReviewLedger {
 
     /// Record one gate invocation: the review row plus one finding row
     /// per entry, all `source = 'self'`. One transaction; a gate either
-    /// lands whole or not at all.
-    pub fn record_review(&self, gate: &GateRecord, output: &ReviewOutput) -> rusqlite::Result<()> {
+    /// lands whole or not at all. Returns the inserted finding ids so
+    /// the caller can surface them for disposition.
+    pub fn record_review(
+        &self,
+        gate: &GateRecord,
+        output: &ReviewOutput,
+    ) -> rusqlite::Result<Vec<i64>> {
         let mut conn = self.conn.lock().expect("review ledger mutex poisoned");
         let tx = conn.transaction()?;
         tx.execute(
@@ -153,6 +166,7 @@ impl ReviewLedger {
                 output.confidence,
             ],
         )?;
+        let mut ids = Vec::with_capacity(output.findings.len());
         {
             let mut ins = tx.prepare(
                 "INSERT INTO findings
@@ -172,15 +186,18 @@ impl ReviewLedger {
                     f.line,
                     f.note,
                 ])?;
+                ids.push(tx.last_insert_rowid());
             }
         }
-        tx.commit()
+        tx.commit()?;
+        Ok(ids)
     }
 
     /// Record one externally-sourced finding (a human or review-bot
     /// comment). Severity and confidence stay NULL: those are
-    /// self-review signals.
-    pub fn record_finding(&self, f: &ExternalFinding) -> rusqlite::Result<()> {
+    /// self-review signals. Returns the inserted finding id so the
+    /// caller can surface it for disposition.
+    pub fn record_finding(&self, f: &ExternalFinding) -> rusqlite::Result<i64> {
         let conn = self.conn.lock().expect("review ledger mutex poisoned");
         conn.execute(
             "INSERT INTO findings
@@ -190,7 +207,7 @@ impl ReviewLedger {
                 f.repo, f.gate, f.git_ref, f.source, f.category, f.file, f.line, f.note,
             ],
         )?;
-        Ok(())
+        Ok(conn.last_insert_rowid())
     }
 
     /// Render the `/findings` report: reviews by gate and verdict,
@@ -235,6 +252,18 @@ impl ReviewLedger {
         }
         Ok(out)
     }
+}
+
+/// Add `column` to `table` when it is not already present.
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"
+    ))?;
+    let present: i64 = stmt.query_row([column], |r| r.get(0))?;
+    if present == 0 {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
+    }
+    Ok(())
 }
 
 /// One externally-sourced finding, as recorded by [`ReviewLogTool`].
@@ -412,6 +441,97 @@ mod tests {
             gate: "commit",
             git_ref: "abc123",
         }
+    }
+
+    #[test]
+    fn migration_adds_disposition_columns_to_legacy_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.db");
+        // A ledger created before the disposition columns existed.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE reviews (
+                     id INTEGER PRIMARY KEY,
+                     recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+                     repo TEXT NOT NULL, gate TEXT NOT NULL,
+                     git_ref TEXT NOT NULL, verdict TEXT NOT NULL,
+                     confidence REAL);
+                 CREATE TABLE findings (
+                     id INTEGER PRIMARY KEY,
+                     recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+                     repo TEXT NOT NULL, gate TEXT NOT NULL,
+                     git_ref TEXT NOT NULL, source TEXT NOT NULL,
+                     category TEXT NOT NULL, severity TEXT,
+                     confidence REAL, file TEXT, line INTEGER,
+                     note TEXT NOT NULL);
+                 INSERT INTO findings (repo, gate, git_ref, source, category, note)
+                 VALUES ('o/r', 'external', '1', 'human', 'x', 'pre-migration row');",
+            )
+            .unwrap();
+        }
+
+        let ledger = ReviewLedger::open(&path).unwrap();
+        let conn = ledger.conn.lock().unwrap();
+        let (rows, pending): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), SUM(disposition IS NULL) FROM findings",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((rows, pending), (1, 1), "old rows survive as pending");
+    }
+
+    #[test]
+    fn reopen_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.db");
+        drop(ReviewLedger::open(&path).unwrap());
+        // Second open must not fail on already-added columns.
+        ReviewLedger::open(&path).unwrap();
+    }
+
+    #[test]
+    fn record_review_returns_finding_ids() {
+        let (_dir, ledger) = ledger();
+        let output = parse_findings_block(BLOCK).unwrap();
+        let ids = ledger.record_review(&gate(), &output).unwrap();
+        assert_eq!(ids.len(), output.findings.len());
+
+        let conn = ledger.conn.lock().unwrap();
+        let category: String = conn
+            .query_row(
+                "SELECT category FROM findings WHERE id = ?1",
+                [ids[0]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(category, "swallowed-error");
+    }
+
+    #[test]
+    fn record_finding_returns_id() {
+        let (_dir, ledger) = ledger();
+        let id = ledger
+            .record_finding(&ExternalFinding {
+                repo: "o/r",
+                gate: "external",
+                git_ref: "1",
+                source: "human",
+                category: "x",
+                file: None,
+                line: None,
+                note: "n",
+            })
+            .unwrap();
+        let conn = ledger.conn.lock().unwrap();
+        let note: String = conn
+            .query_row("SELECT note FROM findings WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(note, "n");
     }
 
     #[test]
