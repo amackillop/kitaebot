@@ -19,8 +19,8 @@ is impossible without a place to remember what was promised or learned.
 The design follows the memdir pattern (a size-capped always-loaded
 index plus on-demand topic files) and ships in phases: storage,
 injection, and in-turn writes first; heartbeat-driven distillation
-second. Structured commitments build on this and live in the heartbeat
-spec ([spec 07](07-heartbeat.md)) when they land.
+second. Structured commitments build on this and live in
+[spec 24](24-self-directed-work.md), phase 3.
 
 ## Behavior
 
