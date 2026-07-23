@@ -231,7 +231,8 @@ impl ReviewLedger {
     }
 
     /// Render the `/findings` report: reviews by gate and verdict,
-    /// then finding counts by category split self vs external.
+    /// finding counts by category split self vs external, then
+    /// dispositions by source.
     pub fn report(&self) -> rusqlite::Result<String> {
         let conn = self.conn.lock().expect("review ledger mutex poisoned");
 
@@ -256,6 +257,31 @@ impl ReviewLedger {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
 
+        // (source, total, fixed, disputed, no-action, pending). Dispute
+        // rate per source is the query disposition tracking exists for;
+        // pending measures disposition discipline itself (spec 23).
+        let dispositions: Vec<(String, i64, i64, i64, i64, i64)> = {
+            let mut stmt = conn.prepare(
+                "SELECT source, COUNT(*),
+                        SUM(CASE WHEN disposition = 'fixed' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN disposition = 'disputed' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN disposition = 'no-action' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN disposition IS NULL THEN 1 ELSE 0 END)
+                 FROM findings GROUP BY source ORDER BY source",
+            )?;
+            stmt.query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
         if reviews.is_empty() && categories.is_empty() {
             return Ok("No reviews recorded.".to_string());
         }
@@ -269,6 +295,20 @@ impl ReviewLedger {
         let _ = writeln!(out, "{:<22} {:>6} {:>10}", "Category", "Self", "External");
         for (category, own, external) in &categories {
             let _ = writeln!(out, "{category:<22} {own:>6} {external:>10}");
+        }
+        if !dispositions.is_empty() {
+            out.push_str("\nDispositions by source\n\n");
+            let _ = writeln!(
+                out,
+                "{:<8} {:>6} {:>6} {:>9} {:>10} {:>8}",
+                "Source", "Total", "Fixed", "Disputed", "No-action", "Pending",
+            );
+            for (source, total, fixed, disputed, no_action, pending) in &dispositions {
+                let _ = writeln!(
+                    out,
+                    "{source:<8} {total:>6} {fixed:>6} {disputed:>9} {no_action:>10} {pending:>8}",
+                );
+            }
         }
         Ok(out)
     }
@@ -820,6 +860,68 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn report_splits_dispositions_by_source() {
+        let (_dir, ledger) = ledger();
+        // Two self findings: one fixed, one left pending.
+        let output = ReviewOutput {
+            verdict: Verdict::Incorrect,
+            confidence: Some(0.9),
+            explanation: "two problems".into(),
+            findings: vec![
+                Finding {
+                    category: "swallowed-error".into(),
+                    severity: Some("must-fix".into()),
+                    confidence: None,
+                    file: None,
+                    line: None,
+                    note: "a".into(),
+                },
+                Finding {
+                    category: "comment-noise".into(),
+                    severity: Some("nit".into()),
+                    confidence: None,
+                    file: None,
+                    line: None,
+                    note: "b".into(),
+                },
+            ],
+        };
+        let ids = ledger.record_review(&gate(), &output).unwrap();
+        assert!(ledger.set_disposition(ids[0], "fixed", None).unwrap());
+        // One external finding, disputed.
+        let ext = ledger
+            .record_finding(&ExternalFinding {
+                repo: "o/r",
+                gate: "external",
+                git_ref: "9",
+                source: "bot",
+                category: "unneeded-guard",
+                file: None,
+                line: None,
+                note: "c",
+            })
+            .unwrap();
+        assert!(
+            ledger
+                .set_disposition(ext, "disputed", Some("the guard is load-bearing"))
+                .unwrap()
+        );
+
+        let report = ledger.report().unwrap();
+        assert!(report.contains("Dispositions by source"), "{report}");
+        // self: 2 total, 1 fixed, 1 pending.
+        assert!(
+            report.contains("self          2      1         0          0        1"),
+            "{report}"
+        );
+        // bot: 1 total, 1 disputed.
+        assert!(
+            report.contains("bot           1      0         1          0        0"),
+            "{report}"
+        );
     }
 
     #[test]
