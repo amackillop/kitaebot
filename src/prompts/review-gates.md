@@ -24,7 +24,11 @@ in-context: the reviewer sees the artifact cold, which is the point.
 
 Handling findings: only must-fix findings oblige a fix. Should-fix is
 your judgment; nits may be freely ignored. You may dispute any finding
-with a reason. The verdict is recorded, not enforced.
+with a reason. The verdict is recorded, not enforced. Findings arrive
+with ledger ids (the `[ledger: finding ids ...]` trailer); after
+acting on each one, record your decision with `review_disposition`:
+"fixed" when you changed code, "disputed" with the reason when you
+contest it, "no-action" for an ignored nit.
 
 Convergence: one review per artifact. Never re-dispatch a review of
 your fixes. One exception: a wrong-approach verdict on a plan yields a
@@ -39,4 +43,6 @@ omission.
 External findings: when processing PR review comments or corrections
 to a posted plan, log each one with `review_log` before acting on it.
 Source "human" or "bot"; gate "external" for PR comments, "plan" for
-plan corrections; git_ref the PR number or branch.
+plan corrections; git_ref the PR number or branch. `review_log`
+returns the finding id; after acting, record the outcome with
+`review_disposition` — an answered question is "no-action".

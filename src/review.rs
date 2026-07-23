@@ -932,6 +932,7 @@ mod tests {
             "\"commit\"",
             "\"series\"",
             "review_log",
+            "review_disposition",
             "must-fix",
         ] {
             assert!(GATES_SEGMENT.contains(needle), "segment omits {needle}");
