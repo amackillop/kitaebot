@@ -6,6 +6,7 @@
 //! tool calls and reasoning stay in its own context; the parent sees
 //! only the final assistant text.
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -344,9 +345,17 @@ impl<P: Provider> Tool for TaskTool<P> {
                     usage,
                 },
             );
-            let text = output.into_text();
+            let mut text = output.into_text();
             if args.agent_type == AgentKind::Reviewer {
-                record_review(self.review_ledger.as_deref(), args.review.as_ref(), &text);
+                let ids = record_review(self.review_ledger.as_deref(), args.review.as_ref(), &text);
+                if !ids.is_empty() {
+                    let list = ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = write!(text, "\n\n[ledger: finding ids {list}]");
+                }
             }
             Ok(text)
         })
@@ -355,12 +364,15 @@ impl<P: Provider> Tool for TaskTool<P> {
 
 /// Parse a reviewer response's findings block and record it —
 /// mechanically, no model cooperation required. Telemetry only: every
-/// failure is a warning, never a review failure.
-fn record_review(ledger: Option<&ReviewLedger>, meta: Option<&ReviewMeta>, text: &str) {
-    let Some(ledger) = ledger else { return };
+/// failure is a warning, never a review failure. Returns the recorded
+/// finding ids so the parent can disposition them.
+fn record_review(ledger: Option<&ReviewLedger>, meta: Option<&ReviewMeta>, text: &str) -> Vec<i64> {
+    let Some(ledger) = ledger else {
+        return Vec::new();
+    };
     let Some(output) = review::parse_findings_block(text) else {
         warn!("reviewer response has no parseable findings block");
-        return;
+        return Vec::new();
     };
     // A missing meta mislabels the rows but must not drop them: the
     // category counts are the point.
@@ -375,8 +387,12 @@ fn record_review(ledger: Option<&ReviewLedger>, meta: Option<&ReviewMeta>, text:
         gate,
         git_ref,
     };
-    if let Err(e) = ledger.record_review(&record, &output) {
-        warn!("failed to record review: {e}");
+    match ledger.record_review(&record, &output) {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!("failed to record review: {e}");
+            Vec::new()
+        }
     }
 }
 
@@ -797,11 +813,46 @@ mod tests {
             )
             .await
             .unwrap();
-        // The parent still gets the full text, block included.
+        // The parent still gets the full text, block included, plus
+        // the mechanical id trailer it needs for dispositions.
         assert!(result.contains("```findings"), "{result}");
+        assert!(result.contains("[ledger: finding ids 1]"), "{result}");
         let report = ledger.report().unwrap();
         assert!(report.contains("commit"), "{report}");
         assert!(report.contains("swallowed-error"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn clean_review_gets_no_id_trailer() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger =
+            Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
+        let clean = "All good.\n```findings\n{\"verdict\": \"correct\", \
+                     \"confidence\": 1.0, \"explanation\": \"clean\", \
+                     \"findings\": []}\n```";
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            clean.to_string(),
+        ))]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({"prompt": "review this", "agent_type": "reviewer"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.contains("[ledger:"), "{result}");
     }
 
     #[tokio::test]
@@ -811,13 +862,15 @@ mod tests {
             Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
         let tool = tool_with_review_ledger(ledger.clone());
         // An explore response that happens to contain a findings block
-        // must not land in the ledger.
-        tool.execute(
-            serde_json::json!({"prompt": "research this"}),
-            ToolCtx::default(),
-        )
-        .await
-        .unwrap();
+        // must not land in the ledger, and must not grow a trailer.
+        let result = tool
+            .execute(
+                serde_json::json!({"prompt": "research this"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.contains("[ledger:"), "{result}");
         assert_eq!(ledger.report().unwrap(), "No reviews recorded.");
     }
 

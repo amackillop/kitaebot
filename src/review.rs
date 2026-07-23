@@ -210,6 +210,26 @@ impl ReviewLedger {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Record the parent's decision on a finding. Returns `false` when
+    /// no row carries `id` — the caller turns that into a visible tool
+    /// error rather than a silent no-op.
+    pub fn set_disposition(
+        &self,
+        id: i64,
+        disposition: &str,
+        note: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().expect("review ledger mutex poisoned");
+        let updated = conn.execute(
+            "UPDATE findings
+             SET disposition = ?2, disposition_note = ?3,
+                 disposed_at = datetime('now')
+             WHERE id = ?1",
+            params![id, disposition, note],
+        )?;
+        Ok(updated > 0)
+    }
+
     /// Render the `/findings` report: reviews by gate and verdict,
     /// then finding counts by category split self vs external.
     pub fn report(&self) -> rusqlite::Result<String> {
@@ -347,7 +367,8 @@ impl Tool for ReviewLogTool {
                     "source 'self' is reserved for mechanical recording".into(),
                 ));
             }
-            self.ledger
+            let id = self
+                .ledger
                 .record_finding(&ExternalFinding {
                     repo: &args.repo,
                     gate: &args.gate,
@@ -359,7 +380,106 @@ impl Tool for ReviewLogTool {
                     note: &args.note,
                 })
                 .map_err(|e| ToolError::ExecutionFailed(format!("review_log: {e}")))?;
-            Ok("Recorded.".to_string())
+            Ok(format!("Recorded finding #{id}."))
+        })
+    }
+}
+
+/// The parent's decision on a finding, after acting on it. Enum at
+/// the tool boundary, free text in storage (spec 23).
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum Disposition {
+    Fixed,
+    Disputed,
+    NoAction,
+}
+
+impl Disposition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fixed => "fixed",
+            Self::Disputed => "disputed",
+            Self::NoAction => "no-action",
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DispositionArgs {
+    /// Ledger id of the finding, as surfaced when it was recorded.
+    finding_id: i64,
+    /// "fixed": code changed. "disputed": contested, note required.
+    /// "no-action": uncontested but no change warranted (an ignored
+    /// nit, an answered question).
+    disposition: Disposition,
+    /// The reason. Required for disputes.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// Tool recording the parent's per-finding decision (spec 23,
+/// Disposition tracking). Root-only by construction, like
+/// [`ReviewLogTool`]. Annotates existing rows only, so it needs no
+/// forgery guard.
+pub struct ReviewDispositionTool {
+    ledger: Arc<ReviewLedger>,
+}
+
+impl ReviewDispositionTool {
+    pub fn new(ledger: Arc<ReviewLedger>) -> Self {
+        Self { ledger }
+    }
+}
+
+impl Tool for ReviewDispositionTool {
+    fn name(&self) -> &'static str {
+        "review_disposition"
+    }
+
+    fn description(&self) -> &'static str {
+        "Record your decision on a review finding after acting on it: \
+        \"fixed\" (code changed), \"disputed\" (contested; note with the \
+        reason required), or \"no-action\" (uncontested, no change \
+        warranted — an ignored nit or an answered question). finding_id \
+        is the ledger id surfaced when the finding was recorded."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::to_value(schemars::schema_for!(DispositionArgs))
+            .expect("schema serialization failed")
+    }
+
+    fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: ToolCtx,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
+        Box::pin(async move {
+            let args: DispositionArgs = serde_json::from_value(args)
+                .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+            if matches!(args.disposition, Disposition::Disputed)
+                && args.note.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(ToolError::InvalidArguments(
+                    "a dispute requires a note with the reason".into(),
+                ));
+            }
+            let found = self
+                .ledger
+                .set_disposition(
+                    args.finding_id,
+                    args.disposition.as_str(),
+                    args.note.as_deref(),
+                )
+                .map_err(|e| ToolError::ExecutionFailed(format!("review_disposition: {e}")))?;
+            if !found {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "no finding with id {}",
+                    args.finding_id
+                )));
+            }
+            Ok("Disposition recorded.".to_string())
         })
     }
 }
@@ -557,21 +677,24 @@ mod tests {
         let (_dir, ledger) = ledger();
         let ledger = Arc::new(ledger);
         let tool = ReviewLogTool::new(ledger.clone());
-        tool.execute(
-            serde_json::json!({
-                "repo": "owner/repo",
-                "gate": "external",
-                "git_ref": "142",
-                "source": "human",
-                "category": "swallowed-error",
-                "file": "src/x.rs",
-                "line": 7,
-                "note": "reviewer caught a dropped Err"
-            }),
-            ToolCtx::default(),
-        )
-        .await
-        .unwrap();
+        let reply = tool
+            .execute(
+                serde_json::json!({
+                    "repo": "owner/repo",
+                    "gate": "external",
+                    "git_ref": "142",
+                    "source": "human",
+                    "category": "swallowed-error",
+                    "file": "src/x.rs",
+                    "line": 7,
+                    "note": "reviewer caught a dropped Err"
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        // The id is the handle a later disposition points at.
+        assert_eq!(reply, "Recorded finding #1.");
         let report = ledger.report().unwrap();
         assert!(report.contains("swallowed-error"), "{report}");
         // The external column carries it, not self.
@@ -602,6 +725,101 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn set_disposition_roundtrip() {
+        let (_dir, ledger) = ledger();
+        let output = parse_findings_block(BLOCK).unwrap();
+        let ids = ledger.record_review(&gate(), &output).unwrap();
+
+        assert!(ledger.set_disposition(ids[0], "fixed", None).unwrap());
+
+        let conn = ledger.conn.lock().unwrap();
+        let (disposition, disposed_at): (String, Option<String>) = conn
+            .query_row(
+                "SELECT disposition, disposed_at FROM findings WHERE id = ?1",
+                [ids[0]],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(disposition, "fixed");
+        assert!(disposed_at.is_some());
+    }
+
+    #[test]
+    fn set_disposition_unknown_id_is_false() {
+        let (_dir, ledger) = ledger();
+        assert!(!ledger.set_disposition(999, "fixed", None).unwrap());
+    }
+
+    #[tokio::test]
+    async fn disposition_tool_records_decision() {
+        let (_dir, ledger) = ledger();
+        let ledger = Arc::new(ledger);
+        let id = ledger
+            .record_finding(&ExternalFinding {
+                repo: "o/r",
+                gate: "external",
+                git_ref: "1",
+                source: "bot",
+                category: "x",
+                file: None,
+                line: None,
+                note: "n",
+            })
+            .unwrap();
+
+        let tool = ReviewDispositionTool::new(ledger.clone());
+        tool.execute(
+            serde_json::json!({
+                "finding_id": id,
+                "disposition": "disputed",
+                "note": "the guard is required; removing it breaks retries"
+            }),
+            ToolCtx::default(),
+        )
+        .await
+        .unwrap();
+
+        let conn = ledger.conn.lock().unwrap();
+        let (disposition, note): (String, String) = conn
+            .query_row(
+                "SELECT disposition, disposition_note FROM findings WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(disposition, "disputed");
+        assert!(note.contains("retries"));
+    }
+
+    #[tokio::test]
+    async fn disposition_tool_rejects_dispute_without_note() {
+        let (_dir, ledger) = ledger();
+        let tool = ReviewDispositionTool::new(Arc::new(ledger));
+        let err = tool
+            .execute(
+                serde_json::json!({"finding_id": 1, "disposition": "disputed"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[tokio::test]
+    async fn disposition_tool_errors_on_unknown_id() {
+        let (_dir, ledger) = ledger();
+        let tool = ReviewDispositionTool::new(Arc::new(ledger));
+        let err = tool
+            .execute(
+                serde_json::json!({"finding_id": 999, "disposition": "no-action"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed(_)));
     }
 
     #[test]

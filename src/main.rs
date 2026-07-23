@@ -253,7 +253,9 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     // no allowlist names it.
     if let Some(ledger) = &review_ledger {
         let review_log: Arc<dyn tools::Tool> = Arc::new(review::ReviewLogTool::new(ledger.clone()));
-        tools.extend_with(vec![review_log], &config.tools.disabled);
+        let review_disposition: Arc<dyn tools::Tool> =
+            Arc::new(review::ReviewDispositionTool::new(ledger.clone()));
+        tools.extend_with(vec![review_log, review_disposition], &config.tools.disabled);
     }
     let heartbeat_provider = role_provider(&provider, overrides.heartbeat.as_deref());
     let memory_provider = role_provider(&provider, overrides.memory.as_deref());
