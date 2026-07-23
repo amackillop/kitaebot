@@ -42,9 +42,10 @@ pub struct CompletionsProvider {
     model: String,
     max_tokens: u32,
     temperature: f32,
-    /// Request `OpenRouter` usage accounting (cache hit details).
-    /// Off for other APIs — strict endpoints reject unknown params.
-    usage_accounting: bool,
+    /// `OpenRouter`-only request extensions: usage accounting (cache
+    /// hit details) and the data-collection denial. Off for other
+    /// APIs — strict endpoints reject unknown params.
+    openrouter: bool,
 }
 
 impl CompletionsProvider {
@@ -55,7 +56,7 @@ impl CompletionsProvider {
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             temperature: config.temperature,
-            usage_accounting: matches!(config.api, Api::OpenRouter),
+            openrouter: matches!(config.api, Api::OpenRouter),
         }
     }
 
@@ -67,7 +68,7 @@ impl CompletionsProvider {
             model: model.to_string(),
             max_tokens: self.max_tokens,
             temperature: self.temperature,
-            usage_accounting: self.usage_accounting,
+            openrouter: self.openrouter,
         }
     }
 
@@ -134,9 +135,10 @@ impl Provider for CompletionsProvider {
             tools: if tools.is_empty() { None } else { Some(tools) },
             max_tokens: self.max_tokens,
             temperature: self.temperature,
-            usage: self
-                .usage_accounting
-                .then_some(UsageAccounting { include: true }),
+            usage: self.openrouter.then_some(UsageAccounting { include: true }),
+            provider: self.openrouter.then_some(ProviderPreferences {
+                data_collection: "deny",
+            }),
         };
 
         debug!(model = %self.model, message_count = messages.len(), "Sending chat request");
@@ -198,11 +200,22 @@ struct ChatRequest<'a> {
     /// `OpenRouter` usage accounting opt-in; omitted for other APIs.
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<UsageAccounting>,
+    /// `OpenRouter` routing preferences; omitted for other APIs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<ProviderPreferences>,
 }
 
 #[derive(Serialize)]
 struct UsageAccounting {
     include: bool,
+}
+
+/// `OpenRouter` provider routing preferences.
+#[derive(Serialize)]
+struct ProviderPreferences {
+    /// "deny" restricts routing to endpoints that neither retain nor
+    /// train on prompts. Not configurable: privacy is not a knob.
+    data_collection: &'static str,
 }
 
 #[cfg(test)]
@@ -246,28 +259,36 @@ mod tests {
         assert_eq!(cheap.model, "cheap/model");
         assert_eq!(cheap.max_tokens, provider.max_tokens);
         assert!((cheap.temperature - provider.temperature).abs() < f32::EPSILON);
-        assert_eq!(cheap.usage_accounting, provider.usage_accounting);
+        assert_eq!(cheap.openrouter, provider.openrouter);
     }
 
     #[test]
-    fn usage_accounting_serialized_only_when_set() {
-        let request = |usage| ChatRequest {
+    fn openrouter_extensions_serialized_only_when_set() {
+        let request = |usage, provider| ChatRequest {
             model: "m",
             messages: Vec::new(),
             tools: None,
             max_tokens: 1,
             temperature: 0.0,
             usage,
+            provider,
         };
-        let with =
-            serde_json::to_string(&request(Some(UsageAccounting { include: true }))).unwrap();
+        let with = serde_json::to_string(&request(
+            Some(UsageAccounting { include: true }),
+            Some(ProviderPreferences {
+                data_collection: "deny",
+            }),
+        ))
+        .unwrap();
         assert!(with.contains(r#""usage":{"include":true}"#));
-        let without = serde_json::to_string(&request(None)).unwrap();
+        assert!(with.contains(r#""provider":{"data_collection":"deny"}"#));
+        let without = serde_json::to_string(&request(None, None)).unwrap();
         assert!(!without.contains("usage"));
+        assert!(!without.contains("provider"));
     }
 
     #[test]
-    fn usage_accounting_enabled_only_for_openrouter() {
+    fn openrouter_extensions_enabled_only_for_openrouter() {
         let client = || {
             CompletionsClient::new(
                 "https://example.invalid".to_string(),
@@ -276,12 +297,31 @@ mod tests {
         };
         // Default API is OpenRouter.
         let config = ProviderConfig::default();
-        assert!(CompletionsProvider::new(client(), &config).usage_accounting);
+        assert!(CompletionsProvider::new(client(), &config).openrouter);
         let config = ProviderConfig {
             api: Api::OpenAi,
             ..ProviderConfig::default()
         };
-        assert!(!CompletionsProvider::new(client(), &config).usage_accounting);
+        assert!(!CompletionsProvider::new(client(), &config).openrouter);
+    }
+
+    /// The privacy denial rides every `OpenRouter` request body; a
+    /// regression here silently re-enables training-data collection.
+    #[tokio::test]
+    async fn openrouter_request_carries_data_collection_deny() {
+        let client = CompletionsClient::from_fn(|body| async move {
+            let body = String::from_utf8(body).unwrap();
+            assert!(
+                body.contains(r#""provider":{"data_collection":"deny"}"#),
+                "request body missing the data-collection denial: {body}"
+            );
+            Ok(crate::clients::RawResponse {
+                status: 200,
+                body: br#"{"choices":[{"message":{"content":"hi"}}]}"#.to_vec(),
+            })
+        });
+        let provider = CompletionsProvider::new(client, &ProviderConfig::default());
+        provider.chat(&[], &[]).await.unwrap();
     }
 
     #[tokio::test]
