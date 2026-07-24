@@ -18,7 +18,8 @@ use crate::dispatch::Reply;
 /// human reviewing logs) can tell where input came from.
 #[derive(Debug, Clone)]
 pub enum ChannelSource {
-    Heartbeat,
+    /// The duty scheduler (spec 24).
+    Duty,
     GitHub {
         pr_number: u32,
         #[allow(dead_code)] // Routed via session_hint, not consumed by actor.
@@ -42,7 +43,7 @@ impl ChannelSource {
 impl fmt::Display for ChannelSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Heartbeat => write!(f, "Heartbeat"),
+            Self::Duty => write!(f, "Duty"),
             Self::GitHub { pr_number, .. } => write!(f, "GitHub PR #{pr_number}"),
             Self::Linear { issue } => write!(f, "Linear {issue}"),
             Self::Socket => write!(f, "Socket"),
@@ -81,7 +82,7 @@ mod tests {
     fn only_socket_and_telegram_are_attended() {
         assert!(ChannelSource::Socket.is_attended());
         assert!(ChannelSource::Telegram.is_attended());
-        assert!(!ChannelSource::Heartbeat.is_attended());
+        assert!(!ChannelSource::Duty.is_attended());
         assert!(
             !ChannelSource::GitHub {
                 pr_number: 1,
@@ -98,8 +99,8 @@ mod tests {
     }
 
     #[test]
-    fn display_heartbeat() {
-        assert_eq!(ChannelSource::Heartbeat.to_string(), "Heartbeat");
+    fn display_duty() {
+        assert_eq!(ChannelSource::Duty.to_string(), "Duty");
     }
 
     #[test]

@@ -29,8 +29,10 @@ pub enum SlashCommand {
     Context,
     /// Force a memory distillation pass, bypassing the token gate.
     Distill,
-    /// Trigger a one-shot heartbeat cycle.
-    Heartbeat,
+    /// Run one named duty, gate respected (sent by the scheduler).
+    Duty { name: String },
+    /// Run every duty whose gate is open, ignoring schedules.
+    Duties,
     /// Clear session and start fresh.
     New,
     /// List sessions or switch to a named one.
@@ -63,7 +65,10 @@ impl FromStr for SlashCommand {
             ("/compact", "") => Ok(Self::Compact),
             ("/context", "") => Ok(Self::Context),
             ("/distill", "") => Ok(Self::Distill),
-            ("/heartbeat", "") => Ok(Self::Heartbeat),
+            ("/duties", "") => Ok(Self::Duties),
+            ("/duty", name) if !name.is_empty() => Ok(Self::Duty {
+                name: name.to_string(),
+            }),
             ("/new", "") => Ok(Self::New),
             ("/stats", "") => Ok(Self::Stats),
             ("/usage", "") => Ok(Self::Usage),
@@ -79,18 +84,18 @@ impl FromStr for SlashCommand {
 
 /// Execute a slash command.
 ///
-/// Called by the agent actor. `/heartbeat` calls `agent::process_message`
+/// Called by the agent actor. Duty arms call `agent::process_message`
 /// directly rather than going through the handle (which would deadlock).
-/// The heartbeat and memory providers are consumed only by the
-/// `/heartbeat` arm: the review turn may run on a cheaper model than
-/// root turns, and distillation runs on its own memory model.
+/// The task-review and memory providers are consumed only by the duty
+/// arms: the task-review turn may run on a cheaper model than root
+/// turns, and distillation runs on its own memory model.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     cmd: SlashCommand,
     engine: &mut impl ContextEngine,
     summarize: &SummarizeFn,
     workspace: &Workspace,
-    heartbeat_provider: &impl Provider,
+    task_review_provider: &impl Provider,
     memory_provider: &impl Provider,
     tools: &Tools,
     distiller: &Distiller,
@@ -116,46 +121,43 @@ pub async fn execute(
             }
             Err(e) => Err(format!("Compaction failed: {e}")),
         },
-        SlashCommand::Context => {
-            let stats = engine.stats();
-            let pct = (stats.token_estimate * 100)
-                .checked_div(stats.budget)
-                .unwrap_or(0);
-            Ok(Reply::text(format!(
-                "Context: {} / {} tokens ({pct}%)\n\
-                 Messages: {}\n\
-                 Session: {}",
-                stats.token_estimate,
-                stats.budget,
-                stats.message_count,
-                engine.active_session(),
-            )))
-        }
+        SlashCommand::Context => Ok(context_reply(engine)),
         SlashCommand::Distill => {
-            let session = engine.active_session().to_string();
-            let pass = distill_pass(
-                &*engine,
+            distill_reply(
+                engine,
                 summarize,
                 workspace,
                 memory_provider,
                 distiller,
                 usage_ledger,
-                &session,
                 distill::Gate::Bypass,
+                "Nothing to distill.",
             )
             .await
-            .map_err(|e| format!("Distillation failed: {e}"))?;
-            match pass {
-                Some(summary) => Ok(Reply::text(format!("Distilled: {summary}"))),
-                None => Ok(Reply::text("Nothing to distill.".into())),
-            }
         }
-        SlashCommand::Heartbeat => {
-            heartbeat_cycle(
+        SlashCommand::Duty { name } => {
+            run_duty(
+                &name,
                 engine,
                 summarize,
                 workspace,
-                heartbeat_provider,
+                task_review_provider,
+                memory_provider,
+                tools,
+                distiller,
+                max_iterations,
+                memory_index_cap,
+                usage_ledger,
+                review_ledger.is_some(),
+            )
+            .await
+        }
+        SlashCommand::Duties => {
+            all_duties(
+                engine,
+                summarize,
+                workspace,
+                task_review_provider,
                 memory_provider,
                 tools,
                 distiller,
@@ -196,15 +198,15 @@ pub async fn execute(
     }
 }
 
-/// Run the heartbeat cycle: the optional task-review turn followed by
-/// the independent distillation pass. Both turns bill against the active
-/// session in the usage ledger.
+/// Dispatch one named duty, gate respected (the scheduler's entry
+/// point, `/duty <name>`).
 #[allow(clippy::too_many_arguments)]
-async fn heartbeat_cycle(
+async fn run_duty(
+    name: &str,
     engine: &mut impl ContextEngine,
     summarize: &SummarizeFn,
     workspace: &Workspace,
-    heartbeat_provider: &impl Provider,
+    task_review_provider: &impl Provider,
     memory_provider: &impl Provider,
     tools: &Tools,
     distiller: &Distiller,
@@ -213,20 +215,109 @@ async fn heartbeat_cycle(
     usage_ledger: Option<&UsageLedger>,
     review_gates: bool,
 ) -> Result<Reply, String> {
-    // The session the heartbeat runs on; both turns below bill against
-    // it in the ledger.
-    let session = engine.active_session().to_string();
+    match name {
+        "task-review" => task_review(
+            engine,
+            summarize,
+            workspace,
+            task_review_provider,
+            tools,
+            max_iterations,
+            memory_index_cap,
+            usage_ledger,
+            review_gates,
+        )
+        .await
+        .map(Reply::text),
+        "distill" => {
+            distill_reply(
+                engine,
+                summarize,
+                workspace,
+                memory_provider,
+                distiller,
+                usage_ledger,
+                distill::Gate::Enforce,
+                "Distillation gate closed.",
+            )
+            .await
+        }
+        other => Err(format!("Unknown duty: {other}")),
+    }
+}
 
-    // The task-review turn. May be skipped when there are no standing
-    // tasks; distillation below runs regardless.
-    let review = match heartbeat::prepare(workspace) {
+/// Render the `/context` stats line.
+fn context_reply(engine: &impl ContextEngine) -> Reply {
+    let stats = engine.stats();
+    let pct = (stats.token_estimate * 100)
+        .checked_div(stats.budget)
+        .unwrap_or(0);
+    Reply::text(format!(
+        "Context: {} / {} tokens ({pct}%)\n\
+         Messages: {}\n\
+         Session: {}",
+        stats.token_estimate,
+        stats.budget,
+        stats.message_count,
+        engine.active_session(),
+    ))
+}
+
+/// One distillation pass rendered as a reply; `idle` is the message
+/// when no pass ran (the wording differs per gate).
+#[allow(clippy::too_many_arguments)]
+async fn distill_reply(
+    engine: &impl ContextEngine,
+    summarize: &SummarizeFn,
+    workspace: &Workspace,
+    memory_provider: &impl Provider,
+    distiller: &Distiller,
+    usage_ledger: Option<&UsageLedger>,
+    gate: distill::Gate,
+    idle: &str,
+) -> Result<Reply, String> {
+    let session = engine.active_session().to_string();
+    let pass = distill_pass(
+        engine,
+        summarize,
+        workspace,
+        memory_provider,
+        distiller,
+        usage_ledger,
+        &session,
+        gate,
+    )
+    .await
+    .map_err(|e| format!("Distillation failed: {e}"))?;
+    match pass {
+        Some(summary) => Ok(Reply::text(format!("Distilled: {summary}"))),
+        None => Ok(Reply::text(idle.into())),
+    }
+}
+
+/// The task-review duty: run the HEARTBEAT.md standing tasks as a
+/// turn on the active session. Skips when there are none.
+#[allow(clippy::too_many_arguments)]
+async fn task_review(
+    engine: &mut impl ContextEngine,
+    summarize: &SummarizeFn,
+    workspace: &Workspace,
+    task_review_provider: &impl Provider,
+    tools: &Tools,
+    max_iterations: usize,
+    memory_index_cap: usize,
+    usage_ledger: Option<&UsageLedger>,
+    review_gates: bool,
+) -> Result<String, String> {
+    let session = engine.active_session().to_string();
+    match heartbeat::prepare(workspace) {
         Ok(heartbeat::Prepared::Ready(prompt)) => {
             let (output, usage) = agent::process_message_metered(
                 engine,
                 summarize,
                 workspace,
                 &prompt,
-                heartbeat_provider,
+                task_review_provider,
                 tools,
                 max_iterations,
                 memory_index_cap,
@@ -234,31 +325,60 @@ async fn heartbeat_cycle(
                 &crate::tools::ToolCtx::default(),
             )
             .await
-            .map_err(|e| format!("Heartbeat failed: {e}"))?;
+            .map_err(|e| format!("Task review failed: {e}"))?;
             usage::record_turn(
                 usage_ledger,
                 &TurnRecord {
                     session: &session,
-                    source: "Heartbeat",
-                    model: heartbeat_provider.model(),
+                    source: "task-review",
+                    model: task_review_provider.model(),
                     usage,
                 },
             );
             let response = output.into_text();
             if let Err(e) = heartbeat::finish(workspace, &response) {
-                error!("Failed to write heartbeat history: {e}");
+                error!("Failed to write task-review history: {e}");
             }
-            response
+            Ok(response)
         }
-        Ok(heartbeat::Prepared::Skipped(reason)) => format!("Skipped: {reason}"),
-        Err(e) => return Err(format!("Heartbeat failed: {e}")),
-    };
+        Ok(heartbeat::Prepared::Skipped(reason)) => Ok(format!("Skipped: {reason}")),
+        Err(e) => Err(format!("Task review failed: {e}")),
+    }
+}
 
-    // Distillation is independent of the review: it folds accumulated
-    // session history into memory whenever the mechanical gate opens,
-    // even with no review tasks. A failure is logged, not fatal — the
-    // review reply stands.
-    let pass = distill_pass(
+/// Run every duty whose gate is open, ignoring schedules — the
+/// operator's "run it now" (`/duties`). Duty failures degrade to
+/// lines in the combined reply; the command itself succeeds.
+#[allow(clippy::too_many_arguments)]
+async fn all_duties(
+    engine: &mut impl ContextEngine,
+    summarize: &SummarizeFn,
+    workspace: &Workspace,
+    task_review_provider: &impl Provider,
+    memory_provider: &impl Provider,
+    tools: &Tools,
+    distiller: &Distiller,
+    max_iterations: usize,
+    memory_index_cap: usize,
+    usage_ledger: Option<&UsageLedger>,
+    review_gates: bool,
+) -> Result<Reply, String> {
+    let review = task_review(
+        engine,
+        summarize,
+        workspace,
+        task_review_provider,
+        tools,
+        max_iterations,
+        memory_index_cap,
+        usage_ledger,
+        review_gates,
+    )
+    .await
+    .unwrap_or_else(|e| e);
+
+    let session = engine.active_session().to_string();
+    let distill_note = match distill_pass(
         &*engine,
         summarize,
         workspace,
@@ -268,15 +388,16 @@ async fn heartbeat_cycle(
         &session,
         distill::Gate::Enforce,
     )
-    .await;
-    match pass {
-        Ok(Some(summary)) => Ok(Reply::text(format!("{review}\n\nDistilled: {summary}"))),
-        Ok(None) => Ok(Reply::text(review)),
+    .await
+    {
+        Ok(Some(summary)) => format!("\n\nDistilled: {summary}"),
+        Ok(None) => String::new(),
         Err(e) => {
             error!("Distillation failed: {e}");
-            Ok(Reply::text(review))
+            String::new()
         }
-    }
+    };
+    Ok(Reply::text(format!("{review}{distill_note}")))
 }
 
 /// Run one distillation pass plus its bookkeeping: bill the turn to
@@ -462,7 +583,15 @@ mod tests {
         assert_eq!("/compact".parse(), Ok(SlashCommand::Compact));
         assert_eq!("/context".parse(), Ok(SlashCommand::Context));
         assert_eq!("/distill".parse(), Ok(SlashCommand::Distill));
-        assert_eq!("/heartbeat".parse(), Ok(SlashCommand::Heartbeat));
+        assert_eq!("/duties".parse(), Ok(SlashCommand::Duties));
+        assert_eq!(
+            "/duty task-review".parse(),
+            Ok(SlashCommand::Duty {
+                name: "task-review".into()
+            }),
+        );
+        assert_eq!("/duty".parse::<SlashCommand>(), Err(UnknownCommand));
+        assert_eq!("/heartbeat".parse::<SlashCommand>(), Err(UnknownCommand));
         assert_eq!("/new".parse(), Ok(SlashCommand::New));
         assert_eq!("/stats".parse(), Ok(SlashCommand::Stats));
         assert_eq!("/usage".parse(), Ok(SlashCommand::Usage));

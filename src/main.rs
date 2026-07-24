@@ -155,7 +155,7 @@ async fn main() {
             eprintln!("Usage: kitaebot <command>");
             eprintln!();
             eprintln!("Commands:");
-            eprintln!("  run  Start daemon (heartbeat + channels)");
+            eprintln!("  run  Start daemon (duties + channels)");
             std::process::exit(1);
         }
     }
@@ -164,16 +164,20 @@ async fn main() {
 /// Built-in duties, scheduled from config (spec 24 phase 1).
 fn build_duties(config: &Config) -> Vec<duty::Duty> {
     // Validated by Config::validate; parse cannot fail here.
-    let heartbeat = config
-        .duties
-        .heartbeat
-        .parse()
-        .expect("validated schedule failed to parse");
-    vec![duty::Duty {
-        name: "heartbeat",
-        command: "/heartbeat",
-        schedule: heartbeat,
-    }]
+    let parse =
+        |s: &crate::config::ScheduleConfig| s.parse().expect("validated schedule failed to parse");
+    vec![
+        duty::Duty {
+            name: "task-review",
+            command: "/duty task-review",
+            schedule: parse(&config.duties.task_review),
+        },
+        duty::Duty {
+            name: "distill",
+            command: "/duty distill",
+            schedule: parse(&config.duties.distill),
+        },
+    ]
 }
 
 /// Provider variant for a role: the override model when configured,
@@ -271,12 +275,12 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
             Arc::new(review::ReviewDispositionTool::new(ledger.clone()));
         tools.extend_with(vec![review_log, review_disposition], &config.tools.disabled);
     }
-    let heartbeat_provider = role_provider(&provider, overrides.heartbeat.as_deref());
+    let task_review_provider = role_provider(&provider, overrides.task_review.as_deref());
     let memory_provider = role_provider(&provider, overrides.memory.as_deref());
     agent::AgentHandle::spawn(
         workspace,
         provider,
-        heartbeat_provider,
+        task_review_provider,
         memory_provider,
         Arc::new(tools),
         distiller,

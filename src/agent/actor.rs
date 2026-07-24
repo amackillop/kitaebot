@@ -31,7 +31,7 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     rx: mpsc::Receiver<Envelope>,
     workspace: Arc<Workspace>,
     provider: Arc<P>,
-    heartbeat_provider: Arc<P>,
+    task_review_provider: Arc<P>,
     memory_provider: Arc<P>,
     tools: Arc<Tools>,
     distiller: Arc<Distiller>,
@@ -52,7 +52,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         rx: mpsc::Receiver<Envelope>,
         workspace: Arc<Workspace>,
         provider: Arc<P>,
-        heartbeat_provider: Arc<P>,
+        task_review_provider: Arc<P>,
         memory_provider: Arc<P>,
         tools: Arc<Tools>,
         distiller: Arc<Distiller>,
@@ -68,7 +68,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             rx,
             workspace,
             provider,
-            heartbeat_provider,
+            task_review_provider,
             memory_provider,
             tools,
             distiller,
@@ -126,7 +126,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                     &mut self.engine,
                     &self.summarize,
                     &self.workspace,
-                    &*self.heartbeat_provider,
+                    &*self.task_review_provider,
                     &*self.memory_provider,
                     &self.tools,
                     &self.distiller,
@@ -286,13 +286,13 @@ mod tests {
     fn spawn_agent_full(
         ws: Arc<Workspace>,
         provider: Arc<MockProvider>,
-        heartbeat_provider: Arc<MockProvider>,
+        task_review_provider: Arc<MockProvider>,
         tools: Tools,
         notifier: Option<Arc<Notifier>>,
         max_iterations: usize,
     ) -> AgentHandle {
         let mut builder = TestAgent::new(ws, provider)
-            .heartbeat_provider(heartbeat_provider)
+            .task_review_provider(task_review_provider)
             .tools(tools)
             .max_iterations(max_iterations);
         if let Some(notifier) = notifier {
@@ -701,38 +701,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn heartbeat_turn_uses_heartbeat_provider() {
+    async fn task_review_duty_uses_task_review_provider() {
         let (_dir, ws) = workspace();
         // An active task so heartbeat::prepare returns Ready.
         std::fs::write(ws.heartbeat_path(), "- [ ] Check builds\n").unwrap();
 
         // The root provider has no responses: any turn hitting it fails.
         let root = Arc::new(MockProvider::new(vec![]));
-        let heartbeat = Arc::new(MockProvider::new(vec![Ok(Response::Text(
-            "from heartbeat provider".into(),
+        let task_review = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            "from task-review provider".into(),
         ))]));
 
         let handle = spawn_agent_full(
             ws,
             root.clone(),
-            heartbeat.clone(),
+            task_review.clone(),
             Tools::default(),
             None,
             1,
         );
         let result = handle
             .send_message(
-                ChannelSource::Heartbeat,
-                "/heartbeat".into(),
+                ChannelSource::Duty,
+                "/duty task-review".into(),
                 None,
                 None,
                 CancellationToken::new(),
             )
             .await;
 
-        assert_eq!(result.unwrap().content, "from heartbeat provider");
+        assert_eq!(result.unwrap().content, "from task-review provider");
         assert_eq!(root.call_count(), 0);
-        assert_eq!(heartbeat.call_count(), 1);
+        assert_eq!(task_review.call_count(), 1);
     }
 
     #[tokio::test]

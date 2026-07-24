@@ -31,18 +31,19 @@ pub(crate) fn workspace() -> (TempDir, Arc<Workspace>) {
 pub(crate) struct TestAgent {
     ws: Arc<Workspace>,
     provider: Arc<MockProvider>,
-    heartbeat_provider: Arc<MockProvider>,
+    task_review_provider: Arc<MockProvider>,
     tools: Tools,
     notifier: Option<Arc<Notifier>>,
     max_iterations: usize,
 }
 
 impl TestAgent {
-    /// Defaults: the root provider doubles as the heartbeat and memory
-    /// role, no extra tools, no notifier, a single tool-loop iteration.
+    /// Defaults: the root provider doubles as the task-review and
+    /// memory role, no extra tools, no notifier, a single tool-loop
+    /// iteration.
     pub(crate) fn new(ws: Arc<Workspace>, provider: Arc<MockProvider>) -> Self {
         Self {
-            heartbeat_provider: provider.clone(),
+            task_review_provider: provider.clone(),
             ws,
             provider,
             tools: Tools::default(),
@@ -56,8 +57,8 @@ impl TestAgent {
         self
     }
 
-    pub(crate) fn heartbeat_provider(mut self, provider: Arc<MockProvider>) -> Self {
-        self.heartbeat_provider = provider;
+    pub(crate) fn task_review_provider(mut self, provider: Arc<MockProvider>) -> Self {
+        self.task_review_provider = provider;
         self
     }
 
@@ -85,7 +86,7 @@ impl TestAgent {
         AgentHandle::spawn(
             self.ws,
             self.provider.clone(),
-            self.heartbeat_provider,
+            self.task_review_provider,
             self.provider,
             Arc::new(self.tools),
             distiller,

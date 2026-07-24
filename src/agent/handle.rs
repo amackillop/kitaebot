@@ -40,7 +40,7 @@ impl AgentHandle {
     pub fn spawn<P: Provider + 'static, E: ContextEngine + 'static>(
         workspace: Arc<Workspace>,
         provider: Arc<P>,
-        heartbeat_provider: Arc<P>,
+        task_review_provider: Arc<P>,
         memory_provider: Arc<P>,
         tools: Arc<Tools>,
         distiller: Arc<Distiller>,
@@ -57,7 +57,7 @@ impl AgentHandle {
             rx,
             workspace,
             provider,
-            heartbeat_provider,
+            task_review_provider,
             memory_provider,
             tools,
             distiller,

@@ -146,12 +146,12 @@ mod tests {
         TestAgent::new(ws.clone(), provider).spawn()
     }
 
-    /// One hourly heartbeat duty. With no persisted state it is due
+    /// One hourly task-review duty. With no persisted state it is due
     /// immediately (anacron catch-up).
     fn heartbeat_duty() -> Vec<Duty> {
         vec![Duty {
-            name: "heartbeat",
-            command: "/heartbeat",
+            name: "task-review",
+            command: "/duty task-review",
             schedule: Schedule::Every(3600),
         }]
     }
@@ -211,7 +211,7 @@ mod tests {
         // The run must be recorded: a restarted scheduler reads this
         // and does not re-fire — the restart-cadence contract.
         let state = crate::duty::state::DutyState::load(&ws.state_dir().join("duties.json"));
-        assert!(state.last_run("heartbeat").is_some());
+        assert!(state.last_run("task-review").is_some());
     }
 
     #[tokio::test]

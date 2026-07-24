@@ -67,7 +67,7 @@ pub async fn run_loop(duties: Vec<Duty>, state_path: PathBuf, handle: &AgentHand
             let cancel = CancellationToken::new();
             match handle
                 .send_message(
-                    ChannelSource::Heartbeat,
+                    ChannelSource::Duty,
                     duty.command.to_string(),
                     None,
                     None,
