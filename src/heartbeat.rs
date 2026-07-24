@@ -1,23 +1,13 @@
-//! Periodic heartbeat channel.
+//! The heartbeat duty's prepare/finish building blocks.
 //!
-//! [`poll_loop`] ticks on a configurable interval and sends `/heartbeat`
-//! through the agent handle. The command handler in [`crate::commands`]
-//! does the actual prepare/execute/finish work.
-//!
-//! [`prepare`] and [`finish`] are the lower-level building blocks used
-//! by the `/heartbeat` slash command.
+//! Scheduling lives in [`crate::duty`] (spec 24): the scheduler sends
+//! `/heartbeat` through the agent handle, and the command handler in
+//! [`crate::commands`] calls [`prepare`] and [`finish`].
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::time::Duration;
 
-use tokio::time::{self, MissedTickBehavior};
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
-
-use crate::agent::AgentHandle;
-use crate::agent::envelope::ChannelSource;
 use crate::error::HeartbeatError;
 use crate::workspace::Workspace;
 
@@ -45,33 +35,6 @@ pub enum Prepared {
     Ready(String),
     /// Nothing to do.
     Skipped(SkipReason),
-}
-
-/// Run the heartbeat channel loop.
-///
-/// Sends `/heartbeat` to the agent on each tick. The command handler
-/// does prepare/execute/finish; this loop just provides the timer.
-pub async fn poll_loop(interval: Duration, handle: &AgentHandle) -> ! {
-    let mut tick = time::interval(interval);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
-        tick.tick().await;
-        let cancel = CancellationToken::new();
-        match handle
-            .send_message(
-                ChannelSource::Heartbeat,
-                "/heartbeat".into(),
-                None,
-                None,
-                cancel,
-            )
-            .await
-        {
-            Ok(reply) => info!("Heartbeat: {}", reply.content),
-            Err(e) => error!("Heartbeat error (will retry next tick): {e}"),
-        }
-    }
 }
 
 /// Read tasks and build prompt. Returns [`Prepared`].

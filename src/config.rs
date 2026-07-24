@@ -23,7 +23,7 @@ pub struct Config {
     #[serde(default)]
     pub github: GithubConfig,
     #[serde(default)]
-    pub heartbeat: HeartbeatConfig,
+    pub duties: DutiesConfig,
     #[serde(default)]
     pub linear: LinearConfig,
     #[serde(default)]
@@ -227,11 +227,35 @@ pub struct WebSearchConfig {
     pub timeout_secs: u64,
 }
 
-/// Heartbeat daemon settings.
+/// Duty scheduler settings (spec 24).
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct HeartbeatConfig {
-    pub interval_secs: u64,
+pub struct DutiesConfig {
+    /// Schedule for the heartbeat duty (task review + distillation).
+    pub heartbeat: ScheduleConfig,
+}
+
+/// One duty's schedule: exactly one of `every` (interval, e.g.
+/// `"30m"`) or `daily` (UTC time of day, e.g. `"06:00"`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScheduleConfig {
+    pub every: Option<String>,
+    pub daily: Option<String>,
+}
+
+impl ScheduleConfig {
+    /// Parse into a [`Schedule`]. Called at validation, so later
+    /// callers may expect success.
+    pub fn parse(&self) -> Result<crate::duty::schedule::Schedule, String> {
+        use crate::duty::schedule::{Schedule, parse_daily, parse_every};
+        match (&self.every, &self.daily) {
+            (Some(e), None) => Ok(Schedule::Every(parse_every(e)?)),
+            (None, Some(d)) => Ok(Schedule::Daily(parse_daily(d)?)),
+            (None, None) => Err("schedule needs `every` or `daily`".into()),
+            (Some(_), Some(_)) => Err("schedule takes `every` or `daily`, not both".into()),
+        }
+    }
 }
 
 /// Memory subsystem settings (spec 21).
@@ -514,10 +538,14 @@ impl Default for GithubConfig {
     }
 }
 
-impl Default for HeartbeatConfig {
+impl Default for DutiesConfig {
     fn default() -> Self {
         Self {
-            interval_secs: 1800,
+            // Matches the pre-scheduler heartbeat interval.
+            heartbeat: ScheduleConfig {
+                every: Some("30m".into()),
+                daily: None,
+            },
         }
     }
 }
@@ -640,10 +668,8 @@ impl Config {
                 "context max_tokens must be > provider max_tokens (output reserve)".into(),
             ));
         }
-        if self.heartbeat.interval_secs == 0 {
-            return Err(ConfigError::Invalid(
-                "heartbeat interval_secs must be > 0".into(),
-            ));
+        if let Err(e) = self.duties.heartbeat.parse() {
+            return Err(ConfigError::Invalid(format!("duties.heartbeat: {e}")));
         }
         if self.memory.index_cap_bytes == 0 {
             return Err(ConfigError::Invalid(
@@ -920,27 +946,41 @@ memory = \"cheap/memory\"
     }
 
     #[test]
-    fn heartbeat_defaults() {
+    fn duties_defaults() {
+        use crate::duty::schedule::Schedule;
         let cfg = load_toml("").unwrap();
-        assert_eq!(cfg.heartbeat.interval_secs, 1800);
+        // Matches the pre-scheduler heartbeat interval.
+        assert_eq!(cfg.duties.heartbeat.parse().unwrap(), Schedule::Every(1800));
     }
 
     #[test]
-    fn heartbeat_parse() {
-        let cfg = load_toml("[heartbeat]\ninterval_secs = 600\n").unwrap();
-        assert_eq!(cfg.heartbeat.interval_secs, 600);
+    fn duties_parse_every_and_daily() {
+        use crate::duty::schedule::Schedule;
+        let cfg = load_toml("[duties.heartbeat]\nevery = \"1h\"\n").unwrap();
+        assert_eq!(cfg.duties.heartbeat.parse().unwrap(), Schedule::Every(3600));
+        let cfg = load_toml("[duties.heartbeat]\ndaily = \"06:00\"\n").unwrap();
+        assert_eq!(
+            cfg.duties.heartbeat.parse().unwrap(),
+            Schedule::Daily(6 * 3600)
+        );
     }
 
     #[test]
-    fn heartbeat_reject_unknown_field() {
-        let result = load_toml("[heartbeat]\ntypo = 1\n");
+    fn duties_reject_unknown_field() {
+        let result = load_toml("[duties.heartbeat]\ntypo = 1\n");
         assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 
     #[test]
-    fn heartbeat_reject_zero_interval() {
-        let result = load_toml("[heartbeat]\ninterval_secs = 0\n");
-        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    fn duties_reject_both_and_garbage_schedules() {
+        for toml in [
+            "[duties.heartbeat]\nevery = \"1h\"\ndaily = \"06:00\"\n",
+            "[duties.heartbeat]\nevery = \"soon\"\n",
+            "[duties.heartbeat]\ndaily = \"25:00\"\n",
+        ] {
+            let result = load_toml(toml);
+            assert!(matches!(result, Err(ConfigError::Invalid(_))), "{toml}");
+        }
     }
 
     #[test]

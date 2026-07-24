@@ -1,10 +1,10 @@
-//! Long-running daemon that drives the heartbeat, GitHub, Linear,
-//! Telegram, and socket loops.
+//! Long-running daemon that drives the duty scheduler, GitHub,
+//! Linear, Telegram, and socket loops.
 //!
-//! The daemon runs five concurrent loops — heartbeat ticks on a
-//! configurable interval, the GitHub PR poller checks for new reviews
-//! and comments, the Linear poller checks for assigned issues and
-//! comments, the Telegram poller long-polls for incoming messages,
+//! The daemon runs five concurrent loops — the duty scheduler
+//! dispatches scheduled duties, the GitHub PR poller checks for new
+//! reviews and comments, the Linear poller checks for assigned issues
+//! and comments, the Telegram poller long-polls for incoming messages,
 //! and the socket listener accepts Unix domain socket clients. All are
 //! pinned futures inside a single `tokio::select!`, so they make
 //! progress concurrently.
@@ -15,7 +15,6 @@
 
 use std::future::Future;
 use std::path::Path;
-use std::time::Duration;
 
 use tracing::info;
 
@@ -25,7 +24,7 @@ use crate::channel::linear::{self, LinearChannel};
 use crate::channel::socket;
 use crate::channel::telegram::{self, TelegramChannel};
 use crate::config::GithubConfig;
-use crate::heartbeat;
+use crate::duty::{self, Duty};
 use crate::tools::git::GitCli;
 use crate::tools::github::GhCli;
 use crate::workspace::Workspace;
@@ -35,7 +34,7 @@ use crate::workspace::Workspace;
 pub async fn run(
     workspace: &Workspace,
     handle: &AgentHandle,
-    interval_secs: u64,
+    duties: Vec<Duty>,
     telegram: Option<&TelegramChannel>,
     gh_cli: Option<&GhCli>,
     git_cli: Option<&GitCli>,
@@ -46,7 +45,7 @@ pub async fn run(
     run_with_shutdown(
         workspace,
         handle,
-        Duration::from_secs(interval_secs),
+        duties,
         telegram,
         gh_cli,
         git_cli,
@@ -58,13 +57,13 @@ pub async fn run(
     .await;
 }
 
-/// Testable core: runs heartbeat + github + linear + telegram + socket
+/// Testable core: runs duties + github + linear + telegram + socket
 /// until `shutdown` resolves.
 #[allow(clippy::too_many_arguments)]
 async fn run_with_shutdown<S: Future<Output = ()>>(
     workspace: &Workspace,
     handle: &AgentHandle,
-    interval: Duration,
+    duties: Vec<Duty>,
     telegram: Option<&TelegramChannel>,
     gh_cli: Option<&GhCli>,
     git_cli: Option<&GitCli>,
@@ -73,7 +72,8 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     socket_path: &Path,
     shutdown: S,
 ) {
-    let heartbeat_loop = heartbeat::poll_loop(interval, handle);
+    let duty_state_path = workspace.state_dir().join("duties.json");
+    let duty_loop = duty::run_loop(duties, duty_state_path, handle);
 
     let telegram_loop = async {
         match telegram {
@@ -108,7 +108,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     let socket_loop = socket::listen(socket_path, handle);
 
     tokio::select! {
-        () = heartbeat_loop => unreachable!("heartbeat loop never exits"),
+        () = duty_loop => unreachable!("duty loop never exits"),
         () = telegram_loop => unreachable!("telegram loop never exits"),
         () = github_loop => unreachable!("github loop never exits"),
         () = linear_loop => unreachable!("linear loop never exits"),
@@ -136,13 +136,24 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::duty::schedule::Schedule;
     use crate::provider::MockProvider;
     use crate::test_support::{TestAgent, workspace};
-    use crate::types::Response;
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn spawn_agent(ws: &Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
         TestAgent::new(ws.clone(), provider).spawn()
+    }
+
+    /// One hourly heartbeat duty. With no persisted state it is due
+    /// immediately (anacron catch-up).
+    fn heartbeat_duty() -> Vec<Duty> {
+        vec![Duty {
+            name: "heartbeat",
+            command: "/heartbeat",
+            schedule: Schedule::Every(3600),
+        }]
     }
 
     /// Socket path in a temp dir — avoids collisions and `/run` dependency.
@@ -156,13 +167,13 @@ mod tests {
     async fn fires_immediately_then_shuts_down() {
         let (_dir, ws) = workspace();
         let (_sock_dir, sock_path) = sock_path();
-        // No HEARTBEAT.md → skipped, but proves the tick fired.
+        // No HEARTBEAT.md → skipped, but proves the duty fired.
         let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
 
         run_with_shutdown(
             &ws,
             &handle,
-            Duration::from_hours(1), // large interval — only the immediate first tick matters
+            heartbeat_duty(),
             None,
             None,
             None,
@@ -173,42 +184,34 @@ mod tests {
         )
         .await;
 
-        // If we get here without hanging, the first tick was immediate
-        // and the shutdown future terminated the loop.
+        // If we get here without hanging, the catch-up fired and the
+        // shutdown future terminated the loop.
     }
 
     #[tokio::test]
-    async fn multiple_cycles_with_short_interval() {
+    async fn duty_run_persists_state() {
         let (_dir, ws) = workspace();
         let (_sock_dir, sock_path) = sock_path();
-        std::fs::write(ws.heartbeat_path(), "- [ ] task\n").unwrap();
-
-        // Over-provision: we expect ~3 ticks but provide enough headroom.
-        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text("ok".into())); 10]));
-        let handle = spawn_agent(&ws, provider.clone());
+        let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
 
         run_with_shutdown(
             &ws,
             &handle,
-            Duration::from_millis(100), // 100ms interval for fast test
+            heartbeat_duty(),
             None,
             None,
             None,
             &GithubConfig::default(),
             None, // linear
             &sock_path,
-            async {
-                // Let 3 ticks fire: immediate + 2 more.
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            },
+            tokio::time::sleep(Duration::from_millis(50)),
         )
         .await;
 
-        assert!(
-            provider.call_count() >= 2,
-            "expected at least 2 cycles, got {}",
-            provider.call_count(),
-        );
+        // The run must be recorded: a restarted scheduler reads this
+        // and does not re-fire — the restart-cadence contract.
+        let state = crate::duty::state::DutyState::load(&ws.state_dir().join("duties.json"));
+        assert!(state.last_run("heartbeat").is_some());
     }
 
     #[tokio::test]
@@ -230,7 +233,7 @@ mod tests {
         run_with_shutdown(
             &ws,
             &handle,
-            Duration::from_hours(1),
+            heartbeat_duty(),
             None,
             None,
             None,

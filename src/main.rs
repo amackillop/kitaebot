@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod daemon;
 mod dispatch;
+mod duty;
 mod engine;
 mod error;
 mod heartbeat;
@@ -75,11 +76,9 @@ async fn main() {
 
     match std::env::args().nth(1).as_deref() {
         Some("run") => {
-            info!(
-                interval_secs = config.heartbeat.interval_secs,
-                telegram = config.telegram.enabled,
-                "Daemon starting",
-            );
+            info!(telegram = config.telegram.enabled, "Daemon starting");
+
+            let duties = build_duties(&config);
 
             let workspace = Arc::new(workspace);
             let provider = Arc::new(rt.provider);
@@ -138,7 +137,7 @@ async fn main() {
             daemon::run(
                 &workspace,
                 &handle,
-                config.heartbeat.interval_secs,
+                duties,
                 rt.telegram.as_ref(),
                 rt.gh_cli.as_ref(),
                 rt.git_cli.as_ref(),
@@ -160,6 +159,21 @@ async fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Built-in duties, scheduled from config (spec 24 phase 1).
+fn build_duties(config: &Config) -> Vec<duty::Duty> {
+    // Validated by Config::validate; parse cannot fail here.
+    let heartbeat = config
+        .duties
+        .heartbeat
+        .parse()
+        .expect("validated schedule failed to parse");
+    vec![duty::Duty {
+        name: "heartbeat",
+        command: "/heartbeat",
+        schedule: heartbeat,
+    }]
 }
 
 /// Provider variant for a role: the override model when configured,
