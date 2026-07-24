@@ -27,6 +27,17 @@ pub struct Duty {
     pub schedule: Schedule,
 }
 
+/// Append a timestamped entry to the duty history log (HISTORY.md).
+pub fn log_history(path: &std::path::Path, entry: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let timestamp = crate::time::now_iso8601();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "[{timestamp}] {entry}\n")
+}
+
 /// Cap on scheduler sleep. `tokio::time::sleep` is monotonic and
 /// diverges from the wall clock across host pauses; re-checking
 /// bounds the divergence without ever dispatching early.

@@ -8,15 +8,12 @@ use std::str::FromStr;
 
 use tracing::error;
 
-use crate::agent;
 use crate::dispatch::Reply;
 use crate::engine::names::sanitize_name;
 use crate::engine::{ContextEngine, SessionInfo, SummarizeFn};
-use crate::heartbeat;
 use crate::memory::distill::{self, Distiller};
 use crate::provider::Provider;
 use crate::review::ReviewLedger;
-use crate::tools::Tools;
 use crate::usage::{self, TurnRecord, UsageLedger};
 use crate::workspace::Workspace;
 
@@ -84,23 +81,16 @@ impl FromStr for SlashCommand {
 
 /// Execute a slash command.
 ///
-/// Called by the agent actor. Duty arms call `agent::process_message`
-/// directly rather than going through the handle (which would deadlock).
-/// The task-review and memory providers are consumed only by the duty
-/// arms: the task-review turn may run on a cheaper model than root
-/// turns, and distillation runs on its own memory model.
+/// Called by the agent actor. The memory provider is consumed only by
+/// distillation, which runs on its own model.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     cmd: SlashCommand,
     engine: &mut impl ContextEngine,
     summarize: &SummarizeFn,
     workspace: &Workspace,
-    task_review_provider: &impl Provider,
     memory_provider: &impl Provider,
-    tools: &Tools,
     distiller: &Distiller,
-    max_iterations: usize,
-    memory_index_cap: usize,
     usage_ledger: Option<&UsageLedger>,
     review_ledger: Option<&ReviewLedger>,
 ) -> Result<Reply, String> {
@@ -141,30 +131,24 @@ pub async fn execute(
                 engine,
                 summarize,
                 workspace,
-                task_review_provider,
                 memory_provider,
-                tools,
                 distiller,
-                max_iterations,
-                memory_index_cap,
                 usage_ledger,
-                review_ledger.is_some(),
             )
             .await
         }
+        // Distillation is the only built-in duty until prompt duties
+        // land; "all open gates" and "the distill gate" coincide.
         SlashCommand::Duties => {
-            all_duties(
+            distill_reply(
                 engine,
                 summarize,
                 workspace,
-                task_review_provider,
                 memory_provider,
-                tools,
                 distiller,
-                max_iterations,
-                memory_index_cap,
                 usage_ledger,
-                review_ledger.is_some(),
+                distill::Gate::Enforce,
+                "Distillation gate closed.",
             )
             .await
         }
@@ -200,35 +184,16 @@ pub async fn execute(
 
 /// Dispatch one named duty, gate respected (the scheduler's entry
 /// point, `/duty <name>`).
-#[allow(clippy::too_many_arguments)]
 async fn run_duty(
     name: &str,
     engine: &mut impl ContextEngine,
     summarize: &SummarizeFn,
     workspace: &Workspace,
-    task_review_provider: &impl Provider,
     memory_provider: &impl Provider,
-    tools: &Tools,
     distiller: &Distiller,
-    max_iterations: usize,
-    memory_index_cap: usize,
     usage_ledger: Option<&UsageLedger>,
-    review_gates: bool,
 ) -> Result<Reply, String> {
     match name {
-        "task-review" => task_review(
-            engine,
-            summarize,
-            workspace,
-            task_review_provider,
-            tools,
-            max_iterations,
-            memory_index_cap,
-            usage_ledger,
-            review_gates,
-        )
-        .await
-        .map(Reply::text),
         "distill" => {
             distill_reply(
                 engine,
@@ -295,111 +260,6 @@ async fn distill_reply(
     }
 }
 
-/// The task-review duty: run the HEARTBEAT.md standing tasks as a
-/// turn on the active session. Skips when there are none.
-#[allow(clippy::too_many_arguments)]
-async fn task_review(
-    engine: &mut impl ContextEngine,
-    summarize: &SummarizeFn,
-    workspace: &Workspace,
-    task_review_provider: &impl Provider,
-    tools: &Tools,
-    max_iterations: usize,
-    memory_index_cap: usize,
-    usage_ledger: Option<&UsageLedger>,
-    review_gates: bool,
-) -> Result<String, String> {
-    let session = engine.active_session().to_string();
-    match heartbeat::prepare(workspace) {
-        Ok(heartbeat::Prepared::Ready(prompt)) => {
-            let (output, usage) = agent::process_message_metered(
-                engine,
-                summarize,
-                workspace,
-                &prompt,
-                task_review_provider,
-                tools,
-                max_iterations,
-                memory_index_cap,
-                review_gates,
-                &crate::tools::ToolCtx::default(),
-            )
-            .await
-            .map_err(|e| format!("Task review failed: {e}"))?;
-            usage::record_turn(
-                usage_ledger,
-                &TurnRecord {
-                    session: &session,
-                    source: "task-review",
-                    model: task_review_provider.model(),
-                    usage,
-                },
-            );
-            let response = output.into_text();
-            if let Err(e) = heartbeat::finish(workspace, &response) {
-                error!("Failed to write task-review history: {e}");
-            }
-            Ok(response)
-        }
-        Ok(heartbeat::Prepared::Skipped(reason)) => Ok(format!("Skipped: {reason}")),
-        Err(e) => Err(format!("Task review failed: {e}")),
-    }
-}
-
-/// Run every duty whose gate is open, ignoring schedules — the
-/// operator's "run it now" (`/duties`). Duty failures degrade to
-/// lines in the combined reply; the command itself succeeds.
-#[allow(clippy::too_many_arguments)]
-async fn all_duties(
-    engine: &mut impl ContextEngine,
-    summarize: &SummarizeFn,
-    workspace: &Workspace,
-    task_review_provider: &impl Provider,
-    memory_provider: &impl Provider,
-    tools: &Tools,
-    distiller: &Distiller,
-    max_iterations: usize,
-    memory_index_cap: usize,
-    usage_ledger: Option<&UsageLedger>,
-    review_gates: bool,
-) -> Result<Reply, String> {
-    let review = task_review(
-        engine,
-        summarize,
-        workspace,
-        task_review_provider,
-        tools,
-        max_iterations,
-        memory_index_cap,
-        usage_ledger,
-        review_gates,
-    )
-    .await
-    .unwrap_or_else(|e| e);
-
-    let session = engine.active_session().to_string();
-    let distill_note = match distill_pass(
-        &*engine,
-        summarize,
-        workspace,
-        memory_provider,
-        distiller,
-        usage_ledger,
-        &session,
-        distill::Gate::Enforce,
-    )
-    .await
-    {
-        Ok(Some(summary)) => format!("\n\nDistilled: {summary}"),
-        Ok(None) => String::new(),
-        Err(e) => {
-            error!("Distillation failed: {e}");
-            String::new()
-        }
-    };
-    Ok(Reply::text(format!("{review}{distill_note}")))
-}
-
 /// Run one distillation pass plus its bookkeeping: bill the turn to
 /// `session` in the ledger and append the result to HISTORY.md.
 /// Returns the pass summary, or `None` when no pass ran.
@@ -436,7 +296,9 @@ async fn distill_pass(
                 usage,
             },
         );
-        if let Err(e) = heartbeat::finish(workspace, &format!("Distilled: {summary}")) {
+        if let Err(e) =
+            crate::duty::log_history(&workspace.history_path(), &format!("Distilled: {summary}"))
+        {
             error!("Failed to write distillation history: {e}");
         }
         summary

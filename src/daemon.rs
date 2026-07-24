@@ -146,12 +146,12 @@ mod tests {
         TestAgent::new(ws.clone(), provider).spawn()
     }
 
-    /// One hourly task-review duty. With no persisted state it is due
+    /// One hourly distill duty. With no persisted state it is due
     /// immediately (anacron catch-up).
-    fn heartbeat_duty() -> Vec<Duty> {
+    fn distill_duty() -> Vec<Duty> {
         vec![Duty {
-            name: "task-review",
-            command: "/duty task-review",
+            name: "distill",
+            command: "/duty distill",
             schedule: Schedule::Every(3600),
         }]
     }
@@ -167,13 +167,13 @@ mod tests {
     async fn fires_immediately_then_shuts_down() {
         let (_dir, ws) = workspace();
         let (_sock_dir, sock_path) = sock_path();
-        // No HEARTBEAT.md → skipped, but proves the duty fired.
+        // Closed distill gate → gate-closed reply, but the duty fired.
         let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
 
         run_with_shutdown(
             &ws,
             &handle,
-            heartbeat_duty(),
+            distill_duty(),
             None,
             None,
             None,
@@ -197,7 +197,7 @@ mod tests {
         run_with_shutdown(
             &ws,
             &handle,
-            heartbeat_duty(),
+            distill_duty(),
             None,
             None,
             None,
@@ -211,29 +211,26 @@ mod tests {
         // The run must be recorded: a restarted scheduler reads this
         // and does not re-fire — the restart-cadence contract.
         let state = crate::duty::state::DutyState::load(&ws.state_dir().join("duties.json"));
-        assert!(state.last_run("task-review").is_some());
+        assert!(state.last_run("distill").is_some());
     }
 
     #[tokio::test]
     async fn error_does_not_crash_loop() {
-        use crate::error::ProviderError;
-
         let (_dir, ws) = workspace();
         let (_sock_dir, sock_path) = sock_path();
-        std::fs::write(ws.heartbeat_path(), "- [ ] task\n").unwrap();
 
-        // Provider returns an error — loop should survive.
-        let handle = spawn_agent(
-            &ws,
-            Arc::new(MockProvider::new(vec![Err(ProviderError::Network(
-                "test".into(),
-            ))])),
-        );
+        // An unknown duty makes the turn fail — the loop must survive,
+        // record the run, and move on.
+        let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
 
         run_with_shutdown(
             &ws,
             &handle,
-            heartbeat_duty(),
+            vec![Duty {
+                name: "nope",
+                command: "/duty nope",
+                schedule: Schedule::Every(3600),
+            }],
             None,
             None,
             None,

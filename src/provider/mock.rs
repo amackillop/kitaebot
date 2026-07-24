@@ -1,7 +1,7 @@
 //! Mock provider for tests.
 //!
 //! Returns pre-configured responses in order, tracking call count.
-//! Shared across `agent` and `heartbeat` test modules.
+//! Shared across the agent, command, and channel test modules.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

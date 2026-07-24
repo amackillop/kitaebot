@@ -80,7 +80,7 @@ fn policy_halt_msg(reasons: &[String]) -> String {
 /// Run a single root turn, returning its outcome and billed
 /// [`TurnUsage`] so the caller can record the cost to the usage ledger.
 ///
-/// Shared by all root channels (telegram, socket, heartbeat). Prepends
+/// Shared by all root channels (telegram, socket, duties). Prepends
 /// the memory index (spec 21) to the cached system prompt, read fresh so
 /// runtime writes take effect on the next turn, and the review-gates
 /// segment (spec 23) when the pipeline is enabled. Sub-agents call

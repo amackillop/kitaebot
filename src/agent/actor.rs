@@ -31,7 +31,6 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     rx: mpsc::Receiver<Envelope>,
     workspace: Arc<Workspace>,
     provider: Arc<P>,
-    task_review_provider: Arc<P>,
     memory_provider: Arc<P>,
     tools: Arc<Tools>,
     distiller: Arc<Distiller>,
@@ -52,7 +51,6 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         rx: mpsc::Receiver<Envelope>,
         workspace: Arc<Workspace>,
         provider: Arc<P>,
-        task_review_provider: Arc<P>,
         memory_provider: Arc<P>,
         tools: Arc<Tools>,
         distiller: Arc<Distiller>,
@@ -68,7 +66,6 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             rx,
             workspace,
             provider,
-            task_review_provider,
             memory_provider,
             tools,
             distiller,
@@ -126,12 +123,8 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                     &mut self.engine,
                     &self.summarize,
                     &self.workspace,
-                    &*self.task_review_provider,
                     &*self.memory_provider,
-                    &self.tools,
                     &self.distiller,
-                    self.max_iterations,
-                    self.memory_index_cap,
                     self.usage_ledger.as_deref(),
                     self.review_ledger.as_deref(),
                 )
@@ -273,26 +266,7 @@ mod tests {
         notifier: Option<Arc<Notifier>>,
         max_iterations: usize,
     ) -> AgentHandle {
-        spawn_agent_full(
-            ws,
-            provider.clone(),
-            provider,
-            tools,
-            notifier,
-            max_iterations,
-        )
-    }
-
-    fn spawn_agent_full(
-        ws: Arc<Workspace>,
-        provider: Arc<MockProvider>,
-        task_review_provider: Arc<MockProvider>,
-        tools: Tools,
-        notifier: Option<Arc<Notifier>>,
-        max_iterations: usize,
-    ) -> AgentHandle {
         let mut builder = TestAgent::new(ws, provider)
-            .task_review_provider(task_review_provider)
             .tools(tools)
             .max_iterations(max_iterations);
         if let Some(notifier) = notifier {
@@ -701,38 +675,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_review_duty_uses_task_review_provider() {
+    async fn distill_duty_reports_closed_gate() {
         let (_dir, ws) = workspace();
-        // An active task so heartbeat::prepare returns Ready.
-        std::fs::write(ws.heartbeat_path(), "- [ ] Check builds\n").unwrap();
-
-        // The root provider has no responses: any turn hitting it fails.
+        // The root provider has no responses: a duty turn must not
+        // hit it — the gate is closed and no distillation runs.
         let root = Arc::new(MockProvider::new(vec![]));
-        let task_review = Arc::new(MockProvider::new(vec![Ok(Response::Text(
-            "from task-review provider".into(),
-        ))]));
 
-        let handle = spawn_agent_full(
-            ws,
-            root.clone(),
-            task_review.clone(),
-            Tools::default(),
-            None,
-            1,
-        );
+        let handle = spawn_agent_with(ws, root.clone(), Tools::default(), None, 1);
         let result = handle
             .send_message(
                 ChannelSource::Duty,
-                "/duty task-review".into(),
+                "/duty distill".into(),
                 None,
                 None,
                 CancellationToken::new(),
             )
             .await;
 
-        assert_eq!(result.unwrap().content, "from task-review provider");
+        assert_eq!(result.unwrap().content, "Distillation gate closed.");
         assert_eq!(root.call_count(), 0);
-        assert_eq!(task_review.call_count(), 1);
     }
 
     #[tokio::test]

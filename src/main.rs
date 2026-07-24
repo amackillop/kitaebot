@@ -9,7 +9,6 @@ mod dispatch;
 mod duty;
 mod engine;
 mod error;
-mod heartbeat;
 mod memory;
 mod notify;
 mod provider;
@@ -166,18 +165,11 @@ fn build_duties(config: &Config) -> Vec<duty::Duty> {
     // Validated by Config::validate; parse cannot fail here.
     let parse =
         |s: &crate::config::ScheduleConfig| s.parse().expect("validated schedule failed to parse");
-    vec![
-        duty::Duty {
-            name: "task-review",
-            command: "/duty task-review",
-            schedule: parse(&config.duties.task_review),
-        },
-        duty::Duty {
-            name: "distill",
-            command: "/duty distill",
-            schedule: parse(&config.duties.distill),
-        },
-    ]
+    vec![duty::Duty {
+        name: "distill",
+        command: "/duty distill",
+        schedule: parse(&config.duties.distill),
+    }]
 }
 
 /// Provider variant for a role: the override model when configured,
@@ -275,12 +267,10 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
             Arc::new(review::ReviewDispositionTool::new(ledger.clone()));
         tools.extend_with(vec![review_log, review_disposition], &config.tools.disabled);
     }
-    let task_review_provider = role_provider(&provider, overrides.task_review.as_deref());
     let memory_provider = role_provider(&provider, overrides.memory.as_deref());
     agent::AgentHandle::spawn(
         workspace,
         provider,
-        task_review_provider,
         memory_provider,
         Arc::new(tools),
         distiller,

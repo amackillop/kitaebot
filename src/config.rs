@@ -157,8 +157,6 @@ pub struct ModelOverrides {
     pub reviewer: Option<String>,
     /// Model for context-compaction summaries.
     pub summarizer: Option<String>,
-    /// Model for task-review duty turns.
-    pub task_review: Option<String>,
     /// Model for memory distillation turns.
     pub memory: Option<String>,
 }
@@ -231,8 +229,6 @@ pub struct WebSearchConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DutiesConfig {
-    /// Schedule for the task-review duty (HEARTBEAT.md standing tasks).
-    pub task_review: ScheduleConfig,
     /// Schedule for the distillation duty (token gate still applies).
     pub distill: ScheduleConfig,
 }
@@ -269,7 +265,7 @@ pub struct MemoryConfig {
     /// Must be > 0.
     pub index_cap_bytes: usize,
     /// Undistilled tokens, summed across all sessions, that must
-    /// accumulate before the heartbeat folds them into memory. A
+    /// accumulate before the distill duty folds them into memory. A
     /// mechanical gate: no LLM runs until the total is reached. Sized
     /// below the distiller's window so a triggered pass fits in one
     /// turn. Must be > 0.
@@ -543,10 +539,6 @@ impl Default for GithubConfig {
 impl Default for DutiesConfig {
     fn default() -> Self {
         Self {
-            task_review: ScheduleConfig {
-                every: None,
-                daily: Some("09:00".into()),
-            },
             distill: ScheduleConfig {
                 every: Some("1h".into()),
                 daily: None,
@@ -672,9 +664,6 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "context max_tokens must be > provider max_tokens (output reserve)".into(),
             ));
-        }
-        if let Err(e) = self.duties.task_review.parse() {
-            return Err(ConfigError::Invalid(format!("duties.task_review: {e}")));
         }
         if let Err(e) = self.duties.distill.parse() {
             return Err(ConfigError::Invalid(format!("duties.distill: {e}")));
@@ -896,7 +885,7 @@ BKB_API_KEY = \"bkb-api-key\"
         assert!(cfg.provider.model_overrides.worker.is_none());
         assert!(cfg.provider.model_overrides.reviewer.is_none());
         assert!(cfg.provider.model_overrides.summarizer.is_none());
-        assert!(cfg.provider.model_overrides.task_review.is_none());
+        assert!(cfg.provider.model_overrides.memory.is_none());
         assert!(cfg.provider.model_overrides.memory.is_none());
     }
 
@@ -909,7 +898,6 @@ explore = \"cheap/explore\"
 worker = \"mid/worker\"
 reviewer = \"strong/reviewer\"
 summarizer = \"cheap/summarizer\"
-task_review = \"cheap/task-review\"
 memory = \"cheap/memory\"
 ",
         )
@@ -919,7 +907,6 @@ memory = \"cheap/memory\"
         assert_eq!(overrides.worker.as_deref(), Some("mid/worker"));
         assert_eq!(overrides.reviewer.as_deref(), Some("strong/reviewer"));
         assert_eq!(overrides.summarizer.as_deref(), Some("cheap/summarizer"));
-        assert_eq!(overrides.task_review.as_deref(), Some("cheap/task-review"));
         assert_eq!(overrides.memory.as_deref(), Some("cheap/memory"));
     }
 
@@ -957,10 +944,6 @@ memory = \"cheap/memory\"
     fn duties_defaults() {
         use crate::duty::schedule::Schedule;
         let cfg = load_toml("").unwrap();
-        assert_eq!(
-            cfg.duties.task_review.parse().unwrap(),
-            Schedule::Daily(9 * 3600)
-        );
         assert_eq!(cfg.duties.distill.parse().unwrap(), Schedule::Every(3600));
     }
 
@@ -969,25 +952,25 @@ memory = \"cheap/memory\"
         use crate::duty::schedule::Schedule;
         let cfg = load_toml("[duties.distill]\nevery = \"2h\"\n").unwrap();
         assert_eq!(cfg.duties.distill.parse().unwrap(), Schedule::Every(7200));
-        let cfg = load_toml("[duties.task_review]\ndaily = \"06:00\"\n").unwrap();
+        let cfg = load_toml("[duties.distill]\ndaily = \"06:00\"\n").unwrap();
         assert_eq!(
-            cfg.duties.task_review.parse().unwrap(),
+            cfg.duties.distill.parse().unwrap(),
             Schedule::Daily(6 * 3600)
         );
     }
 
     #[test]
     fn duties_reject_unknown_field() {
-        let result = load_toml("[duties.task_review]\ntypo = 1\n");
+        let result = load_toml("[duties.distill]\ntypo = 1\n");
         assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 
     #[test]
     fn duties_reject_both_and_garbage_schedules() {
         for toml in [
-            "[duties.task_review]\nevery = \"1h\"\ndaily = \"06:00\"\n",
+            "[duties.distill]\nevery = \"1h\"\ndaily = \"06:00\"\n",
             "[duties.distill]\nevery = \"soon\"\n",
-            "[duties.task_review]\ndaily = \"25:00\"\n",
+            "[duties.distill]\ndaily = \"25:00\"\n",
         ] {
             let result = load_toml(toml);
             assert!(matches!(result, Err(ConfigError::Invalid(_))), "{toml}");

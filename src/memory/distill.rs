@@ -3,7 +3,7 @@
 //! Distillation folds recent session history into `memory/`. This
 //! module owns the persisted per-session watermarks, the mechanical
 //! token gate that decides when a pass is worth an LLM turn, and the
-//! distiller worker that runs the pass. The heartbeat duty in
+//! distiller worker that runs the pass. The distill duty in
 //! `commands::execute` drives it.
 
 use std::collections::BTreeMap;
@@ -87,7 +87,7 @@ pub fn gate_open(total: u64, threshold: u64) -> bool {
     total >= threshold
 }
 
-/// Whether a pass respects the token gate. Heartbeats enforce it;
+/// Whether a pass respects the token gate. The distill duty enforces it;
 /// `/distill` bypasses it to force a pass on demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {

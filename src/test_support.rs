@@ -31,19 +31,18 @@ pub(crate) fn workspace() -> (TempDir, Arc<Workspace>) {
 pub(crate) struct TestAgent {
     ws: Arc<Workspace>,
     provider: Arc<MockProvider>,
-    task_review_provider: Arc<MockProvider>,
+    memory_provider: Arc<MockProvider>,
     tools: Tools,
     notifier: Option<Arc<Notifier>>,
     max_iterations: usize,
 }
 
 impl TestAgent {
-    /// Defaults: the root provider doubles as the task-review and
-    /// memory role, no extra tools, no notifier, a single tool-loop
-    /// iteration.
+    /// Defaults: the root provider doubles as the memory role, no
+    /// extra tools, no notifier, a single tool-loop iteration.
     pub(crate) fn new(ws: Arc<Workspace>, provider: Arc<MockProvider>) -> Self {
         Self {
-            task_review_provider: provider.clone(),
+            memory_provider: provider.clone(),
             ws,
             provider,
             tools: Tools::default(),
@@ -54,11 +53,6 @@ impl TestAgent {
 
     pub(crate) fn tools(mut self, tools: Tools) -> Self {
         self.tools = tools;
-        self
-    }
-
-    pub(crate) fn task_review_provider(mut self, provider: Arc<MockProvider>) -> Self {
-        self.task_review_provider = provider;
         self
     }
 
@@ -80,14 +74,13 @@ impl TestAgent {
         )
         .unwrap();
         let summarize = make_summarize_fn(self.provider.clone());
-        // Threshold far above any test transcript, so a /heartbeat turn
+        // Threshold far above any test transcript, so a duty turn
         // never trips the distillation gate.
         let distiller = Arc::new(Distiller::new(&Tools::default(), self.ws.path(), 40_000, 1));
         AgentHandle::spawn(
             self.ws,
-            self.provider.clone(),
-            self.task_review_provider,
             self.provider,
+            self.memory_provider,
             Arc::new(self.tools),
             distiller,
             self.max_iterations,

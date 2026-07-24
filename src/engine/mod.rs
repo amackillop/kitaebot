@@ -171,7 +171,7 @@ pub trait ContextEngine: Send + Sync {
     /// at or beyond that session's watermark in `since` (a session
     /// missing from the map counts from its first event). Sessions
     /// with no pending events are omitted. Reads counts only, never
-    /// content, so the heartbeat can probe cheaply before spending an
+    /// content, so the distill duty can probe cheaply before spending an
     /// LLM turn. Ephemeral history is not durable and yields an empty
     /// map.
     fn pending_distill_tokens(

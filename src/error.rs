@@ -14,10 +14,6 @@ pub enum Error {
     #[error("Engine error: {0}")]
     Engine(#[from] EngineError),
 
-    /// Heartbeat execution error.
-    #[error("Heartbeat error: {0}")]
-    Heartbeat(#[from] HeartbeatError),
-
     /// Turn cancelled by client disconnect.
     #[error("Turn cancelled")]
     Cancelled,
@@ -146,18 +142,6 @@ pub enum WorkspaceError {
     /// Failed to create or access workspace directory.
     #[error("Failed to initialize workspace at {0}: {1}")]
     Init(PathBuf, #[source] std::io::Error),
-}
-
-/// Heartbeat execution errors.
-#[derive(Debug, Error)]
-pub enum HeartbeatError {
-    /// Failed to read HEARTBEAT.md.
-    #[error("Failed to read tasks: {0}")]
-    ReadTasks(#[source] std::io::Error),
-
-    /// Failed to append to HISTORY.md.
-    #[error("Failed to write history: {0}")]
-    WriteHistory(#[source] std::io::Error),
 }
 
 /// Configuration errors.

@@ -12,7 +12,7 @@
 #   kitaebot.logLevel   - RUST_LOG filter string (default: "kitaebot=info")
 #   kitaebot.tools      - Packages available to the exec tool via PATH
 #   kitaebot.gitConfig  - Attrset { name, email, signingKey? } for git identity via programs.git
-#   kitaebot.promptsDir - Directory of operator .md files (USER.md, HEARTBEAT.md) symlinked into the workspace
+#   kitaebot.promptsDir - Directory of operator .md files (USER.md) symlinked into the workspace
 #   kitaebot.vm              - VM resource options: { memorySize, cores, diskSize } (all in MB except cores)
 #   kitaebot.egressAllowlist - Domains the kitaebot uid may connect to (all others blocked)
 #
@@ -92,7 +92,7 @@ in
     promptsDir = lib.mkOption {
       type = lib.types.path;
       default = ./prompts;
-      description = "Directory containing operator files (USER.md, HEARTBEAT.md); the persona is compiled into the binary";
+      description = "Directory containing operator files (USER.md); the persona is compiled into the binary";
     };
 
     secretsDir = lib.mkOption {
@@ -266,7 +266,6 @@ in
         "d /var/lib/kitaebot/state 0750 kitaebot kitaebot -"
         "L+ /var/lib/kitaebot/config.toml - - - - ${configFile}"
         "L+ /var/lib/kitaebot/USER.md - - - - ${cfg.promptsDir}/USER.md"
-        "L+ /var/lib/kitaebot/HEARTBEAT.md - - - - ${cfg.promptsDir}/HEARTBEAT.md"
         "d /var/lib/kitaebot/.config/direnv 0750 kitaebot kitaebot -"
         "L+ /var/lib/kitaebot/.config/direnv/direnv.toml - - - - ${direnvConfig}"
       ];

@@ -89,12 +89,7 @@ impl Workspace {
         self.root.join("memory")
     }
 
-    /// Path to the heartbeat task file.
-    pub fn heartbeat_path(&self) -> PathBuf {
-        self.root.join("HEARTBEAT.md")
-    }
-
-    /// Path to the heartbeat history log.
+    /// Path to the duty history log.
     pub fn history_path(&self) -> PathBuf {
         self.root.join("HISTORY.md")
     }

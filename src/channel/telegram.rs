@@ -3,7 +3,7 @@
 //! Long-polls `getUpdates` for incoming messages, sends them to the
 //! agent actor via [`AgentHandle`], and sends responses back via
 //! `sendMessage`. Designed to run as an async loop alongside the
-//! heartbeat in the daemon's `tokio::select!`.
+//! duty scheduler in the daemon's `tokio::select!`.
 
 use std::time::Duration;
 
