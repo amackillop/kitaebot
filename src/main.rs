@@ -160,16 +160,25 @@ async fn main() {
     }
 }
 
-/// Built-in duties, scheduled from config (spec 24 phase 1).
+/// Built-in and operator-defined duties, scheduled from config
+/// (spec 24 phase 1).
 fn build_duties(config: &Config) -> Vec<duty::Duty> {
     // Validated by Config::validate; parse cannot fail here.
     let parse =
         |s: &crate::config::ScheduleConfig| s.parse().expect("validated schedule failed to parse");
-    vec![duty::Duty {
-        name: "distill",
-        command: "/duty distill",
+    let mut duties = vec![duty::Duty {
+        name: "distill".into(),
+        input: "/duty distill".into(),
+        session_hint: None,
         schedule: parse(&config.duties.distill),
-    }]
+    }];
+    duties.extend(config.duties.prompt.iter().map(|p| duty::Duty {
+        name: p.name.clone(),
+        input: p.prompt.clone(),
+        session_hint: Some(p.repo.clone()),
+        schedule: parse(&p.schedule),
+    }));
+    duties
 }
 
 /// Provider variant for a role: the override model when configured,

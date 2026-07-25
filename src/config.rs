@@ -231,6 +231,25 @@ pub struct WebSearchConfig {
 pub struct DutiesConfig {
     /// Schedule for the distillation duty (token gate still applies).
     pub distill: ScheduleConfig,
+    /// Operator-defined prompt duties: recurring watch-tasks authored
+    /// in config (spec 24). `[[duties.prompt]]` tables.
+    pub prompt: Vec<PromptDutyConfig>,
+}
+
+/// One operator-defined prompt duty.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptDutyConfig {
+    /// Duty name: a single token, unique across all duties.
+    pub name: String,
+    /// Schedule (`every` or `daily`), flattened alongside.
+    #[serde(flatten)]
+    pub schedule: ScheduleConfig,
+    /// Repository the duty works on (`owner/repo`). Must be in
+    /// `git.trusted_repos`; the turn runs on its work session.
+    pub repo: String,
+    /// The turn's prompt text.
+    pub prompt: String,
 }
 
 /// One duty's schedule: exactly one of `every` (interval, e.g.
@@ -543,6 +562,7 @@ impl Default for DutiesConfig {
                 every: Some("1h".into()),
                 daily: None,
             },
+            prompt: Vec::new(),
         }
     }
 }
@@ -668,6 +688,7 @@ impl Config {
         if let Err(e) = self.duties.distill.parse() {
             return Err(ConfigError::Invalid(format!("duties.distill: {e}")));
         }
+        self.validate_prompt_duties()?;
         if self.memory.index_cap_bytes == 0 {
             return Err(ConfigError::Invalid(
                 "memory index_cap_bytes must be > 0".into(),
@@ -742,6 +763,36 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "web_search timeout_secs must be > 0".into(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Validate `[[duties.prompt]]` entries: parseable schedule, a
+    /// single-token unique name that shadows no built-in, a non-empty
+    /// prompt, and a repo covered by `git.trusted_repos`.
+    fn validate_prompt_duties(&self) -> Result<(), ConfigError> {
+        let mut seen = std::collections::HashSet::new();
+        for p in &self.duties.prompt {
+            let ctx = |e: String| ConfigError::Invalid(format!("duties.prompt {:?}: {e}", p.name));
+            if p.name.is_empty() || p.name.contains(char::is_whitespace) {
+                return Err(ctx("name must be a single non-empty token".into()));
+            }
+            if p.name == "distill" {
+                return Err(ctx("name shadows a built-in duty".into()));
+            }
+            if !seen.insert(&p.name) {
+                return Err(ctx("duplicate duty name".into()));
+            }
+            if p.prompt.trim().is_empty() {
+                return Err(ctx("prompt must be non-empty".into()));
+            }
+            p.schedule.parse().map_err(ctx)?;
+            if !crate::tools::git::url::is_trusted_repo(&p.repo, &self.git.trusted_repos) {
+                return Err(ctx(format!(
+                    "repo {:?} is not in git.trusted_repos",
+                    p.repo
+                )));
+            }
         }
         Ok(())
     }
@@ -975,6 +1026,68 @@ memory = \"cheap/memory\"
             let result = load_toml(toml);
             assert!(matches!(result, Err(ConfigError::Invalid(_))), "{toml}");
         }
+    }
+
+    /// A well-formed prompt duty on a trusted repo.
+    const PROMPT_DUTY: &str = "\
+[git]
+enabled = true
+trusted_repos = [\"owner/repo\"]
+
+[[duties.prompt]]
+name = \"security-watch\"
+daily = \"06:00\"
+repo = \"owner/repo\"
+prompt = \"Review recent commits for security issues.\"
+";
+
+    #[test]
+    fn prompt_duty_parses() {
+        let cfg = load_toml(PROMPT_DUTY).unwrap();
+        let p = &cfg.duties.prompt[0];
+        assert_eq!(p.name, "security-watch");
+        assert_eq!(p.repo, "owner/repo");
+        assert!(p.schedule.parse().is_ok());
+    }
+
+    #[test]
+    fn prompt_duty_rejects_untrusted_repo() {
+        let toml = PROMPT_DUTY.replace("repo = \"owner/repo\"", "repo = \"evil/repo\"");
+        let result = load_toml(&toml);
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn prompt_duty_rejects_bad_names() {
+        for (from, to) in [
+            ("name = \"security-watch\"", "name = \"two tokens\""),
+            ("name = \"security-watch\"", "name = \"\""),
+            ("name = \"security-watch\"", "name = \"distill\""),
+        ] {
+            let toml = PROMPT_DUTY.replace(from, to);
+            let result = load_toml(&toml);
+            assert!(matches!(result, Err(ConfigError::Invalid(_))), "{to}");
+        }
+    }
+
+    #[test]
+    fn prompt_duty_rejects_duplicate_names() {
+        let toml = format!(
+            "{PROMPT_DUTY}\n[[duties.prompt]]\nname = \"security-watch\"\n\
+             every = \"1h\"\nrepo = \"owner/repo\"\nprompt = \"again\"\n"
+        );
+        let result = load_toml(&toml);
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn prompt_duty_rejects_empty_prompt() {
+        let toml = PROMPT_DUTY.replace(
+            "prompt = \"Review recent commits for security issues.\"",
+            "prompt = \"  \"",
+        );
+        let result = load_toml(&toml);
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 
     #[test]

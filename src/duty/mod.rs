@@ -20,10 +20,15 @@ use crate::agent::envelope::ChannelSource;
 use schedule::Schedule;
 use state::DutyState;
 
-/// A scheduled duty: dispatches `command` through the actor when due.
+/// A scheduled duty: dispatches `input` through the actor when due.
+///
+/// `input` is a slash command for built-ins (`/duty distill`) or the
+/// operator's prompt text for prompt duties; `session_hint` routes a
+/// prompt duty onto its repo's work session.
 pub struct Duty {
-    pub name: &'static str,
-    pub command: &'static str,
+    pub name: String,
+    pub input: String,
+    pub session_hint: Option<String>,
     pub schedule: Schedule,
 }
 
@@ -47,7 +52,7 @@ const MAX_SLEEP_SECS: u64 = 600;
 fn due<'a>(duties: &'a [Duty], state: &DutyState, now: u64) -> Vec<&'a Duty> {
     duties
         .iter()
-        .filter(|d| d.schedule.next_due(state.last_run(d.name), now) <= now)
+        .filter(|d| d.schedule.next_due(state.last_run(&d.name), now) <= now)
         .collect()
 }
 
@@ -58,7 +63,7 @@ fn next_wake(duties: &[Duty], state: &DutyState, now: u64) -> u64 {
         .iter()
         .map(|d| {
             d.schedule
-                .next_due(state.last_run(d.name), now)
+                .next_due(state.last_run(&d.name), now)
                 .saturating_sub(now)
         })
         .min()
@@ -79,19 +84,19 @@ pub async fn run_loop(duties: Vec<Duty>, state_path: PathBuf, handle: &AgentHand
             match handle
                 .send_message(
                     ChannelSource::Duty,
-                    duty.command.to_string(),
-                    None,
+                    duty.input.clone(),
+                    duty.session_hint.clone(),
                     None,
                     cancel,
                 )
                 .await
             {
-                Ok(reply) => info!(duty = duty.name, "Duty run: {}", reply.content),
-                Err(e) => error!(duty = duty.name, "Duty error (will retry next period): {e}"),
+                Ok(reply) => info!(duty = %duty.name, "Duty run: {}", reply.content),
+                Err(e) => error!(duty = %duty.name, "Duty error (will retry next period): {e}"),
             }
             // last_run advances even on error: retry next period, not
             // in a tight loop (spec 24 failure modes).
-            state.record_run(duty.name, crate::time::now_epoch());
+            state.record_run(&duty.name, crate::time::now_epoch());
             state.save(&state_path);
         }
         let now = crate::time::now_epoch();
@@ -103,18 +108,19 @@ pub async fn run_loop(duties: Vec<Duty>, state_path: PathBuf, handle: &AgentHand
 mod tests {
     use super::*;
 
+    fn duty(name: &str, schedule: Schedule) -> Duty {
+        Duty {
+            name: name.to_string(),
+            input: format!("/{name}"),
+            session_hint: None,
+            schedule,
+        }
+    }
+
     fn duties() -> Vec<Duty> {
         vec![
-            Duty {
-                name: "first",
-                command: "/first",
-                schedule: Schedule::Every(3_600),
-            },
-            Duty {
-                name: "second",
-                command: "/second",
-                schedule: Schedule::Daily(6 * 3_600),
-            },
+            duty("first", Schedule::Every(3_600)),
+            duty("second", Schedule::Daily(6 * 3_600)),
         ]
     }
 
@@ -122,9 +128,10 @@ mod tests {
     fn due_preserves_declaration_order() {
         let state = DutyState::default();
         // No recorded runs: everything is due, in declaration order.
-        let names: Vec<&str> = due(&duties(), &state, 1_000)
+        let duties = duties();
+        let names: Vec<&str> = due(&duties, &state, 1_000)
             .iter()
-            .map(|d| d.name)
+            .map(|d| d.name.as_str())
             .collect();
         assert_eq!(names, ["first", "second"]);
     }
@@ -145,11 +152,7 @@ mod tests {
         state.record_run("first", now); // due in 3600
         state.record_run("second", now); // due later
         assert_eq!(next_wake(&duties(), &state, now), 600); // capped
-        let short = vec![Duty {
-            name: "soon",
-            command: "/soon",
-            schedule: Schedule::Every(30),
-        }];
+        let short = vec![duty("soon", Schedule::Every(30))];
         state.record_run("soon", now);
         assert_eq!(next_wake(&short, &state, now), 30);
     }

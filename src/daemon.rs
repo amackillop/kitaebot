@@ -150,8 +150,9 @@ mod tests {
     /// immediately (anacron catch-up).
     fn distill_duty() -> Vec<Duty> {
         vec![Duty {
-            name: "distill",
-            command: "/duty distill",
+            name: "distill".into(),
+            input: "/duty distill".into(),
+            session_hint: None,
             schedule: Schedule::Every(3600),
         }]
     }
@@ -227,8 +228,9 @@ mod tests {
             &ws,
             &handle,
             vec![Duty {
-                name: "nope",
-                command: "/duty nope",
+                name: "nope".into(),
+                input: "/duty nope".into(),
+                session_hint: None,
                 schedule: Schedule::Every(3600),
             }],
             None,
