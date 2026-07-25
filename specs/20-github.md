@@ -121,60 +121,53 @@ prompting the model to fetch them. The diff is deliberately NOT
 packed: which files to read in full is a judgment call, and packing
 all diffs just moves the size problem into the User message.
 
-The instruction block:
+The review protocol itself is static choreography and lives in a
+session-scoped system-prompt segment ([spec 06](06-system-prompt.md)),
+appended to every turn on a `review:{nwo}` session; the dispatch
+message carries only the per-turn facts above. The protocol:
+
+**The root review turn orchestrates; the `reviewer` sub-agent
+([spec 23](23-self-review.md)) judges.** Two reasons, recorded here
+because both outlast the implementation. First, model strength: the
+reviewer role carries its own model override, and an external PR
+review — read by a human teammate — is the most outward-facing
+judgment the bot produces; it should not run on a weaker model than
+the bot's internal self-checks. Second, containment: PR-head content
+is untrusted input, and the reviewer sub-agent is read-only by
+construction — no exec, no git, no GitHub tools — so the judgment
+pass over untrusted code happens in the most tool-restricted context
+available, rather than in a root turn holding outward-facing tools.
 
 - The PR head is already checked out at `reviews/<owner>/<repo>`,
-  detached at the recorded SHA with the base branch fetched (see Review
-  checkout). Treat it as read-only: git only to read (diff, log, show);
-  no branch switching, edits, or stashing, and never `gh pr checkout`
-  (`github_gh` blocks it anyway, [spec 03](03-tools.md)). The working
-  checkout under `projects/` is not involved.
-- Read the diff per file: the changed-file list and commit messages
-  are already in the message, so go straight to
-  `git diff origin/<base>...HEAD -- <path>` in the review checkout for
-  each file worth reading. The full `gh pr diff` output typically
-  exceeds the tool-output threshold ([spec 14](14-context-engine.md))
-  and comes back as an excerpt the root cannot expand; per-file diffs
-  stay readable. Commit messages carry the rationale for the change —
-  the why, the trade-offs, the alternatives rejected. They inform the
-  review, and the review checks that the code actually does what they
-  say.
-- The prompt states the externalization contract: oversized tool
-  output becomes a `<file>` reference with a head/tail excerpt, the
-  full text remains searchable via `lcm_grep`, and re-running the
-  command with different flags to shrink it is a waste of a turn.
-- Context beyond the diff (usage of changed code, existing behavior,
-  test coverage) goes through the `task` tool (explore, [spec
-  19](19-sub-agents.md)) against files in the review checkout, with
-  specific questions and file:line evidence required in the answer. Direct file
-  reads are reserved for judging a hunk whose surrounding code the diff
-  does not show. This keeps cross-file tracing out of the root context;
-  findings still land there via the sub-agent's summary.
-- Review for correctness, security, and design. Be specific: file and
-  line references, not vibes.
-- Comments are for what is suspect or needs to change. No praise
-  comments — inline threads exist to be resolved, and "nice" resolves
-  nothing. A truly remarkable observation gets one line in the review
-  body.
-- Findings with a concrete better version carry a GitHub suggestion
-  block with the replacement lines: the author commits it with one
-  click, so consent and authorship stay with them and the bot's no-push
-  invariant holds. This covers mechanical fixes (typo, off-by-one,
-  wrong constant) and cleaner shapes for the commented lines alike;
-  findings that need discussion rather than replacement lines get
-  prose.
-- Submit one formal review with the `github_pr_review_submit` tool
-  ([spec 03](03-tools.md)): `body` (summary and verdict), `event`
-  (`APPROVE` or `COMMENT`), and `comments` (path/line/body array).
-  Inline findings each become a resolvable thread, which is what the
-  follow-up path engages with. `repo_dir` is the review checkout. On failure
-  (usually bad
-  line anchoring), the affected finding moves into `body` with a
-  file:line reference and the review is resubmitted. A formal review
-  (not a plain comment) is required — submitting it is what clears the
-  pending request and stops re-triggering. `REQUEST_CHANGES` is
-  unrepresentable in the tool: blocking judgments stay with humans; a
-  critical finding is a `COMMENT` review that says so.
+  detached at the recorded SHA with the base branch fetched (see
+  Review checkout). Read-only: git only to read; never
+  `gh pr checkout`. The working checkout under `projects/` is not
+  involved.
+- The root produces the diff (`git diff origin/<base>...HEAD`, per
+  file) and packs it into the reviewer dispatch together with the
+  PR's stated intent (title, body, commit messages), the checkout
+  root, and review metadata `{repo, gate: "pr", git_ref: <head SHA>}`
+  so the verdict lands in the findings ledger. The reviewer cannot
+  produce diffs itself (no git), which is why the diff is packed here
+  while the root's own reading stays judgment-driven. Oversized diffs
+  degrade the same way as the series gate (spec 23): commit list plus
+  per-file stats, and the reviewer reads head-state files via
+  `file_read` in the checkout.
+- The reviewer returns prose findings and the findings block; the
+  root translates. Verdict `correct` → `APPROVE`; `incorrect` →
+  `COMMENT` with each finding as a resolvable inline thread. The root
+  owns anchoring (paths and lines from the findings), suggestion
+  blocks where a finding carries a concrete replacement (consent and
+  authorship stay with the author; the no-push invariant holds), and
+  submission via `github_pr_review_submit` — `body`, `event`
+  (`APPROVE` or `COMMENT` only; `REQUEST_CHANGES` is unrepresentable,
+  blocking judgments stay with humans), `comments`. On anchoring
+  failure the finding moves into `body` with a file:line reference
+  and the review is resubmitted. A formal review is required —
+  submitting it clears the pending request and stops re-triggering.
+- Comment discipline is the reviewer prompt's own (spec 23): suspect
+  or needs-change only, no praise threads, no manufactured findings.
+  The root does not add findings of its own — one judge per review.
 - Never push to the PR branch, never merge, never close.
 
 ### Re-reviews on push
@@ -184,24 +177,22 @@ re-request needed. A new head SHA triggers an incremental re-review,
 scoped to the delta in the context of the prior review. The dispatched
 message carries the previously reviewed SHA and instructs the model to:
 
-- Read the incremental diff, not the whole PR: the channel has already
-  prepared the review checkout (same as the initial review — new head
-  detached, read-only), so `git log` and `git diff` over `{prev}..HEAD`
-  in it, falling back to the full `gh pr diff` when that fails (e.g.
-  after a force push).
-- Recall its prior review: the review session carries it, and
-  `gh pr view --json reviews` recovers the submitted text if compaction
-  ate the details.
-- Judge the delta against that feedback: does it address the prior
-  review adequately and without introducing new bugs? A full re-review
-  of untouched code is explicitly not wanted.
-- Delegate any context-gathering beyond the diff to the `task` tool
-  (explore), same as the initial review.
-- Submit a formal review via `github_pr_review_submit`: `APPROVE` when
-  the feedback is addressed, `COMMENT` naming the remaining gaps
-  otherwise. Same comment discipline as the initial review: suspect or
-  needs-change only, no praise, suggestion blocks where a concrete
-  better version exists.
+- Produce the incremental diff, not the whole PR: the channel has
+  already prepared the review checkout (same as the initial review —
+  new head detached, read-only), so `git diff {prev}..HEAD` in it,
+  falling back to the full `gh pr diff` when that fails (e.g. after a
+  force push).
+- Recall the prior review: the review session carries it, and
+  `gh pr view --json reviews` recovers the submitted text if
+  compaction ate the details.
+- Dispatch the reviewer with the delta diff, the prior review's
+  substance, and the question the initial review does not ask: does
+  the delta address that feedback adequately and without introducing
+  new problems? A full re-review of untouched code is explicitly not
+  wanted. Same metadata shape, `git_ref` the new head SHA.
+- Translate and submit as in the initial review: `correct` →
+  `APPROVE` (the feedback is addressed), `incorrect` → `COMMENT`
+  naming the remaining gaps as inline threads.
 
 The `reviewed` entry updates to the new SHA on dispatch, so each push
 gets at most one incremental turn.

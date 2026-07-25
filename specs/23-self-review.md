@@ -233,7 +233,7 @@ SQLite at `state/review.db`, following the `state/usage.db` pattern
 |--------|---------|
 | `ts` | Timestamp |
 | `repo` | `owner/repo` |
-| `gate` | `plan` \| `commit` \| `series` \| `external` |
+| `gate` | `plan` \| `commit` \| `series` \| `external` \| `pr` (bot reviews of others' PRs, spec 20) |
 | `git_ref` | SHA for commit/series, branch for plan, PR number for external |
 | `source` | `self` \| `human` \| `bot` |
 | `category` | Free-text category |
