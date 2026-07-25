@@ -14,6 +14,9 @@ use tracing::{error, warn};
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct DutyState {
     last_run: HashMap<String, u64>,
+    /// Per-duty gate cursors (new-commits: last-reviewed head SHA).
+    #[serde(default)]
+    cursors: HashMap<String, String>,
 }
 
 impl DutyState {
@@ -59,6 +62,14 @@ impl DutyState {
     pub fn record_run(&mut self, duty: &str, epoch: u64) {
         self.last_run.insert(duty.to_string(), epoch);
     }
+
+    pub fn cursor(&self, duty: &str) -> Option<&str> {
+        self.cursors.get(duty).map(String::as_str)
+    }
+
+    pub fn set_cursor(&mut self, duty: &str, value: &str) {
+        self.cursors.insert(duty.to_string(), value.to_string());
+    }
 }
 
 #[cfg(test)]
@@ -70,19 +81,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("duties.json");
         let mut state = DutyState::default();
-        state.record_run("heartbeat", 12_345);
+        state.record_run("distill", 12_345);
+        state.set_cursor("watch", "abc123");
         state.save(&path);
 
         let loaded = DutyState::load(&path);
-        assert_eq!(loaded.last_run("heartbeat"), Some(12_345));
+        assert_eq!(loaded.last_run("distill"), Some(12_345));
         assert_eq!(loaded.last_run("unknown"), None);
+        assert_eq!(loaded.cursor("watch"), Some("abc123"));
+        assert_eq!(loaded.cursor("unknown"), None);
+    }
+
+    #[test]
+    fn cursorless_state_file_loads() {
+        // A duties.json written before cursors existed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("duties.json");
+        std::fs::write(&path, r#"{"last_run":{"distill":5}}"#).unwrap();
+        let state = DutyState::load(&path);
+        assert_eq!(state.last_run("distill"), Some(5));
+        assert_eq!(state.cursor("distill"), None);
     }
 
     #[test]
     fn missing_file_starts_fresh() {
         let dir = tempfile::tempdir().unwrap();
         let state = DutyState::load(&dir.path().join("duties.json"));
-        assert_eq!(state.last_run("heartbeat"), None);
+        assert_eq!(state.last_run("distill"), None);
     }
 
     #[test]
@@ -91,6 +116,6 @@ mod tests {
         let path = dir.path().join("duties.json");
         std::fs::write(&path, "not json").unwrap();
         let state = DutyState::load(&path);
-        assert_eq!(state.last_run("heartbeat"), None);
+        assert_eq!(state.last_run("distill"), None);
     }
 }

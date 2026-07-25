@@ -86,6 +86,25 @@ impl GitCli {
         }
     }
 
+    /// The SHA of the remote default-branch head, via `git ls-remote`.
+    /// Needs no checkout — the duty scheduler's new-commits gate probes
+    /// repos the bot may never have cloned.
+    pub async fn remote_head(&self, nwo: &str) -> Result<String, ToolError> {
+        let url = format!("https://github.com/{nwo}.git");
+        let call = self.prepare_git(&["ls-remote", &url, "HEAD"], &self.workspace_root);
+        let out = self.exec_git(call, true).await?;
+        if out.exit_code != 0 {
+            return Err(ToolError::ExecutionFailed(format!(
+                "ls-remote {nwo} exited {}: {}",
+                out.exit_code,
+                out.stderr.trim(),
+            )));
+        }
+        parse_ls_remote_head(&out.stdout).ok_or_else(|| {
+            ToolError::ExecutionFailed(format!("ls-remote {nwo}: no HEAD in output"))
+        })
+    }
+
     /// Execute a [`SubprocessCall`] with optional credential injection.
     ///
     /// When `authenticated` is true, a temporary `GIT_ASKPASS` script
@@ -123,6 +142,16 @@ impl GitCli {
         drop(askpass);
         output
     }
+}
+
+/// Extract the SHA from `git ls-remote <url> HEAD` output
+/// (`"<sha>\tHEAD"`).
+fn parse_ls_remote_head(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find(|l| l.trim_end().ends_with("HEAD"))
+        .and_then(|l| l.split_whitespace().next())
+        .map(str::to_string)
 }
 
 // ── GIT_ASKPASS helper ──────────────────────────────────────────────
@@ -169,7 +198,24 @@ impl AskPass {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_ls_remote_head;
     use crate::tools::git::test_helpers::stub_git_cli_with_repo;
+
+    #[test]
+    fn parse_ls_remote_head_extracts_sha() {
+        let out = "8725e54c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f\tHEAD\n";
+        assert_eq!(
+            parse_ls_remote_head(out).as_deref(),
+            Some("8725e54c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f")
+        );
+    }
+
+    #[test]
+    fn parse_ls_remote_head_ignores_other_refs() {
+        let out = "aaaa\trefs/heads/main\n";
+        assert_eq!(parse_ls_remote_head(out), None);
+        assert_eq!(parse_ls_remote_head(""), None);
+    }
 
     #[test]
     fn prepare_git_builds_correct_call() {

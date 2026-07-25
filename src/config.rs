@@ -248,6 +248,11 @@ pub struct PromptDutyConfig {
     /// Repository the duty works on (`owner/repo`). Must be in
     /// `git.trusted_repos`; the turn runs on its work session.
     pub repo: String,
+    /// Optional mechanical gate. `"new-commits"` keeps a last-reviewed
+    /// SHA cursor and dispatches only on new commits; unset runs
+    /// unconditionally on schedule. Requires `github.enabled`.
+    #[serde(default)]
+    pub gate: Option<String>,
     /// The turn's prompt text.
     pub prompt: String,
 }
@@ -793,6 +798,17 @@ impl Config {
                     p.repo
                 )));
             }
+            match p.gate.as_deref() {
+                None | Some("new-commits") => {}
+                Some(other) => {
+                    return Err(ctx(format!(
+                        "unknown gate {other:?}; expected \"new-commits\""
+                    )));
+                }
+            }
+            if p.gate.is_some() && !self.github.enabled {
+                return Err(ctx("gate \"new-commits\" requires github.enabled".into()));
+            }
         }
         Ok(())
     }
@@ -1075,6 +1091,30 @@ prompt = \"Review recent commits for security issues.\"
         let toml = format!(
             "{PROMPT_DUTY}\n[[duties.prompt]]\nname = \"security-watch\"\n\
              every = \"1h\"\nrepo = \"owner/repo\"\nprompt = \"again\"\n"
+        );
+        let result = load_toml(&toml);
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn prompt_duty_gate_requires_github() {
+        // Gate on a config without github.enabled.
+        let toml = format!("{PROMPT_DUTY}gate = \"new-commits\"\n");
+        let result = load_toml(&toml);
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+
+        // With github enabled it parses.
+        let toml = format!(
+            "[github]\nenabled = true\nowner = \"o\"\n\n{PROMPT_DUTY}gate = \"new-commits\"\n"
+        );
+        let cfg = load_toml(&toml).unwrap();
+        assert_eq!(cfg.duties.prompt[0].gate.as_deref(), Some("new-commits"));
+    }
+
+    #[test]
+    fn prompt_duty_rejects_unknown_gate() {
+        let toml = format!(
+            "[github]\nenabled = true\nowner = \"o\"\n\n{PROMPT_DUTY}gate = \"full-moon\"\n"
         );
         let result = load_toml(&toml);
         assert!(matches!(result, Err(ConfigError::Invalid(_))));

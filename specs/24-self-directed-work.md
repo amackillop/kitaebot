@@ -254,7 +254,14 @@ complete scope statement for discovery and prompt duties.
   detection generalizes, since the Linear channel owns it today.
 - **Gate vocabulary for prompt duties**: `new-commits` is the only
   gate v1 needs; new-issues, new-releases, or an RSS cursor follow
-  the same cursor shape when a real watch-task wants them.
+  the same cursor shape when a real watch-task wants them. A
+  min-commit-count threshold was considered and rejected (2026-07-25):
+  the schedule is the cost ceiling and the gate only subtracts, so a
+  fast repo degrades to the ungated per-period cost by design;
+  batching would delay review of exactly the commit that matters, and
+  counting needs a heavier probe than ls-remote. If churn noise ever
+  shows up in usage data, the answer is a path/author filter on the
+  delta, not a count.
 - **Commitment creation surface**: a dedicated tool the model calls,
   or prompted convention plus distillation catching missed promises?
   A tool is mechanical and auditable; lean tool, decide at phase 3

@@ -17,6 +17,7 @@ use tracing::{error, info};
 
 use crate::agent::AgentHandle;
 use crate::agent::envelope::ChannelSource;
+use crate::tools::git::GitCli;
 use schedule::Schedule;
 use state::DutyState;
 
@@ -30,6 +31,34 @@ pub struct Duty {
     pub input: String,
     pub session_hint: Option<String>,
     pub schedule: Schedule,
+    pub gate: Option<Gate>,
+}
+
+/// A mechanical pre-dispatch check: decides whether a due duty gets a
+/// turn at all, at the cost of zero tokens.
+pub enum Gate {
+    /// Open only when the repo's remote head moved past the cursor.
+    NewCommits { repo: String },
+}
+
+/// What a new-commits probe decides, given cursor and remote head.
+#[derive(Debug, PartialEq, Eq)]
+enum NewCommits {
+    /// No cursor yet: record the head, dispatch nothing. First contact
+    /// must not review the repo's entire history.
+    Prime,
+    /// Head unchanged: nothing to review.
+    Closed,
+    /// Head moved: dispatch, and advance the cursor on success.
+    Open,
+}
+
+fn new_commits_decision(cursor: Option<&str>, head: &str) -> NewCommits {
+    match cursor {
+        None => NewCommits::Prime,
+        Some(c) if c == head => NewCommits::Closed,
+        Some(_) => NewCommits::Open,
+    }
 }
 
 /// Append a timestamped entry to the duty history log (HISTORY.md).
@@ -75,32 +104,95 @@ fn next_wake(duties: &[Duty], state: &DutyState, now: u64) -> u64 {
 ///
 /// Serialization comes free: `send_message` awaits the actor, so two
 /// duties due together run in sequence, in declaration order.
-pub async fn run_loop(duties: Vec<Duty>, state_path: PathBuf, handle: &AgentHandle) -> ! {
+pub async fn run_loop(
+    duties: Vec<Duty>,
+    state_path: PathBuf,
+    handle: &AgentHandle,
+    git: Option<GitCli>,
+) -> ! {
     let mut state = DutyState::load(&state_path);
     loop {
         let now = crate::time::now_epoch();
         for duty in due(&duties, &state, now) {
-            let cancel = CancellationToken::new();
-            match handle
-                .send_message(
-                    ChannelSource::Duty,
-                    duty.input.clone(),
-                    duty.session_hint.clone(),
-                    None,
-                    cancel,
-                )
-                .await
-            {
-                Ok(reply) => info!(duty = %duty.name, "Duty run: {}", reply.content),
-                Err(e) => error!(duty = %duty.name, "Duty error (will retry next period): {e}"),
+            // (input, cursor to advance on success)
+            let dispatch: Option<(String, Option<String>)> = match &duty.gate {
+                None => Some((duty.input.clone(), None)),
+                Some(Gate::NewCommits { repo }) => {
+                    probe_new_commits(duty, repo, git.as_ref(), &mut state).await
+                }
+            };
+            if let Some((input, new_cursor)) = dispatch {
+                let cancel = CancellationToken::new();
+                match handle
+                    .send_message(
+                        ChannelSource::Duty,
+                        input,
+                        duty.session_hint.clone(),
+                        None,
+                        cancel,
+                    )
+                    .await
+                {
+                    Ok(reply) => {
+                        info!(duty = %duty.name, "Duty run: {}", reply.content);
+                        // Advance only on success: a failed turn
+                        // re-reviews the same delta next period.
+                        if let Some(head) = new_cursor {
+                            state.set_cursor(&duty.name, &head);
+                        }
+                    }
+                    Err(e) => {
+                        error!(duty = %duty.name, "Duty error (will retry next period): {e}");
+                    }
+                }
             }
-            // last_run advances even on error: retry next period, not
-            // in a tight loop (spec 24 failure modes).
+            // last_run advances even on error or closed gate: retry
+            // next period, not in a tight loop (spec 24 failure modes).
             state.record_run(&duty.name, crate::time::now_epoch());
             state.save(&state_path);
         }
         let now = crate::time::now_epoch();
         tokio::time::sleep(Duration::from_secs(next_wake(&duties, &state, now))).await;
+    }
+}
+
+/// Probe the new-commits gate. Returns the dispatch input and the
+/// cursor to advance, or `None` when nothing should run (gate closed,
+/// first-contact priming, or probe failure).
+async fn probe_new_commits(
+    duty: &Duty,
+    repo: &str,
+    git: Option<&GitCli>,
+    state: &mut DutyState,
+) -> Option<(String, Option<String>)> {
+    let Some(git) = git else {
+        // Config validation requires github.enabled for gated duties;
+        // reaching here means the invariant broke, not the operator.
+        error!(duty = %duty.name, "new-commits gate has no GitCli; skipping");
+        return None;
+    };
+    let head = match git.remote_head(repo).await {
+        Ok(head) => head,
+        Err(e) => {
+            error!(duty = %duty.name, "new-commits probe failed (will retry next period): {e}");
+            return None;
+        }
+    };
+    match new_commits_decision(state.cursor(&duty.name), &head) {
+        NewCommits::Prime => {
+            info!(duty = %duty.name, %head, "new-commits gate primed");
+            state.set_cursor(&duty.name, &head);
+            None
+        }
+        NewCommits::Closed => {
+            info!(duty = %duty.name, "new-commits gate closed");
+            None
+        }
+        NewCommits::Open => {
+            let cursor = state.cursor(&duty.name).expect("Open requires a cursor");
+            let input = format!("{}\n\n[new commits: {cursor}..{head}]", duty.input);
+            Some((input, Some(head)))
+        }
     }
 }
 
@@ -114,7 +206,15 @@ mod tests {
             input: format!("/{name}"),
             session_hint: None,
             schedule,
+            gate: None,
         }
+    }
+
+    #[test]
+    fn new_commits_decision_matrix() {
+        assert_eq!(new_commits_decision(None, "abc"), NewCommits::Prime);
+        assert_eq!(new_commits_decision(Some("abc"), "abc"), NewCommits::Closed);
+        assert_eq!(new_commits_decision(Some("abc"), "def"), NewCommits::Open);
     }
 
     fn duties() -> Vec<Duty> {

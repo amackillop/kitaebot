@@ -73,7 +73,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     shutdown: S,
 ) {
     let duty_state_path = workspace.state_dir().join("duties.json");
-    let duty_loop = duty::run_loop(duties, duty_state_path, handle);
+    let duty_loop = duty::run_loop(duties, duty_state_path, handle, git_cli.cloned());
 
     let telegram_loop = async {
         match telegram {
@@ -154,6 +154,7 @@ mod tests {
             input: "/duty distill".into(),
             session_hint: None,
             schedule: Schedule::Every(3600),
+            gate: None,
         }]
     }
 
@@ -232,6 +233,7 @@ mod tests {
                 input: "/duty nope".into(),
                 session_hint: None,
                 schedule: Schedule::Every(3600),
+                gate: None,
             }],
             None,
             None,

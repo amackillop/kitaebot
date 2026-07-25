@@ -171,12 +171,16 @@ fn build_duties(config: &Config) -> Vec<duty::Duty> {
         input: "/duty distill".into(),
         session_hint: None,
         schedule: parse(&config.duties.distill),
+        gate: None,
     }];
     duties.extend(config.duties.prompt.iter().map(|p| duty::Duty {
         name: p.name.clone(),
         input: p.prompt.clone(),
         session_hint: Some(p.repo.clone()),
         schedule: parse(&p.schedule),
+        gate: p.gate.as_deref().map(|_| duty::Gate::NewCommits {
+            repo: p.repo.clone(),
+        }),
     }));
     duties
 }
