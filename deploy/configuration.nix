@@ -50,8 +50,9 @@ in
         max_tokens = 32768;
         model_overrides = {
           explore = "deepseek/deepseek-v4-pro";
+          worker = "deepseek/deepseek-v4-pro";
+          reviewer = "moonshotai/kimi-k3";
           summarizer = "deepseek/deepseek-v4-flash";
-          heartbeat = "deepseek/deepseek-v4-flash";
         };
       };
 
@@ -73,7 +74,7 @@ in
       github = {
         enabled = true;
         owner = "amackillop";
-        trusted_users = [ ];
+        trusted_users = [ "npslaney" ];
         trusted_bots = [ "chatgpt-codex-connector" ];
       };
       linear = {
