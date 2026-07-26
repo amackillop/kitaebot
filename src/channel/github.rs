@@ -1349,6 +1349,17 @@ mod tests {
             "Blocking judgments stay",
             "github_pr_diff_reply",
             "Never resolve review threads",
+            // The reviewer sub-agent judges; the root translates.
+            "agent_type \"reviewer\"",
+            "gate: \"pr\"",
+            "judge per review",
+            "reviewer call fails",
+            // The diff is packed by reference, and pr-gate findings
+            // are dispositioned on the follow-up turn, not at submit.
+            "reviews/.diffs",
+            "Do not read the diff yourself",
+            "review_disposition",
+            "stays pending until its author answers it",
         ] {
             assert!(
                 REVIEW_PROTOCOL_SEGMENT.contains(needle),

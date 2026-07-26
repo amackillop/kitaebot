@@ -218,9 +218,9 @@ struct Args {
 struct ReviewMeta {
     /// Repository under review, `owner/repo`.
     repo: String,
-    /// Which gate: "plan", "commit", or "series".
+    /// Which gate: "plan", "commit", "series", or "pr".
     gate: String,
-    /// The ref under review: SHA for commit/series, branch for plan.
+    /// The ref under review: SHA for commit/series/pr, branch for plan.
     git_ref: String,
 }
 
@@ -283,10 +283,10 @@ impl<P: Provider> Tool for TaskTool<P> {
         and exec. For self-contained mechanical tasks. No git or GitHub \
         tools.\n\
         agent_type \"reviewer\": read-only judge for an artifact you pack \
-        into the prompt (a plan, a staged diff with its commit message, or \
-        a branch diff) plus its stated intent. Explore's tools but no \
-        access to compacted history. Returns prose findings ending in a \
-        fenced findings block."
+        into the prompt (a plan, a staged diff with its commit message, a \
+        branch diff, or a pull request diff) plus its stated intent. \
+        Explore's tools but no access to compacted history. Returns prose \
+        findings ending in a fenced findings block."
     }
 
     fn parameters(&self) -> serde_json::Value {
