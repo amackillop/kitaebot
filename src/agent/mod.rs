@@ -83,8 +83,10 @@ fn policy_halt_msg(reasons: &[String]) -> String {
 /// Shared by all root channels (telegram, socket, duties). Prepends
 /// the memory index (spec 21) to the cached system prompt, read fresh so
 /// runtime writes take effect on the next turn, and the review-gates
-/// segment (spec 23) when the pipeline is enabled. Sub-agents call
-/// [`run_turn_metered`] directly and are excluded by design.
+/// segment (spec 23) when the pipeline is enabled, and any
+/// session-scoped segment (spec 06) the active session calls for.
+/// Sub-agents call [`run_turn_metered`] directly and are excluded by
+/// design.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_message_metered(
     engine: &mut impl ContextEngine,
@@ -106,6 +108,10 @@ pub(crate) async fn process_message_metered(
     if review_gates {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(crate::review::GATES_SEGMENT);
+    }
+    if crate::channel::github::is_review_session(engine.active_session()) {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(crate::channel::github::REVIEW_PROTOCOL_SEGMENT);
     }
     run_turn_metered(
         engine,
