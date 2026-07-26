@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::agent::AgentHandle;
-use crate::agent::envelope::ChannelSource;
+use crate::agent::envelope::{ChannelSource, GitHubRole};
 use crate::error::ToolError;
 use crate::time::now_iso8601;
 use crate::tools::git::GitCli;
@@ -290,7 +290,7 @@ async fn feedback_pass(
                 handle,
                 pr.number,
                 nwo,
-                nwo.clone(),
+                GitHubRole::Author,
                 format_review(pr, nwo, review),
             )
             .await;
@@ -315,7 +315,7 @@ async fn feedback_pass(
                 handle,
                 pr.number,
                 nwo,
-                nwo.clone(),
+                GitHubRole::Author,
                 format_comment(pr, nwo, comment),
             )
             .await;
@@ -340,7 +340,7 @@ async fn feedback_pass(
                 handle,
                 pr.number,
                 nwo,
-                nwo.clone(),
+                GitHubRole::Author,
                 format_diff_comment(pr, nwo, dc),
             )
             .await;
@@ -401,7 +401,7 @@ async fn review_request_pass(
             handle,
             d.pr_number,
             &d.repo,
-            review_session(&d.repo),
+            GitHubRole::Reviewer,
             d.message,
         )
         .await;
@@ -489,7 +489,7 @@ async fn tracked_pass(
             handle,
             d.pr_number,
             &d.repo,
-            review_session(&d.repo),
+            GitHubRole::Reviewer,
             d.message,
         )
         .await;
@@ -504,34 +504,24 @@ fn parse_tracking_key(key: &str) -> Option<(&str, u32)> {
     Some((nwo, number.parse().ok()?))
 }
 
-/// The review-session prompt segment (spec 06, session-scoped
-/// segments): static review choreography, appended to the system
-/// prompt of every turn on a `review:*` session instead of riding in
+/// The review protocol prompt segment (spec 06, role segments):
+/// static review choreography, appended to the system prompt of every
+/// turn dispatched as [`GitHubRole::Reviewer`] instead of riding in
 /// each dispatch message.
 pub(crate) const REVIEW_PROTOCOL_SEGMENT: &str = include_str!("../prompts/review-protocol.md");
 
-/// Whether a (sanitized) session name is a review session.
-/// `sanitize_name` preserves the `:`, so the prefix survives storage.
-pub(crate) fn is_review_session(session: &str) -> bool {
-    session.starts_with("review:")
-}
-
-/// Session key for review turns on a repo. Kept separate from the
-/// work session (`{nwo}`): reviewing and building the same repo are
-/// different conversations, and prior-review context lives here.
-fn review_session(nwo: &str) -> String {
-    format!("review:{nwo}")
-}
-
-async fn send(handle: &AgentHandle, pr_number: u32, repo: &str, session: String, message: String) {
+/// Dispatch a turn to the repo's work session. Every GitHub turn lands
+/// there (spec 20); `role` is what distinguishes them, not the session.
+async fn send(handle: &AgentHandle, pr_number: u32, repo: &str, role: GitHubRole, message: String) {
     let cancel = CancellationToken::new();
     let source = ChannelSource::GitHub {
         pr_number,
         repo: repo.to_string(),
+        role,
     };
     // Actor switches to this session for the turn.
     match handle
-        .send_message(source, message, Some(session), None, cancel)
+        .send_message(source, message, Some(repo.to_string()), None, cancel)
         .await
     {
         Ok(reply) => info!(pr_number, "GitHub PR #{pr_number}: {}", reply.content),
@@ -1313,22 +1303,6 @@ mod tests {
             &trust("alice", &[], &[]),
         );
         assert!(dispatches.is_empty());
-    }
-
-    #[test]
-    fn review_session_key_is_prefixed() {
-        assert_eq!(review_session("owner/repo"), "review:owner/repo");
-    }
-
-    /// The session-scoped segment keys on the prefix, which must
-    /// survive session-name sanitization (`:` is not rewritten).
-    #[test]
-    fn review_session_detection_survives_sanitization() {
-        let sanitized = crate::engine::names::sanitize_name(&review_session("owner/repo"));
-        assert_eq!(sanitized, "review:owner--repo");
-        assert!(is_review_session(&sanitized));
-        assert!(!is_review_session("owner--repo"));
-        assert!(!is_review_session("general"));
     }
 
     /// The segment carries every contract the dispatch messages no

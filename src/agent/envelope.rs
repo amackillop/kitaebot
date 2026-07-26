@@ -12,6 +12,20 @@ use tokio_util::sync::CancellationToken;
 use crate::activity::Activity;
 use crate::dispatch::Reply;
 
+/// Which side of a pull request the bot is on for a turn (spec 20).
+///
+/// The GitHub channel knows which poll pass raised each item, so the
+/// role costs nothing to carry. It selects the review protocol segment
+/// ([spec 06](../../specs/06-system-prompt.md)) and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitHubRole {
+    /// Feedback on a PR the bot opened.
+    Author,
+    /// A review request, a re-review, or discussion on a PR the bot
+    /// reviewed.
+    Reviewer,
+}
+
 /// Which channel originated a message.
 ///
 /// Prefixed onto messages in the unified session so the agent (and the
@@ -24,6 +38,7 @@ pub enum ChannelSource {
         pr_number: u32,
         #[allow(dead_code)] // Routed via session_hint, not consumed by actor.
         repo: String,
+        role: GitHubRole,
     },
     Linear {
         issue: String,
@@ -87,6 +102,7 @@ mod tests {
             !ChannelSource::GitHub {
                 pr_number: 1,
                 repo: "owner/repo".into(),
+                role: GitHubRole::Reviewer,
             }
             .is_attended()
         );
@@ -108,6 +124,7 @@ mod tests {
         let src = ChannelSource::GitHub {
             pr_number: 42,
             repo: "owner/repo".into(),
+            role: GitHubRole::Author,
         };
         assert_eq!(src.to_string(), "GitHub PR #42");
     }

@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::activity::{self, Activity};
+use crate::agent::envelope::{ChannelSource, GitHubRole};
 use crate::engine::{ContextEngine, SummarizeFn};
 use crate::error::{Error, ToolError};
 use crate::provider::{CallUsage, Provider};
@@ -77,16 +78,28 @@ fn policy_halt_msg(reasons: &[String]) -> String {
     msg
 }
 
+/// Role segment for a dispatch, if the role it declares carries one
+/// (spec 06). Keyed on the dispatch rather than the session: a session
+/// is where history accumulates, a role is a property of the turn.
+pub(crate) fn role_segment(source: &ChannelSource) -> Option<&'static str> {
+    match source {
+        ChannelSource::GitHub {
+            role: GitHubRole::Reviewer,
+            ..
+        } => Some(crate::channel::github::REVIEW_PROTOCOL_SEGMENT),
+        _ => None,
+    }
+}
+
 /// Run a single root turn, returning its outcome and billed
 /// [`TurnUsage`] so the caller can record the cost to the usage ledger.
 ///
 /// Shared by all root channels (telegram, socket, duties). Prepends
 /// the memory index (spec 21) to the cached system prompt, read fresh so
 /// runtime writes take effect on the next turn, and the review-gates
-/// segment (spec 23) when the pipeline is enabled, and any
-/// session-scoped segment (spec 06) the active session calls for.
-/// Sub-agents call [`run_turn_metered`] directly and are excluded by
-/// design.
+/// segment (spec 23) when the pipeline is enabled, and the role
+/// segment (spec 06) when the dispatch carries one. Sub-agents call
+/// [`run_turn_metered`] directly and are excluded by design.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_message_metered(
     engine: &mut impl ContextEngine,
@@ -98,6 +111,7 @@ pub(crate) async fn process_message_metered(
     max_iterations: usize,
     memory_index_cap: usize,
     review_gates: bool,
+    role_segment: Option<&str>,
     ctx: &ToolCtx,
 ) -> Result<(TurnOutput, TurnUsage), Error> {
     let mut system_prompt =
@@ -109,9 +123,9 @@ pub(crate) async fn process_message_metered(
         system_prompt.push_str("\n\n");
         system_prompt.push_str(crate::review::GATES_SEGMENT);
     }
-    if crate::channel::github::is_review_session(engine.active_session()) {
+    if let Some(segment) = role_segment {
         system_prompt.push_str("\n\n");
-        system_prompt.push_str(crate::channel::github::REVIEW_PROTOCOL_SEGMENT);
+        system_prompt.push_str(segment);
     }
     run_turn_metered(
         engine,
@@ -1257,6 +1271,7 @@ mod tests {
             MAX_ITER,
             8192,
             false,
+            None,
             &ToolCtx::default(),
         )
         .await;
@@ -1265,6 +1280,25 @@ mod tests {
         // The caller (actor) is responsible for saving. We verify the engine
         // recorded the user message.
         assert_eq!(engine.stats().message_count, 1);
+    }
+
+    /// Only the reviewer role takes the review protocol; the author
+    /// role is the bot's own PR and must not be handed a reviewer's
+    /// choreography.
+    #[test]
+    fn only_the_reviewer_role_takes_the_review_segment() {
+        let github = |role| ChannelSource::GitHub {
+            pr_number: 1,
+            repo: "owner/repo".into(),
+            role,
+        };
+        assert_eq!(
+            role_segment(&github(GitHubRole::Reviewer)),
+            Some(crate::channel::github::REVIEW_PROTOCOL_SEGMENT)
+        );
+        assert_eq!(role_segment(&github(GitHubRole::Author)), None);
+        assert_eq!(role_segment(&ChannelSource::Duty), None);
+        assert_eq!(role_segment(&ChannelSource::Socket), None);
     }
 
     // ── Policy violation gate ─────────────────────────────────────────

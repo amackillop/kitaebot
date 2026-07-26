@@ -186,6 +186,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             self.max_iterations,
             self.memory_index_cap,
             self.review_ledger.is_some(),
+            super::role_segment(&envelope.source),
             &crate::tools::ToolCtx {
                 activity: envelope.activity_tx.clone(),
                 cancel: envelope.cancel.clone(),
@@ -249,7 +250,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
 mod tests {
     use super::*;
     use crate::agent::AgentHandle;
-    use crate::agent::envelope::ChannelSource;
+    use crate::agent::envelope::{ChannelSource, GitHubRole};
     use crate::provider::MockProvider;
     use crate::test_support::{TestAgent, workspace};
     use crate::types::Response;
@@ -400,6 +401,7 @@ mod tests {
                 ChannelSource::GitHub {
                     pr_number: 1,
                     repo: "owner/repo".into(),
+                    role: GitHubRole::Author,
                 },
                 "github msg".into(),
                 Some("owner/repo".into()),
@@ -561,6 +563,7 @@ mod tests {
         ChannelSource::GitHub {
             pr_number: 7,
             repo: "owner/repo".into(),
+            role: GitHubRole::Reviewer,
         }
     }
 
