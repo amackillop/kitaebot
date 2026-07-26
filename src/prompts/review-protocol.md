@@ -1,10 +1,11 @@
-# Review Sessions
+# Review Protocol
 
-This session exists to review pull requests in one repository. Each
-dispatch message carries the per-turn facts: PR number and repo, the
-review checkout path, the head SHA (and for re-reviews the previously
-reviewed SHA), the base branch, changed files, and commit messages.
-The rules below apply to every review turn.
+This turn is a pull-request review, dispatched by the GitHub channel.
+The session it runs on also carries your own work in that repository;
+these rules govern review turns and nothing else. Each dispatch message
+carries the per-turn facts: PR number and repo, the review checkout
+path, the head SHA (and for re-reviews the previously reviewed SHA), the
+base branch, changed files, and commit messages.
 
 ## The review checkout
 
@@ -30,8 +31,8 @@ judge per review.
 
 - Write the whole diff to a file instead of reading it into your
   context. With `working_dir` at the workspace root:
-  `mkdir -p reviews/.diffs && git -C reviews/<owner>/<repo> diff
-  origin/<base>...HEAD > reviews/.diffs/pr-<n>-<head SHA>.diff`.
+  `mkdir -p .diffs && git -C reviews/<owner>/<repo> diff
+  origin/<base>...HEAD > .diffs/pr-<n>-<head SHA>.diff`.
   The redirect means no diff text comes back through exec, so the size
   of the PR is not your problem and there is nothing to shrink.
 - Dispatch the `task` tool with agent_type "reviewer", packing the path
@@ -98,7 +99,7 @@ review the delta, not the whole PR:
 
 - Write the delta to a file the same way, with the SHAs from the
   dispatch: `git -C reviews/<owner>/<repo> diff <prev>...HEAD >
-  reviews/.diffs/pr-<n>-<head SHA>.diff`. Three dots, so a force push
+  .diffs/pr-<n>-<head SHA>.diff`. Three dots, so a force push
   diffs from the merge base rather than producing nonsense. Fall back
   to `gh pr diff <n> -R <nwo>` if it fails anyway.
 - `git -C reviews/<owner>/<repo> log <prev>..HEAD` for the new commit

@@ -220,7 +220,7 @@ available, rather than in a root turn holding outward-facing tools.
   `gh pr checkout`. The working checkout under `projects/` is not
   involved.
 - The root produces the diff by redirecting
-  `git diff origin/<base>...HEAD` to a file under `reviews/.diffs/`,
+  `git diff origin/<base>...HEAD` to a file under `.diffs/`,
   and packs its **path** into the reviewer dispatch together with the
   PR's stated intent (title, body, commit messages), the checkout
   root, and review metadata `{repo, gate: "pr", git_ref: <head SHA>}`
@@ -274,7 +274,7 @@ message carries the previously reviewed SHA and instructs the model to:
 - Produce the incremental diff, not the whole PR: the channel has
   already prepared the review checkout (same as the initial review —
   new head detached, read-only), so `git diff {prev}...HEAD` in it, to
-  the same `reviews/.diffs/` path convention. Three dots: after a force
+  the same `.diffs/` path convention. Three dots: after a force
   push `{prev}` is no longer an ancestor, and diffing from the merge
   base degrades better than diffing against a diverged tip. Falls back
   to the full `gh pr diff` when that fails anyway.

@@ -899,7 +899,7 @@ fn format_review_request(
     }
     let _ = write!(
         s,
-        "\nReview this PR per the Review Sessions protocol.\n\
+        "\nReview this PR per the Review Protocol.\n\
          Review checkout: `{checkout}`, detached at {head}, base branch \
          origin/{base} fetched.",
     );
@@ -941,7 +941,7 @@ fn format_tracked_turn(
     if let Some(prev) = prev_sha {
         let _ = write!(
             msg,
-            "\nRe-review the delta per the Review Sessions protocol.\n\
+            "\nRe-review the delta per the Review Protocol.\n\
              Review checkout: `{checkout}`, detached at {head}; previously \
              reviewed SHA: {prev}.",
         );
@@ -958,7 +958,7 @@ fn format_tracked_turn(
     if !comments.is_empty() {
         let _ = write!(
             msg,
-            "\n\nRespond to each comment per the Review Sessions protocol \
+            "\n\nRespond to each comment per the Review Protocol \
              (comment follow-ups). Review checkout: `{checkout}`, detached \
              at {head}.",
         );
@@ -1245,7 +1245,7 @@ mod tests {
         assert!(d.message.contains("It was broken because of reasons."));
         // Per-turn facts only; the choreography lives in the
         // session-scoped protocol segment.
-        assert!(d.message.contains("per the Review Sessions protocol"));
+        assert!(d.message.contains("per the Review Protocol"));
         assert!(d.message.contains("Review checkout: `reviews/owner/repo`"));
         assert!(d.message.contains("detached at abc123"));
         assert!(d.message.contains("origin/main"));
@@ -1330,7 +1330,7 @@ mod tests {
             "reviewer call fails",
             // The diff is packed by reference, and pr-gate findings
             // are dispositioned on the follow-up turn, not at submit.
-            "reviews/.diffs",
+            ".diffs/pr-",
             "Do not read the diff yourself",
             "review_disposition",
             "stays pending until its author answers it",
@@ -1440,7 +1440,7 @@ mod tests {
         assert!(d.message.contains("head is now new"));
         assert!(
             d.message
-                .contains("Re-review the delta per the Review Sessions protocol")
+                .contains("Re-review the delta per the Review Protocol")
         );
         assert!(d.message.contains("Review checkout: `reviews/o/r`"));
         assert!(d.message.contains("detached at new"));
