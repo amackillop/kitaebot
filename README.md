@@ -4,19 +4,19 @@ Autonomous programming agent in Rust. Runs in a NixOS VM with Landlock sandboxin
 
 ## Overview
 
-Kitaebot is a long-running daemon that accepts messages via Telegram, Unix socket, GitHub PR comments, or Linear issues, routes them through an LLM agent loop with tool use, and persists conversation state through a pluggable context engine. A periodic heartbeat triggers autonomous task review.
+Kitaebot is a long-running daemon that accepts messages via Telegram, Unix socket, GitHub PR comments, or Linear issues, routes them through an LLM agent loop with tool use, and persists conversation state through a pluggable context engine. A duty scheduler runs recurring work on its own schedule.
 
 Two binaries:
 
 | Binary | Purpose | Lifecycle |
 |--------|---------|-----------|
-| `kitaebot run` | Daemon (Telegram + socket + heartbeat + GitHub + Linear) | systemd service |
+| `kitaebot run` | Daemon (Telegram + socket + duties + GitHub + Linear) | systemd service |
 | `kchat <socket>` | Socket client REPL | On-demand |
 
 ## Architecture
 
 ```
-Channels (Telegram, Unix socket, GitHub PR, Linear, Heartbeat)
+Channels (Telegram, Unix socket, GitHub PR, Linear, Duties)
         │
         ├─ Messages ──► AgentHandle ──► Agent actor (sequential)
         │                                 ├─ process_message ──► LLM loop
@@ -196,12 +196,21 @@ kitaebot = {
       poll_interval_secs = 120;
       trusted_users = [ "user@example.com" ];    # Emails allowed to drive issues
     };
-    heartbeat = {
-      interval_secs = 1800;
+    duties = {                                   # Duty scheduler (spec 24)
+      distill = { every = "1h"; };                # Token gate still applies
+      prompt = [                                  # Operator-defined watch-tasks
+        {
+          name = "ci-watch";
+          every = "6h";                           # or daily = "06:00" (UTC)
+          repo = "owner/repo";                    # Must be in git.trusted_repos
+          gate = "new-commits";                   # Optional; needs github.enabled
+          prompt = "Check CI on the default branch.";
+        }
+      ];
     };
     memory = {
       index_cap_bytes = 8192;                    # Byte cap on the injected MEMORY.md index
-      distill_threshold_tokens = 40000;          # Undistilled tokens across all sessions before the heartbeat distills
+      distill_threshold_tokens = 40000;          # Undistilled tokens across all sessions before the distill duty runs
     };
     provider = {
       api = "openrouter";                        # openrouter | openai | groq | together | mistral
@@ -212,7 +221,7 @@ kitaebot = {
         explore = "cheap/model";
         worker = "mid/model";
         summarizer = "cheap/model";
-        heartbeat = "cheap/model";
+        reviewer = "strong/model";                 # Judges the bot's own work and others' PRs
         memory = "strong/model";                   # Distilled facts persist and inject every turn; don't skimp
       };
     };
@@ -313,20 +322,24 @@ src/
 ├── notify.rs            notify tool + Telegram push batching
 ├── daemon.rs            Event loop (select over enabled channels)
 ├── dispatch.rs          Input classification and Reply type
-├── commands.rs          Slash commands (/new, /context, /compact, /heartbeat, /distill, /stats)
-├── heartbeat.rs         Periodic heartbeat channel (timer + prepare/finish)
+├── commands.rs          Slash commands (/new, /context, /compact, /duties, /distill, /stats)
+├── duty/                Duty scheduler (mod, schedule, state)
 ├── runtime.rs           Provider/tools/channels assembly
 ├── activity.rs          Structured turn events for observability
 ├── workspace.rs         Workspace init + system prompt assembly
 ├── time.rs              ISO 8601 timestamps (Hinnant algorithm)
 ├── types.rs             Domain types (Message, ToolCall, Response)
 ├── error.rs             Algebraic error types
-└── prompts/             SOUL.md, AGENTS.md (compiled in via include_str!)
+└── prompts/             Compiled in via include_str!:
+                         SOUL.md, AGENTS.md (root system prompt)
+                         explore.md, worker.md, reviewer.md (sub-agents)
+                         review-gates.md, review-protocol.md (segments)
+                         distill.md
 vm/
 ├── configuration.nix    NixOS module (systemd service, egress filter, hardening)
 ├── test-egress.nix      NixOS VM integration test for egress filter
 ├── test-fixtures/       Test fixture data
-└── prompts/             USER.md, HEARTBEAT.md (operator files, provisioned)
+└── prompts/             USER.md (operator file, provisioned)
 nix/
 └── lightpanda.nix       Headless browser package
 deploy/

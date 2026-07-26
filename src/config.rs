@@ -145,7 +145,9 @@ pub struct ProviderConfig {
 /// Per-role model overrides. Each role falls back to `provider.model`
 /// when unset. Roles are the structural seams where the difficulty of
 /// the work is already known: sub-agent types, compaction summaries,
-/// and duty turns.
+/// and memory distillation. Duty turns run on `provider.model` — the
+/// duty scheduler replaced the heartbeat's override with the root
+/// model (spec 24).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelOverrides {
