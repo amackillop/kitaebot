@@ -134,9 +134,9 @@ PRs, push turns retry via the SHA delta; a comment-only turn is lost
 once `last_poll` advances — accepted, since prep failures on an
 established worktree are transient. First-use preparation is not in that
 class: it clones and registers a worktree, and can fail for reasons that
-persist across ticks (untrusted repo, no disk, no network). Such a
-failure costs a comment turn per tick until it is fixed, and is loud in
-the log rather than silent. The head SHA
+persist across ticks (no disk, no network, a repo `gh` can reach but
+`git` cannot). Such a failure costs a comment turn per tick until it is
+fixed, and is loud in the log rather than silent. The head SHA
 must be a 40-char hex string and the base ref must not start with `-`;
 both come from the GitHub API, but git would parse an option-shaped
 value as a flag.
