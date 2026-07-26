@@ -36,14 +36,50 @@ both queries:
    single combined turn.
 
 Items are filtered (see below) and dispatched through the agent handle
-with `ChannelSource::GitHub { pr_number, repo }`. The session key splits
-by direction: feedback on the bot's own PRs routes to the repo's work
-session (`owner/repo`, the same key as Linear issue routing), while
-review and re-review/discussion turns route to `review:owner/repo`.
-Reviewing and building the same repo are different conversations —
-prior-review context lives in the review session, in-progress work in
-the work session, and neither compacts the other away. `last_poll`
-advances only after a successful poll.
+with `ChannelSource::GitHub { pr_number, repo, role }`, where `role` is
+`author` (feedback on the bot's own PR) or `reviewer` (a review
+request, a re-review, a discussion turn on a PR the bot reviewed). The
+channel knows which of its three poll passes produced each item, so the
+role costs nothing to carry. It selects the review protocol segment
+([spec 06](06-system-prompt.md)) and nothing else.
+
+**All GitHub turns route to the repo's work session** (`owner/repo`,
+the same key as Linear issue routing). `last_poll` advances only after
+a successful poll.
+
+An earlier revision gave reviews their own `review:{nwo}` session, to
+keep prior-review context from compacting in-progress work away and to
+accumulate repo knowledge across reviews. Both justifications have
+since been taken over:
+
+- **Judgment isolation** belongs to the `reviewer` sub-agent
+  ([spec 23](23-self-review.md)). The diff and the code reading happen
+  in an ephemeral context that is discarded; the root review turn is
+  four mechanical calls and holds no diff at all.
+- **Knowledge accumulation** belongs to memory ([spec
+  21](21-memory.md)). Distillation gathers pending spans across *all*
+  sessions with per-session watermarks, so reviewer output reaches
+  `memory/topics/` wherever the turn ran — the review session was never
+  load-bearing for it. What the reviewer needs back is
+  `memory/topics/review-checklist.md` and the findings ledger, both
+  session-independent.
+- **Prior-review recall** is authoritative on GitHub, not in a
+  session: `gh pr view --json reviews` is what was actually published,
+  where session history is what the bot believes it said after
+  compaction.
+
+What a separate session did still buy was narrative isolation, and the
+actor bounds how much that is worth: it consumes envelopes serially and
+awaits each turn to completion, so a review dispatch arriving during an
+implementation turn queues behind it rather than interleaving. A whole
+commit-by-commit implementation is one turn. Interference is therefore
+confined to turn boundaries, where nothing is in flight, and feedback
+on the bot's own PRs has always landed in the work session anyway.
+
+The residual case is an implementation turn that exhausts
+`agent.max_iterations` — root `BudgetPolicy` is `Fail`, so it errors
+with work half-done and continuation becomes a second turn. That is a
+failure mode to handle at the cap, not a reason to shard sessions.
 
 ### Review checkout
 
@@ -122,10 +158,10 @@ packed: the root produces it on demand and hands it to the reviewer by
 reference (see the protocol below), so it never has to sit in a
 message at all.
 
-The review protocol itself is static choreography and lives in a
-session-scoped system-prompt segment ([spec 06](06-system-prompt.md)),
-appended to every turn on a `review:{nwo}` session; the dispatch
-message carries only the per-turn facts above. The protocol:
+The review protocol itself is static choreography and lives in a role
+segment ([spec 06](06-system-prompt.md)), appended to every turn
+dispatched with `role: reviewer`; the dispatch message carries only the
+per-turn facts above. The protocol:
 
 **The root review turn orchestrates; the `reviewer` sub-agent
 ([spec 23](23-self-review.md)) judges.** Two reasons, recorded here
@@ -203,9 +239,9 @@ message carries the previously reviewed SHA and instructs the model to:
   push `{prev}` is no longer an ancestor, and diffing from the merge
   base degrades better than diffing against a diverged tip. Falls back
   to the full `gh pr diff` when that fails anyway.
-- Recall the prior review: the review session carries it, and
-  `gh pr view --json reviews` recovers the submitted text if
-  compaction ate the details.
+- Recall the prior review from `gh pr view --json reviews`, which is
+  what was actually published. The work session may still carry it, but
+  the API is the source of truth and the session is a cache of it.
 - Dispatch the reviewer with the delta diff, the prior review's
   substance, and the question the initial review does not ask: does
   the delta address that feedback adequately and without introducing
@@ -251,9 +287,9 @@ the only place the ledger observes a human disputing a finding; the
 self-gates can only ever record the bot disputing itself, which is the
 weakest calibration signal available. `pending` on a `pr` finding
 therefore means awaiting the author, not lapsed discipline. Finding ids
-come from the review turn that published them, in the same session's
-history — one of the reasons review sessions are keyed per repository
-rather than per PR.
+come from the review turn that published them, in the work session's
+history and recoverable with `lcm_grep`; the ledger holds them
+regardless, keyed by repo and `git_ref`.
 
 ### Same-tick push and comments
 

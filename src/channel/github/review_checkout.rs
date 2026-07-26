@@ -5,6 +5,10 @@
 //! turn is dispatched, the checkout is force-detached at the recorded
 //! PR head SHA, so leftover state from a previous review can never
 //! block the next one and review turns never touch in-progress work.
+//!
+//! No devShell is provisioned: the reviewer sub-agent has no `exec`,
+//! and the root only runs `git`/`gh` from the workspace root, so
+//! nothing on the review path can consume one.
 
 use crate::error::ToolError;
 use crate::tools::git::GitCli;
@@ -64,8 +68,6 @@ async fn prepare_at(
         false,
     )
     .await?;
-    // Provision the devShell so review turns can build and test.
-    git.warm_devshell(&dir).await;
     Ok(())
 }
 

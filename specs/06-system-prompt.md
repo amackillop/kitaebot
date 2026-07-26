@@ -36,24 +36,31 @@ The prompt is prepended as a `Message::System` to every provider call but
 **never stored in the session**. This keeps the session clean and allows prompt
 changes without invalidating history.
 
-### Session-scoped segments
+### Role segments
 
 Compiled prompt segments appended to the root system prompt when the
-active session is of a matching type. Session type derives from the
-session name: `review:{nwo}` sessions are review sessions; everything
-else is a work session. The naming convention is already load-bearing
-in the GitHub channel (spec 20), so it is the key — no session
-metadata is added.
+turn is of a matching kind. The key is the **dispatch**, not the
+session: the channel that raised the turn declares what the bot is
+being asked to be, and that declaration rides on the envelope.
+
+Keyed this way after an earlier revision keyed it on the session name
+(`review:{nwo}` sessions took the review segment). Two problems. It
+depended on a naming convention surviving `sanitize_name`, which
+needed a test to pin behaviour nothing else relied on; and it assumed
+one role per conversation, which stopped being true when review turns
+moved onto the repo's work session (spec 20). A session is where
+history accumulates. A role is a property of the turn.
 
 The mechanism mirrors the review-gates segment (spec 23): a compiled
 `include_str!` const, appended in `process_message_metered`, gated on
-a condition — there config, here session type. Segments carry static
-choreography that would otherwise ride in every dispatch User message
-and accumulate in the session until compaction; as system-prompt
-segments they are paid once per request and never compacted away.
-Dispatch messages shrink to per-turn facts.
+a condition — there config, here the dispatched role. Segments carry
+static choreography that would otherwise ride in every dispatch User
+message and accumulate in the session until compaction; as
+system-prompt segments they are paid once per request and never
+compacted away. Dispatch messages shrink to per-turn facts.
 
-First and only consumer: the GitHub review protocol (spec 20).
+First and only consumer: the GitHub review protocol (spec 20), on
+dispatches where the bot is the reviewer and not the author.
 Deliberately not consumed: injecting the worked repo's own
 `AGENTS.md`/`CLAUDE.md` at system-prompt level — repo content is
 data, and elevating it above data is a prompt-injection surface with

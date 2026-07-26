@@ -15,6 +15,10 @@ but never switch branches, edit files, stash, or `gh pr checkout`.
 Your working checkout under `projects/` is not involved; leave it
 alone.
 
+Reach into it with `git -C <checkout>` and keep `working_dir` at the
+workspace root. The checkout has no devShell provisioned, and running
+exec inside it would make direnv build one nobody uses.
+
 ## Reviewing a PR
 
 You orchestrate; the `reviewer` sub-agent judges. You produce the diff
@@ -97,8 +101,9 @@ review the delta, not the whole PR:
   reviews/.diffs/pr-<n>-<head SHA>.diff`. Three dots, so a force push
   diffs from the merge base rather than producing nonsense. Fall back
   to `gh pr diff <n> -R <nwo>` if it fails anyway.
-- `git log <prev>..HEAD` for the new commit messages. That one you do
-  read: it is the delta's stated intent, and you pack it.
+- `git -C reviews/<owner>/<repo> log <prev>..HEAD` for the new commit
+  messages. That one you do read: it is the delta's stated intent, and
+  you pack it.
 - Recall your prior review; `gh pr view <n> -R <nwo> --json reviews`
   recovers the submitted text if you no longer have the details.
 - Dispatch the reviewer with the delta path, the substance of your
@@ -139,5 +144,4 @@ to each on the merits:
   which way it went belongs in the note.
 - The finding ids are in this session's history, from the review turn
   that published them. `lcm_grep` recovers them if compaction took the
-  details; that history is why review sessions are per repository and
-  not per PR.
+  details.

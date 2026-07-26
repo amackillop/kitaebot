@@ -100,9 +100,12 @@ diluted by prompt packing, and the model override gives blind-spot
 diversity — a different model reviewing is worth more than the same
 weights re-reading.
 
-Naming: the `reviewer` agent type is unrelated to GitHub review sessions
-(`review:{nwo}`, spec 20). Those review *other people's* PRs on GitHub;
-this reviews the bot's own work locally, pre-push.
+Scope: this one agent type judges both the bot's own work at the local
+gates below and other people's PRs on GitHub under the `pr` gate
+([spec 20](20-github.md)). The analysis is the same job — judge a diff
+against its stated intent — so it is one prompt. What differs is the
+frame around it: who packed the artifact, who reads the findings, and
+who is expected to act on them.
 
 ### Review gates
 
@@ -409,9 +412,12 @@ that references an unavailable mechanism is worse than none.
   allowlist-validation tests extend to the new type.
 - **Provider (spec 02)**: one new entry in `model_overrides`, same
   fallback semantics as the existing five roles.
-- **GitHub channel (spec 20)**: untouched mechanically. The `review:{nwo}`
-  session continues reviewing others' PRs; own-PR human feedback continues
-  arriving on the work session, now logged via `review_log`.
+- **GitHub channel (spec 20)**: the review turn dispatches this agent
+  type under the `pr` gate and translates its verdict into a formal
+  review, so the reviewer judges the bot's outward-facing reviews as
+  well as its own work. Own-PR human feedback arrives on the same work
+  session, logged via `review_log`. Findings published to a PR are
+  dispositioned when its author answers, not at submission.
 - **Cost tracking**: reviewer sub-agent turns are billed inside the
   parent's `run_turn` row like any other sub-agent — no ledger coupling.
 
