@@ -83,21 +83,60 @@ failure mode to handle at the cap, not a reason to shard sessions.
 
 ### Review checkout
 
-Review turns never touch the working checkout under `projects/`. Before
-dispatching a review, the channel prepares a dedicated clone at
-`reviews/<owner>/<repo>`: clone on first use, then
+Review turns never touch the working tree under `projects/`. Before
+dispatching a review, the channel prepares a **worktree** of the repo's
+working clone at `reviews/<owner>/<repo>`: ensure
+`projects/<owner>/<repo>` is cloned, `git worktree prune`,
+`git worktree add --detach` on first use, then
 `git fetch origin <base> pull/{n}/head` and
-`git checkout --force --detach <head-sha>`. Force-detaching at the
-recorded SHA means leftover state from a previous review turn can never
-block the next one, and the checkout matches the SHA recorded in
+`git checkout --force --detach <head-sha>` inside it. Force-detaching at
+the recorded SHA means leftover state from a previous review turn can
+never block the next one, and the checkout matches the SHA recorded in
 `reviewed` exactly. The model is told the checkout is read-only.
+
+A worktree rather than a second clone because the object store is
+shared: no duplicate full fetch per repo, and a review of a repo the bot
+already works on costs almost nothing. `--detach` is load-bearing — git
+refuses to check the same *branch* out in two worktrees, and a review
+head that happens to match the working branch would otherwise collide.
+`prune` precedes `add` because a deleted directory leaves registration
+metadata behind that makes `add` fail.
+
+Two consequences of sharing, recorded because the separate clone did not
+have them:
+
+- **Reviewing implies cloning.** A repo the bot has only ever reviewed
+  now gets a `projects/` clone as a side effect. Review preparation
+  clones without provisioning a devShell (nothing on the review path
+  consumes one) and leaves warming to whoever first does actual work
+  there — `git_clone` warms on its exists-path, and `exec`'s
+  Blocked-then-re-allow fallback covers the rest. Preparation must not
+  reintroduce the devShell cost one level up.
+- **Untrusted objects land in the working clone.** `pull/{n}/head`
+  fetches a contributor's objects into the object database the bot
+  commits from, and `origin/pull/*` refs become visible to the working
+  tree. HEAD stays independent per worktree, so nothing is checked out
+  implicitly, and the workflow branches from `origin/HEAD`
+  ([spec 06](06-system-prompt.md), AGENTS.md). Accepted, but it is a new
+  adjacency: the separate clone kept PR content in a directory the
+  working tree could not reach.
+
+Diffs packed by reference go to `.diffs/` at the workspace root, not
+under `reviews/`. They are not review-specific — spec 23's open question
+has the self gates packing the same way — and `reviews/` now holds
+worktrees of other repositories, which is the wrong parent for a scratch
+directory.
 
 Both the review-request and tracked passes prepare the checkout this
 way. Preparation failure logs a warning and skips the PR for the tick
 without writing state, so the next tick retries naturally. For tracked
 PRs, push turns retry via the SHA delta; a comment-only turn is lost
 once `last_poll` advances — accepted, since prep failures on an
-existing clone are transient. The head SHA
+established worktree are transient. First-use preparation is not in that
+class: it clones and registers a worktree, and can fail for reasons that
+persist across ticks (untrusted repo, no disk, no network). Such a
+failure costs a comment turn per tick until it is fixed, and is loud in
+the log rather than silent. The head SHA
 must be a 40-char hex string and the base ref must not start with `-`;
 both come from the GitHub API, but git would parse an option-shaped
 value as a flag.

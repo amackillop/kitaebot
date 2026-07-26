@@ -468,8 +468,9 @@ that references an unavailable mechanism is worse than none.
   rather than answering it: the parent redirects the diff to a file and
   packs the path, so no diff text crosses either context and there is
   no size to threshold. The same move should work at the commit and
-  series gates, with one wrinkle — those diffs are taken in a *working*
-  checkout under `projects/`, so the diff file has to land outside the
-  repo it describes or it dirties the tree it is about to be committed
-  from. Until that is settled the self gates still pack by value, which
-  makes the two halves of the pipeline inconsistent.
+  series gates: those diffs are taken in a *working* checkout under
+  `projects/`, so the file lands in `.diffs/` at the workspace root
+  (spec 20) rather than in the repo it describes, which would dirty the
+  tree it is about to be committed from. What remains is doing it; until
+  then the self gates still pack by value, and the two halves of the
+  pipeline are inconsistent.
