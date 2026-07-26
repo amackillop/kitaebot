@@ -118,8 +118,9 @@ a push and judge commits it was not dispatched for. Commit messages
 are required reading for every review (they carry the rationale the
 code is checked against), so the harness supplies them instead of
 prompting the model to fetch them. The diff is deliberately NOT
-packed: which files to read in full is a judgment call, and packing
-all diffs just moves the size problem into the User message.
+packed: the root produces it on demand and hands it to the reviewer by
+reference (see the protocol below), so it never has to sit in a
+message at all.
 
 The review protocol itself is static choreography and lives in a
 session-scoped system-prompt segment ([spec 06](06-system-prompt.md)),
@@ -143,16 +144,22 @@ available, rather than in a root turn holding outward-facing tools.
   Review checkout). Read-only: git only to read; never
   `gh pr checkout`. The working checkout under `projects/` is not
   involved.
-- The root produces the diff (`git diff origin/<base>...HEAD`, per
-  file) and packs it into the reviewer dispatch together with the
+- The root produces the diff by redirecting
+  `git diff origin/<base>...HEAD` to a file under `reviews/.diffs/`,
+  and packs its **path** into the reviewer dispatch together with the
   PR's stated intent (title, body, commit messages), the checkout
   root, and review metadata `{repo, gate: "pr", git_ref: <head SHA>}`
   so the verdict lands in the findings ledger. The reviewer cannot
-  produce diffs itself (no git), which is why the diff is packed here
-  while the root's own reading stays judgment-driven. Oversized diffs
-  degrade the same way as the series gate (spec 23): commit list plus
-  per-file stats, and the reviewer reads head-state files via
-  `file_read` in the checkout.
+  produce diffs itself (no git), which is why the root produces it.
+  By reference rather than by value because a packed diff sits in the
+  root's working set twice — once as the exec result, once in the
+  `task` call the root writes — and that second copy is an assistant
+  message, which the context engine does not externalize at any size
+  ([spec 14](14-context-engine.md)). By reference the root holds none
+  of the diff, the reviewer reads all of it instead of a head/tail
+  excerpt, and PR size stops bounding the review. The root does not
+  read the diff: it is not the judge, and a diff in its context is one
+  the reviewer's verdict has to compete with.
 - The reviewer returns prose findings and the findings block; the
   root translates. Verdict `correct` → `APPROVE`; `incorrect` →
   `COMMENT` with each finding as a resolvable inline thread. The root
@@ -161,10 +168,22 @@ available, rather than in a root turn holding outward-facing tools.
   authorship stay with the author; the no-push invariant holds), and
   submission via `github_pr_review_submit` — `body`, `event`
   (`APPROVE` or `COMMENT` only; `REQUEST_CHANGES` is unrepresentable,
-  blocking judgments stay with humans), `comments`. On anchoring
-  failure the finding moves into `body` with a file:line reference
-  and the review is resubmitted. A formal review is required —
-  submitting it clears the pending request and stops re-triggering.
+  blocking judgments stay with humans), `comments`. Each `comments`
+  entry carries a single right-side `line`, so a replacement spanning
+  more lines than can be anchored becomes prose with file:line
+  references. On anchoring failure the finding moves into `body` with
+  a file:line reference and the review is resubmitted; since the root
+  anchors without having read the diff, a repeatedly rejected
+  submission reads hunk headers (`--unified=0`) for the touched line
+  ranges — anchoring data, not the hunk bodies. A formal review is
+  required — submitting it clears the pending request and stops
+  re-triggering.
+- A failed reviewer call is a skipped review ([spec
+  23](23-self-review.md)): the root judges the diff itself and says so
+  in the review body. Restated here because the review-gates segment
+  carrying that disclosure norm is gated on `review.enabled` while
+  this protocol is not, so the obligation would otherwise vanish
+  exactly when a human is reading the result.
 - Comment discipline is the reviewer prompt's own (spec 23): suspect
   or needs-change only, no praise threads, no manufactured findings.
   The root does not add findings of its own — one judge per review.
@@ -179,9 +198,11 @@ message carries the previously reviewed SHA and instructs the model to:
 
 - Produce the incremental diff, not the whole PR: the channel has
   already prepared the review checkout (same as the initial review —
-  new head detached, read-only), so `git diff {prev}..HEAD` in it,
-  falling back to the full `gh pr diff` when that fails (e.g. after a
-  force push).
+  new head detached, read-only), so `git diff {prev}...HEAD` in it, to
+  the same `reviews/.diffs/` path convention. Three dots: after a force
+  push `{prev}` is no longer an ancestor, and diffing from the merge
+  base degrades better than diffing against a diverged tip. Falls back
+  to the full `gh pr diff` when that fails anyway.
 - Recall the prior review: the review session carries it, and
   `gh pr view --json reviews` recovers the submitted text if
   compaction ate the details.
@@ -218,6 +239,21 @@ Pushing to the PR branch directly remains future work (needs
 
 The bot responds only to human comments, never to its own, so threads
 terminate when the human stops replying.
+
+Follow-up turns are also where the bot's own published findings get
+dispositioned ([spec 23](23-self-review.md)), not at submission time.
+A `pr`-gate finding stays pending until its author answers it: `fixed`
+when they take the change, `disputed` with their reason when they
+contest it, `no-action` when it is dropped without objection. A dispute
+is recorded whether or not the bot concedes — that a human argued at
+all is the signal, and which way it went belongs in the note. This is
+the only place the ledger observes a human disputing a finding; the
+self-gates can only ever record the bot disputing itself, which is the
+weakest calibration signal available. `pending` on a `pr` finding
+therefore means awaiting the author, not lapsed discipline. Finding ids
+come from the review turn that published them, in the same session's
+history — one of the reasons review sessions are keyed per repository
+rather than per PR.
 
 ### Same-tick push and comments
 

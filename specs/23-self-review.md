@@ -234,7 +234,7 @@ SQLite at `state/review.db`, following the `state/usage.db` pattern
 | `ts` | Timestamp |
 | `repo` | `owner/repo` |
 | `gate` | `plan` \| `commit` \| `series` \| `external` \| `pr` (bot reviews of others' PRs, spec 20) |
-| `git_ref` | SHA for commit/series, branch for plan, PR number for external |
+| `git_ref` | SHA for commit/series/pr, branch for plan, PR number for external |
 | `source` | `self` \| `human` \| `bot` |
 | `category` | Free-text category |
 | `severity` | `must-fix` \| `should-fix` \| `nit` (self only) |
@@ -302,6 +302,16 @@ ignoring it and misfiles the row as `disputed`, inflating the human
 dispute rate) and not a fourth `answered` value (taxonomy no planned
 query distinguishes). A dispute requires a `disposition_note`; the
 note is what makes a dispute auditable rather than a shrug.
+
+**Who acts, and when**: at the self gates the parent both receives the
+finding and acts on it, so it dispositions immediately and `pending`
+measures its own discipline. At the `pr` gate (spec 20) the finding is
+published to someone else's PR, so the actor is its author and the
+disposition waits for their reply on a later follow-up turn. `pending`
+there means awaiting the author. Queries that read `pending` as laxity
+must therefore exclude the `pr` gate or separate it out; the dispute
+rate needs no such care, and a human disputing a published finding is
+the strongest calibration signal the ledger receives.
 
 **Identity**: a disposition needs a finding to point at, and row ids
 never left the database in v1. Both write paths now surface them:
@@ -448,4 +458,12 @@ that references an unavailable mechanism is worse than none.
   in v1; split only if the ledger shows plan-review misses.
 - **Series-gate size threshold**: at what packed-diff size does the
   parent degrade to list+stats? Needs a real number from usage, not a
-  guess.
+  guess. The `pr` gate (spec 20) dissolved its version of this question
+  rather than answering it: the parent redirects the diff to a file and
+  packs the path, so no diff text crosses either context and there is
+  no size to threshold. The same move should work at the commit and
+  series gates, with one wrinkle — those diffs are taken in a *working*
+  checkout under `projects/`, so the diff file has to land outside the
+  repo it describes or it dirties the tree it is about to be committed
+  from. Until that is settled the self gates still pack by value, which
+  makes the two halves of the pipeline inconsistent.
