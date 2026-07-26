@@ -934,6 +934,8 @@ mod tests {
             "review_log",
             "review_disposition",
             "must-fix",
+            // The reviewer no longer fetches conventions itself.
+            "origin/HEAD:AGENTS.md",
         ] {
             assert!(GATES_SEGMENT.contains(needle), "segment omits {needle}");
         }

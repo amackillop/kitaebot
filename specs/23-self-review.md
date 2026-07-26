@@ -64,10 +64,21 @@ this type exists for is insulation from the parent's reasoning about
 *this change*, not amnesia about the codebase — a reviewer that does not
 know the repo's conventions or the bot's recurring mistakes can only
 catch generic slop. The role prompt instructs the reviewer to read
-`memory/MEMORY.md`, the worked repo's topic file, and the repo's own
-`AGENTS.md`/`CLAUDE.md` before judging. Memory files are ordinary
-workspace files reachable via `file_read`, so spec 21's sub-agent
-injection exclusion stands untouched. The contamination edge — a
+`memory/MEMORY.md`, the worked repo's topic file, and
+`memory/topics/review-checklist.md` before judging. Memory files are
+ordinary workspace files reachable via `file_read`, so spec 21's
+sub-agent injection exclusion stands untouched.
+
+**Conventions come from the parent, from a trusted ref.** The reviewer
+does not read `AGENTS.md` out of the checkout it is judging. It was told
+to, and on the `pr` gate the only checkout it has is the PR head
+([spec 20](20-github.md)), so a PR could edit that file and hand the
+judge its own rules — a sharper surface than the diff,
+because a diff is framed as code to assess while conventions are framed
+as rules to apply. The parent writes them out from `origin/HEAD` (self
+gates) or `origin/<base>` (`pr` gate) and names the path. An artifact
+does not get to state the rules it is measured by, and a change that
+edits the conventions is itself a finding to weigh. The contamination edge — a
 remembered decision about the current task pre-anchoring a plan review —
 is already excluded by memory discipline: in-progress task state is
 session state, never memory (AGENTS.md, Memory section).

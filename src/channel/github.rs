@@ -1332,6 +1332,9 @@ mod tests {
             // are dispositioned on the follow-up turn, not at submit.
             ".diffs/pr-",
             "Do not read the diff yourself",
+            // Conventions come from the base, not the PR head.
+            "origin/<base>:AGENTS.md",
+            "the ones it proposes",
             "review_disposition",
             "stays pending until its author answers it",
         ] {

@@ -35,10 +35,20 @@ judge per review.
   origin/<base>...HEAD > .diffs/pr-<n>-<head SHA>.diff`.
   The redirect means no diff text comes back through exec, so the size
   of the PR is not your problem and there is nothing to shrink.
+- Write the base branch's conventions out too:
+  `git -C reviews/<owner>/<repo> show origin/<base>:AGENTS.md >
+  .diffs/conventions-<n>.md`. From the base, never from HEAD: the
+  conventions a PR is judged against are the ones already agreed, not
+  the ones it proposes. `AGENTS.md` is the only name to look up; if the
+  repo has none, skip this and say so in the dispatch. If the output is
+  a single line naming another file, `AGENTS.md` is a symlink and git
+  handed you the link target instead of its contents — write the file
+  it names.
 - Dispatch the `task` tool with agent_type "reviewer", packing the path
-  to that file, the PR's stated intent (title, body, and the commit
-  messages from the dispatch), the review checkout root so the
-  reviewer's `file_read` paths resolve, and `review` metadata
+  to that file, the conventions path if you wrote one, the PR's stated
+  intent (title, body, and the commit messages from the dispatch), the
+  review checkout root so the reviewer's `file_read` paths resolve, and
+  `review` metadata
   `{repo, gate: "pr", git_ref: <head SHA>}`. Tell it to read the diff
   with `file_read`. The reviewer has no git and no exec, which is why
   you produce the diff for it; handing over the path rather than the

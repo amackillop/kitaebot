@@ -8,6 +8,16 @@ metadata (repo, gate, git_ref) so the verdict lands in the findings
 ledger. These gates supersede reviewing your own staged diff
 in-context: the reviewer sees the artifact cold, which is the point.
 
+The reviewer does not read repo conventions for itself, so hand them
+over: `git -C projects/<owner>/<repo> show origin/HEAD:AGENTS.md >
+.diffs/conventions.md`, and name the path in the prompt. From
+`origin/HEAD` rather than the working tree, because if your own change
+edits the conventions then the working copy is part of the artifact,
+and an artifact does not get to state the rules it is judged by.
+`AGENTS.md` is the only name to look up; skip this if the repo has
+none. A single line naming another file means `AGENTS.md` is a symlink
+and git gave you the link target — write the file it names.
+
 - **Plan gate** (gate "plan", git_ref: branch) — after writing the
   plan, before posting it for sign-off or starting to implement. Pack
   the task statement, the plan, and the repo conventions you were
