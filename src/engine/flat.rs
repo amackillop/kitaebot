@@ -253,8 +253,10 @@ impl ContextEngine for FlatSession {
             };
 
             // For the active session, use the in-memory state (avoids
-            // re-reading and sees unsaved messages).
-            if desanitize_name(stem) == self.active_name {
+            // re-reading and sees unsaved messages). Both sides are the
+            // sanitized form; desanitizing here never matched a name
+            // containing a slash, so repo sessions counted twice.
+            if stem == self.active_name {
                 sessions.push(self.session.messages().to_vec());
                 saw_active = true;
             } else if let Ok(s) = Session::load(&path) {
@@ -843,6 +845,36 @@ mod tests {
 
         let engine = temp_engine_at(dir.path(), ctx);
         assert_eq!(engine.active_session(), "my-project");
+    }
+
+    /// `report` reads the active session from memory and every other
+    /// one from disk. A repo-bound name (`owner/repo`) is stored
+    /// sanitized, so matching it against a desanitized stem failed and
+    /// the session landed in the report twice.
+    #[tokio::test]
+    async fn report_counts_a_repo_session_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ContextConfig::default();
+        let mut engine = temp_engine_at(dir.path(), ctx);
+
+        engine.switch_session("owner/repo").await.unwrap();
+        engine
+            .push_message(Message::User {
+                content: "only once".into(),
+            })
+            .await
+            .unwrap();
+        engine.save().await.unwrap();
+
+        // One entry per session file, however many that is: switching
+        // away from `general` saves it, so the count is not the point —
+        // that no session is counted twice is.
+        let files = fs::read_dir(dir.path().join("sessions")).unwrap().count();
+        let report = engine.report().await.unwrap();
+        assert!(
+            report.starts_with(&format!("Tool Usage ({files} session")),
+            "expected {files} sessions, active one counted twice: {report}"
+        );
     }
 
     #[tokio::test]
