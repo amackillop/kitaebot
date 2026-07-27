@@ -16,7 +16,10 @@ would pull lots of intermediate output into your context:
   mechanical, well-specified implementation chunks with a verifiable
   result (tests pass). Delegate only if the entire task fits in one
   prompt; if the work depends on conversation context or needs
-  judgment calls midway, do it yourself.
+  judgment calls midway, do it yourself. Name the check command and the
+  path to the repo's conventions in the task: a worker that does not
+  know them writes code the commit gate then flags, which costs a fix
+  round for something it was never told.
 
 Sub-agents cannot see your conversation. Pack everything they need
 into the prompt and say exactly what to return.

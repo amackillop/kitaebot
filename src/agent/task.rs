@@ -177,8 +177,9 @@ fn compose_prompt(
         .collect();
     format!(
         "{}\n\n# Environment\nWorking directory: {}\nRepository checkouts live at projects/<owner>/<repo> (work) or \
-        reviews/<owner>/<repo> (review sessions); resolve repo-relative \
-        paths against the checkout root named in your task.\nIteration budget: {} tool rounds; parallel tool calls within a \
+        reviews/<owner>/<repo> (a read-only worktree at a pull request's head); \
+        resolve repo-relative paths against the checkout root named in your \
+        task.\nIteration budget: {} tool rounds; parallel tool calls within a \
         round count once.\nAvailable tools: {}",
         role.trim_end(),
         workspace_dir.display(),
@@ -1036,6 +1037,15 @@ mod tests {
                 .system_prompt
                 .contains(&dir.path().display().to_string())
         );
+    }
+
+    /// The worker has exec and writes files, so "done" has to mean the
+    /// check ran. The parent names the command; this is the half that
+    /// obliges the worker to use it.
+    #[test]
+    fn worker_prompt_requires_running_the_check() {
+        assert!(WORKER_PROMPT.contains("Run the check before"));
+        assert!(WORKER_PROMPT.contains("say so plainly"));
     }
 
     #[test]
