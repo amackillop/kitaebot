@@ -31,6 +31,11 @@ use crate::workspace::Workspace;
 /// Consecutive identical tool calls before execution is skipped.
 const REPEAT_LIMIT: usize = 3;
 
+/// Skipped rounds before the turn is abandoned. Skipping stops the tool
+/// running but does nothing about a model that keeps asking: without a
+/// limit the turn spends its whole budget re-sending one refused call.
+const REPEAT_STRIKE_LIMIT: usize = 2;
+
 const REPEAT_ERROR: &str = "ERROR: You have called this tool with identical \
     arguments multiple times and received the same result. \
     Do NOT retry the same call. Either use a different tool \
@@ -141,7 +146,7 @@ pub(crate) async fn process_message_metered(
     review_gates: bool,
     role_segments: &[&str],
     ctx: &ToolCtx,
-) -> Result<(TurnOutput, TurnUsage), Error> {
+) -> (Result<TurnOutput, Error>, TurnUsage) {
     let mut system_prompt =
         match crate::memory::index_segment(&workspace.memory_dir(), prompt.memory_index_cap) {
             Some(index) => format!("{}\n{index}", workspace.system_prompt()),
@@ -258,7 +263,7 @@ pub(crate) async fn run_turn(
         ctx,
     )
     .await
-    .map(|(output, _usage)| output)
+    .0
 }
 
 /// Run a single turn of the agent loop, returning its outcome and the
@@ -276,6 +281,13 @@ pub(crate) async fn run_turn(
 /// Exposed crate-internally so sub-agents (spec 19) run the exact
 /// same loop against an ephemeral child context.
 ///
+/// Billed usage is returned alongside the outcome, not inside it: the
+/// calls happened whether or not the turn succeeded, and a failure is
+/// where the cost most needs recording. Returning
+/// `Result<(_, TurnUsage)>` dropped the usage on every error path, so a
+/// turn that ground to the iteration cap — the most expensive way to
+/// fail — billed nothing at all.
+///
 /// # Errors
 /// Returns error if max iterations reached (under [`BudgetPolicy::Fail`])
 /// or provider fails
@@ -290,7 +302,7 @@ pub(crate) async fn run_turn_metered(
     max_iterations: usize,
     budget: BudgetPolicy,
     ctx: &ToolCtx,
-) -> Result<(TurnOutput, TurnUsage), Error> {
+) -> (Result<TurnOutput, Error>, TurnUsage) {
     let started = std::time::Instant::now();
     let mut stats = TurnStats::default();
     let result = turn_loop(
@@ -312,6 +324,7 @@ pub(crate) async fn run_turn_metered(
         Ok(TurnOutput::PolicyHalt { .. }) => "policy_halt",
         Err(Error::Cancelled) => "cancelled",
         Err(Error::MaxIterationsReached) => "max_iterations",
+        Err(Error::NoProgress) => "no_progress",
         Err(_) => "error",
     };
     match &result {
@@ -341,7 +354,7 @@ pub(crate) async fn run_turn_metered(
             "Turn summary"
         ),
     }
-    result.map(|output| (output, stats.usage))
+    (result, stats.usage)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -387,6 +400,7 @@ async fn turn_loop(
 
     let mut repeats = RepeatDetector::new();
     let mut policy_strikes: usize = 0;
+    let mut repeat_strikes: usize = 0;
 
     for iteration in 0..max_iterations {
         if cancel.is_cancelled() {
@@ -432,10 +446,24 @@ async fn turn_loop(
                     .await?;
 
                 if repeats.record(&calls) {
+                    repeat_strikes += 1;
+                    // Name the call: the whole point of this line is
+                    // telling the reader what the model is stuck on, and
+                    // the skipped calls never reach the tool logs.
+                    let repeated = calls
+                        .iter()
+                        .map(|c| format!("{}({})", c.function.name, c.function.arguments))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     warn!(
                         iteration,
+                        repeat_strikes,
+                        repeated = %truncate_output(&repeated, LOG_CONTENT_MAX),
                         "Repeated tool calls detected, skipping execution"
                     );
+                    // Every tool_call needs a result before the next
+                    // completion, so the refusal is pushed even when
+                    // this is the round that ends the turn.
                     for call in &calls {
                         engine
                             .push_message(Message::Tool {
@@ -444,8 +472,14 @@ async fn turn_loop(
                             })
                             .await?;
                     }
+                    if repeat_strikes >= REPEAT_STRIKE_LIMIT {
+                        warn!(iteration, "Repeat strike limit reached, abandoning turn");
+                        return Err(Error::NoProgress);
+                    }
                     continue;
                 }
+                // Executing anything at all is progress.
+                repeat_strikes = 0;
 
                 stats.tool_calls += calls.len();
                 for call in &calls {
@@ -722,6 +756,22 @@ mod tests {
         )
     }
 
+    /// A distinct call per iteration: the repeat detector fingerprints
+    /// on (name, arguments), so varying the arguments is what separates
+    /// "burned the budget working" from "burned it repeating itself".
+    fn mock_distinct_call(n: usize) -> Response {
+        Response::ToolCalls {
+            content: String::new(),
+            calls: vec![ToolCall::new(
+                format!("call-{n}"),
+                ToolFunction {
+                    name: "mock".to_string(),
+                    arguments: format!("{{\"n\":{n}}}"),
+                },
+            )],
+        }
+    }
+
     fn mock_tool_calls(ids: &[&str]) -> Response {
         Response::ToolCalls {
             content: String::new(),
@@ -798,14 +848,43 @@ mod tests {
         assert_eq!(result.unwrap().into_text(), "Tool result processed");
     }
 
+    /// The refusal alone does not stop a model that keeps asking. Without
+    /// a strike limit the turn spends its entire budget re-sending one
+    /// call, which is how a live turn burned 76 of 100 iterations.
     #[tokio::test]
-    async fn test_max_iterations() {
+    async fn a_model_that_will_not_stop_repeating_ends_the_turn() {
         let provider = Arc::new(MockProvider::new(vec![
-            Ok(mock_tool_calls(&[
-                "call-infinite"
-            ]));
+            Ok(mock_tool_calls(&["c1"]));
             MAX_ITER
         ]));
+        let tools = mock_tools("same output");
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let (result, usage) = run_turn_metered(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Stuck",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            BudgetPolicy::Fail,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert!(matches!(result.unwrap_err(), Error::NoProgress));
+        // Two executed, two refused, then out: nowhere near the cap.
+        assert_eq!(provider.call_count(), 4);
+        assert_eq!(usage.calls, 4, "the wasted calls are still billed");
+    }
+
+    #[tokio::test]
+    async fn test_max_iterations() {
+        let provider = Arc::new(MockProvider::new(
+            (0..MAX_ITER).map(|n| Ok(mock_distinct_call(n))).collect(),
+        ));
         let tools = mock_tools("mock output");
         let mut engine = test_engine();
         let summarize = test_summarize(&provider);
@@ -824,14 +903,48 @@ mod tests {
         assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
     }
 
+    /// Grinding to the iteration cap is the most expensive way for a turn
+    /// to fail, so it is the one that most needs billing. Usage used to
+    /// ride inside the `Ok`, which meant this path recorded nothing.
+    #[tokio::test]
+    async fn a_capped_turn_still_reports_its_usage() {
+        let provider = Arc::new(MockProvider::new(
+            (0..MAX_ITER).map(|n| Ok(mock_distinct_call(n))).collect(),
+        ));
+        let tools = mock_tools("mock output");
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let (result, usage) = run_turn_metered(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Infinite loop",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            BudgetPolicy::Fail,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
+        assert_eq!(
+            usage.calls,
+            u32::try_from(MAX_ITER).unwrap(),
+            "every call the turn made should be billed"
+        );
+    }
+
     #[tokio::test]
     async fn test_repeated_tool_calls_skipped() {
+        // Two executed, the third skipped, then something different —
+        // which clears the strike and lets the turn finish.
         let provider = Arc::new(MockProvider::new(vec![
             Ok(mock_tool_calls(&["c1"])),
             Ok(mock_tool_calls(&["c2"])),
             Ok(mock_tool_calls(&["c3"])),
-            Ok(mock_tool_calls(&["c4"])),
-            Ok(mock_tool_calls(&["c5"])),
+            Ok(mock_distinct_call(99)),
             Ok(text("Gave up")),
         ]));
         let tools = mock_tools("same output");
@@ -852,7 +965,7 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap().into_text(), "Gave up");
-        assert_eq!(provider.call_count(), 6);
+        assert_eq!(provider.call_count(), 5);
 
         drop(tx);
         let mut events = Vec::new();
@@ -867,8 +980,9 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, Activity::ToolEnd { .. }))
             .count();
-        assert_eq!(tool_starts, 2);
-        assert_eq!(tool_ends, 2);
+        // c1, c2, then the distinct call; c3 was skipped.
+        assert_eq!(tool_starts, 3);
+        assert_eq!(tool_ends, 3);
 
         // Assembled context should contain repetition error messages for skipped calls.
         let ctx = engine.assemble(SYSTEM).await.unwrap();
@@ -879,7 +993,7 @@ mod tests {
                 matches!(m, Message::Tool { content, .. } if content.starts_with("ERROR: You have called"))
             })
             .collect();
-        assert_eq!(repetition_msgs.len(), 3); // iterations 3, 4, 5
+        assert_eq!(repetition_msgs.len(), 1); // only the third call was refused
     }
 
     #[tokio::test]
@@ -1225,10 +1339,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_activity_max_iterations() {
-        let provider = Arc::new(MockProvider::new(vec![
-            Ok(mock_tool_calls(&["call-inf"]));
-            MAX_ITER
-        ]));
+        let provider = Arc::new(MockProvider::new(
+            (0..MAX_ITER).map(|n| Ok(mock_distinct_call(n))).collect(),
+        ));
         let tools = mock_tools("mock output");
         let mut engine = test_engine();
         let summarize = test_summarize(&provider);
@@ -1315,6 +1428,7 @@ mod tests {
             &ToolCtx::default(),
         )
         .await;
+        let (result, _usage) = result;
         assert!(result.is_err());
 
         // The caller (actor) is responsible for saving. We verify the engine
@@ -1370,6 +1484,19 @@ mod tests {
             "## When Tools Fail",
         ] {
             assert!(agents.contains(kept), "AGENTS.md lost {kept}");
+        }
+    }
+
+    /// Externalization is a property of the context engine, not of a
+    /// mode, so it belongs in the always-present prompt. It lived only in
+    /// the review protocol until that path stopped needing it, and a
+    /// builder turn then met a `<file>` reference with no idea what it
+    /// was and burned its whole budget re-reading the same file.
+    #[test]
+    fn the_static_prompt_explains_externalized_output() {
+        let agents = include_str!("../prompts/AGENTS.md");
+        for needle in ["<file>", "lcm_grep", "Never re-issue an identical call"] {
+            assert!(agents.contains(needle), "AGENTS.md omits {needle}");
         }
     }
 

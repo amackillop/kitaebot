@@ -25,6 +25,17 @@ pub enum Error {
     #[error("Maximum iterations reached without completion")]
     MaxIterationsReached,
 
+    /// The model re-emitted the same tool call after being told it was
+    /// no longer being executed.
+    ///
+    /// Distinct from [`Self::MaxIterationsReached`] because the budget
+    /// was not the problem: the turn had rounds left and was spending
+    /// them on a call whose result it already had. Ending early turns a
+    /// livelock that costs the whole budget into one that costs a
+    /// handful of calls.
+    #[error("Turn made no progress: the same tool call was repeated after being refused")]
+    NoProgress,
+
     /// LLM provider error (network, auth, etc.).
     #[error("Provider error: {0}")]
     Provider(#[from] ProviderError),

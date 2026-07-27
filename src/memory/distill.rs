@@ -204,7 +204,7 @@ pub async fn run<P: Provider, E: ContextEngine>(
     let mut ephemeral = EphemeralSession::new(DISTILL_TOOL_OUTPUT_TOKENS);
     // Fail, not FinalAnswer: a half-distilled memory write is worse
     // than retrying on the next cycle with the backlog carried.
-    let (output, usage) = run_turn_metered(
+    let (result, usage) = run_turn_metered(
         &mut ephemeral,
         summarize,
         &distiller.system_prompt,
@@ -215,7 +215,8 @@ pub async fn run<P: Provider, E: ContextEngine>(
         BudgetPolicy::Fail,
         &ToolCtx::default(),
     )
-    .await?;
+    .await;
+    let output = result?;
 
     for (name, watermark) in gathered.advances {
         state.watermarks.insert(name, watermark);

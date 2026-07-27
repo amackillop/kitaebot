@@ -195,21 +195,18 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         )
         .await;
 
-        // Record billed usage before unwrapping the turn output.
-        if let Ok((_, usage)) = &metered {
-            let source = envelope.source.to_string();
-            usage::record_turn(
-                self.usage_ledger.as_deref(),
-                &TurnRecord {
-                    session: target,
-                    source: &source,
-                    model: self.provider.model(),
-                    usage: *usage,
-                },
-            );
-        }
-
-        let result = metered.map(|(output, _usage)| output);
+        // Bill the turn whatever its outcome: the calls were made.
+        let (result, usage) = metered;
+        let source = envelope.source.to_string();
+        usage::record_turn(
+            self.usage_ledger.as_deref(),
+            &TurnRecord {
+                session: target,
+                source: &source,
+                model: self.provider.model(),
+                usage,
+            },
+        );
 
         // A policy halt is an Ok reply, so the Err hook in `handle`
         // never sees it. Alert here where the outcome is still typed.

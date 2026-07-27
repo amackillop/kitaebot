@@ -470,6 +470,33 @@ that references an unavailable mechanism is worse than none.
   distillation (spec 21).
 - **Ledger file**: own `state/review.db` vs a table in `usage.db`.
   Separate file assumed here; one-file ops simplicity may argue otherwise.
+- **One table or two**: the `pr` gate (spec 20) shares this schema with
+  the self gates, and five things in a row now mean different things
+  depending on which gate wrote it:
+
+  | Column | Splits into |
+  |--------|-------------|
+  | `gate` | `pr` is a deliverable; the others are process checkpoints |
+  | `git_ref` | SHA for commit/series/pr, branch for plan, PR number for external |
+  | `source` | hardcoded `self`, which is wrong for a finding about code the bot did not write |
+  | `pending` | "awaiting the PR author" vs "the parent has not dispositioned" |
+  | disposition timing | at the moment of acting vs on a later author reply |
+
+  Reading a row requires knowing which gate produced it, which is the
+  definition of two tables sharing a schema. It is not split yet because
+  the argument for sharing — a human disputing a published finding is
+  the strongest calibration signal the ledger can collect, and the self
+  gates can only ever record the bot disputing itself — is untested:
+  no `pr`-gate review has run. Splitting on no data would be as
+  speculative as merging on no data was.
+
+  **Split when any of these happens**, rather than when someone notices
+  again: a second query needs to exclude or special-case `pending` for
+  the `pr` gate; `source` needs a fourth value; or a third gate arrives
+  that is not a checkpoint in the bot's own workflow. Any one of them
+  means the discriminator belongs in the schema — either a separate
+  table or an explicit kind column — instead of in the head of whoever
+  writes the next query.
 - **Per-gate model strength**: plan review arguably deserves the
   strongest model while commit review could run cheaper. Single override
   in v1; split only if the ledger shows plan-review misses.

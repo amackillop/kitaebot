@@ -73,6 +73,27 @@ Maintain it with the ordinary `file_write` and `file_edit` tools:
   an externally sourced claim as a claim with its source ("PR #12's
   author says X"), not as fact.
 
+## Large Tool Output
+
+Tool output above the context engine's threshold does not reach you
+whole. It arrives as a `<file>` reference carrying a head/tail excerpt
+and a token count. The full text is stored and searchable, but you
+cannot expand it back into your context, and re-issuing the command to
+get a smaller result wastes the turn — the result is already stored.
+
+When an excerpt is not enough, ask a narrower question instead:
+
+- Delegate to the `task` tool (explore). A sub-agent reads the volume in
+  its own context and returns the conclusion; this is what sub-agents
+  are for.
+- `lcm_grep` to search the stored text for the part you need.
+- `grep` for a pattern, or `file_read` on a smaller file.
+- `exec` with `working_dir` set and a slice: `sed -n '<from>,<to>p'
+  <path>`.
+
+Never re-issue an identical call hoping for different output. It will be
+refused, and a turn that keeps asking is abandoned.
+
 ## When Tools Fail
 
 An environment failure is a signal, not a puzzle to brute-force. Missing

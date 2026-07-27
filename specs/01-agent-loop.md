@@ -54,9 +54,25 @@ pairs (compared as `serde_json::Value` so key order is irrelevant).
 | Consecutive identical count | Behavior |
 |-----------------------------|----------|
 | 1-2 | Execute normally |
-| 3+  | Skip execution, inject error as each call's result |
+| 3   | Skip execution, inject error as each call's result |
+| 4   | Skip, inject, then abandon the turn with `NoProgress` |
 
-The counter resets when the fingerprint changes.
+The counter resets when the fingerprint changes, and a round that
+executes anything clears the strike count — the gate is about lack of
+progress, and running a different tool is progress.
+
+Skipping stops the tool; it does nothing about a model that keeps
+asking. A live turn spent 76 of its 100 iterations re-sending one
+refused call, each a full provider call, so refusal needs a limit behind
+it. `NoProgress` is distinct from `MaxIterationsReached` because the
+budget was not the problem: the turn had rounds left and was spending
+them on a result it already had. It stays an error rather than the
+final-answer squeeze so unattended turns still raise an alert, which a
+successful-looking degraded reply would not.
+
+The refusal is injected even on the round that ends the turn: every
+`tool_call` needs a matching result before the next completion, so
+skipping that would leave the stored context malformed.
 
 ### Policy Violation Gate
 

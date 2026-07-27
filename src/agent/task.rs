@@ -322,7 +322,7 @@ impl<P: Provider> Tool for TaskTool<P> {
             // answer instead of erroring, so a reviewer that runs out
             // of budget still delivers a verdict and its cost is
             // recorded.
-            let (output, usage) = run_turn_metered(
+            let (result, usage) = run_turn_metered(
                 &mut engine,
                 &self.summarize,
                 &agent.system_prompt,
@@ -334,9 +334,10 @@ impl<P: Provider> Tool for TaskTool<P> {
                 &child_ctx,
             )
             .instrument(tracing::info_span!("subagent", agent = label))
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("sub-agent failed: {e}")))?;
-            // No conversation of its own: the row is tagged by agent type.
+            .await;
+            // Bill before propagating: a sub-agent that errored still
+            // spent its calls. No conversation of its own, so the row is
+            // tagged by agent type.
             usage::record_turn(
                 self.usage_ledger.as_deref(),
                 &TurnRecord {
@@ -346,6 +347,8 @@ impl<P: Provider> Tool for TaskTool<P> {
                     usage,
                 },
             );
+            let output =
+                result.map_err(|e| ToolError::ExecutionFailed(format!("sub-agent failed: {e}")))?;
             let mut text = output.into_text();
             if args.agent_type == AgentKind::Reviewer {
                 let ids = record_review(self.review_ledger.as_deref(), args.review.as_ref(), &text);
