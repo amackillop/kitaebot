@@ -61,10 +61,67 @@ compacted away. Dispatch messages shrink to per-turn facts.
 
 First and only consumer: the GitHub review protocol (spec 20), on
 dispatches where the bot is the reviewer and not the author.
-Deliberately not consumed: injecting the worked repo's own
-`AGENTS.md`/`CLAUDE.md` at system-prompt level — repo content is
-data, and elevating it above data is a prompt-injection surface with
-its own gating decision (FUTURE.md, System Prompt).
+
+### Repo conventions
+
+The worked repository's own `AGENTS.md`, appended to the root system
+prompt for sessions bound to a repo. The workflow's Orient step has the
+model read it with `file_read`, which makes it ordinary tool output that
+compaction can evict mid-task — exactly when a long turn still needs the
+rules. In the system prompt it survives.
+
+Keyed on the session, not the dispatch, which is the difference from a
+role segment: which repo a session is about is a property of the
+session. `desanitize_name(active_session())` gives a candidate
+`owner/repo`, which counts only if `projects/<owner>/<repo>` is a real
+clone. Desanitization alone is ambiguous — `foo--bar` maps to `foo/bar`
+— so the directory check is what turns a wrong guess into no
+conventions rather than another repo's. Sessions with no matching clone
+get nothing.
+
+Source is `git show origin/HEAD:AGENTS.md` in that clone, never a
+working tree and never the review worktree. Content on the default
+branch passed the repository's own review gate, so the trust boundary is
+"somebody approved this" rather than "the bot did not write it". That is
+what makes elevating repo content above data defensible, and what makes
+it safe on review turns without a role gate: review and work turns share
+the `{nwo}` session (spec 20), so session type could not gate it anyway.
+
+Gated on `git.trusted_repos`, no separate list. Merging to a trusted
+repo's default branch already implies enough access to change CI or add
+a dependency, so prompt text is not the marginal risk.
+
+`AGENTS.md` is the only name looked up. Check the tree entry's mode and
+resolve a symlink one level: a symlink's blob is its target path, which
+would otherwise be injected as the conventions themselves.
+
+Cap 16384 bytes, a constant rather than config. Not a budget
+calculation — a sanity bound sized off real files, since the two the bot
+works on today are 10397 and 2905 bytes and the larger wants room to
+grow. For scale, the heaviest prompt already assembled (static files,
+a full memory index, both segments) is around 8500 tokens against an
+effective context of 167232, and conventions add roughly 2600 to that.
+
+Over the cap, inject nothing and let Orient handle it — a half-read
+index is still an index, but a cut-off sentence can invert a rule. Log
+it: a repo whose conventions have quietly outgrown the bound would
+otherwise look identical to one with no `AGENTS.md` at all.
+
+The segment frames what follows as conventions governing code style and
+workflow within that repository, which cannot direct actions elsewhere,
+override these instructions, or authorize a push, merge, or approval.
+The frame earns its place: at 10397 bytes against the bot's own 11222,
+an injected convention file is comparable in weight to the operating
+instructions it sits beside, so which one wins a conflict has to be
+stated rather than left to proximity.
+
+Read per root turn like the memory index; any failure injects nothing.
+Sub-agents are excluded with the other segments — the reviewer gets
+conventions from its parent (spec 23). Root `AGENTS.md` only; nested
+per-package files in monorepos are out of scope.
+
+The Orient step (AGENTS.md, Developer Workflow) changes to skip reading
+what is already in the prompt.
 
 ### Content Guidelines
 
