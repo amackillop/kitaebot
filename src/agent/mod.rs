@@ -87,16 +87,33 @@ pub(crate) struct PromptConfig {
     pub trusted_repos: Vec<String>,
 }
 
-/// Role segment for a dispatch, if the role it declares carries one
-/// (spec 06). Keyed on the dispatch rather than the session: a session
-/// is where history accumulates, a role is a property of the turn.
-pub(crate) fn role_segment(source: &ChannelSource) -> Option<&'static str> {
+/// The developer workflow: clone through pull request. Split out of
+/// `AGENTS.md` because it is builder choreography, and a turn spent
+/// reviewing somebody else's PR should not be holding instructions on
+/// how to push and open one.
+const DEVELOPER_WORKFLOW: &str = include_str!("../prompts/developer-workflow.md");
+
+/// Segments the bot builds with, and the ones it reviews with. Mutually
+/// exclusive: the two modes are the same agent under different
+/// instructions, not one agent holding both sets.
+const BUILDER_SEGMENTS: &[&str] = &[DEVELOPER_WORKFLOW];
+const REVIEWER_SEGMENTS: &[&str] = &[crate::channel::github::REVIEW_PROTOCOL_SEGMENT];
+
+/// Segments a dispatch carries (spec 06). Keyed on the dispatch rather
+/// than the session: a session is where history accumulates, a role is
+/// a property of the turn.
+///
+/// Only the reviewer role is knowable from a dispatch — the GitHub
+/// channel knows which poll pass raised the item. Nothing declares a
+/// turn to be build work, so builder is the default rather than a
+/// detected mode.
+pub(crate) fn role_segments(source: &ChannelSource) -> &'static [&'static str] {
     match source {
         ChannelSource::GitHub {
             role: GitHubRole::Reviewer,
             ..
-        } => Some(crate::channel::github::REVIEW_PROTOCOL_SEGMENT),
-        _ => None,
+        } => REVIEWER_SEGMENTS,
+        _ => BUILDER_SEGMENTS,
     }
 }
 
@@ -107,7 +124,7 @@ pub(crate) fn role_segment(source: &ChannelSource) -> Option<&'static str> {
 /// the memory index (spec 21) to the cached system prompt, read fresh so
 /// runtime writes take effect on the next turn, then appends the
 /// review-gates segment (spec 23) when the pipeline is enabled, the
-/// role segment (spec 06) when the dispatch carries one, and the
+/// segments the dispatched role carries (spec 06), and the
 /// worked repo's conventions (spec 06) when the session names a
 /// trusted clone. Sub-agents call [`run_turn_metered`] directly and are
 /// excluded by design.
@@ -122,7 +139,7 @@ pub(crate) async fn process_message_metered(
     max_iterations: usize,
     prompt: &PromptConfig,
     review_gates: bool,
-    role_segment: Option<&str>,
+    role_segments: &[&str],
     ctx: &ToolCtx,
 ) -> Result<(TurnOutput, TurnUsage), Error> {
     let mut system_prompt =
@@ -143,7 +160,7 @@ pub(crate) async fn process_message_metered(
         system_prompt.push_str("\n\n");
         system_prompt.push_str(crate::review::GATES_SEGMENT);
     }
-    if let Some(segment) = role_segment {
+    for segment in role_segments {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(segment);
     }
@@ -1294,7 +1311,7 @@ mod tests {
                 trusted_repos: Vec::new(),
             },
             false,
-            None,
+            &[],
             &ToolCtx::default(),
         )
         .await;
@@ -1305,23 +1322,55 @@ mod tests {
         assert_eq!(engine.stats().message_count, 1);
     }
 
-    /// Only the reviewer role takes the review protocol; the author
-    /// role is the bot's own PR and must not be handed a reviewer's
-    /// choreography.
+    /// The two modes are exclusive. A reviewer must not be told how to
+    /// push and open a PR on the branch it is judging, and a builder
+    /// must not be missing the workflow because a dispatch looked
+    /// review-shaped.
     #[test]
-    fn only_the_reviewer_role_takes_the_review_segment() {
+    fn the_two_modes_do_not_share_segments() {
         let github = |role| ChannelSource::GitHub {
             pr_number: 1,
             repo: "owner/repo".into(),
             role,
         };
-        assert_eq!(
-            role_segment(&github(GitHubRole::Reviewer)),
-            Some(crate::channel::github::REVIEW_PROTOCOL_SEGMENT)
-        );
-        assert_eq!(role_segment(&github(GitHubRole::Author)), None);
-        assert_eq!(role_segment(&ChannelSource::Duty), None);
-        assert_eq!(role_segment(&ChannelSource::Socket), None);
+        let reviewer = role_segments(&github(GitHubRole::Reviewer));
+        assert_eq!(reviewer, [crate::channel::github::REVIEW_PROTOCOL_SEGMENT]);
+        assert!(!reviewer.iter().any(|s| s.contains("## Developer Workflow")));
+
+        // Author is the bot's own PR, which is build work.
+        for source in [
+            github(GitHubRole::Author),
+            ChannelSource::Duty,
+            ChannelSource::Socket,
+            ChannelSource::Telegram,
+        ] {
+            let segments = role_segments(&source);
+            assert_eq!(segments, [DEVELOPER_WORKFLOW], "{source}");
+            assert!(
+                !segments
+                    .iter()
+                    .any(|s| s.contains("Review this PR per the Review Protocol")),
+                "{source} carries reviewer choreography"
+            );
+        }
+    }
+
+    /// The workflow left `AGENTS.md` to become a segment; the static
+    /// prompt must not still carry a copy.
+    #[test]
+    fn the_static_prompt_no_longer_carries_the_workflow() {
+        let agents = include_str!("../prompts/AGENTS.md");
+        assert!(!agents.contains("## Developer Workflow"));
+        assert!(DEVELOPER_WORKFLOW.starts_with("## Developer Workflow"));
+        // Shared sections stayed behind.
+        for kept in [
+            "## Delegation",
+            "## Guidelines",
+            "## Memory",
+            "## When Tools Fail",
+        ] {
+            assert!(agents.contains(kept), "AGENTS.md lost {kept}");
+        }
     }
 
     // ── Policy violation gate ─────────────────────────────────────────

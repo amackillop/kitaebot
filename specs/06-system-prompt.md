@@ -59,8 +59,26 @@ message and accumulate in the session until compaction; as
 system-prompt segments they are paid once per request and never
 compacted away. Dispatch messages shrink to per-turn facts.
 
-First and only consumer: the GitHub review protocol (spec 20), on
-dispatches where the bot is the reviewer and not the author.
+Two consumers, and they are the bot's two modes. A **builder** turn
+carries `developer-workflow.md` (clone through pull request); a
+**reviewer** turn carries the GitHub review protocol (spec 20). They are
+mutually exclusive — the same agent under different instructions, not
+one agent holding both sets.
+
+Only the reviewer mode is detectable: the GitHub channel knows which
+poll pass raised an item. Nothing declares a turn to be build work, so
+builder is the default rather than a detected mode, and every dispatch
+that is not a reviewer dispatch gets it.
+
+The workflow was in `AGENTS.md` until it became a segment, over half
+that file by size. Keeping it there meant a turn reviewing somebody
+else's pull request also held "**Push** — use the `git_push` tool" and
+"**Pull request** — use `github_pr_create`", directly beside the review
+protocol's "never push to the PR branch, never merge, never close". Both
+scope correctly on a careful read, and the protocol states that
+prohibition explicitly *because* of the adjacency — which is a sign the
+adjacency was the problem. Splitting it makes the modes structural
+instead of a matter of the model reading carefully.
 
 ### Repo conventions
 
@@ -120,8 +138,8 @@ Sub-agents are excluded with the other segments — the reviewer gets
 conventions from its parent (spec 23). Root `AGENTS.md` only; nested
 per-package files in monorepos are out of scope.
 
-The Orient step (AGENTS.md, Developer Workflow) changes to skip reading
-what is already in the prompt.
+The Orient step (`developer-workflow.md`) skips reading what is already
+in the prompt.
 
 ### Content Guidelines
 
@@ -129,9 +147,11 @@ Each file has a distinct role. Examples of what belongs where:
 
 - **`SOUL.md`** — Identity, personality traits, values, communication style
   (e.g. "be concise", "no emojis", "accuracy over speed")
-- **`AGENTS.md`** — Operational instructions: tool usage guidelines, developer
-  workflow (clone, branch, implement, validate, commit, PR), commit message
-  standards, failure handling, exec deny-list workarounds
+- **`AGENTS.md`** — Mode-independent operating instructions: delegation,
+  tool usage guidelines, memory discipline, failure handling, exec
+  deny-list workarounds. The builder workflow left it to become a role
+  segment (see Role segments), so what remains applies to every turn
+  whatever the bot is doing
 - **`USER.md`** — User-specific context: name, timezone, preferences,
   project conventions
 

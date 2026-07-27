@@ -187,7 +187,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             self.max_iterations,
             &self.prompt,
             self.review_ledger.is_some(),
-            super::role_segment(&envelope.source),
+            super::role_segments(&envelope.source),
             &crate::tools::ToolCtx {
                 activity: envelope.activity_tx.clone(),
                 cancel: envelope.cancel.clone(),

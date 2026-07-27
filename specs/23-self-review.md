@@ -120,7 +120,7 @@ who is expected to act on them.
 
 ### Review gates
 
-Three gates in the developer workflow (AGENTS.md), all dispatched by the
+Three gates in the developer workflow (`developer-workflow.md`), all dispatched by the
 root agent as ordinary `task` calls with `agent_type: "reviewer"`. All
 run **before** the action they guard, so fixes land in the artifact that
 ships.
@@ -365,7 +365,7 @@ existing table.
 
 ### Workflow integration
 
-AGENTS.md Developer Workflow changes (prose, in the implementation
+Developer-workflow prompt changes (prose, in the implementation
 commits):
 
 - New step after Orient/Context: **Plan** — for non-trivial work, write

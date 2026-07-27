@@ -179,13 +179,13 @@ mod tests {
         vec!["o/r".to_string()]
     }
 
-    /// The workflow's Orient step keys on this heading to decide it can
-    /// skip re-reading the file. A rename here would silently strand
-    /// that instruction.
+    /// The Orient step keys on this heading to decide it can skip
+    /// re-reading the file. A rename at either end, or the step moving
+    /// to another prompt, would silently strand the instruction.
     #[test]
     fn the_orient_step_names_the_heading_this_emits() {
         assert!(header("o/r").contains(HEADING));
-        assert!(include_str!("prompts/AGENTS.md").contains(HEADING));
+        assert!(include_str!("prompts/developer-workflow.md").contains(HEADING));
     }
 
     #[tokio::test]
