@@ -160,9 +160,17 @@ in
       };
       diskSize = lib.mkOption {
         type = lib.types.ints.positive;
-        default = 20480;
-        description = "VM root disk size in megabytes";
-        example = 40960;
+        default = 40960;
+        description = ''
+          VM root disk size in megabytes.
+
+          The store holds a devShell closure per warmed checkout plus room
+          to build. At 20 GiB the live set reached 16 GiB with two
+          checkouts warmed, leaving too little for `nix flake check` — it
+          failed with "lack of free disk space" while auto-GC thrashed,
+          which surfaced as tool timeouts rather than as a disk error.
+        '';
+        example = 81920;
       };
     };
 

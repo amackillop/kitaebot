@@ -140,6 +140,27 @@ vm-logs:
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost \
         journalctl --output cat -f _SYSTEMD_UNIT=kitaebot.service + _SYSTEMD_UNIT=tinyproxy.service + _TRANSPORT=kernel
 
+# Back up durable workspace state (spec 05) to backups/ on the host
+vm-backup *flags: (vm-run flags)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p backups
+    OUT="backups/kitaebot-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost 'bash -s' \
+        < vm/backup.sh > "$OUT"
+    echo "wrote $OUT ($(du -h "$OUT" | cut -f1))"
+
+# Restore durable workspace state from a vm-backup artifact
+vm-restore file *flags: (vm-run flags)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f "{{file}}" || { echo "no such backup: {{file}}" >&2; exit 1; }
+    scp -i ~/.ssh/id_ed25519 -P 2222 {{SSH_OPTS}} "{{file}}" \
+        root@localhost:/tmp/kitaebot-restore.tar.gz
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost 'bash -s' \
+        < vm/restore.sh
+    echo "restored from {{file}}"
+
 # Dump the last N log lines and exit (non-interactive; for scripts and tools)
 vm-logs-dump lines="200":
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost \

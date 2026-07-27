@@ -25,8 +25,7 @@ Resolved via fallback chain:
 ├── SOUL.md                  # Agent personality (Nix-provisioned)
 ├── AGENTS.md                # Agent instructions (Nix-provisioned)
 ├── USER.md                  # User profile (Nix-provisioned, optional)
-├── HEARTBEAT.md             # Periodic task definitions (Nix-provisioned)
-├── HISTORY.md               # Heartbeat execution log
+├── HISTORY.md               # Duty execution log (spec 24)
 │
 ├── sessions/                # Flat-engine session storage
 │   └── <name>.json          # One file per session
@@ -43,6 +42,21 @@ Resolved via fallback chain:
 │
 └── projects/                # User's working area
 ```
+
+### Durable and derived state
+
+Backup and restore ([spec 09](09-vm.md)) turns on this split:
+
+| Durable | Derived |
+|---------|---------|
+| `state/` — the databases, `state/lcm/payloads/`, the JSON cursors | `projects/`, `reviews/`, `.diffs/` — re-cloned or regenerated |
+| `memory/` | build caches (`.cargo`, `.npm`, `.cache`, `.local`) |
+| `HISTORY.md` | Nix-provisioned symlinks (`SOUL.md`, `AGENTS.md`, `USER.md`, `config.toml`) |
+
+Durable state measured ~10 MB against ~6 GB of derived, which is what
+makes restoring onto a fresh machine cheap. `state/lcm/payloads/` is the
+easy one to miss: `large_files` rows reference those blobs, so a backup
+without them leaves `lcm_grep` with nothing to search.
 
 ### Initialization
 
