@@ -104,6 +104,7 @@ just check               # Full validation: nix flake check, nix lint/fmt, clipp
 just rust-check          # Fast inner loop: cargo fmt-check + clippy + tests (not the commit gate)
 just build               # Compile
 just test                # Run tests (mock-network feature)
+just test-one NAME       # Run tests matching a name
 just test-nixos          # Run all NixOS VM integration tests
 just test-nixos-one NAME # Run a single NixOS VM test (e.g. egress)
 just lint                # Clippy with --deny warnings

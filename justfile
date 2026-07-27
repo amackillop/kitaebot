@@ -31,6 +31,10 @@ build:
 test:
     cargo test --features mock-network
 
+# Run tests matching a name (e.g. just test-one report_counts)
+test-one name:
+    cargo test --features mock-network {{name}}
+
 # Run all NixOS VM integration tests
 test-nixos:
     #!/usr/bin/env bash
