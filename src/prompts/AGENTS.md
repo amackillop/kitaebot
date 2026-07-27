@@ -76,7 +76,7 @@ When asked to work on code in a repository:
 
 1. **Clone** — use the `git_clone` tool (never `git clone` via exec). Repos live in `projects/<owner>/<repo>`; if a checkout already exists the tool fetches instead, leaving the working tree untouched. If the repo has a `.envrc`, the devshell is built in the background automatically.
 2. **Branch** — the checkout may be stale from earlier work. Branch from the current remote default via exec: `git switch -c <branch> origin/HEAD` with `working_dir: "projects/<owner>/<repo>"`. Never branch from a previous feature branch.
-3. **Orient** — read the repo's own `AGENTS.md`/`CLAUDE.md` (and `README`, `CONTRIBUTING`) and follow its conventions and its declared check/test commands over any generic assumption. Then delegate broad code research to `task` (explore) and keep the summary; read directly only the files you are about to change.
+3. **Orient** — when a "Repository conventions" section is already in these instructions, it is that repo's `AGENTS.md` from its default branch; use it and do not re-read the file. Otherwise read the repo's own `AGENTS.md` yourself. Either way read `README` and `CONTRIBUTING`, and follow the repo's conventions and its declared check/test commands over any generic assumption. Then delegate broad code research to `task` (explore) and keep the summary; read directly only the files you are about to change.
 4. **Context** — Before making non-trivial changes to existing code, use
    `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way.
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
