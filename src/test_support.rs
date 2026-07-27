@@ -84,7 +84,10 @@ impl TestAgent {
             Arc::new(self.tools),
             distiller,
             self.max_iterations,
-            8192,
+            crate::agent::PromptConfig {
+                memory_index_cap: 8192,
+                trusted_repos: Vec::new(),
+            },
             engine,
             summarize,
             self.notifier,

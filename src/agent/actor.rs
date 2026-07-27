@@ -22,6 +22,7 @@ use crate::usage::{self, TurnRecord, UsageLedger};
 use crate::workspace::Workspace;
 use tokio::sync::mpsc;
 
+use super::PromptConfig;
 use super::envelope::{Envelope, InputEnvelope};
 
 /// The actor that processes envelopes sequentially.
@@ -35,7 +36,7 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     tools: Arc<Tools>,
     distiller: Arc<Distiller>,
     max_iterations: usize,
-    memory_index_cap: usize,
+    prompt: PromptConfig,
     engine: E,
     summarize: SummarizeFn,
     notifier: Option<Arc<Notifier>>,
@@ -55,7 +56,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         tools: Arc<Tools>,
         distiller: Arc<Distiller>,
         max_iterations: usize,
-        memory_index_cap: usize,
+        prompt: PromptConfig,
         engine: E,
         summarize: SummarizeFn,
         notifier: Option<Arc<Notifier>>,
@@ -70,7 +71,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             tools,
             distiller,
             max_iterations,
-            memory_index_cap,
+            prompt,
             engine,
             summarize,
             notifier,
@@ -184,7 +185,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             &*self.provider,
             &self.tools,
             self.max_iterations,
-            self.memory_index_cap,
+            &self.prompt,
             self.review_ledger.is_some(),
             super::role_segment(&envelope.source),
             &crate::tools::ToolCtx {

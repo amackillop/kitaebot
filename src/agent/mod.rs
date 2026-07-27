@@ -78,6 +78,15 @@ fn policy_halt_msg(reasons: &[String]) -> String {
     msg
 }
 
+/// What the root system prompt needs beyond the cached static files:
+/// the memory index cap (spec 21) and the repos whose own `AGENTS.md`
+/// may be injected (spec 06). Both are per-turn assembly inputs, so
+/// they travel together rather than as loose arguments.
+pub(crate) struct PromptConfig {
+    pub memory_index_cap: usize,
+    pub trusted_repos: Vec<String>,
+}
+
 /// Role segment for a dispatch, if the role it declares carries one
 /// (spec 06). Keyed on the dispatch rather than the session: a session
 /// is where history accumulates, a role is a property of the turn.
@@ -96,10 +105,12 @@ pub(crate) fn role_segment(source: &ChannelSource) -> Option<&'static str> {
 ///
 /// Shared by all root channels (telegram, socket, duties). Prepends
 /// the memory index (spec 21) to the cached system prompt, read fresh so
-/// runtime writes take effect on the next turn, and the review-gates
-/// segment (spec 23) when the pipeline is enabled, and the role
-/// segment (spec 06) when the dispatch carries one. Sub-agents call
-/// [`run_turn_metered`] directly and are excluded by design.
+/// runtime writes take effect on the next turn, then appends the
+/// review-gates segment (spec 23) when the pipeline is enabled, the
+/// role segment (spec 06) when the dispatch carries one, and the
+/// worked repo's conventions (spec 06) when the session names a
+/// trusted clone. Sub-agents call [`run_turn_metered`] directly and are
+/// excluded by design.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_message_metered(
     engine: &mut impl ContextEngine,
@@ -109,16 +120,25 @@ pub(crate) async fn process_message_metered(
     provider: &impl Provider,
     tools: &Tools,
     max_iterations: usize,
-    memory_index_cap: usize,
+    prompt: &PromptConfig,
     review_gates: bool,
     role_segment: Option<&str>,
     ctx: &ToolCtx,
 ) -> Result<(TurnOutput, TurnUsage), Error> {
     let mut system_prompt =
-        match crate::memory::index_segment(&workspace.memory_dir(), memory_index_cap) {
+        match crate::memory::index_segment(&workspace.memory_dir(), prompt.memory_index_cap) {
             Some(index) => format!("{}\n{index}", workspace.system_prompt()),
             None => workspace.system_prompt().to_string(),
         };
+    if let Some(conventions) = crate::conventions::segment(
+        workspace.path(),
+        engine.active_session(),
+        &prompt.trusted_repos,
+    )
+    .await
+    {
+        system_prompt.push_str(&conventions);
+    }
     if review_gates {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(crate::review::GATES_SEGMENT);
@@ -1269,7 +1289,10 @@ mod tests {
             &*provider,
             &tools,
             MAX_ITER,
-            8192,
+            &PromptConfig {
+                memory_index_cap: 8192,
+                trusted_repos: Vec::new(),
+            },
             false,
             None,
             &ToolCtx::default(),

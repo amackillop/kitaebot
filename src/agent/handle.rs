@@ -20,6 +20,7 @@ use crate::tools::Tools;
 use crate::usage::UsageLedger;
 use crate::workspace::Workspace;
 
+use super::PromptConfig;
 use super::actor::Agent;
 use super::envelope::{ChannelSource, Envelope, InputEnvelope};
 
@@ -44,7 +45,7 @@ impl AgentHandle {
         tools: Arc<Tools>,
         distiller: Arc<Distiller>,
         max_iterations: usize,
-        memory_index_cap: usize,
+        prompt: PromptConfig,
         engine: E,
         summarize: SummarizeFn,
         notifier: Option<Arc<Notifier>>,
@@ -60,7 +61,7 @@ impl AgentHandle {
             tools,
             distiller,
             max_iterations,
-            memory_index_cap,
+            prompt,
             engine,
             summarize,
             notifier,

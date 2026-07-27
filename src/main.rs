@@ -4,6 +4,7 @@ mod channel;
 mod clients;
 mod commands;
 mod config;
+mod conventions;
 mod daemon;
 mod dispatch;
 mod duty;
@@ -288,7 +289,10 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         Arc::new(tools),
         distiller,
         config.agent.max_iterations,
-        config.memory.index_cap_bytes,
+        agent::PromptConfig {
+            memory_index_cap: config.memory.index_cap_bytes,
+            trusted_repos: config.git.trusted_repos.clone(),
+        },
         engine,
         summarize,
         notifier,
