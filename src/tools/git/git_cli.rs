@@ -81,7 +81,7 @@ impl GitCli {
             args: args.iter().map(ToString::to_string).collect(),
             cwd: cwd.to_path_buf(),
             env,
-            timeout_secs: None,
+            timeout_secs: hook_timeout(args),
             stdin: None,
         }
     }
@@ -144,6 +144,27 @@ impl GitCli {
     }
 }
 
+/// Allowance for git subcommands that run repository hooks.
+///
+/// A hook is arbitrary repo-defined work, not a bounded git operation:
+/// this project's own `pre-commit` runs `just check`, a full
+/// `nix flake check`. The 120s subprocess default killed every commit
+/// the bot attempted against its own repo. Matches the allowance
+/// `direnv` gets for evaluating a flake, which is the same kind of
+/// wait. `exec_git` already injects the devshell env so hooks can find
+/// `just`; this is the other half of letting them finish.
+const HOOK_TIMEOUT_SECS: u64 = 900;
+
+/// The timeout for `args`, if its subcommand runs hooks.
+///
+/// A property of the subcommand rather than the caller, so no call site
+/// has to remember. `commit` and `push` are the two the git tools
+/// issue that trigger hooks; everything else is bounded by network or
+/// local IO and keeps the default.
+fn hook_timeout(args: &[&str]) -> Option<u64> {
+    matches!(args.first(), Some(&"commit" | &"push")).then_some(HOOK_TIMEOUT_SECS)
+}
+
 /// Extract the SHA from `git ls-remote <url> HEAD` output
 /// (`"<sha>\tHEAD"`).
 fn parse_ls_remote_head(stdout: &str) -> Option<String> {
@@ -198,8 +219,30 @@ impl AskPass {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_ls_remote_head;
+    use super::{HOOK_TIMEOUT_SECS, hook_timeout, parse_ls_remote_head};
     use crate::tools::git::test_helpers::stub_git_cli_with_repo;
+
+    /// A commit waits for the repo's own gate; a read does not.
+    #[test]
+    fn only_hook_running_subcommands_get_the_long_timeout() {
+        assert_eq!(
+            hook_timeout(&["commit", "-m", "x"]),
+            Some(HOOK_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            hook_timeout(&["push", "origin", "b"]),
+            Some(HOOK_TIMEOUT_SECS)
+        );
+        for read in [
+            vec!["log", "--oneline"],
+            vec!["diff", "--cached"],
+            vec!["fetch", "origin"],
+            vec!["ls-remote", "url", "HEAD"],
+        ] {
+            assert_eq!(hook_timeout(&read), None, "{read:?}");
+        }
+        assert_eq!(hook_timeout(&[]), None);
+    }
 
     #[test]
     fn parse_ls_remote_head_extracts_sha() {
