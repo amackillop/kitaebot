@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::agent::AgentHandle;
 use crate::agent::envelope::ChannelSource;
@@ -58,6 +58,26 @@ fn new_commits_decision(cursor: Option<&str>, head: &str) -> NewCommits {
         None => NewCommits::Prime,
         Some(c) if c == head => NewCommits::Closed,
         Some(_) => NewCommits::Open,
+    }
+}
+
+/// Cap on a history entry's outcome text. The log is append-only and
+/// backed up with the rest of durable state, so a duty that replies at
+/// length should not grow it without bound.
+const HISTORY_ENTRY_MAX: usize = 500;
+
+/// Record a duty's outcome in the history log.
+///
+/// The journal has this too, but it rotates. This is the durable record
+/// of what the bot did while nobody was watching, which is the whole
+/// point of a scheduler that runs unattended.
+fn record(history_path: &std::path::Path, name: &str, outcome: &str) {
+    let entry = format!(
+        "duty {name}: {}",
+        crate::tools::truncate_output(outcome, HISTORY_ENTRY_MAX)
+    );
+    if let Err(e) = log_history(history_path, &entry) {
+        warn!(duty = %name, "failed to write history: {e}");
     }
 }
 
@@ -107,6 +127,7 @@ fn next_wake(duties: &[Duty], state: &DutyState, now: u64) -> u64 {
 pub async fn run_loop(
     duties: Vec<Duty>,
     state_path: PathBuf,
+    history_path: PathBuf,
     handle: &AgentHandle,
     git: Option<GitCli>,
 ) -> ! {
@@ -135,6 +156,7 @@ pub async fn run_loop(
                 {
                     Ok(reply) => {
                         info!(duty = %duty.name, "Duty run: {}", reply.content);
+                        record(&history_path, &duty.name, &reply.content);
                         // Advance only on success: a failed turn
                         // re-reviews the same delta next period.
                         if let Some(head) = new_cursor {
@@ -143,6 +165,7 @@ pub async fn run_loop(
                     }
                     Err(e) => {
                         error!(duty = %duty.name, "Duty error (will retry next period): {e}");
+                        record(&history_path, &duty.name, &format!("failed: {e}"));
                     }
                 }
             }

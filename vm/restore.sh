@@ -14,14 +14,11 @@ systemctl stop kitaebot
 
 # Replace rather than merge: a merged state/ could keep payload blobs
 # whose large_files rows are gone, or cursors newer than the databases.
-rm -rf "$W/state" "$W/memory" "$W/HISTORY.md"
+rm -rf "$W/state" "$W/memory"
 tar -C "$W" -xzf "$ARCHIVE"
 rm -f "$ARCHIVE"
 
 chown -R kitaebot:kitaebot "$W/state" "$W/memory"
-if [ -e "$W/HISTORY.md" ]; then
-    chown kitaebot:kitaebot "$W/HISTORY.md"
-fi
 
 systemctl start kitaebot
 systemctl is-active kitaebot

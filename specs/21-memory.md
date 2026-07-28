@@ -38,9 +38,10 @@ Today `memory/` also holds tenants that are not memory: the context
 engine's store (`lcm.db`, payloads, `active_session`), the channels'
 poll state (`github_poll_state.json`, `linear_poll_state.json`), and
 the heartbeat's `HISTORY.md` log. Phase 1 evicts them — machine-owned
-runtime state (engine store, poll state) moves to `state/`, and
-`HISTORY.md` moves next to `HEARTBEAT.md` under heartbeat ownership
-([spec 07](07-heartbeat.md)). No migration: deployed state starts
+runtime state (engine store, poll state) moves to `state/`. `HISTORY.md`
+was to move next to `HEARTBEAT.md` under heartbeat ownership; the duty
+scheduler retired that owner ([spec 24](24-self-directed-work.md)) and
+the log went to `state/` with the rest of machine-owned state. No migration: deployed state starts
 fresh at the new paths. A directory named `memory` that mostly
 contains a database is a lie waiting to confuse someone.
 

@@ -61,6 +61,19 @@ impl Workspace {
         mk(&path.join("projects"))?;
         mk(&path.join("state"))?;
 
+        // HISTORY.md was at the root while it belonged to the heartbeat
+        // (spec 21). The heartbeat is gone and the log is machine-owned,
+        // so it lives under state/ now; move an existing one rather than
+        // silently starting a second.
+        let legacy_history = path.join("HISTORY.md");
+        let history = path.join("state/HISTORY.md");
+        if legacy_history.is_file()
+            && !history.exists()
+            && let Err(e) = fs::rename(&legacy_history, &history)
+        {
+            tracing::warn!("failed to move HISTORY.md into state/: {e}");
+        }
+
         let system_prompt = read_system_prompt(&path);
         Ok(Self {
             root: path,
@@ -91,7 +104,7 @@ impl Workspace {
 
     /// Path to the duty history log.
     pub fn history_path(&self) -> PathBuf {
-        self.root.join("HISTORY.md")
+        self.state_dir().join("HISTORY.md")
     }
 
     /// Path to the GitHub poll state file.
@@ -163,6 +176,38 @@ fn default_data_dir() -> Result<PathBuf, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The log used to live at the root under heartbeat ownership. An
+    /// existing one moves rather than being abandoned beside a new one.
+    #[test]
+    fn init_moves_a_legacy_history_into_state() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("HISTORY.md"), "[t] old entry\n").unwrap();
+
+        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+
+        assert_eq!(ws.history_path(), dir.path().join("state/HISTORY.md"));
+        assert_eq!(
+            fs::read_to_string(ws.history_path()).unwrap(),
+            "[t] old entry\n"
+        );
+        assert!(!dir.path().join("HISTORY.md").exists());
+    }
+
+    /// A log already in place wins; the legacy file is left alone rather
+    /// than clobbering newer history.
+    #[test]
+    fn init_keeps_the_current_history_over_a_legacy_one() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("state")).unwrap();
+        fs::write(dir.path().join("HISTORY.md"), "old\n").unwrap();
+        fs::write(dir.path().join("state/HISTORY.md"), "current\n").unwrap();
+
+        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+
+        assert_eq!(fs::read_to_string(ws.history_path()).unwrap(), "current\n");
+        assert!(dir.path().join("HISTORY.md").exists());
+    }
 
     #[test]
     fn init_creates_structure() {

@@ -25,7 +25,6 @@ Resolved via fallback chain:
 ├── SOUL.md                  # Agent personality (Nix-provisioned)
 ├── AGENTS.md                # Agent instructions (Nix-provisioned)
 ├── USER.md                  # User profile (Nix-provisioned, optional)
-├── HISTORY.md               # Duty execution log (spec 24)
 │
 ├── sessions/                # Flat-engine session storage
 │   └── <name>.json          # One file per session
@@ -38,7 +37,8 @@ Resolved via fallback chain:
 │   ├── active_session       # Last active session name
 │   ├── lcm.db               # LCM engine store (+ lcm/ payloads)
 │   ├── github_poll_state.json  # GitHub channel poll cursor
-│   └── linear_poll_state.json  # Linear channel poll cursor
+│   ├── linear_poll_state.json  # Linear channel poll cursor
+│   └── HISTORY.md           # Duty execution log (spec 24)
 │
 └── projects/                # User's working area
 ```
@@ -49,9 +49,9 @@ Backup and restore ([spec 09](09-vm.md)) turns on this split:
 
 | Durable | Derived |
 |---------|---------|
-| `state/` — the databases, `state/lcm/payloads/`, the JSON cursors | `projects/`, `reviews/`, `.diffs/` — re-cloned or regenerated |
+| `state/` — the databases, `state/lcm/payloads/`, the JSON cursors, `HISTORY.md` | `projects/`, `reviews/`, `.diffs/` — re-cloned or regenerated |
 | `memory/` | build caches (`.cargo`, `.npm`, `.cache`, `.local`) |
-| `HISTORY.md` | Nix-provisioned symlinks (`SOUL.md`, `AGENTS.md`, `USER.md`, `config.toml`) |
+| | Nix-provisioned symlinks (`SOUL.md`, `AGENTS.md`, `USER.md`, `config.toml`) |
 
 Durable state measured ~10 MB against ~6 GB of derived, which is what
 makes restoring onto a fresh machine cheap. `state/lcm/payloads/` is the
@@ -64,7 +64,7 @@ without them leaves `lcm_grep` with nothing to search.
 creates the directory tree: workspace root, `sessions/`, `memory/`,
 `projects/`, `state/`.
 
-Prompt files (`SOUL.md`, `AGENTS.md`, `USER.md`, `HEARTBEAT.md`) and
+Prompt files (`SOUL.md`, `AGENTS.md`, `USER.md`) and
 `config.toml` are **not** created by the Rust binary. They are provisioned
 externally by the NixOS module via `systemd.tmpfiles.rules` as symlinks into
 the Nix store. This keeps content management declarative and outside the
@@ -94,8 +94,7 @@ changing them requires a rebuild and restart regardless.
 | `path()` | Workspace root |
 | `sessions_dir()` | `sessions/` |
 | `state_dir()` | `state/` |
-| `heartbeat_path()` | `HEARTBEAT.md` |
-| `history_path()` | `HISTORY.md` |
+| `history_path()` | `state/HISTORY.md` |
 | `github_poll_state_path()` | `state/github_poll_state.json` |
 | `linear_poll_state_path()` | `state/linear_poll_state.json` |
 

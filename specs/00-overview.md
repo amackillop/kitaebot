@@ -46,8 +46,8 @@ Existing solutions (nanobot, OpenClaw) are feature-rich but complex. Kitaebot pr
 │  │                                                    │  │
 │  │  sessions/          memory/         SOUL.md        │  │
 │  │  state/             └── MEMORY.md   AGENTS.md      │  │
-│  │  HISTORY.md                         HEARTBEAT.md   │  │
-│  │                                     config.toml    │  │
+│  │  └── HISTORY.md                     USER.md        │  │
+│  │  projects/                          config.toml    │  │
 │  └────────────────────────────────────────────────────┘  │
 │                                                          │
 │  ┌──────────────┐                                        │
@@ -126,12 +126,11 @@ All channels follow the same pattern: construct a message, send it through `Agen
 2. New issues and trusted comments sent through `AgentHandle` with `ChannelSource::Linear { issue }`
 3. Agent replies (plan, revision, or completion note) are posted back as issue comments
 
-### Heartbeat
+### Duties
 
-1. Internal timer fires (configurable interval, default 30 minutes)
-2. Sends `/heartbeat` through `AgentHandle` — processed as a slash command
-3. Command handler reads HEARTBEAT.md, builds prompt, runs agent turn
-4. Result appended to `HISTORY.md`
+1. The scheduler wakes a duty that is due ([spec 24](24-self-directed-work.md))
+2. Its input is sent through `AgentHandle` with `ChannelSource::Duty`, on the duty's session
+3. The outcome is appended to `state/HISTORY.md` — durable, unlike the journal, which is where an unattended run would otherwise only be visible
 
 ## Design Principles
 

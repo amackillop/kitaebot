@@ -19,7 +19,7 @@ for db in "$W"/state/*.db; do
     sqlite3 "$db" "VACUUM INTO '$S/state/$(basename "$db")'"
 done
 
-for f in "$W"/state/*.json "$W"/state/active_session; do
+for f in "$W"/state/*.json "$W"/state/active_session "$W"/state/HISTORY.md; do
     [ -e "$f" ] || continue
     cp -a "$f" "$S/state/"
 done
@@ -31,8 +31,5 @@ if [ -d "$W/state/lcm" ]; then
 fi
 
 cp -a "$W/memory" "$S/"
-if [ -e "$W/HISTORY.md" ]; then
-    cp -a "$W/HISTORY.md" "$S/"
-fi
 
 tar -C "$S" -czf - .
