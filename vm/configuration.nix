@@ -148,27 +148,32 @@ in
     vm = {
       memorySize = lib.mkOption {
         type = lib.types.ints.positive;
-        default = 4096;
-        description = "VM memory in megabytes";
-        example = 8192;
+        default = 8192;
+        description = ''
+          VM memory in megabytes. Scale it with `cores`: peak build
+          memory tracks how many compiler processes run at once.
+        '';
+        example = 16384;
       };
       cores = lib.mkOption {
         type = lib.types.ints.positive;
-        default = 4;
-        description = "Number of virtual CPU cores";
-        example = 8;
+        default = 8;
+        description = ''
+          Number of virtual CPU cores. Size for the heaviest build a
+          worked repository runs rather than for the daemon: commit
+          gates run that repository's own checks, and those have to
+          finish inside the git tool's timeout.
+        '';
+        example = 16;
       };
       diskSize = lib.mkOption {
         type = lib.types.ints.positive;
         default = 40960;
         description = ''
-          VM root disk size in megabytes.
-
-          The store holds a devShell closure per warmed checkout plus room
-          to build. At 20 GiB the live set reached 16 GiB with two
-          checkouts warmed, leaving too little for `nix flake check` — it
-          failed with "lack of free disk space" while auto-GC thrashed,
-          which surfaced as tool timeouts rather than as a disk error.
+          VM root disk size in megabytes. The store holds a devShell
+          closure per warmed checkout plus room to build; exhausting it
+          surfaces as build failures and tool timeouts rather than as
+          anything naming the disk.
         '';
         example = 81920;
       };
@@ -481,6 +486,9 @@ in
       # runs `nix develop` to build a devshell. Put the writable store
       # on disk instead so it has the full diskSize to work with.
       writableStoreUseTmpfs = false;
+      # Without this, qemu's footprint is a high-water mark: pages fault
+      # in on demand and nothing ever returns them.
+      qemu.options = [ "-device virtio-balloon,free-page-reporting=on" ];
       # Port forwarding for SSH (host 2222 -> guest 22)
       forwardPorts = [
         {

@@ -43,12 +43,14 @@ test-nixos:
     echo "NixOS tests: $tests"
     for name in $(echo "$tests" | jq -r '.[]'); do
         echo "── $name ──"
-        nix build ".#nixosTests.x86_64-linux.$name" --print-build-logs
+        nix build ".#nixosTests.x86_64-linux.$name" --print-build-logs --no-link
     done
 
 # Run a single NixOS VM test by name (e.g. just test-nixos-one egress)
+# --no-link: a test's output is its pass/fail, and `nix build` would
+# otherwise overwrite ./result, which vm-run executes the VM from.
 test-nixos-one name:
-    nix build .#nixosTests.x86_64-linux.{{name}} --print-build-logs
+    nix build .#nixosTests.x86_64-linux.{{name}} --print-build-logs --no-link
 
 # Lint with clippy (both real and test builds)
 lint:
