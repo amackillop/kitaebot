@@ -112,15 +112,32 @@ vm-run *flags:
         pkill -f 'qemu-system.*-name kitaebot' 2>/dev/null && sleep 1 || true
     fi
     if $FRESH; then
+        # Refuse to delete the image while anything still holds port 2222:
+        # a VM outliving the pkill keeps running on the deleted inode, and
+        # its writes are lost. pkill only reaches processes in this
+        # shell's namespace, so a VM started elsewhere survives it.
+        if ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=1 {{SSH_OPTS}} root@localhost exit 2>/dev/null; then
+            echo "error: a VM still answers on port 2222; refusing to delete its disk" >&2
+            exit 1
+        fi
         rm -f kitaebot.qcow2
     fi
     echo "Starting VM in background..."
     BOOT_START=$SECONDS
     nohup ./result/bin/run-kitaebot-vm > /dev/null 2>&1 &
     echo "Waiting for SSH to be ready..."
-    for i in {1..30}; do
-        ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=1 {{SSH_OPTS}} root@localhost exit 2>/dev/null && break || sleep 1
+    READY=false
+    for _ in $(seq 1 60); do
+        if ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=1 {{SSH_OPTS}} root@localhost exit 2>/dev/null; then
+            READY=true
+            break
+        fi
+        sleep 1
     done
+    if ! $READY; then
+        echo "error: VM did not answer on port 2222 within 60s" >&2
+        exit 1
+    fi
     echo "VM ready in $((SECONDS - BOOT_START))s"
 
 # Stop the VM
