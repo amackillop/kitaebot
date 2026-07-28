@@ -9,6 +9,8 @@
 #   - ownership is derived from the archive, not a fixed list: an archive
 #     predating HISTORY.md's move into state/ carries it at the root, and
 #     it must still come back writable
+#   - the workspace directory keeps its own owner and mode, which an
+#     archive containing "./" would otherwise overwrite
 #
 # Not covered: that VACUUM INTO captures WAL content a plain copy would
 # miss. Forcing uncheckpointed data to survive the writer exiting is not
@@ -75,11 +77,11 @@ pkgs.testers.nixosTest {
         machine.succeed("bash ${./backup.sh} > /tmp/backup.tar.gz")
         listing = machine.succeed("tar tzf /tmp/backup.tar.gz")
         for want in [
-            "./state/usage.db",
-            "./state/lcm/payloads/file_keep",
-            "./state/github_poll_state.json",
-            "./state/HISTORY.md",
-            "./memory/MEMORY.md",
+            "state/usage.db",
+            "state/lcm/payloads/file_keep",
+            "state/github_poll_state.json",
+            "state/HISTORY.md",
+            "memory/MEMORY.md",
         ]:
             assert want in listing, f"backup omits {want}:\n{listing}"
         assert "projects" not in listing, f"backup swept in derived state:\n{listing}"
@@ -101,6 +103,17 @@ pkgs.testers.nixosTest {
             owner = machine.succeed(f"stat -c %U {W}/{path}").strip()
             assert owner == "kitaebot", f"{path} owned by {owner}"
 
+    with subtest("the workspace directory itself survives extraction"):
+        # An archive containing "./" stamps that entry's owner and mode
+        # onto $W. root:root 0700 there locks the daemon out of its own
+        # WorkingDirectory, which fails as CHDIR and says nothing about
+        # ownership. This escaped the first version of this test.
+        got = machine.succeed(f"stat -c '%U:%G %a' {W}").strip()
+        assert got == "kitaebot:kitaebot 750", f"workspace root is {got}"
+        # state/ is 0750 per tmpfiles; archiving root's umask widened it.
+        got = machine.succeed(f"stat -c %a {W}/state").strip()
+        assert got == "750", f"state/ came back {got}"
+
     with subtest("ownership follows the archive, not a fixed list"):
         # An archive from before HISTORY.md moved into state/ carries it
         # at the root. Chowning a hardcoded state/+memory/ leaves it
@@ -114,6 +127,9 @@ pkgs.testers.nixosTest {
 
         owner = machine.succeed(f"stat -c %U {W}/HISTORY.md").strip()
         assert owner == "kitaebot", f"root-level HISTORY.md left owned by {owner}"
+        # Same check after a legacy archive, which is where "./" comes from.
+        got = machine.succeed(f"stat -c '%U:%G %a' {W}").strip()
+        assert got == "kitaebot:kitaebot 750", f"workspace root is {got}"
 
     with subtest("the daemon is running again afterwards"):
         machine.succeed("systemctl is-active kitaebot")

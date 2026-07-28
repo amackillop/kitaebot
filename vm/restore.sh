@@ -26,5 +26,12 @@ tar -tzf "$ARCHIVE" | sed 's|^\./||' | cut -d/ -f1 | grep -v '^$' | sort -u |
     done
 rm -f "$ARCHIVE"
 
+# Archives predating the fix above contain "./", whose owner and mode
+# land on $W itself. root:root 0700 there locks the daemon out of its own
+# WorkingDirectory, and the failure reads as a confusing CHDIR error
+# rather than anything about ownership. Match what tmpfiles declares.
+chown kitaebot:kitaebot "$W"
+chmod 0750 "$W"
+
 systemctl start kitaebot
 systemctl is-active kitaebot

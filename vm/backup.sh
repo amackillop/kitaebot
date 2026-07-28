@@ -9,6 +9,9 @@ W=/var/lib/kitaebot
 S=$(mktemp -d)
 trap 'rm -rf "$S"' EXIT
 mkdir -p "$S/state"
+# Carry the real mode, not root's umask: tmpfiles declares state/ 0750
+# and a plain mkdir would archive 0755, widening it on every restore.
+chmod --reference="$W/state" "$S/state"
 
 # VACUUM INTO rather than cp: these are WAL databases, so copying the
 # main file without the -wal beside it silently drops everything not yet
@@ -32,4 +35,7 @@ fi
 
 cp -a "$W/memory" "$S/"
 
-tar -C "$S" -czf - .
+# Name the entries rather than ".": an archive containing "./" stamps
+# that entry's owner and mode onto the extraction target, and this one
+# would carry the mktemp -d directory's root:root 0700.
+tar -C "$S" -czf - state memory
