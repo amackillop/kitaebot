@@ -16,9 +16,15 @@ systemctl stop kitaebot
 # whose large_files rows are gone, or cursors newer than the databases.
 rm -rf "$W/state" "$W/memory"
 tar -C "$W" -xzf "$ARCHIVE"
-rm -f "$ARCHIVE"
 
-chown -R kitaebot:kitaebot "$W/state" "$W/memory"
+# Own whatever the archive placed, rather than a hardcoded list that has
+# to be kept in step with backup.sh. An older archive carries HISTORY.md
+# at its root, from before that log moved under state/.
+tar -tzf "$ARCHIVE" | sed 's|^\./||' | cut -d/ -f1 | grep -v '^$' | sort -u |
+    while read -r top; do
+        chown -R kitaebot:kitaebot "$W/$top"
+    done
+rm -f "$ARCHIVE"
 
 systemctl start kitaebot
 systemctl is-active kitaebot
