@@ -94,6 +94,7 @@
         # `nix flake check` stays fast. CI runs these in a dedicated
         # job with KVM access. Add new VM tests here.
         nixosTests = nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          backup = import ./vm/test-backup.nix { inherit pkgs self; };
           egress = import ./vm/test-egress.nix { inherit pkgs self; };
         };
 
