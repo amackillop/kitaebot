@@ -18,6 +18,7 @@ pub(crate) mod mcp;
 mod mock;
 #[cfg(not(feature = "mock-network"))]
 pub(crate) mod network;
+pub(crate) mod warm;
 
 pub mod path;
 
@@ -47,6 +48,7 @@ use crate::types::{ToolCall, ToolDefinition};
 use crate::workspace::Workspace;
 
 pub use direnv::DirenvCache;
+pub use warm::Warmer;
 
 /// Environment variables forwarded to child processes.
 ///

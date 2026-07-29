@@ -1,15 +1,20 @@
 //! `git_commit` tool — commit staged changes with co-author trailers.
 
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tracing::warn;
 
 use super::git_cli::GitCli;
 use super::{Tool, ToolCtx};
+use crate::activity::{Activity, emit};
 use crate::error::ToolError;
 use crate::tools::cli_runner::SubprocessCall;
+use crate::tools::warm::WarmOutcome;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -40,15 +45,18 @@ impl Tool for Commit {
     fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: ToolCtx,
+        ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-            self.run(&args.repo_dir, &args.message).await
+            self.run(&args.repo_dir, &args.message, &ctx).await
         })
     }
 }
+
+/// Cadence of `Waiting` activity while a warm holds up the commit.
+const WAIT_NOTE_PERIOD: Duration = Duration::from_mins(1);
 
 impl Commit {
     pub fn new(cli: GitCli, co_authors: Vec<String>) -> Self {
@@ -61,9 +69,36 @@ impl Commit {
         Ok(self.cli.prepare_git(&["commit", "-m", &full_message], &cwd))
     }
 
-    async fn run(&self, repo_dir: &str, message: &str) -> Result<String, ToolError> {
+    async fn run(&self, repo_dir: &str, message: &str, ctx: &ToolCtx) -> Result<String, ToolError> {
+        let cwd = self.cli.resolve_repo_dir(repo_dir)?;
+        self.await_warm(&cwd, ctx).await;
         let call = self.prepare(repo_dir, message)?;
         self.cli.exec_git(call, false).await?.format()
+    }
+
+    /// Wait out an in-flight build warm before running the hook
+    /// (spec 03: only this tool waits on readiness). Absence and
+    /// failure proceed — the hook then fails honestly.
+    async fn await_warm(&self, cwd: &Path, ctx: &ToolCtx) {
+        let wait = self.cli.warmer().ready(cwd);
+        tokio::pin!(wait);
+        // First tick is delayed so an instant answer emits nothing.
+        let start = tokio::time::Instant::now() + WAIT_NOTE_PERIOD;
+        let mut ticker = tokio::time::interval_at(start, WAIT_NOTE_PERIOD);
+        loop {
+            tokio::select! {
+                outcome = &mut wait => {
+                    if outcome == Some(WarmOutcome::Failed) {
+                        warn!(dir = %cwd.display(), "build warm failed; committing anyway");
+                    }
+                    return;
+                }
+                _ = ticker.tick() => emit(ctx.activity.as_ref(), Activity::Waiting {
+                    tool: "git_commit".into(),
+                    on: "build-cache warm".into(),
+                }),
+            }
+        }
     }
 }
 
@@ -120,6 +155,36 @@ mod tests {
             msg,
             "Add feature\n\nCo-authored-by: Alice <alice@example.com>\nCo-authored-by: Bob <bob@example.com>\n"
         );
+    }
+
+    #[tokio::test]
+    async fn await_warm_returns_immediately_when_never_warmed() {
+        let (git, repo) = stub_git_cli_with_repo();
+        let cwd = git.resolve_repo_dir(&repo).unwrap();
+        let tool = Commit::new(git, vec![]);
+        // Completes without an in-flight warm to join; a hang here
+        // times out the test harness.
+        tool.await_warm(&cwd, &ToolCtx::default()).await;
+    }
+
+    #[tokio::test]
+    async fn await_warm_waits_out_an_in_flight_run() {
+        let (git, repo) = stub_git_cli_with_repo();
+        let cwd = git.resolve_repo_dir(&repo).unwrap();
+        let runner = {
+            let (w, p) = (git.warmer().clone(), cwd.clone());
+            tokio::spawn(async move { w.warm(&p, "sleep 0.3").await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let before = std::time::Instant::now();
+        Commit::new(git, vec![])
+            .await_warm(&cwd, &ToolCtx::default())
+            .await;
+        assert!(
+            before.elapsed() >= Duration::from_millis(100),
+            "commit must not run while the warm is in flight"
+        );
+        runner.await.unwrap();
     }
 
     #[test]

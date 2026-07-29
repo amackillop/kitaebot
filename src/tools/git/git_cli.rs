@@ -4,14 +4,17 @@
 //! (clone, push, commit). Auth uses a temporary `GIT_ASKPASS` script
 //! written to a private directory for the duration of one command.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tracing::{debug, warn};
 
 use crate::error::ToolError;
 use crate::secrets::Secret;
 use crate::tools::cli_runner::{self, CmdOutput, SubprocessCall};
+use crate::tools::warm::Warmer;
 use crate::tools::{DirenvCache, direnv};
 
 /// Shared context for git tools.
@@ -22,6 +25,9 @@ pub struct GitCli {
     pub(super) direnv_cache: DirenvCache,
     /// Repos (`owner/repo` or `owner/*`) whose `.envrc` may be trusted.
     pub(super) trusted_repos: Vec<String>,
+    warmer: Warmer,
+    /// Build-warm command per exact `owner/repo` (spec 03).
+    warm_commands: Arc<BTreeMap<String, String>>,
 }
 
 impl GitCli {
@@ -31,15 +37,34 @@ impl GitCli {
         direnv_cache: DirenvCache,
         trusted_repos: Vec<String>,
     ) -> Self {
+        let warmer = Warmer::new(direnv_cache.clone());
         Self {
             token,
             workspace_root: workspace_root.into(),
             direnv_cache,
             trusted_repos,
+            warmer,
+            warm_commands: Arc::default(),
         }
     }
 
-    /// Trust and warm the devShell of a prepared checkout.
+    /// Share warm state and configured commands. The runtime calls
+    /// this on every `GitCli` it builds so the tool-side and
+    /// channel-side instances see one warm map.
+    pub fn with_warm(mut self, warmer: Warmer, commands: Arc<BTreeMap<String, String>>) -> Self {
+        self.warmer = warmer;
+        self.warm_commands = commands;
+        self
+    }
+
+    /// Shared warm state, for the readiness wait in `git_commit`.
+    pub fn warmer(&self) -> &Warmer {
+        &self.warmer
+    }
+
+    /// Trust and warm the devShell of a prepared checkout, then kick
+    /// off the repo's configured build warm in the background
+    /// (spec 03: the warm never blocks the turn that triggered it).
     ///
     /// No-op without an `.envrc` or when origin is not in
     /// `trusted_repos`. Best-effort: a failed warm degrades to
@@ -48,13 +73,23 @@ impl GitCli {
         if !dir.join(".envrc").exists() {
             return;
         }
-        if !super::origin_trusted(dir, &self.trusted_repos).await {
+        let Some(nwo) = super::origin_nwo(dir).await else {
+            debug!(dir = %dir.display(), "no readable origin; skipping devshell warm");
+            return;
+        };
+        if !super::url::is_trusted_repo(&nwo, &self.trusted_repos) {
             debug!(dir = %dir.display(), "origin not in trusted_repos; skipping devshell warm");
             return;
         }
         direnv::allow(dir).await;
         if let Err(e) = self.direnv_cache.get(dir).await {
             warn!(dir = %dir.display(), error = %e, "devshell warm failed");
+            return;
+        }
+        if let Some(command) = warm_command(&self.warm_commands, &nwo) {
+            let (warmer, dir, command) =
+                (self.warmer.clone(), dir.to_path_buf(), command.to_string());
+            tokio::spawn(async move { warmer.warm(&dir, &command).await });
         }
     }
 
@@ -165,6 +200,15 @@ fn hook_timeout(args: &[&str]) -> Option<u64> {
     matches!(args.first(), Some(&"commit" | &"push")).then_some(HOOK_TIMEOUT_SECS)
 }
 
+/// The configured warm command for `nwo`, matched case-insensitively
+/// like every other repo comparison.
+fn warm_command<'a>(commands: &'a BTreeMap<String, String>, nwo: &str) -> Option<&'a str> {
+    commands
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(nwo))
+        .map(|(_, command)| command.as_str())
+}
+
 /// Extract the SHA from `git ls-remote <url> HEAD` output
 /// (`"<sha>\tHEAD"`).
 fn parse_ls_remote_head(stdout: &str) -> Option<String> {
@@ -242,6 +286,17 @@ mod tests {
             assert_eq!(hook_timeout(&read), None, "{read:?}");
         }
         assert_eq!(hook_timeout(&[]), None);
+    }
+
+    #[test]
+    fn warm_command_matches_case_insensitively() {
+        let commands: std::collections::BTreeMap<String, String> =
+            [("Owner/Repo".to_string(), "just check".to_string())].into();
+        assert_eq!(
+            super::warm_command(&commands, "owner/repo"),
+            Some("just check")
+        );
+        assert_eq!(super::warm_command(&commands, "owner/other"), None);
     }
 
     #[test]

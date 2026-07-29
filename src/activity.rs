@@ -25,6 +25,8 @@ pub enum Activity {
     ToolEnd { tool: String, error: Option<String> },
     /// A tool call is about to execute.
     ToolStart { tool: String },
+    /// A tool is waiting on background work before it can run.
+    Waiting { tool: String, on: String },
 }
 
 impl fmt::Display for Activity {
@@ -42,6 +44,7 @@ impl fmt::Display for Activity {
                 error: Some(e),
             } => write!(f, "Tool failed: {tool} ({e})"),
             Self::ToolStart { tool } => write!(f, "Running tool: {tool}"),
+            Self::Waiting { tool, on } => write!(f, "{tool} waiting on {on}"),
         }
     }
 }

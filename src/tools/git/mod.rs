@@ -106,13 +106,15 @@ pub(crate) fn build(
     workspace: &Workspace,
     config: &crate::config::GitConfig,
     direnv: DirenvCache,
+    warmer: crate::tools::Warmer,
 ) -> Vec<Arc<dyn Tool>> {
     let git = GitCli::new(
         token,
         workspace.path(),
         direnv,
         config.trusted_repos.clone(),
-    );
+    )
+    .with_warm(warmer, Arc::new(config.warm_commands.clone()));
 
     vec![
         Arc::new(Commit::new(git.clone(), config.co_authors.clone())),

@@ -42,9 +42,10 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::telegram::TelegramClient;
     use crate::notify::NotifyTool;
     use crate::secrets::load_secret;
-    use crate::tools::{DirenvCache, git, github, linear, network};
+    use crate::tools::{DirenvCache, Warmer, git, github, linear, network};
 
     let direnv_cache = DirenvCache::new();
+    let warmer = Warmer::new(direnv_cache.clone());
     let mut tools = Tools::local(workspace, config, direnv_cache.clone());
 
     let telegram_token = if config.telegram.enabled {
@@ -66,6 +67,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 workspace,
                 &config.git,
                 direnv_cache.clone(),
+                warmer.clone(),
             ));
         }
         // The channel prepares review checkouts itself, even when the
@@ -77,6 +79,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 direnv_cache.clone(),
                 config.git.trusted_repos.clone(),
             )
+            .with_warm(warmer.clone(), Arc::new(config.git.warm_commands.clone()))
         });
         let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
@@ -158,7 +161,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     use crate::clients::telegram::TelegramClient;
     use crate::notify::NotifyTool;
     use crate::secrets::{Secret, load_secret};
-    use crate::tools::{DirenvCache, git, github, linear};
+    use crate::tools::{DirenvCache, Warmer, git, github, linear};
 
     let client = CompletionsClient::new(
         config.provider.api.endpoint().to_string(),
@@ -167,6 +170,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     let provider = CompletionsProvider::new(client, &config.provider);
 
     let direnv_cache = DirenvCache::new();
+    let warmer = Warmer::new(direnv_cache.clone());
     let mut tools = Tools::local(workspace, config, direnv_cache.clone());
     let (gh_cli, git_cli) = if config.git.enabled || config.github.enabled {
         let token = load_secret("github-token").unwrap_or_else(|e| {
@@ -179,6 +183,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 workspace,
                 &config.git,
                 direnv_cache.clone(),
+                warmer.clone(),
             ));
         }
         // The channel prepares review checkouts itself, even when the
@@ -190,6 +195,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 direnv_cache.clone(),
                 config.git.trusted_repos.clone(),
             )
+            .with_warm(warmer.clone(), Arc::new(config.git.warm_commands.clone()))
         });
         let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
