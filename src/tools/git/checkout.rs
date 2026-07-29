@@ -24,26 +24,44 @@ pub(crate) fn rel_path(root: &str, nwo: &str) -> Result<String, ToolError> {
     ))
 }
 
-/// Clone `url` into the workspace-relative `rel` if it is not already a
-/// git repo. Returns the absolute checkout directory.
+/// Clone `url` into the workspace-relative `rel` unless a healthy
+/// checkout already exists. Returns the absolute checkout directory.
 pub(crate) async fn ensure_cloned(
     git: &GitCli,
     url: &str,
     rel: &str,
 ) -> Result<PathBuf, ToolError> {
     let dir = git.workspace_root().join(rel);
-    if !dir.join(".git").is_dir() {
-        let parent = dir.parent().expect("rel path has parent components");
-        tokio::fs::create_dir_all(parent)
+    if dir.join(".git").is_dir() {
+        // rev-parse is local-only: it fails only when the repo is
+        // genuinely broken, never for a checkout holding work.
+        if run(git, &["rev-parse", "--git-dir"], &dir, false)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("create {}: {e}", parent.display())))?;
-        let name = rel.rsplit('/').next().expect("rsplit yields at least one");
-        run(git, &["clone", url, name], parent, true).await?;
+            .is_ok()
+        {
+            return Ok(dir);
+        }
+        // A clone interrupted by machine death leaves a .git skeleton
+        // git rejects; trusting is_dir() would wedge this repo forever.
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("remove {}: {e}", dir.display())))?;
+    }
+    let parent = dir.parent().expect("rel path has parent components");
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("create {}: {e}", parent.display())))?;
+    let name = rel.rsplit('/').next().expect("rsplit yields at least one");
+    if let Err(e) = run(git, &["clone", url, name], parent, true).await {
+        // A failed clone must not leave a partial .git either.
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        return Err(e);
     }
     Ok(dir)
 }
 
-/// Run git in `cwd`, discarding output, with optional credential injection.
+/// Run git in `cwd`, failing on nonzero exit, with optional credential
+/// injection.
 pub(crate) async fn run(
     git: &GitCli,
     args: &[&str],
@@ -51,12 +69,120 @@ pub(crate) async fn run(
     authenticated: bool,
 ) -> Result<(), ToolError> {
     let call = git.prepare_git(args, cwd);
-    git.exec_git(call, authenticated).await?.format().map(drop)
+    let out = git.exec_git(call, authenticated).await?;
+    if out.exit_code != 0 {
+        return Err(ToolError::ExecutionFailed(format!(
+            "git {} exited {}: {}",
+            args.first().copied().unwrap_or(""),
+            out.exit_code,
+            out.stderr.trim(),
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::Secret;
+    use crate::tools::DirenvCache;
+
+    fn workspace_git() -> (GitCli, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = GitCli::new(
+            Secret::test("fake"),
+            dir.path(),
+            DirenvCache::new(),
+            Vec::new(),
+        );
+        (git, dir)
+    }
+
+    #[tokio::test]
+    async fn run_fails_on_nonzero_exit() {
+        let (git, dir) = workspace_git();
+        // Not a repo: `git log` exits nonzero, which must be an error,
+        // not silently discarded output.
+        let err = run(&git, &["log", "-1"], dir.path(), false).await;
+        assert!(matches!(err, Err(ToolError::ExecutionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn ensure_cloned_fails_loudly_and_leaves_no_partial_checkout() {
+        let (git, dir) = workspace_git();
+        let err = ensure_cloned(&git, "file:///nowhere-at-all", "projects/o/r").await;
+        assert!(matches!(err, Err(ToolError::ExecutionFailed(_))));
+        assert!(
+            !dir.path().join("projects/o/r").exists(),
+            "a failed clone must not leave a directory that blocks retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_cloned_replaces_a_corrupt_skeleton() {
+        let (git, dir) = workspace_git();
+        // Fixture origin to clone from.
+        let origin = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-b", "main"][..],
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(origin.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        }
+        // What a machine death mid-clone leaves behind: a .git dir
+        // that exists but git refuses to recognize.
+        let wedged = dir.path().join("projects/o/r/.git");
+        std::fs::create_dir_all(&wedged).unwrap();
+
+        let url = format!("file://{}", origin.path().display());
+        let cloned = ensure_cloned(&git, &url, "projects/o/r").await.unwrap();
+
+        assert!(
+            run(&git, &["rev-parse", "--git-dir"], &cloned, false)
+                .await
+                .is_ok(),
+            "the skeleton must be replaced by a healthy clone"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_cloned_leaves_a_healthy_checkout_alone() {
+        let (git, dir) = workspace_git();
+        let checkout = dir.path().join("projects/o/r");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let out = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&checkout)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        std::fs::write(checkout.join("work.txt"), "uncommitted").unwrap();
+
+        // Unreachable URL: proves no clone is attempted.
+        ensure_cloned(&git, "file:///nowhere-at-all", "projects/o/r")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("work.txt")).unwrap(),
+            "uncommitted",
+            "an existing healthy checkout must never be touched"
+        );
+    }
 
     #[test]
     fn rel_path_joins_owner_and_repo_under_root() {

@@ -123,13 +123,11 @@ impl GitCli {
             Ok(rel) => rel,
             Err(e) => return format!("bad repo path: {e}"),
         };
-        let dir = self.workspace_root.join(&rel);
-        if !dir.join(".git").is_dir() {
-            let url = format!("https://github.com/{nwo}.git");
-            if let Err(e) = super::checkout::ensure_cloned(self, &url, &rel).await {
-                return format!("clone failed: {e}");
-            }
-        }
+        let url = format!("https://github.com/{nwo}.git");
+        let dir = match super::checkout::ensure_cloned(self, &url, &rel).await {
+            Ok(dir) => dir,
+            Err(e) => return format!("clone failed: {e}"),
+        };
         match self.provision_devshell(&dir).await {
             None => "skipped: no devshell".into(),
             Some(command) => match self.warmer.warm(&dir, &command).await {
@@ -225,25 +223,27 @@ impl GitCli {
     }
 }
 
-/// Allowance for git subcommands that run repository hooks.
+/// Allowance for git subcommands whose work is unbounded by git itself.
 ///
-/// A hook is arbitrary repo-defined work, not a bounded git operation:
-/// this project's own `pre-commit` runs `just check`, a full
-/// `nix flake check`. The 120s subprocess default killed every commit
-/// the bot attempted against its own repo. Matches the allowance
-/// `direnv` gets for evaluating a flake, which is the same kind of
-/// wait. `exec_git` already injects the devshell env so hooks can find
-/// `just`; this is the other half of letting them finish.
-const HOOK_TIMEOUT_SECS: u64 = 900;
+/// `commit` and `push` run repository hooks — arbitrary repo-defined
+/// work; this project's own `pre-commit` runs `just check`. `clone`
+/// and `fetch` move whole repositories through the egress proxy: the
+/// 120s subprocess default killed the warm duty's clone of a large
+/// repo on a cold cache, leaving a partial `.git`. Matches the
+/// allowance `direnv` gets for evaluating a flake, the same kind of
+/// wait.
+const LONG_TIMEOUT_SECS: u64 = 900;
 
-/// The timeout for `args`, if its subcommand runs hooks.
-///
-/// A property of the subcommand rather than the caller, so no call site
-/// has to remember. `commit` and `push` are the two the git tools
-/// issue that trigger hooks; everything else is bounded by network or
+/// The timeout for `args`, if its subcommand runs hooks or transfers
+/// a repository. A property of the subcommand rather than the caller,
+/// so no call site has to remember. Everything else is bounded by
 /// local IO and keeps the default.
 fn hook_timeout(args: &[&str]) -> Option<u64> {
-    matches!(args.first(), Some(&"commit" | &"push")).then_some(HOOK_TIMEOUT_SECS)
+    matches!(
+        args.first(),
+        Some(&"clone" | &"commit" | &"fetch" | &"push")
+    )
+    .then_some(LONG_TIMEOUT_SECS)
 }
 
 /// The configured warm command for `nwo`, matched case-insensitively
@@ -311,7 +311,7 @@ impl AskPass {
 mod tests {
     use std::sync::Arc;
 
-    use super::{GitCli, HOOK_TIMEOUT_SECS, hook_timeout, parse_ls_remote_head};
+    use super::{GitCli, LONG_TIMEOUT_SECS, hook_timeout, parse_ls_remote_head};
     use crate::secrets::Secret;
     use crate::test_support::{ENV_LOCK, FakeDirenv};
     use crate::tools::DirenvCache;
@@ -379,21 +379,20 @@ mod tests {
         );
     }
 
-    /// A commit waits for the repo's own gate; a read does not.
+    /// Hooks and repo transfers wait; bounded reads do not.
     #[test]
-    fn only_hook_running_subcommands_get_the_long_timeout() {
-        assert_eq!(
-            hook_timeout(&["commit", "-m", "x"]),
-            Some(HOOK_TIMEOUT_SECS)
-        );
-        assert_eq!(
-            hook_timeout(&["push", "origin", "b"]),
-            Some(HOOK_TIMEOUT_SECS)
-        );
+    fn only_unbounded_subcommands_get_the_long_timeout() {
+        for slow in [
+            vec!["clone", "url", "dir"],
+            vec!["commit", "-m", "x"],
+            vec!["fetch", "origin"],
+            vec!["push", "origin", "b"],
+        ] {
+            assert_eq!(hook_timeout(&slow), Some(LONG_TIMEOUT_SECS), "{slow:?}");
+        }
         for read in [
             vec!["log", "--oneline"],
             vec!["diff", "--cached"],
-            vec!["fetch", "origin"],
             vec!["ls-remote", "url", "HEAD"],
         ] {
             assert_eq!(hook_timeout(&read), None, "{read:?}");
