@@ -91,6 +91,15 @@ the actor sends at most one per turn, and the counter exists to stop the
 flush. With Telegram disabled there is no `Notifier` and no alert — same
 as the tool.
 
+### Durable mirror
+
+Every message the `Notifier` sends — tool notifies, batch flushes,
+harness alerts — is also appended to `state/NOTIFICATIONS.md` with a
+timestamp, before the Telegram attempt, so a failed delivery still
+leaves a record. Telegram is the attention tap; the mirror is the
+durable, greppable log (`just vm-notifications`), and it rides the
+state backup (spec 05).
+
 ### Model disclosure on unattended turns
 
 The harness alert covers only failure. A turn that *succeeds* by working

@@ -85,20 +85,9 @@ fn record(history_path: &std::path::Path, name: &str, outcome: &str) {
         "duty {name}: {}",
         crate::tools::truncate_output(outcome, HISTORY_ENTRY_MAX)
     );
-    if let Err(e) = log_history(history_path, &entry) {
+    if let Err(e) = crate::workspace::append_log(history_path, &entry) {
         warn!(duty = %name, "failed to write history: {e}");
     }
-}
-
-/// Append a timestamped entry to the duty history log (HISTORY.md).
-pub fn log_history(path: &std::path::Path, entry: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let timestamp = crate::time::now_iso8601();
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    writeln!(file, "[{timestamp}] {entry}\n")
 }
 
 /// Cap on scheduler sleep. `tokio::time::sleep` is monotonic and

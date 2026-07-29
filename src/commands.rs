@@ -296,9 +296,10 @@ async fn distill_pass(
                 usage,
             },
         );
-        if let Err(e) =
-            crate::duty::log_history(&workspace.history_path(), &format!("Distilled: {summary}"))
-        {
+        if let Err(e) = crate::workspace::append_log(
+            &workspace.history_path(),
+            &format!("Distilled: {summary}"),
+        ) {
             error!("Failed to write distillation history: {e}");
         }
         summary

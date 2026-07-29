@@ -38,7 +38,8 @@ Resolved via fallback chain:
 │   ├── lcm.db               # LCM engine store (+ lcm/ payloads)
 │   ├── github_poll_state.json  # GitHub channel poll cursor
 │   ├── linear_poll_state.json  # Linear channel poll cursor
-│   └── HISTORY.md           # Duty execution log (spec 24)
+│   ├── HISTORY.md           # Duty execution log (spec 24)
+│   └── NOTIFICATIONS.md     # Mirror of sent notifications (spec 17)
 │
 └── projects/                # User's working area
 ```
@@ -95,6 +96,7 @@ changing them requires a rebuild and restart regardless.
 | `sessions_dir()` | `sessions/` |
 | `state_dir()` | `state/` |
 | `history_path()` | `state/HISTORY.md` |
+| `notifications_path()` | `state/NOTIFICATIONS.md` |
 | `github_poll_state_path()` | `state/github_poll_state.json` |
 | `linear_poll_state_path()` | `state/linear_poll_state.json` |
 

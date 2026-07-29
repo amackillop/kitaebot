@@ -107,6 +107,12 @@ impl Workspace {
         self.state_dir().join("HISTORY.md")
     }
 
+    /// Path to the notification mirror: every message the Notifier
+    /// sends, greppable without Telegram.
+    pub fn notifications_path(&self) -> PathBuf {
+        self.state_dir().join("NOTIFICATIONS.md")
+    }
+
     /// Path to the GitHub poll state file.
     pub fn github_poll_state_path(&self) -> PathBuf {
         self.state_dir().join("github_poll_state.json")
@@ -171,6 +177,20 @@ fn default_data_dir() -> Result<PathBuf, std::io::Error> {
             )
         })?;
     Ok(base.join(APP_NAME))
+}
+
+/// Append a timestamped entry to an append-only log file.
+///
+/// Used for the duty history and the notification mirror: durable,
+/// human-readable, greppable records under `state/`.
+pub fn append_log(path: &std::path::Path, entry: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let timestamp = crate::time::now_iso8601();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "[{timestamp}] {entry}\n")
 }
 
 #[cfg(test)]

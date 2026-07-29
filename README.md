@@ -124,6 +124,7 @@ just ask "message"      # Send one message, print the reply, exit
 just vm-ssh             # SSH into running VM
 just vm-shell           # Shell as kitaebot daemon user (debugging)
 just vm-logs            # Tail daemon, tinyproxy (refused CONNECTs), and kernel (egress drops) logs
+just vm-notifications   # Show the notification mirror (state/NOTIFICATIONS.md)
 just vm-stop            # Shut down VM gracefully (pkill fallback)
 ```
 

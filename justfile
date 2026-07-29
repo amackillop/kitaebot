@@ -179,6 +179,11 @@ vm-ssh *flags: (vm-run flags)
 vm-shell *flags: (vm-run flags)
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} -t root@localhost su -s /bin/sh - kitaebot
 
+# Show the notification mirror (every message the bot sent the operator)
+vm-notifications *flags: (vm-run flags)
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost \
+        cat /var/lib/kitaebot/state/NOTIFICATIONS.md
+
 # Tail daemon, tinyproxy (refused CONNECTs), and kernel (egress drops) logs
 vm-logs:
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost \

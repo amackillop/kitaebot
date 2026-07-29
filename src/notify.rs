@@ -96,6 +96,8 @@ pub struct Notifier {
     client: TelegramClient,
     chat_id: i64,
     state: Mutex<NotifyState>,
+    /// Durable mirror of every outgoing message (`None` in tests).
+    log_path: Option<std::path::PathBuf>,
 }
 
 impl Notifier {
@@ -104,7 +106,15 @@ impl Notifier {
             client,
             chat_id,
             state: Mutex::new(NotifyState::default()),
+            log_path: None,
         }
+    }
+
+    /// Mirror every outgoing message to an append-only log, so
+    /// notifications are greppable without Telegram.
+    pub fn with_log(mut self, path: std::path::PathBuf) -> Self {
+        self.log_path = Some(path);
+        self
     }
 
     /// Reset the rate counter and batch. Called by the actor before
@@ -143,6 +153,13 @@ impl Notifier {
     /// retry/escape layer: notification delivery is best-effort.
     async fn send(&self, text: &str) -> Result<(), TelegramError> {
         let text = truncate_output(text, MAX_MESSAGE_BYTES);
+        // The mirror, not Telegram, is the durable record: log before
+        // the send so a failed delivery still leaves one.
+        if let Some(path) = &self.log_path
+            && let Err(e) = crate::workspace::append_log(path, &text)
+        {
+            warn!("failed to mirror notification: {e}");
+        }
         self.client
             .post_message(self.chat_id, &text, None)
             .await
@@ -363,6 +380,44 @@ mod tests {
         let tool = tool(&sent);
         tool.0.flush().await;
         assert!(sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sends_are_mirrored_to_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("NOTIFICATIONS.md");
+        let sent = sent();
+        let tool = NotifyTool(Arc::new(
+            Notifier::new(ok_client(&sent), 42).with_log(path.clone()),
+        ));
+
+        tool.execute(
+            json!({"message": "build is green", "urgency": "high"}),
+            ToolCtx::default(),
+        )
+        .await
+        .unwrap();
+
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(log.contains("build is green"));
+    }
+
+    #[tokio::test]
+    async fn failed_delivery_still_leaves_a_log_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("NOTIFICATIONS.md");
+        let client = TelegramClient::from_fn(|_method, _body| async {
+            Err(TelegramError::Network("boom".into()))
+        });
+        let notifier = Notifier::new(client, 42).with_log(path.clone());
+
+        notifier.alert("the daemon is on fire").await;
+
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            log.contains("the daemon is on fire"),
+            "the mirror is the record; delivery failure must not erase it"
+        );
     }
 
     #[tokio::test]

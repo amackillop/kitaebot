@@ -17,6 +17,18 @@ use crate::tools::git::GitCli;
 use crate::tools::github::GhCli;
 use crate::workspace::Workspace;
 
+/// Notifier wired to its durable mirror (spec 17).
+fn build_notifier(
+    client: &crate::clients::telegram::TelegramClient,
+    config: &Config,
+    workspace: &Workspace,
+) -> Arc<Notifier> {
+    Arc::new(
+        Notifier::new(client.clone(), config.telegram.chat_id)
+            .with_log(workspace.notifications_path()),
+    )
+}
+
 /// Fully-assembled application runtime returned by [`build`].
 pub struct Runtime {
     pub provider: CompletionsProvider,
@@ -126,7 +138,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 token,
                 Duration::from_secs(config.telegram.poll_timeout_secs + 10),
             );
-            let notifier = Arc::new(Notifier::new(tg_client.clone(), config.telegram.chat_id));
+            let notifier = build_notifier(&tg_client, config, workspace);
             tools.push(Arc::new(NotifyTool(notifier.clone())));
             (
                 Some(TelegramChannel::new(tg_client, config.telegram.chat_id)),
@@ -214,7 +226,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             Secret::placeholder(),
             Duration::from_secs(config.telegram.poll_timeout_secs + 10),
         );
-        let notifier = Arc::new(Notifier::new(tg_client.clone(), config.telegram.chat_id));
+        let notifier = build_notifier(&tg_client, config, workspace);
         tools.push(Arc::new(NotifyTool(notifier.clone())));
         (
             Some(TelegramChannel::new(tg_client, config.telegram.chat_id)),
