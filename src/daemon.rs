@@ -157,8 +157,10 @@ mod tests {
     fn distill_duty() -> Vec<Duty> {
         vec![Duty {
             name: "distill".into(),
-            input: "/duty distill".into(),
-            session_hint: None,
+            action: duty::Action::Dispatch {
+                input: "/duty distill".into(),
+                session_hint: None,
+            },
             schedule: Schedule::Every(3600),
             gate: None,
         }]
@@ -236,8 +238,10 @@ mod tests {
             &handle,
             vec![Duty {
                 name: "nope".into(),
-                input: "/duty nope".into(),
-                session_hint: None,
+                action: duty::Action::Dispatch {
+                    input: "/duty nope".into(),
+                    session_hint: None,
+                },
                 schedule: Schedule::Every(3600),
                 gate: None,
             }],

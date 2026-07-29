@@ -184,6 +184,9 @@ kitaebot = {
       enabled = true;                            # Enables git tools (clone, commit, push)
       co_authors = [ "Name <email>" ];
       trusted_repos = [ "owner/repo" ];          # Repos whose .envrc gets direnv allow
+      warm_commands = {                          # Build-warm command per repo (spec 03);
+        "owner/repo" = "just check";             # keys must be in trusted_repos
+      };
     };
     github = {
       enabled = true;
@@ -199,6 +202,7 @@ kitaebot = {
     };
     duties = {                                   # Duty scheduler (spec 24)
       distill = { every = "1h"; };                # Token gate still applies
+      warm = { every = "24h"; };                  # Build-warm duty; runs only with git.warm_commands set
       prompt = [                                  # Operator-defined watch-tasks
         {
           name = "ci-watch";

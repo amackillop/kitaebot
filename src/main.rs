@@ -169,20 +169,33 @@ fn build_duties(config: &Config) -> Vec<duty::Duty> {
         |s: &crate::config::ScheduleConfig| s.parse().expect("validated schedule failed to parse");
     let mut duties = vec![duty::Duty {
         name: "distill".into(),
-        input: "/duty distill".into(),
-        session_hint: None,
+        action: duty::Action::Dispatch {
+            input: "/duty distill".into(),
+            session_hint: None,
+        },
         schedule: parse(&config.duties.distill),
         gate: None,
     }];
     duties.extend(config.duties.prompt.iter().map(|p| duty::Duty {
         name: p.name.clone(),
-        input: p.prompt.clone(),
-        session_hint: Some(p.repo.clone()),
+        action: duty::Action::Dispatch {
+            input: p.prompt.clone(),
+            session_hint: Some(p.repo.clone()),
+        },
         schedule: parse(&p.schedule),
         gate: p.gate.as_deref().map(|_| duty::Gate::NewCommits {
             repo: p.repo.clone(),
         }),
     }));
+    // Last: a due-together cold warm must not delay the duties above.
+    if !config.git.warm_commands.is_empty() {
+        duties.push(duty::Duty {
+            name: "warm".into(),
+            action: duty::Action::Warm,
+            schedule: parse(&config.duties.warm),
+            gate: None,
+        });
+    }
     duties
 }
 

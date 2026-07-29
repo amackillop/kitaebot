@@ -24,7 +24,8 @@ pub struct Runtime {
     pub telegram: Option<TelegramChannel>,
     pub notifier: Option<Arc<Notifier>>,
     pub gh_cli: Option<GhCli>,
-    /// Used by the GitHub channel to prepare review checkouts.
+    /// Used by the GitHub channel to prepare review checkouts and by
+    /// the duty scheduler to warm build caches.
     pub git_cli: Option<GitCli>,
     pub linear: Option<LinearChannel>,
 }
@@ -70,17 +71,18 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 warmer.clone(),
             ));
         }
-        // The channel prepares review checkouts itself, even when the
-        // git tools are disabled.
-        let git_cli = config.github.enabled.then(|| {
+        // Built whenever a token exists: the GitHub channel prepares
+        // review checkouts with it (gated on github.enabled in the
+        // daemon) and the duty scheduler warms build caches with it.
+        let git_cli = Some(
             GitCli::new(
                 token.clone(),
                 workspace.path(),
                 direnv_cache.clone(),
                 config.git.trusted_repos.clone(),
             )
-            .with_warm(warmer.clone(), Arc::new(config.git.warm_commands.clone()))
-        });
+            .with_warm(warmer.clone(), Arc::new(config.git.warm_commands.clone())),
+        );
         let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
             tools.extend(github::build(gh.clone()));
@@ -186,17 +188,18 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 warmer.clone(),
             ));
         }
-        // The channel prepares review checkouts itself, even when the
-        // git tools are disabled.
-        let git_cli = config.github.enabled.then(|| {
+        // Built whenever a token exists: the GitHub channel prepares
+        // review checkouts with it (gated on github.enabled in the
+        // daemon) and the duty scheduler warms build caches with it.
+        let git_cli = Some(
             GitCli::new(
                 token.clone(),
                 workspace.path(),
                 direnv_cache.clone(),
                 config.git.trusted_repos.clone(),
             )
-            .with_warm(warmer.clone(), Arc::new(config.git.warm_commands.clone()))
-        });
+            .with_warm(warmer.clone(), Arc::new(config.git.warm_commands.clone())),
+        );
         let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
             tools.extend(github::build(gh.clone()));

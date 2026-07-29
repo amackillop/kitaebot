@@ -115,11 +115,16 @@ logic does not move there.
 Recurring mechanical work on the bot's own machine rather than on a
 repository. No LLM turn: the outcome is a log line, not a reply.
 
-- **Warm** — build each configured repo's checks so the commit gate
-  never meets a cold store. Contract and consumer:
-  [spec 03](03-tools.md#build-warm).
-- **Workspace hygiene** — remove finished checkouts and the `.direnv`
-  gcroots pinning their devShell closures.
+- **Warm** — build each configured repo's checks, cloning the checkout
+  first if absent, so the commit gate never meets a cold store. Repos
+  warm sequentially: two cold builds would contend for the same cores.
+  Contract and consumer: [spec 03](03-tools.md#build-warm).
+- **Workspace hygiene** (not built) — remove finished checkouts and
+  the `.direnv` gcroots pinning their devShell closures. Review
+  checkouts became worktrees of the working clone — no object store,
+  no devshell — so what remains to clean is `projects/` checkouts,
+  and "finished" is undefinable there until sessions bind to
+  checkouts. Deferred until that binding exists.
 
 Scheduled rather than hooked to boot or clone: the scheduler's anacron
 behaviour covers boot without a separate path, and covers what neither
@@ -129,8 +134,10 @@ coupled: nothing roots what a warm builds
 small enough that collection stays rare, and a scheduled warm turns an
 eviction into one background rebuild instead of a blocked commit.
 
-Neither fits the scheduler as built: every `Duty` dispatches an `input`
-through the actor, so mechanical work has no kind yet.
+Mechanical duties are a `Duty` action kind run inside the scheduler
+loop itself — no actor, no turn. The scheduler serializes duties, so a
+cold warm delays whatever is due behind it; the warm duty is declared
+last so dispatch duties due at the same tick go first.
 
 ### Phase 2: discovery duties
 

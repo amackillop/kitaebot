@@ -21,17 +21,26 @@ use crate::tools::git::GitCli;
 use schedule::Schedule;
 use state::DutyState;
 
-/// A scheduled duty: dispatches `input` through the actor when due.
-///
-/// `input` is a slash command for built-ins (`/duty distill`) or the
-/// operator's prompt text for prompt duties; `session_hint` routes a
-/// prompt duty onto its repo's work session.
+/// A scheduled duty: performs its [`Action`] when due.
 pub struct Duty {
     pub name: String,
-    pub input: String,
-    pub session_hint: Option<String>,
+    pub action: Action,
     pub schedule: Schedule,
     pub gate: Option<Gate>,
+}
+
+/// What a due duty does.
+pub enum Action {
+    /// Send `input` through the actor: a slash command for built-ins
+    /// (`/duty distill`) or the operator's prompt text for prompt
+    /// duties; `session_hint` routes onto a repo's work session.
+    Dispatch {
+        input: String,
+        session_hint: Option<String>,
+    },
+    /// Prepare and warm every repo in `git.warm_commands`, in the
+    /// scheduler with no LLM turn (spec 24 self-maintenance).
+    Warm,
 }
 
 /// A mechanical pre-dispatch check: decides whether a due duty gets a
@@ -135,38 +144,29 @@ pub async fn run_loop(
     loop {
         let now = crate::time::now_epoch();
         for duty in due(&duties, &state, now) {
-            // (input, cursor to advance on success)
-            let dispatch: Option<(String, Option<String>)> = match &duty.gate {
-                None => Some((duty.input.clone(), None)),
-                Some(Gate::NewCommits { repo }) => {
-                    probe_new_commits(duty, repo, git.as_ref(), &mut state).await
-                }
-            };
-            if let Some((input, new_cursor)) = dispatch {
-                let cancel = CancellationToken::new();
-                match handle
-                    .send_message(
-                        ChannelSource::Duty,
+            match &duty.action {
+                Action::Dispatch {
+                    input,
+                    session_hint,
+                } => {
+                    dispatch(
+                        duty,
                         input,
-                        duty.session_hint.clone(),
-                        None,
-                        cancel,
+                        session_hint.clone(),
+                        handle,
+                        git.as_ref(),
+                        &mut state,
+                        &history_path,
                     )
-                    .await
-                {
-                    Ok(reply) => {
-                        info!(duty = %duty.name, "Duty run: {}", reply.content);
-                        record(&history_path, &duty.name, &reply.content);
-                        // Advance only on success: a failed turn
-                        // re-reviews the same delta next period.
-                        if let Some(head) = new_cursor {
-                            state.set_cursor(&duty.name, &head);
-                        }
-                    }
-                    Err(e) => {
-                        error!(duty = %duty.name, "Duty error (will retry next period): {e}");
-                        record(&history_path, &duty.name, &format!("failed: {e}"));
-                    }
+                    .await;
+                }
+                Action::Warm => {
+                    let outcome = match git.as_ref() {
+                        Some(git) => git.warm_configured_repos().await,
+                        None => "skipped: no GitCli".into(),
+                    };
+                    info!(duty = %duty.name, "Duty run: {outcome}");
+                    record(&history_path, &duty.name, &outcome);
                 }
             }
             // last_run advances even on error or closed gate: retry
@@ -179,11 +179,51 @@ pub async fn run_loop(
     }
 }
 
+/// Gate-check and send one dispatch duty through the actor.
+async fn dispatch(
+    duty: &Duty,
+    input: &str,
+    session_hint: Option<String>,
+    handle: &AgentHandle,
+    git: Option<&GitCli>,
+    state: &mut DutyState,
+    history_path: &std::path::Path,
+) {
+    // (input, cursor to advance on success)
+    let dispatch: Option<(String, Option<String>)> = match &duty.gate {
+        None => Some((input.to_string(), None)),
+        Some(Gate::NewCommits { repo }) => probe_new_commits(duty, input, repo, git, state).await,
+    };
+    let Some((input, new_cursor)) = dispatch else {
+        return;
+    };
+    let cancel = CancellationToken::new();
+    match handle
+        .send_message(ChannelSource::Duty, input, session_hint, None, cancel)
+        .await
+    {
+        Ok(reply) => {
+            info!(duty = %duty.name, "Duty run: {}", reply.content);
+            record(history_path, &duty.name, &reply.content);
+            // Advance only on success: a failed turn re-reviews the
+            // same delta next period.
+            if let Some(head) = new_cursor {
+                state.set_cursor(&duty.name, &head);
+            }
+        }
+        Err(e) => {
+            error!(duty = %duty.name, "Duty error (will retry next period): {e}");
+            record(history_path, &duty.name, &format!("failed: {e}"));
+        }
+    }
+}
+
 /// Probe the new-commits gate. Returns the dispatch input and the
 /// cursor to advance, or `None` when nothing should run (gate closed,
 /// first-contact priming, or probe failure).
 async fn probe_new_commits(
     duty: &Duty,
+    input: &str,
     repo: &str,
     git: Option<&GitCli>,
     state: &mut DutyState,
@@ -213,7 +253,7 @@ async fn probe_new_commits(
         }
         NewCommits::Open => {
             let cursor = state.cursor(&duty.name).expect("Open requires a cursor");
-            let input = format!("{}\n\n[new commits: {cursor}..{head}]", duty.input);
+            let input = format!("{input}\n\n[new commits: {cursor}..{head}]");
             Some((input, Some(head)))
         }
     }
@@ -226,8 +266,10 @@ mod tests {
     fn duty(name: &str, schedule: Schedule) -> Duty {
         Duty {
             name: name.to_string(),
-            input: format!("/{name}"),
-            session_hint: None,
+            action: Action::Dispatch {
+                input: format!("/{name}"),
+                session_hint: None,
+            },
             schedule,
             gate: None,
         }

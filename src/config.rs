@@ -236,6 +236,9 @@ pub struct DutiesConfig {
     /// Operator-defined prompt duties: recurring watch-tasks authored
     /// in config (spec 24). `[[duties.prompt]]` tables.
     pub prompt: Vec<PromptDutyConfig>,
+    /// Schedule for the build-warm duty. Registered only when
+    /// `git.warm_commands` is non-empty.
+    pub warm: ScheduleConfig,
 }
 
 /// One operator-defined prompt duty.
@@ -575,6 +578,10 @@ impl Default for DutiesConfig {
                 daily: None,
             },
             prompt: Vec::new(),
+            warm: ScheduleConfig {
+                every: Some("24h".into()),
+                daily: None,
+            },
         }
     }
 }
@@ -700,6 +707,9 @@ impl Config {
         if let Err(e) = self.duties.distill.parse() {
             return Err(ConfigError::Invalid(format!("duties.distill: {e}")));
         }
+        if let Err(e) = self.duties.warm.parse() {
+            return Err(ConfigError::Invalid(format!("duties.warm: {e}")));
+        }
         self.validate_prompt_duties()?;
         self.validate_warm_commands()?;
         if self.memory.index_cap_bytes == 0 {
@@ -790,7 +800,7 @@ impl Config {
             if p.name.is_empty() || p.name.contains(char::is_whitespace) {
                 return Err(ctx("name must be a single non-empty token".into()));
             }
-            if p.name == "distill" {
+            if p.name == "distill" || p.name == "warm" {
                 return Err(ctx("name shadows a built-in duty".into()));
             }
             if !seen.insert(&p.name) {
@@ -822,8 +832,13 @@ impl Config {
     }
 
     /// Validate `[git.warm_commands]`: exact `owner/repo` keys covered
-    /// by `git.trusted_repos`, non-empty commands.
+    /// by `git.trusted_repos`, non-empty commands, git tools enabled.
     fn validate_warm_commands(&self) -> Result<(), ConfigError> {
+        if !self.git.warm_commands.is_empty() && !self.git.enabled {
+            return Err(ConfigError::Invalid(
+                "git.warm_commands requires git.enabled (the warm serves git_commit)".into(),
+            ));
+        }
         for (nwo, command) in &self.git.warm_commands {
             let ctx = |e: String| ConfigError::Invalid(format!("git.warm_commands {nwo:?}: {e}"));
             let exact = matches!(nwo.split('/').collect::<Vec<_>>().as_slice(),
@@ -1434,7 +1449,7 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn warm_commands_parse() {
         let cfg = load_toml(
-            "[git]\ntrusted_repos = [\"alice/repo\"]\n\
+            "[git]\nenabled = true\ntrusted_repos = [\"alice/repo\"]\n\
              [git.warm_commands]\n\"alice/repo\" = \"just check\"\n",
         )
         .unwrap();
@@ -1447,15 +1462,27 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn warm_commands_repo_may_be_trusted_by_wildcard() {
         let cfg = load_toml(
-            "[git]\ntrusted_repos = [\"alice/*\"]\n\
+            "[git]\nenabled = true\ntrusted_repos = [\"alice/*\"]\n\
              [git.warm_commands]\n\"alice/repo\" = \"just check\"\n",
         );
         assert!(cfg.is_ok());
     }
 
     #[test]
+    fn warm_commands_require_git_enabled() {
+        let result = load_toml(
+            "[git]\ntrusted_repos = [\"alice/repo\"]\n\
+             [git.warm_commands]\n\"alice/repo\" = \"just check\"\n",
+        );
+        assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("git.enabled")));
+    }
+
+    #[test]
     fn warm_commands_reject_untrusted_repo() {
-        let result = load_toml("[git.warm_commands]\n\"alice/repo\" = \"just check\"\n");
+        let result = load_toml(
+            "[git]\nenabled = true\n\
+             [git.warm_commands]\n\"alice/repo\" = \"just check\"\n",
+        );
         assert!(
             matches!(result, Err(ConfigError::Invalid(m)) if m.contains("trusted_repos")),
             "untrusted warm repo must be rejected"
@@ -1466,7 +1493,7 @@ prompt = \"Review recent commits for security issues.\"
     fn warm_commands_reject_wildcard_and_malformed_keys() {
         for key in ["alice/*", "alice", "alice/repo/extra", "/repo", "alice/"] {
             let toml = format!(
-                "[git]\ntrusted_repos = [\"alice/*\"]\n\
+                "[git]\nenabled = true\ntrusted_repos = [\"alice/*\"]\n\
                  [git.warm_commands]\n\"{key}\" = \"just check\"\n"
             );
             let result = load_toml(&toml);
@@ -1480,7 +1507,7 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn warm_commands_reject_empty_command() {
         let result = load_toml(
-            "[git]\ntrusted_repos = [\"alice/repo\"]\n\
+            "[git]\nenabled = true\ntrusted_repos = [\"alice/repo\"]\n\
              [git.warm_commands]\n\"alice/repo\" = \"  \"\n",
         );
         assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("non-empty")));

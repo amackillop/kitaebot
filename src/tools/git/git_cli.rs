@@ -70,26 +70,72 @@ impl GitCli {
     /// `trusted_repos`. Best-effort: a failed warm degrades to
     /// no-devshell, which exec already tolerates.
     pub async fn warm_devshell(&self, dir: &Path) {
-        if !dir.join(".envrc").exists() {
+        let Some(command) = self.provision_devshell(dir).await else {
             return;
+        };
+        let (warmer, dir, command) = (self.warmer.clone(), dir.to_path_buf(), command);
+        tokio::spawn(async move { warmer.warm(&dir, &command).await });
+    }
+
+    /// Allow and evaluate the devshell of a trusted checkout. Returns
+    /// the repo's warm command when a build warm should follow: the
+    /// devshell resolved and a command is configured (the warm command
+    /// comes from the devshell, so it cannot run without one).
+    async fn provision_devshell(&self, dir: &Path) -> Option<String> {
+        if !dir.join(".envrc").exists() {
+            return None;
         }
         let Some(nwo) = super::origin_nwo(dir).await else {
             debug!(dir = %dir.display(), "no readable origin; skipping devshell warm");
-            return;
+            return None;
         };
         if !super::url::is_trusted_repo(&nwo, &self.trusted_repos) {
             debug!(dir = %dir.display(), "origin not in trusted_repos; skipping devshell warm");
-            return;
+            return None;
         }
         direnv::allow(dir).await;
         if let Err(e) = self.direnv_cache.get(dir).await {
             warn!(dir = %dir.display(), error = %e, "devshell warm failed");
-            return;
+            return None;
         }
-        if let Some(command) = warm_command(&self.warm_commands, &nwo) {
-            let (warmer, dir, command) =
-                (self.warmer.clone(), dir.to_path_buf(), command.to_string());
-            tokio::spawn(async move { warmer.warm(&dir, &command).await });
+        warm_command(&self.warm_commands, &nwo).map(str::to_string)
+    }
+
+    /// Prepare and warm every repo in `warm_commands` — the spec 24
+    /// warm duty. Clones missing checkouts. Sequential and awaited on
+    /// purpose: two cold builds would contend for the same cores.
+    /// Returns a per-repo summary for the duty history log.
+    pub async fn warm_configured_repos(&self) -> String {
+        let nwos: Vec<String> = self.warm_commands.keys().cloned().collect();
+        if nwos.is_empty() {
+            return "no warm commands configured".into();
+        }
+        let mut lines = Vec::with_capacity(nwos.len());
+        for nwo in nwos {
+            let status = self.prepare_and_warm(&nwo).await;
+            lines.push(format!("{nwo}: {status}"));
+        }
+        lines.join("; ")
+    }
+
+    async fn prepare_and_warm(&self, nwo: &str) -> String {
+        let rel = match super::checkout::rel_path("projects", nwo) {
+            Ok(rel) => rel,
+            Err(e) => return format!("bad repo path: {e}"),
+        };
+        let dir = self.workspace_root.join(&rel);
+        if !dir.join(".git").is_dir() {
+            let url = format!("https://github.com/{nwo}.git");
+            if let Err(e) = super::checkout::ensure_cloned(self, &url, &rel).await {
+                return format!("clone failed: {e}");
+            }
+        }
+        match self.provision_devshell(&dir).await {
+            None => "skipped: no devshell".into(),
+            Some(command) => match self.warmer.warm(&dir, &command).await {
+                crate::tools::warm::WarmOutcome::Failed => "failed".into(),
+                crate::tools::warm::WarmOutcome::Ready => "warm".into(),
+            },
         }
     }
 
@@ -263,8 +309,75 @@ impl AskPass {
 
 #[cfg(test)]
 mod tests {
-    use super::{HOOK_TIMEOUT_SECS, hook_timeout, parse_ls_remote_head};
+    use std::sync::Arc;
+
+    use super::{GitCli, HOOK_TIMEOUT_SECS, hook_timeout, parse_ls_remote_head};
+    use crate::secrets::Secret;
+    use crate::test_support::{ENV_LOCK, FakeDirenv};
+    use crate::tools::DirenvCache;
     use crate::tools::git::test_helpers::stub_git_cli_with_repo;
+
+    /// A workspace with a real git checkout at `projects/o/r` whose
+    /// origin parses to `o/r`, and a `GitCli` trusting it.
+    fn workspace_with_checkout(warm_command: &str) -> (GitCli, std::path::PathBuf) {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path().join("projects/o/r");
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init"],
+            vec!["remote", "add", "origin", "https://github.com/o/r.git"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+        std::fs::write(dir.join(".envrc"), "use flake").unwrap();
+        let commands: std::collections::BTreeMap<String, String> =
+            [("o/r".to_string(), warm_command.to_string())].into();
+        let direnv = DirenvCache::new();
+        let git = GitCli::new(
+            Secret::test("fake"),
+            workspace.path(),
+            direnv.clone(),
+            vec!["o/r".into()],
+        )
+        .with_warm(crate::tools::Warmer::new(direnv), Arc::new(commands));
+        // Leak the tempdir so the checkout outlives the helper.
+        let _ = workspace.keep();
+        (git, dir)
+    }
+
+    #[tokio::test]
+    async fn warm_configured_repos_warms_an_existing_checkout() {
+        let _lock = ENV_LOCK.lock().await;
+        let _fake = FakeDirenv::install("echo '{}'");
+        let (git, dir) = workspace_with_checkout("touch .warmed");
+
+        let summary = git.warm_configured_repos().await;
+
+        assert_eq!(summary, "o/r: warm");
+        assert!(dir.join(".warmed").exists(), "warm command must have run");
+        assert_eq!(
+            git.warmer().ready(&dir).await,
+            Some(crate::tools::warm::WarmOutcome::Ready)
+        );
+    }
+
+    #[tokio::test]
+    async fn warm_configured_repos_reports_a_failing_command() {
+        let _lock = ENV_LOCK.lock().await;
+        let _fake = FakeDirenv::install("echo '{}'");
+        let (git, dir) = workspace_with_checkout("exit 1");
+
+        assert_eq!(git.warm_configured_repos().await, "o/r: failed");
+        assert_eq!(
+            git.warmer().ready(&dir).await,
+            Some(crate::tools::warm::WarmOutcome::Failed)
+        );
+    }
 
     /// A commit waits for the repo's own gate; a read does not.
     #[test]
