@@ -397,6 +397,11 @@ pub struct GitConfig {
     /// `owner/repo` or `owner/*`, matched case-insensitively.
     /// Everything else clones fine but runs without a devshell.
     pub trusted_repos: Vec<String>,
+    /// Build-warm command per repo (spec 03): run in the repo's
+    /// devshell after checkout preparation and by the warm duty, so
+    /// `git_commit` never meets a cold store. Keys are exact
+    /// `owner/repo` — no wildcards — and must be in `trusted_repos`.
+    pub warm_commands: std::collections::BTreeMap<String, String>,
 }
 
 /// GitHub integration settings.
@@ -696,6 +701,7 @@ impl Config {
             return Err(ConfigError::Invalid(format!("duties.distill: {e}")));
         }
         self.validate_prompt_duties()?;
+        self.validate_warm_commands()?;
         if self.memory.index_cap_bytes == 0 {
             return Err(ConfigError::Invalid(
                 "memory index_cap_bytes must be > 0".into(),
@@ -810,6 +816,26 @@ impl Config {
             }
             if p.gate.is_some() && !self.github.enabled {
                 return Err(ctx("gate \"new-commits\" requires github.enabled".into()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate `[git.warm_commands]`: exact `owner/repo` keys covered
+    /// by `git.trusted_repos`, non-empty commands.
+    fn validate_warm_commands(&self) -> Result<(), ConfigError> {
+        for (nwo, command) in &self.git.warm_commands {
+            let ctx = |e: String| ConfigError::Invalid(format!("git.warm_commands {nwo:?}: {e}"));
+            let exact = matches!(nwo.split('/').collect::<Vec<_>>().as_slice(),
+                [owner, repo] if !owner.is_empty() && !repo.is_empty() && !nwo.contains('*'));
+            if !exact {
+                return Err(ctx("key must be an exact owner/repo (no wildcards)".into()));
+            }
+            if command.trim().is_empty() {
+                return Err(ctx("command must be non-empty".into()));
+            }
+            if !crate::tools::git::url::is_trusted_repo(nwo, &self.git.trusted_repos) {
+                return Err(ctx("repo is not in git.trusted_repos".into()));
             }
         }
         Ok(())
@@ -1398,6 +1424,66 @@ prompt = \"Review recent commits for security issues.\"
     fn git_reject_unknown_field() {
         let result = load_toml("[git]\ntypo = 1\n");
         assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn warm_commands_default_empty() {
+        assert!(load_toml("").unwrap().git.warm_commands.is_empty());
+    }
+
+    #[test]
+    fn warm_commands_parse() {
+        let cfg = load_toml(
+            "[git]\ntrusted_repos = [\"alice/repo\"]\n\
+             [git.warm_commands]\n\"alice/repo\" = \"just check\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.git.warm_commands.get("alice/repo").map(String::as_str),
+            Some("just check")
+        );
+    }
+
+    #[test]
+    fn warm_commands_repo_may_be_trusted_by_wildcard() {
+        let cfg = load_toml(
+            "[git]\ntrusted_repos = [\"alice/*\"]\n\
+             [git.warm_commands]\n\"alice/repo\" = \"just check\"\n",
+        );
+        assert!(cfg.is_ok());
+    }
+
+    #[test]
+    fn warm_commands_reject_untrusted_repo() {
+        let result = load_toml("[git.warm_commands]\n\"alice/repo\" = \"just check\"\n");
+        assert!(
+            matches!(result, Err(ConfigError::Invalid(m)) if m.contains("trusted_repos")),
+            "untrusted warm repo must be rejected"
+        );
+    }
+
+    #[test]
+    fn warm_commands_reject_wildcard_and_malformed_keys() {
+        for key in ["alice/*", "alice", "alice/repo/extra", "/repo", "alice/"] {
+            let toml = format!(
+                "[git]\ntrusted_repos = [\"alice/*\"]\n\
+                 [git.warm_commands]\n\"{key}\" = \"just check\"\n"
+            );
+            let result = load_toml(&toml);
+            assert!(
+                matches!(result, Err(ConfigError::Invalid(m)) if m.contains("owner/repo")),
+                "key {key:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn warm_commands_reject_empty_command() {
+        let result = load_toml(
+            "[git]\ntrusted_repos = [\"alice/repo\"]\n\
+             [git.warm_commands]\n\"alice/repo\" = \"  \"\n",
+        );
+        assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("non-empty")));
     }
 
     // ── github ────────────────────────────────────────────────────────

@@ -70,6 +70,9 @@ in
           "CumuloGlobal/open-money"
           "CumuloGlobal/unhuman"
         ];
+        warm_commands = {
+          "amackillop/kitaebot" = "just check";
+        };
       };
       github = {
         enabled = true;
