@@ -91,6 +91,15 @@ the actor sends at most one per turn, and the counter exists to stop the
 flush. With Telegram disabled there is no `Notifier` and no alert — same
 as the tool.
 
+### Model disclosure on unattended turns
+
+The harness alert covers only failure. A turn that *succeeds* by working
+around a tooling defect discloses nothing: the reply goes unread and the
+defect survives. AGENTS.md therefore directs the model to `notify` when
+it hits or routes around a malfunction of its own tooling on an
+unattended turn. Prompted, not enforced — the harness cannot tell a
+workaround from ordinary work.
+
 ### Scope
 
 Root agent only. Sub-agent tool sets (spec 19) are explicit allowlists that
