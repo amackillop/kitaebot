@@ -111,13 +111,12 @@ vm-run *flags:
         just vm-build
     fi
     if $FRESH || $REBUILD; then
-        pkill -f 'qemu-system.*-name kitaebot' 2>/dev/null && sleep 1 || true
+        just vm-stop
     fi
     if $FRESH; then
         # Refuse to delete the image while anything still holds port 2222:
-        # a VM outliving the pkill keeps running on the deleted inode, and
-        # its writes are lost. pkill only reaches processes in this
-        # shell's namespace, so a VM started elsewhere survives it.
+        # a VM surviving vm-stop keeps running on the deleted inode, and
+        # its writes are lost.
         if ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=1 {{SSH_OPTS}} root@localhost exit 2>/dev/null; then
             echo "error: a VM still answers on port 2222; refusing to delete its disk" >&2
             exit 1
@@ -142,9 +141,35 @@ vm-run *flags:
     fi
     echo "VM ready in $((SECONDS - BOOT_START))s"
 
-# Stop the VM
+# Stop the VM (graceful guest shutdown; pkill only as fallback)
 vm-stop:
-    pkill -f 'qemu-system.*-name kitaebot' || echo "VM not running"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=1 {{SSH_OPTS}} root@localhost exit 2>/dev/null; then
+        pkill -f 'qemu-system.*-name kitaebot' 2>/dev/null || true
+        echo "VM not running"
+        exit 0
+    fi
+    # A hard kill mid-write corrupts guest state (an interrupted clone
+    # once wedged a checkout permanently). poweroff lets systemd stop
+    # the daemon and unmount, and reaches a VM pkill cannot see.
+    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost poweroff 2>/dev/null || true
+    for _ in $(seq 1 30); do
+        if ! ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=1 {{SSH_OPTS}} root@localhost exit 2>/dev/null; then
+            # Port silence precedes qemu exit; give the image lock time
+            # to release so an immediate restart cannot lose the race.
+            for _ in $(seq 1 10); do
+                pgrep -f 'qemu-system.*-name kitaebot' >/dev/null 2>&1 || break
+                sleep 1
+            done
+            sleep 1
+            echo "VM stopped"
+            exit 0
+        fi
+        sleep 1
+    done
+    echo "guest did not power off within 30s; killing qemu" >&2
+    pkill -f 'qemu-system.*-name kitaebot' || true
 
 # SSH into running VM
 vm-ssh *flags: (vm-run flags)
