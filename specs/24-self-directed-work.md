@@ -110,6 +110,28 @@ error the operator owns, it is a prompt duty. Built-ins expose their
 judgment-free knobs (schedule, enabled, cap values) in config; their
 logic does not move there.
 
+### Self-maintenance duties
+
+Recurring mechanical work on the bot's own machine rather than on a
+repository. No LLM turn: the outcome is a log line, not a reply.
+
+- **Warm** — build each configured repo's checks so the commit gate
+  never meets a cold store. Contract and consumer:
+  [spec 03](03-tools.md#build-warm).
+- **Workspace hygiene** — remove finished checkouts and the `.direnv`
+  gcroots pinning their devShell closures.
+
+Scheduled rather than hooked to boot or clone: the scheduler's anacron
+behaviour covers boot without a separate path, and covers what neither
+hook can — a garbage collection that ran since. The two duties are
+coupled: nothing roots what a warm builds
+([spec 03](03-tools.md#open-questions)), so hygiene keeps the store
+small enough that collection stays rare, and a scheduled warm turns an
+eviction into one background rebuild instead of a blocked commit.
+
+Neither fits the scheduler as built: every `Duty` dispatches an `input`
+through the actor, so mechanical work has no kind yet.
+
 ### Phase 2: discovery duties
 
 Duties whose action *generates* work rather than performing it.

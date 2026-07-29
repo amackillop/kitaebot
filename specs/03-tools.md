@@ -445,6 +445,57 @@ parallel tool calls each trigger a full `nix print-dev-env` evaluation.
 Cache keys are directories. Staleness is determined by the mtime of `.envrc`
 and `flake.lock` — two `stat` calls per lookup.
 
+## Build Warm
+
+### Problem
+
+A repository's pre-commit hook runs that repository's checks. On a cold
+Nix store those checks are a full build (~40 min at 4 cores, vs seconds
+warm) — far past the 900s `git_commit` allows for hook-running
+subcommands, so the first commit to any repository cannot land. Raising
+the timeout doesn't fix it: the wait is a build, and belongs somewhere
+visible rather than inside a tool call.
+
+### Requirements
+
+1. **Warm after the devshell** — the check command resolves from the
+   devshell, so it runs after [Direnv Cache](#direnv-cache) requirement 5
+   completes for that checkout
+2. **Declared, not guessed** — command configured per repo (the repo's
+   `AGENTS.md` states it in prose, not machine-readably). Unconfigured
+   repos warm the devshell only
+3. **Two triggers** — the self-maintenance duty
+   ([spec 24](24-self-directed-work.md)) for configured repos, and
+   checkout preparation for repos cloned on demand
+4. **Unconditional** — a warm-store run costs seconds; no bookkeeping
+   about whether it already happened
+5. **Background** — never blocks the turn that triggered it
+6. **Readers wait, one runner** — a `Notify` per repo, as the direnv
+   cache does. Nix serialises same-derivation builds anyway, but a
+   waiter blocked on the derivation lock dies on the tool timeout with
+   no indication why
+7. **Only `git_commit` waits** — reading, editing, and delegating need
+   nothing from the build cache
+8. **Failure doesn't block** — a failed warm is logged; `git_commit`
+   proceeds and fails on the hook honestly
+9. **Its own timeout** — generous, separate from tool timeouts; the
+   thing waited on is a build, not a command
+10. **Visible** — emit activity while waiting, so a long wait reads as
+    progress rather than a hang
+
+### Configuration
+
+Exact-match table beside `git.trusted_repos`; no wildcards, since two
+repositories under one owner rarely share a check command. No new trust
+surface: `warm_devshell` already executes the repo's `.envrc` on clone
+behind `git.trusted_repos`, and the warm command runs behind the same
+gate. Unlisted repos warm nothing.
+
+```toml
+[git.warm_commands]
+"amackillop/kitaebot" = "just check"
+```
+
 ## Boundaries
 
 ### Owns
@@ -498,6 +549,15 @@ and a valid GitHub PAT loaded from credentials.
 
 ## Open Questions
 
+- **Declared vs discovered warm command**: per-repo config goes stale
+  silently when a repo renames its check; a machine-readable convention
+  in the repo would be self-service but needs every repo to adopt it.
+  Configured while there are two repos.
+- **Rooting the warm**: nothing holds a gcroot on what a warm builds —
+  the command is opaque (`just check`, a package script), not a
+  `nix build` with an out-link — so GC can evict it. Whether that needs
+  solving, or scope and scheduling keep collection rare enough, needs
+  the [spec 24](24-self-directed-work.md) duties running first.
 - **Read-before-edit precondition**: opencode-style enforcement
   (reject edits to files not yet read this session) would prevent
   blind edits but needs per-session read tracking in the harness. The
