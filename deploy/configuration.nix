@@ -66,9 +66,9 @@ in
         enabled = true;
         co_authors = [ "Austin Mackillop <github.roundworm216@passmail.net>" ];
         repositories = {
-          "amackillop/kitaebot".warm = "just check";
-          "CumuloGlobal/open-money".warm = "just check";
-          "CumuloGlobal/unhuman".warm = "just check";
+          "amackillop/kitaebot".check = "just check";
+          "CumuloGlobal/open-money".check = "just check";
+          "CumuloGlobal/unhuman".check = "just check";
         };
       };
       github = {

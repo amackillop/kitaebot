@@ -486,18 +486,19 @@ visible rather than inside a tool call.
 
 ### Configuration
 
-The warm command hangs off the repo's `git.repositories` entry, so it
-cannot name a repo the trust list does not: listing the repo is the
-trust grant, and the command rides on it. No new trust surface —
-`warm_devshell` already executes the repo's `.envrc` on clone behind
-the same entry. Exact `owner/repo` entries only, since two repositories
-under one owner rarely share a check command; wildcard entries are
-trust-only. Repos without a warm command warm the devshell and nothing
-else.
+`check` on the repo's `git.repositories` entry is the repo's check
+command — the same one its pre-commit hook runs — and the warm runs
+it ahead of need. Hanging it off the trust entry means it cannot name
+a repo the trust list does not: listing the repo is the trust grant,
+and the command rides on it. No new trust surface — `warm_devshell`
+already executes the repo's `.envrc` on clone behind the same entry.
+Exact `owner/repo` entries only, since two repositories under one
+owner rarely share a check command; wildcard entries are trust-only.
+Repos without one warm the devshell and nothing else.
 
 ```toml
 [git.repositories."amackillop/kitaebot"]
-warm = "just check"
+check = "just check"
 ```
 
 ## Boundaries

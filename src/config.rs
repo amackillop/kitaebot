@@ -237,7 +237,7 @@ pub struct DutiesConfig {
     /// in config (spec 24). `[[duties.prompt]]` tables.
     pub prompt: Vec<PromptDutyConfig>,
     /// Schedule for the build-warm duty. Registered only when some
-    /// repo in `git.repositories` configures a warm command.
+    /// repo in `git.repositories` configures a check command.
     pub warm: ScheduleConfig,
 }
 
@@ -407,10 +407,11 @@ pub struct GitConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RepoConfig {
-    /// Build-warm command (spec 03): run in the repo's devshell after
-    /// checkout preparation and by the warm duty, so `git_commit`
-    /// never meets a cold store. Exact `owner/repo` entries only.
-    pub warm: Option<String>,
+    /// The repo's check command — what its pre-commit hook runs. The
+    /// daemon runs it ahead of need (spec 03 Build Warm: on checkout
+    /// preparation and on the warm duty) so `git_commit` never meets
+    /// a cold store. Exact `owner/repo` entries only.
+    pub check: Option<String>,
 }
 
 impl GitConfig {
@@ -423,7 +424,7 @@ impl GitConfig {
     pub fn warm_commands(&self) -> std::collections::BTreeMap<String, String> {
         self.repositories
             .iter()
-            .filter_map(|(nwo, repo)| repo.warm.clone().map(|warm| (nwo.clone(), warm)))
+            .filter_map(|(nwo, repo)| repo.check.clone().map(|check| (nwo.clone(), check)))
             .collect()
     }
 }
@@ -849,26 +850,26 @@ impl Config {
         Ok(())
     }
 
-    /// Validate `[git.repositories]` warm entries: non-empty command,
+    /// Validate `[git.repositories]` check entries: non-empty command,
     /// exact `owner/repo` key, git tools enabled. Trust needs no
     /// validation — listing the repo is the grant.
     fn validate_repositories(&self) -> Result<(), ConfigError> {
         for (nwo, repo) in &self.git.repositories {
             let ctx = |e: String| ConfigError::Invalid(format!("git.repositories {nwo:?}: {e}"));
-            let Some(warm) = &repo.warm else { continue };
+            let Some(check) = &repo.check else { continue };
             if !self.git.enabled {
                 return Err(ctx(
-                    "warm requires git.enabled (the warm serves git_commit)".into(),
+                    "check requires git.enabled (warming serves git_commit)".into(),
                 ));
             }
-            if warm.trim().is_empty() {
-                return Err(ctx("warm command must be non-empty".into()));
+            if check.trim().is_empty() {
+                return Err(ctx("check command must be non-empty".into()));
             }
             let exact = matches!(nwo.split('/').collect::<Vec<_>>().as_slice(),
                 [owner, repo] if !owner.is_empty() && !repo.is_empty() && !nwo.contains('*'));
             if !exact {
                 return Err(ctx(
-                    "warm requires an exact owner/repo key (no wildcards)".into()
+                    "check requires an exact owner/repo key (no wildcards)".into()
                 ));
             }
         }
@@ -1448,7 +1449,7 @@ prompt = \"Review recent commits for security issues.\"
     fn git_parse() {
         let cfg = load_toml(
             "[git]\nenabled = true\nco_authors = [\"Alice <alice@example.com>\"]\n\
-             [git.repositories.\"alice/repo\"]\nwarm = \"just check\"\n\
+             [git.repositories.\"alice/repo\"]\ncheck = \"just check\"\n\
              [git.repositories.\"alice/*\"]\n",
         )
         .unwrap();
@@ -1483,17 +1484,17 @@ prompt = \"Review recent commits for security issues.\"
     }
 
     #[test]
-    fn warm_requires_git_enabled() {
-        let result = load_toml("[git.repositories.\"alice/repo\"]\nwarm = \"just check\"\n");
+    fn check_requires_git_enabled() {
+        let result = load_toml("[git.repositories.\"alice/repo\"]\ncheck = \"just check\"\n");
         assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("git.enabled")));
     }
 
     #[test]
-    fn warm_rejected_on_wildcard_and_malformed_keys() {
+    fn check_rejected_on_wildcard_and_malformed_keys() {
         for key in ["alice/*", "alice", "alice/repo/extra", "/repo", "alice/"] {
             let toml = format!(
                 "[git]\nenabled = true\n\
-                 [git.repositories.\"{key}\"]\nwarm = \"just check\"\n"
+                 [git.repositories.\"{key}\"]\ncheck = \"just check\"\n"
             );
             let result = load_toml(&toml);
             assert!(
@@ -1504,10 +1505,10 @@ prompt = \"Review recent commits for security issues.\"
     }
 
     #[test]
-    fn warm_rejects_empty_command() {
+    fn check_rejects_empty_command() {
         let result = load_toml(
             "[git]\nenabled = true\n\
-             [git.repositories.\"alice/repo\"]\nwarm = \"  \"\n",
+             [git.repositories.\"alice/repo\"]\ncheck = \"  \"\n",
         );
         assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("non-empty")));
     }
