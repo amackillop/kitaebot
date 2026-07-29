@@ -34,7 +34,7 @@ pub(crate) use super::{Tool, ToolCtx};
 /// Resolve and validate a repo directory within the workspace.
 ///
 /// Rejects path traversal (`..`), absolute paths, paths that escape
-/// the workspace root, and directories without a `.git` subdirectory.
+/// the workspace root, and directories without a `.git` entry.
 pub(crate) fn resolve_repo_dir(
     workspace_root: &Path,
     repo_dir: &str,
@@ -59,7 +59,10 @@ pub(crate) fn resolve_repo_dir(
             guidance: "repo_dir: escapes workspace".into(),
         });
     }
-    if !resolved.join(".git").is_dir() {
+    // A worktree's .git is a file pointing at its clone; review
+    // checkouts are worktrees (spec 20).
+    let marker = resolved.join(".git");
+    if !marker.is_dir() && !marker.is_file() {
         return Err(ToolError::InvalidArguments(format!(
             "{repo_dir} is not a git repository"
         )));
@@ -157,5 +160,19 @@ mod resolve_repo_dir_tests {
         std::fs::create_dir_all(workspace.path().join("projects/myrepo/.git")).unwrap();
         let resolved = resolve_repo_dir(workspace.path(), "projects/myrepo").unwrap();
         assert!(resolved.ends_with("projects/myrepo"));
+    }
+
+    #[test]
+    fn accepts_worktree_with_gitdir_file() {
+        let workspace = tempfile::tempdir().unwrap();
+        let wt = workspace.path().join("reviews/o/r");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            "gitdir: ../../../projects/o/r/.git/worktrees/r\n",
+        )
+        .unwrap();
+        let resolved = resolve_repo_dir(workspace.path(), "reviews/o/r").unwrap();
+        assert!(resolved.ends_with("reviews/o/r"));
     }
 }
