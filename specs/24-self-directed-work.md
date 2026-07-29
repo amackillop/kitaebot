@@ -89,7 +89,7 @@ The `new-commits` gate keeps a per-duty cursor (last-reviewed SHA) in
 the same `state/` file as `last_run`: a cheap fetch-and-compare
 decides whether a turn runs, and each run sees only the delta — an
 idle repo costs two git commands. Without a gate the prompt runs
-unconditionally on schedule. The repo must be in `trusted_repos`;
+unconditionally on schedule. The repo must be listed in `git.repositories`;
 the turn runs on the repo's work session; anything the prompt wants
 to raise goes through the proposal contract below, same caps. This
 stays inside the trust model because the operator authors the prompt
@@ -142,7 +142,7 @@ last so dispatch duties due at the same tick go first.
 ### Phase 2: discovery duties
 
 Duties whose action *generates* work rather than performing it.
-Scope is `git.trusted_repos` only, for all of them.
+Scope is the `git.repositories` trust list only, for all of them.
 
 - **Shepherd** (from spec 21's deferred list): gate is a `gh` query
   over the bot's own open PRs — unanswered review threads, PRs
@@ -220,7 +220,7 @@ Duty and commitment actions are ordinary turns; every existing gate
 (review, egress, deny-list) applies unchanged.
 
 Assumes: system clock is sane (NTP); Linear workspace has a triage
-state the bot's token may create issues into; `trusted_repos` is the
+state the bot's token may create issues into; `git.repositories` is the
 complete scope statement for discovery and prompt duties.
 
 ## Failure Modes
@@ -252,7 +252,7 @@ complete scope statement for discovery and prompt duties.
   the sole, deliberately-contained exception (phase 3): one-shot,
   visible at creation, listed, capped, cancellable.
 - Discovery and prompt duties read and propose against
-  `trusted_repos` only.
+  trusted repos (`git.repositories`) only.
 - Duty turns run through the normal actor; no parallel execution, no
   second agent loop.
 - Schedule, cursor, and commitment state follow the existing

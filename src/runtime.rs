@@ -79,9 +79,9 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 token.clone(),
                 workspace.path(),
                 direnv_cache.clone(),
-                config.git.trusted_repos.clone(),
+                config.git.trusted_repos(),
             )
-            .with_warm(warmer.clone(), Arc::new(config.git.warm_commands.clone())),
+            .with_warm(warmer.clone(), Arc::new(config.git.warm_commands())),
         );
         let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {
@@ -196,9 +196,9 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
                 token.clone(),
                 workspace.path(),
                 direnv_cache.clone(),
-                config.git.trusted_repos.clone(),
+                config.git.trusted_repos(),
             )
-            .with_warm(warmer.clone(), Arc::new(config.git.warm_commands.clone())),
+            .with_warm(warmer.clone(), Arc::new(config.git.warm_commands())),
         );
         let gh = GhCli::new(token, workspace.path());
         if config.github.enabled {

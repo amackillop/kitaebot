@@ -105,7 +105,7 @@ what makes elevating repo content above data defensible, and what makes
 it safe on review turns without a role gate: review and work turns share
 the `{nwo}` session (spec 20), so session type could not gate it anyway.
 
-Gated on `git.trusted_repos`, no separate list. Merging to a trusted
+Gated on the `git.repositories` trust list, no separate one. Merging to a trusted
 repo's default branch already implies enough access to change CI or add
 a dependency, so prompt text is not the marginal risk.
 

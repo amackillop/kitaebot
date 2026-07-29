@@ -228,7 +228,7 @@ impl Tools {
                 workspace.path(),
                 &config.tools.exec,
                 direnv,
-                config.git.trusted_repos.clone(),
+                config.git.trusted_repos(),
             )),
             Arc::new(FileRead::new(guard.clone())),
             Arc::new(FileWrite::new(guard.clone())),

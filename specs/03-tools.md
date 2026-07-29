@@ -342,8 +342,9 @@ dependency.
 ### Git Tools
 
 Four tools wrapping the `git` binary. Gated behind `git.enabled` in config.
-`git.trusted_repos` lists repos (`owner/repo` or `owner/*`, case-insensitive)
-whose `.envrc` may be trusted on clone — see [Direnv Cache](#direnv-cache).
+`git.repositories` keys repos (`owner/repo`, or `owner/*` for trust-only
+wildcard entries, case-insensitive); listing a repo trusts its `.envrc`
+on clone — see [Direnv Cache](#direnv-cache).
 
 `GitCli<R>` holds the GitHub PAT, workspace root, co-authors, and an optional
 direnv cache. The token is injected via a temporary `GIT_ASKPASS` helper script
@@ -352,7 +353,7 @@ not need authentication; clone, fetch, and push do.
 
 | Tool | Description |
 |------|-------------|
-| `git_clone` | Clone a repository into the workspace. For repos in `git.trusted_repos`, runs `direnv allow` synchronously then warms the direnv cache in the background. |
+| `git_clone` | Clone a repository into the workspace. For repos listed in `git.repositories`, runs `direnv allow` synchronously then warms the direnv cache in the background. |
 | `git_commit` | Commit staged changes with co-author trailers. |
 | `git_fetch` | Fetch refs from a remote. Fetch a base branch before rebasing onto it. |
 | `git_push` | Push commits to a remote. |
@@ -433,7 +434,7 @@ parallel tool calls each trigger a full `nix print-dev-env` evaluation.
 4. **Graceful degradation** — if direnv fails, exec runs without the devshell
 5. **Warm on clone** — `git_clone` pre-populates the cache in the background
 6. **Trust before evaluate** — `git_clone` runs `direnv allow` synchronously
-   before returning, and only for repos listed in `git.trusted_repos`. An
+   before returning, and only for repos listed in `git.repositories`. An
    `.envrc` is arbitrary shell executing at clone time, before anyone has
    read the repo; the allowlist is the only gate on that. Unlisted repos
    clone normally and degrade to no-devshell (requirement 4).
@@ -485,15 +486,18 @@ visible rather than inside a tool call.
 
 ### Configuration
 
-Exact-match table beside `git.trusted_repos`; no wildcards, since two
-repositories under one owner rarely share a check command. No new trust
-surface: `warm_devshell` already executes the repo's `.envrc` on clone
-behind `git.trusted_repos`, and the warm command runs behind the same
-gate. Unlisted repos warm nothing.
+The warm command hangs off the repo's `git.repositories` entry, so it
+cannot name a repo the trust list does not: listing the repo is the
+trust grant, and the command rides on it. No new trust surface —
+`warm_devshell` already executes the repo's `.envrc` on clone behind
+the same entry. Exact `owner/repo` entries only, since two repositories
+under one owner rarely share a check command; wildcard entries are
+trust-only. Repos without a warm command warm the devshell and nothing
+else.
 
 ```toml
-[git.warm_commands]
-"amackillop/kitaebot" = "just check"
+[git.repositories."amackillop/kitaebot"]
+warm = "just check"
 ```
 
 ## Boundaries

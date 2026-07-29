@@ -236,8 +236,8 @@ pub struct DutiesConfig {
     /// Operator-defined prompt duties: recurring watch-tasks authored
     /// in config (spec 24). `[[duties.prompt]]` tables.
     pub prompt: Vec<PromptDutyConfig>,
-    /// Schedule for the build-warm duty. Registered only when
-    /// `git.warm_commands` is non-empty.
+    /// Schedule for the build-warm duty. Registered only when some
+    /// repo in `git.repositories` configures a warm command.
     pub warm: ScheduleConfig,
 }
 
@@ -250,8 +250,8 @@ pub struct PromptDutyConfig {
     /// Schedule (`every` or `daily`), flattened alongside.
     #[serde(flatten)]
     pub schedule: ScheduleConfig,
-    /// Repository the duty works on (`owner/repo`). Must be in
-    /// `git.trusted_repos`; the turn runs on its work session.
+    /// Repository the duty works on (`owner/repo`). Must be listed in
+    /// `git.repositories`; the turn runs on its work session.
     pub repo: String,
     /// Optional mechanical gate. `"new-commits"` keeps a last-reviewed
     /// SHA cursor and dispatches only on new commits; unset runs
@@ -395,16 +395,37 @@ pub struct GitConfig {
     /// `Co-authored-by` trailers appended to commit messages.
     /// Each entry is `"Name <email>"`.
     pub co_authors: Vec<String>,
-    /// Repositories whose `.envrc` is trusted: `git_clone` runs
-    /// `direnv allow` only for repos listed here. Entries are
-    /// `owner/repo` or `owner/*`, matched case-insensitively.
-    /// Everything else clones fine but runs without a devshell.
-    pub trusted_repos: Vec<String>,
-    /// Build-warm command per repo (spec 03): run in the repo's
-    /// devshell after checkout preparation and by the warm duty, so
-    /// `git_commit` never meets a cold store. Keys are exact
-    /// `owner/repo` — no wildcards — and must be in `trusted_repos`.
-    pub warm_commands: std::collections::BTreeMap<String, String>,
+    /// Per-repository settings, keyed `owner/repo` (or `owner/*` for
+    /// trust-only wildcard entries), matched case-insensitively.
+    /// Listing a repo is the trust grant: its `.envrc` gets
+    /// `direnv allow` on clone. Unlisted repos clone fine but run
+    /// without a devshell.
+    pub repositories: std::collections::BTreeMap<String, RepoConfig>,
+}
+
+/// Settings for one `[git.repositories."owner/repo"]` entry.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RepoConfig {
+    /// Build-warm command (spec 03): run in the repo's devshell after
+    /// checkout preparation and by the warm duty, so `git_commit`
+    /// never meets a cold store. Exact `owner/repo` entries only.
+    pub warm: Option<String>,
+}
+
+impl GitConfig {
+    /// The trust list: every key of `repositories`.
+    pub fn trusted_repos(&self) -> Vec<String> {
+        self.repositories.keys().cloned().collect()
+    }
+
+    /// Repos with a build-warm command configured.
+    pub fn warm_commands(&self) -> std::collections::BTreeMap<String, String> {
+        self.repositories
+            .iter()
+            .filter_map(|(nwo, repo)| repo.warm.clone().map(|warm| (nwo.clone(), warm)))
+            .collect()
+    }
 }
 
 /// GitHub integration settings.
@@ -711,7 +732,7 @@ impl Config {
             return Err(ConfigError::Invalid(format!("duties.warm: {e}")));
         }
         self.validate_prompt_duties()?;
-        self.validate_warm_commands()?;
+        self.validate_repositories()?;
         if self.memory.index_cap_bytes == 0 {
             return Err(ConfigError::Invalid(
                 "memory index_cap_bytes must be > 0".into(),
@@ -792,7 +813,7 @@ impl Config {
 
     /// Validate `[[duties.prompt]]` entries: parseable schedule, a
     /// single-token unique name that shadows no built-in, a non-empty
-    /// prompt, and a repo covered by `git.trusted_repos`.
+    /// prompt, and a repo listed in `git.repositories`.
     fn validate_prompt_duties(&self) -> Result<(), ConfigError> {
         let mut seen = std::collections::HashSet::new();
         for p in &self.duties.prompt {
@@ -810,11 +831,8 @@ impl Config {
                 return Err(ctx("prompt must be non-empty".into()));
             }
             p.schedule.parse().map_err(ctx)?;
-            if !crate::tools::git::url::is_trusted_repo(&p.repo, &self.git.trusted_repos) {
-                return Err(ctx(format!(
-                    "repo {:?} is not in git.trusted_repos",
-                    p.repo
-                )));
+            if !crate::tools::git::url::is_trusted_repo(&p.repo, &self.git.trusted_repos()) {
+                return Err(ctx(format!("repo {:?} is not in git.repositories", p.repo)));
             }
             match p.gate.as_deref() {
                 None | Some("new-commits") => {}
@@ -831,26 +849,27 @@ impl Config {
         Ok(())
     }
 
-    /// Validate `[git.warm_commands]`: exact `owner/repo` keys covered
-    /// by `git.trusted_repos`, non-empty commands, git tools enabled.
-    fn validate_warm_commands(&self) -> Result<(), ConfigError> {
-        if !self.git.warm_commands.is_empty() && !self.git.enabled {
-            return Err(ConfigError::Invalid(
-                "git.warm_commands requires git.enabled (the warm serves git_commit)".into(),
-            ));
-        }
-        for (nwo, command) in &self.git.warm_commands {
-            let ctx = |e: String| ConfigError::Invalid(format!("git.warm_commands {nwo:?}: {e}"));
+    /// Validate `[git.repositories]` warm entries: non-empty command,
+    /// exact `owner/repo` key, git tools enabled. Trust needs no
+    /// validation — listing the repo is the grant.
+    fn validate_repositories(&self) -> Result<(), ConfigError> {
+        for (nwo, repo) in &self.git.repositories {
+            let ctx = |e: String| ConfigError::Invalid(format!("git.repositories {nwo:?}: {e}"));
+            let Some(warm) = &repo.warm else { continue };
+            if !self.git.enabled {
+                return Err(ctx(
+                    "warm requires git.enabled (the warm serves git_commit)".into(),
+                ));
+            }
+            if warm.trim().is_empty() {
+                return Err(ctx("warm command must be non-empty".into()));
+            }
             let exact = matches!(nwo.split('/').collect::<Vec<_>>().as_slice(),
                 [owner, repo] if !owner.is_empty() && !repo.is_empty() && !nwo.contains('*'));
             if !exact {
-                return Err(ctx("key must be an exact owner/repo (no wildcards)".into()));
-            }
-            if command.trim().is_empty() {
-                return Err(ctx("command must be non-empty".into()));
-            }
-            if !crate::tools::git::url::is_trusted_repo(nwo, &self.git.trusted_repos) {
-                return Err(ctx("repo is not in git.trusted_repos".into()));
+                return Err(ctx(
+                    "warm requires an exact owner/repo key (no wildcards)".into()
+                ));
             }
         }
         Ok(())
@@ -1091,7 +1110,8 @@ memory = \"cheap/memory\"
     const PROMPT_DUTY: &str = "\
 [git]
 enabled = true
-trusted_repos = [\"owner/repo\"]
+
+[git.repositories.\"owner/repo\"]
 
 [[duties.prompt]]
 name = \"security-watch\"
@@ -1420,19 +1440,28 @@ prompt = \"Review recent commits for security issues.\"
         let cfg = load_toml("").unwrap();
         assert!(!cfg.git.enabled);
         assert!(cfg.git.co_authors.is_empty());
-        assert!(cfg.git.trusted_repos.is_empty());
+        assert!(cfg.git.repositories.is_empty());
+        assert!(cfg.git.warm_commands().is_empty());
     }
 
     #[test]
     fn git_parse() {
         let cfg = load_toml(
             "[git]\nenabled = true\nco_authors = [\"Alice <alice@example.com>\"]\n\
-             trusted_repos = [\"alice/repo\", \"alice/*\"]\n",
+             [git.repositories.\"alice/repo\"]\nwarm = \"just check\"\n\
+             [git.repositories.\"alice/*\"]\n",
         )
         .unwrap();
         assert!(cfg.git.enabled);
         assert_eq!(cfg.git.co_authors, vec!["Alice <alice@example.com>"]);
-        assert_eq!(cfg.git.trusted_repos, vec!["alice/repo", "alice/*"]);
+        assert_eq!(cfg.git.trusted_repos(), vec!["alice/*", "alice/repo"]);
+        assert_eq!(
+            cfg.git
+                .warm_commands()
+                .get("alice/repo")
+                .map(String::as_str),
+            Some("just check")
+        );
     }
 
     #[test]
@@ -1442,59 +1471,29 @@ prompt = \"Review recent commits for security issues.\"
     }
 
     #[test]
-    fn warm_commands_default_empty() {
-        assert!(load_toml("").unwrap().git.warm_commands.is_empty());
+    fn repositories_reject_unknown_field() {
+        let result = load_toml("[git.repositories.\"alice/repo\"]\ntypo = 1\n");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 
     #[test]
-    fn warm_commands_parse() {
-        let cfg = load_toml(
-            "[git]\nenabled = true\ntrusted_repos = [\"alice/repo\"]\n\
-             [git.warm_commands]\n\"alice/repo\" = \"just check\"\n",
-        )
-        .unwrap();
-        assert_eq!(
-            cfg.git.warm_commands.get("alice/repo").map(String::as_str),
-            Some("just check")
-        );
+    fn trust_only_entry_needs_no_git_enabled() {
+        let cfg = load_toml("[git.repositories.\"alice/*\"]\n").unwrap();
+        assert_eq!(cfg.git.trusted_repos(), vec!["alice/*"]);
     }
 
     #[test]
-    fn warm_commands_repo_may_be_trusted_by_wildcard() {
-        let cfg = load_toml(
-            "[git]\nenabled = true\ntrusted_repos = [\"alice/*\"]\n\
-             [git.warm_commands]\n\"alice/repo\" = \"just check\"\n",
-        );
-        assert!(cfg.is_ok());
-    }
-
-    #[test]
-    fn warm_commands_require_git_enabled() {
-        let result = load_toml(
-            "[git]\ntrusted_repos = [\"alice/repo\"]\n\
-             [git.warm_commands]\n\"alice/repo\" = \"just check\"\n",
-        );
+    fn warm_requires_git_enabled() {
+        let result = load_toml("[git.repositories.\"alice/repo\"]\nwarm = \"just check\"\n");
         assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("git.enabled")));
     }
 
     #[test]
-    fn warm_commands_reject_untrusted_repo() {
-        let result = load_toml(
-            "[git]\nenabled = true\n\
-             [git.warm_commands]\n\"alice/repo\" = \"just check\"\n",
-        );
-        assert!(
-            matches!(result, Err(ConfigError::Invalid(m)) if m.contains("trusted_repos")),
-            "untrusted warm repo must be rejected"
-        );
-    }
-
-    #[test]
-    fn warm_commands_reject_wildcard_and_malformed_keys() {
+    fn warm_rejected_on_wildcard_and_malformed_keys() {
         for key in ["alice/*", "alice", "alice/repo/extra", "/repo", "alice/"] {
             let toml = format!(
-                "[git]\nenabled = true\ntrusted_repos = [\"alice/*\"]\n\
-                 [git.warm_commands]\n\"{key}\" = \"just check\"\n"
+                "[git]\nenabled = true\n\
+                 [git.repositories.\"{key}\"]\nwarm = \"just check\"\n"
             );
             let result = load_toml(&toml);
             assert!(
@@ -1505,10 +1504,10 @@ prompt = \"Review recent commits for security issues.\"
     }
 
     #[test]
-    fn warm_commands_reject_empty_command() {
+    fn warm_rejects_empty_command() {
         let result = load_toml(
-            "[git]\nenabled = true\ntrusted_repos = [\"alice/repo\"]\n\
-             [git.warm_commands]\n\"alice/repo\" = \"  \"\n",
+            "[git]\nenabled = true\n\
+             [git.repositories.\"alice/repo\"]\nwarm = \"  \"\n",
         );
         assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("non-empty")));
     }

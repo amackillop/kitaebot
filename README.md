@@ -183,9 +183,9 @@ kitaebot = {
     git = {
       enabled = true;                            # Enables git tools (clone, commit, push)
       co_authors = [ "Name <email>" ];
-      trusted_repos = [ "owner/repo" ];          # Repos whose .envrc gets direnv allow
-      warm_commands = {                          # Build-warm command per repo (spec 03);
-        "owner/repo" = "just check";             # keys must be in trusted_repos
+      repositories = {                           # Listing a repo trusts its .envrc (direnv allow)
+        "owner/repo".warm = "just check";        # Optional build-warm command (spec 03)
+        "owner/*" = { };                         # Wildcard trust-only entry; no warm on wildcards
       };
     };
     github = {
@@ -202,12 +202,12 @@ kitaebot = {
     };
     duties = {                                   # Duty scheduler (spec 24)
       distill = { every = "1h"; };                # Token gate still applies
-      warm = { every = "24h"; };                  # Build-warm duty; runs only with git.warm_commands set
+      warm = { every = "24h"; };                  # Build-warm duty; runs only when some repo sets warm
       prompt = [                                  # Operator-defined watch-tasks
         {
           name = "ci-watch";
           every = "6h";                           # or daily = "06:00" (UTC)
-          repo = "owner/repo";                    # Must be in git.trusted_repos
+          repo = "owner/repo";                    # Must be listed in git.repositories
           gate = "new-commits";                   # Optional; needs github.enabled
           prompt = "Check CI on the default branch.";
         }

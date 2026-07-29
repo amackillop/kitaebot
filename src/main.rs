@@ -188,7 +188,7 @@ fn build_duties(config: &Config) -> Vec<duty::Duty> {
         }),
     }));
     // Last: a due-together cold warm must not delay the duties above.
-    if !config.git.warm_commands.is_empty() {
+    if !config.git.warm_commands().is_empty() {
         duties.push(duty::Duty {
             name: "warm".into(),
             action: duty::Action::Warm,
@@ -304,7 +304,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         config.agent.max_iterations,
         agent::PromptConfig {
             memory_index_cap: config.memory.index_cap_bytes,
-            trusted_repos: config.git.trusted_repos.clone(),
+            trusted_repos: config.git.trusted_repos(),
         },
         engine,
         summarize,

@@ -38,8 +38,8 @@ pub enum Action {
         input: String,
         session_hint: Option<String>,
     },
-    /// Prepare and warm every repo in `git.warm_commands`, in the
-    /// scheduler with no LLM turn (spec 24 self-maintenance).
+    /// Prepare and warm every repo with a configured warm command, in
+    /// the scheduler with no LLM turn (spec 24 self-maintenance).
     Warm,
 }
 

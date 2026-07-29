@@ -90,7 +90,7 @@ impl GitClone {
             } else {
                 let _ = write!(
                     output,
-                    "\n.envrc detected but {nwo} is not in git.trusted_repos; \
+                    "\n.envrc detected but {nwo} is not in git.repositories; \
                      direnv/devshell disabled for this checkout."
                 );
             }
