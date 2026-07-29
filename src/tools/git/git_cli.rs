@@ -70,7 +70,7 @@ impl GitCli {
     /// `trusted_repos`. Best-effort: a failed warm degrades to
     /// no-devshell, which exec already tolerates.
     pub async fn warm_devshell(&self, dir: &Path) {
-        let Some(command) = self.provision_devshell(dir).await else {
+        let Ok(Some(command)) = self.provision_devshell(dir).await else {
             return;
         };
         let (warmer, dir, command) = (self.warmer.clone(), dir.to_path_buf(), command);
@@ -80,25 +80,27 @@ impl GitCli {
     /// Allow and evaluate the devshell of a trusted checkout. Returns
     /// the repo's warm command when a build warm should follow: the
     /// devshell resolved and a command is configured (the warm command
-    /// comes from the devshell, so it cannot run without one).
-    async fn provision_devshell(&self, dir: &Path) -> Option<String> {
+    /// comes from the devshell, so it cannot run without one). `Err`
+    /// carries why no devshell was provisioned — the duty summary must
+    /// not report a 15-minute eval timeout as a repo without one.
+    async fn provision_devshell(&self, dir: &Path) -> Result<Option<String>, String> {
         if !dir.join(".envrc").exists() {
-            return None;
+            return Err("no .envrc".into());
         }
         let Some(nwo) = super::origin_nwo(dir).await else {
             debug!(dir = %dir.display(), "no readable origin; skipping devshell warm");
-            return None;
+            return Err("no readable origin".into());
         };
         if !super::url::is_trusted_repo(&nwo, &self.trusted_repos) {
             debug!(dir = %dir.display(), "origin not in trusted_repos; skipping devshell warm");
-            return None;
+            return Err("origin not in git.repositories".into());
         }
         direnv::allow(dir).await;
         if let Err(e) = self.direnv_cache.get(dir).await {
             warn!(dir = %dir.display(), error = %e, "devshell warm failed");
-            return None;
+            return Err(format!("devshell eval failed: {e}"));
         }
-        warm_command(&self.warm_commands, &nwo).map(str::to_string)
+        Ok(warm_command(&self.warm_commands, &nwo).map(str::to_string))
     }
 
     /// Prepare and warm every repo in `warm_commands` — the spec 24
@@ -129,8 +131,9 @@ impl GitCli {
             Err(e) => return format!("clone failed: {e}"),
         };
         match self.provision_devshell(&dir).await {
-            None => "skipped: no devshell".into(),
-            Some(command) => match self.warmer.warm(&dir, &command).await {
+            Err(reason) => format!("skipped: {reason}"),
+            Ok(None) => "skipped: no check command".into(),
+            Ok(Some(command)) => match self.warmer.warm(&dir, &command).await {
                 crate::tools::warm::WarmOutcome::Failed => "failed".into(),
                 crate::tools::warm::WarmOutcome::Ready => "warm".into(),
             },
