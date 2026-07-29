@@ -23,7 +23,7 @@ pub struct GitCli {
     pub(super) token: Secret,
     pub(super) workspace_root: PathBuf,
     pub(super) direnv_cache: DirenvCache,
-    /// Repos (`owner/repo` or `owner/*`) whose `.envrc` may be trusted.
+    /// Repos (`owner/repo`) whose `.envrc` may be trusted.
     pub(super) trusted_repos: Vec<String>,
     warmer: Warmer,
     /// Build-warm command per exact `owner/repo` (spec 03).

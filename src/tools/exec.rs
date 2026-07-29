@@ -449,7 +449,7 @@ pub struct Exec {
     workspace_root: PathBuf,
     timeout: Duration,
     direnv_cache: DirenvCache,
-    /// Repos (`owner/repo` or `owner/*`) whose `.envrc` may be re-allowed
+    /// Repos (`owner/repo`) whose `.envrc` may be re-allowed
     /// when a pull rewrites it and direnv revokes the clone-time approval.
     trusted_repos: Vec<String>,
 }

@@ -185,7 +185,7 @@ kitaebot = {
       co_authors = [ "Name <email>" ];
       repositories = {                           # Listing a repo trusts its .envrc (direnv allow)
         "owner/repo".check = "just check";       # The repo's check command; warms its build cache (spec 03)
-        "owner/*" = { };                         # Wildcard trust-only entry; no check on wildcards
+        "owner/other" = { };                     # Trust-only entry (no check command)
       };
     };
     github = {

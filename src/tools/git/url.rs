@@ -52,18 +52,9 @@ pub(crate) fn extract_nwo(url: &str) -> Option<String> {
 
 /// Check whether `nwo` (`owner/repo`) is in the trusted list.
 ///
-/// Entries are exact `owner/repo` matches or `owner/*` wildcards,
-/// case-insensitive.
+/// Entries are exact `owner/repo` matches, case-insensitive.
 pub(crate) fn is_trusted_repo(nwo: &str, trusted: &[String]) -> bool {
-    let Some((owner, _)) = nwo.split_once('/') else {
-        return false;
-    };
-    trusted.iter().any(|entry| {
-        entry.eq_ignore_ascii_case(nwo)
-            || entry
-                .strip_suffix("/*")
-                .is_some_and(|o| o.eq_ignore_ascii_case(owner))
-    })
+    trusted.iter().any(|entry| entry.eq_ignore_ascii_case(nwo))
 }
 
 /// Validate a user-provided directory name.
@@ -170,19 +161,8 @@ mod tests {
     }
 
     #[test]
-    fn trusted_repo_owner_wildcard() {
-        let trusted = list(&["owner/*"]);
-        assert!(is_trusted_repo("owner/anything", &trusted));
-        assert!(is_trusted_repo("OWNER/anything", &trusted));
-        assert!(!is_trusted_repo("other/anything", &trusted));
-    }
-
-    #[test]
-    fn trusted_repo_rejects_malformed_nwo() {
-        assert!(!is_trusted_repo(
-            "no-slash",
-            &list(&["no-slash", "owner/*"])
-        ));
+    fn trusted_repo_no_wildcards() {
+        assert!(!is_trusted_repo("owner/anything", &list(&["owner/*"])));
     }
 
     // ── Name validation ─────────────────────────────────────────────

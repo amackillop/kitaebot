@@ -342,9 +342,9 @@ dependency.
 ### Git Tools
 
 Four tools wrapping the `git` binary. Gated behind `git.enabled` in config.
-`git.repositories` keys repos (`owner/repo`, or `owner/*` for trust-only
-wildcard entries, case-insensitive); listing a repo trusts its `.envrc`
-on clone — see [Direnv Cache](#direnv-cache).
+`git.repositories` keys repos by exact `owner/repo` (case-insensitive);
+listing a repo trusts its `.envrc` on clone — see
+[Direnv Cache](#direnv-cache).
 
 `GitCli<R>` holds the GitHub PAT, workspace root, co-authors, and an optional
 direnv cache. The token is injected via a temporary `GIT_ASKPASS` helper script
@@ -492,8 +492,6 @@ it ahead of need. Hanging it off the trust entry means it cannot name
 a repo the trust list does not: listing the repo is the trust grant,
 and the command rides on it. No new trust surface — `warm_devshell`
 already executes the repo's `.envrc` on clone behind the same entry.
-Exact `owner/repo` entries only, since two repositories under one
-owner rarely share a check command; wildcard entries are trust-only.
 Repos without one warm the devshell and nothing else.
 
 ```toml

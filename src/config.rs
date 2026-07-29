@@ -395,11 +395,10 @@ pub struct GitConfig {
     /// `Co-authored-by` trailers appended to commit messages.
     /// Each entry is `"Name <email>"`.
     pub co_authors: Vec<String>,
-    /// Per-repository settings, keyed `owner/repo` (or `owner/*` for
-    /// trust-only wildcard entries), matched case-insensitively.
-    /// Listing a repo is the trust grant: its `.envrc` gets
-    /// `direnv allow` on clone. Unlisted repos clone fine but run
-    /// without a devshell.
+    /// Per-repository settings, keyed by exact `owner/repo`, matched
+    /// case-insensitively. Listing a repo is the trust grant: its
+    /// `.envrc` gets `direnv allow` on clone. Unlisted repos clone
+    /// fine but run without a devshell.
     pub repositories: std::collections::BTreeMap<String, RepoConfig>,
 }
 
@@ -850,12 +849,17 @@ impl Config {
         Ok(())
     }
 
-    /// Validate `[git.repositories]` check entries: non-empty command,
-    /// exact `owner/repo` key, git tools enabled. Trust needs no
-    /// validation — listing the repo is the grant.
+    /// Validate `[git.repositories]`: exact `owner/repo` keys; check
+    /// commands non-empty and only with the git tools enabled. Trust
+    /// itself needs no validation — listing the repo is the grant.
     fn validate_repositories(&self) -> Result<(), ConfigError> {
         for (nwo, repo) in &self.git.repositories {
             let ctx = |e: String| ConfigError::Invalid(format!("git.repositories {nwo:?}: {e}"));
+            let exact = matches!(nwo.split('/').collect::<Vec<_>>().as_slice(),
+                [owner, repo] if !owner.is_empty() && !repo.is_empty() && !nwo.contains('*'));
+            if !exact {
+                return Err(ctx("key must be an exact owner/repo".into()));
+            }
             let Some(check) = &repo.check else { continue };
             if !self.git.enabled {
                 return Err(ctx(
@@ -864,13 +868,6 @@ impl Config {
             }
             if check.trim().is_empty() {
                 return Err(ctx("check command must be non-empty".into()));
-            }
-            let exact = matches!(nwo.split('/').collect::<Vec<_>>().as_slice(),
-                [owner, repo] if !owner.is_empty() && !repo.is_empty() && !nwo.contains('*'));
-            if !exact {
-                return Err(ctx(
-                    "check requires an exact owner/repo key (no wildcards)".into()
-                ));
             }
         }
         Ok(())
@@ -1450,12 +1447,12 @@ prompt = \"Review recent commits for security issues.\"
         let cfg = load_toml(
             "[git]\nenabled = true\nco_authors = [\"Alice <alice@example.com>\"]\n\
              [git.repositories.\"alice/repo\"]\ncheck = \"just check\"\n\
-             [git.repositories.\"alice/*\"]\n",
+             [git.repositories.\"alice/other\"]\n",
         )
         .unwrap();
         assert!(cfg.git.enabled);
         assert_eq!(cfg.git.co_authors, vec!["Alice <alice@example.com>"]);
-        assert_eq!(cfg.git.trusted_repos(), vec!["alice/*", "alice/repo"]);
+        assert_eq!(cfg.git.trusted_repos(), vec!["alice/other", "alice/repo"]);
         assert_eq!(
             cfg.git
                 .warm_commands()
@@ -1479,8 +1476,8 @@ prompt = \"Review recent commits for security issues.\"
 
     #[test]
     fn trust_only_entry_needs_no_git_enabled() {
-        let cfg = load_toml("[git.repositories.\"alice/*\"]\n").unwrap();
-        assert_eq!(cfg.git.trusted_repos(), vec!["alice/*"]);
+        let cfg = load_toml("[git.repositories.\"alice/repo\"]\n").unwrap();
+        assert_eq!(cfg.git.trusted_repos(), vec!["alice/repo"]);
     }
 
     #[test]
@@ -1490,12 +1487,9 @@ prompt = \"Review recent commits for security issues.\"
     }
 
     #[test]
-    fn check_rejected_on_wildcard_and_malformed_keys() {
+    fn repositories_reject_wildcard_and_malformed_keys() {
         for key in ["alice/*", "alice", "alice/repo/extra", "/repo", "alice/"] {
-            let toml = format!(
-                "[git]\nenabled = true\n\
-                 [git.repositories.\"{key}\"]\ncheck = \"just check\"\n"
-            );
+            let toml = format!("[git.repositories.\"{key}\"]\n");
             let result = load_toml(&toml);
             assert!(
                 matches!(result, Err(ConfigError::Invalid(m)) if m.contains("owner/repo")),
