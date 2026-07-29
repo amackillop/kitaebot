@@ -67,7 +67,9 @@ async fn prepare_at(
     // Reviewing a repo the bot has never worked on clones it. Fetch
     // into the clone, not the worktree: they share refs, and the
     // worktree may not exist yet.
-    let clone = checkout::ensure_cloned(git, url, clone_rel).await?;
+    let clone = checkout::ensure_cloned(git, url, clone_rel)
+        .await?
+        .into_dir();
     let pull_ref = format!("pull/{pr_number}/head");
     checkout::run(git, &["fetch", "origin", base, &pull_ref], &clone, true).await?;
 

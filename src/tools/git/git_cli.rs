@@ -127,7 +127,7 @@ impl GitCli {
         };
         let url = format!("https://github.com/{nwo}.git");
         let dir = match super::checkout::ensure_cloned(self, &url, &rel).await {
-            Ok(dir) => dir,
+            Ok(ensured) => ensured.into_dir(),
             Err(e) => return format!("clone failed: {e}"),
         };
         match self.provision_devshell(&dir).await {
