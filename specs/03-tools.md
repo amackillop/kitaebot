@@ -555,9 +555,11 @@ and a valid GitHub PAT loaded from credentials.
   Configured while there are two repos.
 - **Rooting the warm**: nothing holds a gcroot on what a warm builds —
   the command is opaque (`just check`, a package script), not a
-  `nix build` with an out-link — so GC can evict it. Whether that needs
-  solving, or scope and scheduling keep collection rare enough, needs
-  the [spec 24](24-self-directed-work.md) duties running first.
+  `nix build` with an out-link — so GC can evict it. GC is
+  pressure-triggered only ([spec 09](09-vm.md#garbage-collection)), so
+  eviction takes disk pressure, not a timer. Whether rooting needs
+  solving beyond that needs the [spec 24](24-self-directed-work.md)
+  duties running first.
 - **Read-before-edit precondition**: opencode-style enforcement
   (reject edits to files not yet read this session) would prevent
   blind edits but needs per-session read tracking in the harness. The

@@ -460,21 +460,11 @@ in
       };
     };
 
-    # The store persists in the qcow2 across rebuilds and nothing ever
-    # collected garbage, so dead closures accumulate until the disk is
-    # full. There are no system-profile generations to keep (the VM
-    # boots straight from the image), so everything unrooted is fair
-    # game; devshells survive via direnv's gcroots in .direnv.
-    nix = {
-      gc = {
-        automatic = true;
-        dates = "daily";
-      };
-      # Emergency valve: GC mid-build when the store runs low (bytes).
-      settings = {
-        min-free = 1024 * 1024 * 1024; # 1 GiB
-        max-free = 5 * 1024 * 1024 * 1024; # 5 GiB
-      };
+    # GC only under disk pressure: a scheduled GC would evict warm
+    # build caches, which nothing roots (spec 03). Bytes.
+    nix.settings = {
+      min-free = 3 * 1024 * 1024 * 1024; # 3 GiB
+      max-free = 10 * 1024 * 1024 * 1024; # 10 GiB
     };
 
     virtualisation = {
