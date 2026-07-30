@@ -4,19 +4,11 @@
 //! the tuned PRAGMA set, runs any pending migrations, and registers the
 //! `REGEXP` user function backed by the `regex` crate.
 //!
-//! Migrations are tracked via `PRAGMA user_version`. [`MIGRATIONS`] is
-//! an ordered slice — entry `i` brings the schema from version `i` to
-//! `i + 1`. Each entry runs inside its own `BEGIN EXCLUSIVE` block
-//! together with the matching `PRAGMA user_version = i + 1` so a
-//! failure rolls the version back. Concurrent processes cannot
-//! interleave migrations — the loser of the lock race wakes up to a
-//! no-op once the winner has bumped the version past its slice.
-//!
-//! Adding a migration: drop a new `NNNN_*.sql` file in `migrations/`
-//! and append it to [`MIGRATIONS`]. Never reorder, edit, or remove an
-//! existing entry — that breaks every database that already advanced
-//! past it. The pre-commit hook enforces append-only on the files in
-//! that directory.
+//! Migrations are tracked via `PRAGMA user_version` through the shared
+//! runner ([`crate::sqlite`]): drop a new `NNNN_*.sql` file in
+//! `migrations/` and append it to [`MIGRATIONS`]. Never reorder, edit,
+//! or remove an existing entry — that breaks every database that
+//! already advanced past it.
 
 use std::path::Path;
 
@@ -98,36 +90,8 @@ pub fn open_readonly(path: &Path) -> Result<Connection, EngineError> {
 /// Returns [`EngineError::Storage`] on any underlying `SQLite` failure.
 pub fn init(conn: &Connection) -> Result<(), EngineError> {
     conn.execute_batch(PRAGMAS).map_err(|e| storage_err(&e))?;
-    apply_migrations(conn, MIGRATIONS)?;
+    crate::sqlite::apply_migrations(conn, MIGRATIONS).map_err(|e| storage_err(&e))?;
     register_regexp(conn)?;
-    Ok(())
-}
-
-/// Apply pending migrations from `migrations`, advancing
-/// `PRAGMA user_version` after each one.
-///
-/// Each migration runs inside its own `BEGIN EXCLUSIVE; ...; COMMIT;`
-/// block paired with `PRAGMA user_version = N`, so a partial failure
-/// rolls back atomically and leaves the version at its previous value.
-fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<(), EngineError> {
-    let current: i32 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|e| storage_err(&e))?;
-    let start = usize::try_from(current).unwrap_or(0);
-
-    for (i, sql) in migrations.iter().enumerate().skip(start) {
-        let target = i + 1;
-        let stmt = format!("BEGIN EXCLUSIVE;\n{sql}\nPRAGMA user_version = {target};\nCOMMIT;");
-        if let Err(e) = conn.execute_batch(&stmt) {
-            // SQLite does not implicitly rollback on a statement-level
-            // error mid-transaction; the BEGIN above stays open and any
-            // DDL run before the failure remains visible to this
-            // connection. Force the rollback so partial migrations do
-            // not leak into subsequent attempts.
-            let _ = conn.execute_batch("ROLLBACK;");
-            return Err(storage_err(&e));
-        }
-    }
     Ok(())
 }
 
@@ -334,57 +298,5 @@ mod tests {
             user_version(&conn),
             i32::try_from(MIGRATIONS.len()).unwrap()
         );
-    }
-
-    /// `apply_migrations` skips entries already applied — running with
-    /// the production slice on an in-memory DB twice does not re-run
-    /// the v1 baseline.
-    #[test]
-    fn apply_migrations_skips_already_applied() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(PRAGMAS).unwrap();
-        apply_migrations(&conn, MIGRATIONS).unwrap();
-
-        // A second pass with a stub follow-up migration should run only
-        // the stub and bump the version by exactly one.
-        let stub = "CREATE TABLE migration_probe (id INTEGER PRIMARY KEY);";
-        let extended: Vec<&str> = MIGRATIONS
-            .iter()
-            .copied()
-            .chain(std::iter::once(stub))
-            .collect();
-        apply_migrations(&conn, &extended).unwrap();
-
-        assert_eq!(user_version(&conn), i32::try_from(extended.len()).unwrap());
-        let probe_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'migration_probe'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(probe_count, 1);
-    }
-
-    /// A failing migration rolls back atomically — the version stays
-    /// at the previous value and partial DDL does not leak.
-    #[test]
-    fn apply_migrations_rolls_back_on_error() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(PRAGMAS).unwrap();
-
-        let broken = "CREATE TABLE leftover (id INTEGER); INSERT INTO no_such_table VALUES (1);";
-        let result = apply_migrations(&conn, &[broken]);
-        assert!(result.is_err());
-
-        assert_eq!(user_version(&conn), 0);
-        let leftover_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'leftover'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover_count, 0, "partial DDL should have rolled back");
     }
 }

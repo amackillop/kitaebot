@@ -8,11 +8,12 @@
 
 use std::fmt::Write as _;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
+
+use crate::state_db::StateDb;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -96,52 +97,16 @@ pub struct GateRecord<'a> {
 /// all. `findings` carries `source` so self findings and external
 /// escapes share one query surface.
 pub struct ReviewLedger {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl ReviewLedger {
-    /// Open (or create) the ledger at `path` and ensure its tables
-    /// exist.
-    pub fn open(path: &Path) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA busy_timeout = 30000;
-             CREATE TABLE IF NOT EXISTS reviews (
-                 id          INTEGER PRIMARY KEY,
-                 recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
-                 repo        TEXT NOT NULL,
-                 gate        TEXT NOT NULL,
-                 git_ref     TEXT NOT NULL,
-                 verdict     TEXT NOT NULL,
-                 confidence  REAL
-             );
-             CREATE TABLE IF NOT EXISTS findings (
-                 id          INTEGER PRIMARY KEY,
-                 recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
-                 repo        TEXT NOT NULL,
-                 gate        TEXT NOT NULL,
-                 git_ref     TEXT NOT NULL,
-                 source      TEXT NOT NULL,
-                 category    TEXT NOT NULL,
-                 severity    TEXT,
-                 confidence  REAL,
-                 file        TEXT,
-                 line        INTEGER,
-                 note        TEXT NOT NULL,
-                 disposition      TEXT,
-                 disposition_note TEXT,
-                 disposed_at      TEXT
-             );",
-        )?;
-        // Deployed ledgers predate the disposition columns, and
-        // CREATE TABLE IF NOT EXISTS never alters an existing table.
-        for column in ["disposition", "disposition_note", "disposed_at"] {
-            add_column_if_missing(&conn, "findings", column)?;
+    /// On the shared operational database ([`StateDb`]); the `reviews`
+    /// and `findings` schemas live in its baseline migration.
+    pub fn new(db: &StateDb) -> Self {
+        Self {
+            conn: db.connection(),
         }
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
     }
 
     /// Record one gate invocation: the review row plus one finding row
@@ -315,17 +280,6 @@ impl ReviewLedger {
 }
 
 /// Add `column` to `table` when it is not already present.
-fn add_column_if_missing(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"
-    ))?;
-    let present: i64 = stmt.query_row([column], |r| r.get(0))?;
-    if present == 0 {
-        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
-    }
-    Ok(())
-}
-
 /// One externally-sourced finding, as recorded by [`ReviewLogTool`].
 pub struct ExternalFinding<'a> {
     pub repo: &'a str,
@@ -589,10 +543,8 @@ mod tests {
         assert_eq!(out.verdict, Verdict::Incorrect);
     }
 
-    fn ledger() -> (tempfile::TempDir, ReviewLedger) {
-        let dir = tempfile::tempdir().unwrap();
-        let ledger = ReviewLedger::open(&dir.path().join("review.db")).unwrap();
-        (dir, ledger)
+    fn ledger() -> ReviewLedger {
+        ReviewLedger::new(&crate::state_db::StateDb::open_in_memory().unwrap())
     }
 
     fn gate<'a>() -> GateRecord<'a> {
@@ -604,57 +556,25 @@ mod tests {
     }
 
     #[test]
-    fn migration_adds_disposition_columns_to_legacy_db() {
+    fn rows_persist_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("review.db");
-        // A ledger created before the disposition columns existed.
+        let path = dir.path().join("kitaebot.db");
         {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE reviews (
-                     id INTEGER PRIMARY KEY,
-                     recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
-                     repo TEXT NOT NULL, gate TEXT NOT NULL,
-                     git_ref TEXT NOT NULL, verdict TEXT NOT NULL,
-                     confidence REAL);
-                 CREATE TABLE findings (
-                     id INTEGER PRIMARY KEY,
-                     recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
-                     repo TEXT NOT NULL, gate TEXT NOT NULL,
-                     git_ref TEXT NOT NULL, source TEXT NOT NULL,
-                     category TEXT NOT NULL, severity TEXT,
-                     confidence REAL, file TEXT, line INTEGER,
-                     note TEXT NOT NULL);
-                 INSERT INTO findings (repo, gate, git_ref, source, category, note)
-                 VALUES ('o/r', 'external', '1', 'human', 'x', 'pre-migration row');",
-            )
-            .unwrap();
+            let ledger = ReviewLedger::new(&crate::state_db::StateDb::open(&path).unwrap());
+            let output = parse_findings_block(BLOCK).unwrap();
+            ledger.record_review(&gate(), &output).unwrap();
         }
-
-        let ledger = ReviewLedger::open(&path).unwrap();
+        let ledger = ReviewLedger::new(&crate::state_db::StateDb::open(&path).unwrap());
         let conn = ledger.conn.lock().unwrap();
-        let (rows, pending): (i64, i64) = conn
-            .query_row(
-                "SELECT COUNT(*), SUM(disposition IS NULL) FROM findings",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM findings", [], |r| r.get(0))
             .unwrap();
-        assert_eq!((rows, pending), (1, 1), "old rows survive as pending");
-    }
-
-    #[test]
-    fn reopen_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("review.db");
-        drop(ReviewLedger::open(&path).unwrap());
-        // Second open must not fail on already-added columns.
-        ReviewLedger::open(&path).unwrap();
+        assert!(rows > 0, "findings must survive reopen");
     }
 
     #[test]
     fn record_review_returns_finding_ids() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         let output = parse_findings_block(BLOCK).unwrap();
         let ids = ledger.record_review(&gate(), &output).unwrap();
         assert_eq!(ids.len(), output.findings.len());
@@ -672,7 +592,7 @@ mod tests {
 
     #[test]
     fn record_finding_returns_id() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         let id = ledger
             .record_finding(&ExternalFinding {
                 repo: "o/r",
@@ -696,7 +616,7 @@ mod tests {
 
     #[test]
     fn record_and_report_roundtrip() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         let output = parse_findings_block(BLOCK).unwrap();
         ledger.record_review(&gate(), &output).unwrap();
 
@@ -708,13 +628,13 @@ mod tests {
 
     #[test]
     fn empty_report_is_a_notice() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         assert_eq!(ledger.report().unwrap(), "No reviews recorded.");
     }
 
     #[tokio::test]
     async fn review_log_records_external_finding() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         let ledger = Arc::new(ledger);
         let tool = ReviewLogTool::new(ledger.clone());
         let reply = tool
@@ -752,7 +672,7 @@ mod tests {
 
     #[tokio::test]
     async fn review_log_rejects_self_source() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         let tool = ReviewLogTool::new(Arc::new(ledger));
         let err = tool
             .execute(
@@ -769,7 +689,7 @@ mod tests {
 
     #[test]
     fn set_disposition_roundtrip() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         let output = parse_findings_block(BLOCK).unwrap();
         let ids = ledger.record_review(&gate(), &output).unwrap();
 
@@ -789,13 +709,13 @@ mod tests {
 
     #[test]
     fn set_disposition_unknown_id_is_false() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         assert!(!ledger.set_disposition(999, "fixed", None).unwrap());
     }
 
     #[tokio::test]
     async fn disposition_tool_records_decision() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         let ledger = Arc::new(ledger);
         let id = ledger
             .record_finding(&ExternalFinding {
@@ -836,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     async fn disposition_tool_rejects_dispute_without_note() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         let tool = ReviewDispositionTool::new(Arc::new(ledger));
         let err = tool
             .execute(
@@ -850,7 +770,7 @@ mod tests {
 
     #[tokio::test]
     async fn disposition_tool_errors_on_unknown_id() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         let tool = ReviewDispositionTool::new(Arc::new(ledger));
         let err = tool
             .execute(
@@ -864,7 +784,7 @@ mod tests {
 
     #[test]
     fn report_splits_dispositions_by_source() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         // Two self findings: one fixed, one left pending.
         let output = ReviewOutput {
             verdict: Verdict::Incorrect,
@@ -943,7 +863,7 @@ mod tests {
 
     #[test]
     fn clean_review_records_verdict_without_findings() {
-        let (_dir, ledger) = ledger();
+        let ledger = ledger();
         let output = ReviewOutput {
             verdict: Verdict::Correct,
             confidence: Some(1.0),

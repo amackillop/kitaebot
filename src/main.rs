@@ -20,6 +20,8 @@ mod safety;
 mod sandbox;
 mod secrets;
 mod session;
+mod sqlite;
+mod state_db;
 #[cfg(test)]
 mod test_support;
 mod time;
@@ -248,28 +250,23 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         config.memory.distill_threshold_tokens,
         config.sub_agents.max_iterations,
     ));
-    // Telemetry: an open failure is logged and the daemon runs unmetered.
-    // Opened before the task tool so sub-agent turns share the ledger.
-    let usage_ledger = match usage::UsageLedger::open(&workspace.usage_db_path()) {
-        Ok(ledger) => Some(Arc::new(ledger)),
+    // Telemetry: an open failure is logged and the daemon runs
+    // unmetered and unrecorded. Opened before the task tool so
+    // sub-agent turns share the ledgers.
+    let state_db = match state_db::StateDb::open(&workspace.state_db_path()) {
+        Ok(db) => Some(db),
         Err(e) => {
-            warn!("Usage ledger disabled: {e}");
+            warn!("State DB disabled: {e}");
             None
         }
     };
-    // Telemetry, same contract as the usage ledger: open failure logs
-    // and the pipeline runs unrecorded.
-    let review_ledger = if config.review.enabled {
-        match review::ReviewLedger::open(&workspace.review_db_path()) {
-            Ok(ledger) => Some(Arc::new(ledger)),
-            Err(e) => {
-                warn!("Review ledger disabled: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let usage_ledger = state_db
+        .as_ref()
+        .map(|db| Arc::new(usage::UsageLedger::new(db)));
+    let review_ledger = state_db
+        .as_ref()
+        .filter(|_| config.review.enabled)
+        .map(|db| Arc::new(review::ReviewLedger::new(db)));
     let overrides = &config.provider.model_overrides;
     let task_tool: Arc<dyn tools::Tool> = Arc::new(agent::task::TaskTool::new(
         agent::task::TypeProviders {

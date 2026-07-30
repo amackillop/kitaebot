@@ -128,14 +128,10 @@ impl Workspace {
         self.state_dir().join("distillation_state.json")
     }
 
-    /// Path to the per-turn usage ledger.
-    pub fn usage_db_path(&self) -> PathBuf {
-        self.state_dir().join("usage.db")
-    }
-
-    /// Path to the review findings ledger (spec 23).
-    pub fn review_db_path(&self) -> PathBuf {
-        self.state_dir().join("review.db")
+    /// Path to the operational state database (usage ledger, review
+    /// ledger, doc store).
+    pub fn state_db_path(&self) -> PathBuf {
+        self.state_dir().join("kitaebot.db")
     }
 
     /// The system prompt, assembled once at workspace init.

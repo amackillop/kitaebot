@@ -10,10 +10,11 @@
 
 use std::cmp::Ordering;
 use std::fmt::Write as _;
-use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
+
+use crate::state_db::StateDb;
 use tracing::warn;
 
 use crate::agent::TurnUsage;
@@ -31,35 +32,18 @@ pub struct TurnRecord<'a> {
     pub usage: TurnUsage,
 }
 
-/// Append-only `SQLite` ledger of per-turn usage.
+/// Append-only ledger of per-turn usage, on the shared operational
+/// database ([`StateDb`]); the `turns` schema lives in its baseline
+/// migration.
 pub struct UsageLedger {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl UsageLedger {
-    /// Open (or create) the ledger at `path` and ensure its table
-    /// exists.
-    pub fn open(path: &Path) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA busy_timeout = 30000;
-             CREATE TABLE IF NOT EXISTS turns (
-                 id                INTEGER PRIMARY KEY,
-                 recorded_at       TEXT    NOT NULL DEFAULT (datetime('now')),
-                 git_sha           TEXT,
-                 session           TEXT    NOT NULL,
-                 source            TEXT    NOT NULL,
-                 model             TEXT    NOT NULL,
-                 calls             INTEGER NOT NULL,
-                 prompt_tokens     INTEGER NOT NULL,
-                 completion_tokens INTEGER NOT NULL,
-                 cost              REAL
-             );",
-        )?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+    pub fn new(db: &StateDb) -> Self {
+        Self {
+            conn: db.connection(),
+        }
     }
 
     /// Read every recorded turn, projected to the columns the report
@@ -290,7 +274,9 @@ mod tests {
 
     fn open_temp() -> (tempfile::TempDir, UsageLedger) {
         let dir = tempfile::tempdir().unwrap();
-        let ledger = UsageLedger::open(&dir.path().join("usage.db")).unwrap();
+        let ledger = UsageLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        );
         (dir, ledger)
     }
 

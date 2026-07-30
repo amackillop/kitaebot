@@ -731,8 +731,9 @@ mod tests {
         responses.push(Ok(Response::Text(REVIEW_RESPONSE.to_string())));
         let provider = Arc::new(MockProvider::new(responses));
         let dir = tempfile::tempdir().unwrap();
-        let ledger =
-            Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
         let tool = TaskTool::new(
             same_provider(&provider),
             noop_summarize(),
@@ -803,8 +804,9 @@ mod tests {
     #[tokio::test]
     async fn reviewer_output_recorded_to_ledger() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger =
-            Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
         let tool = tool_with_review_ledger(ledger.clone());
         let result = tool
             .execute(
@@ -829,8 +831,9 @@ mod tests {
     #[tokio::test]
     async fn clean_review_gets_no_id_trailer() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger =
-            Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
         let clean = "All good.\n```findings\n{\"verdict\": \"correct\", \
                      \"confidence\": 1.0, \"explanation\": \"clean\", \
                      \"findings\": []}\n```";
@@ -862,8 +865,9 @@ mod tests {
     #[tokio::test]
     async fn non_reviewer_output_never_recorded() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger =
-            Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
         let tool = tool_with_review_ledger(ledger.clone());
         // An explore response that happens to contain a findings block
         // must not land in the ledger, and must not grow a trailer.
@@ -881,8 +885,9 @@ mod tests {
     #[tokio::test]
     async fn reviewer_without_meta_still_records() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger =
-            Arc::new(crate::review::ReviewLedger::open(&dir.path().join("review.db")).unwrap());
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
         let tool = tool_with_review_ledger(ledger.clone());
         tool.execute(
             serde_json::json!({"prompt": "review this", "agent_type": "reviewer"}),
