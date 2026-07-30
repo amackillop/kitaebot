@@ -5,9 +5,9 @@
 //!
 //! # Cache invalidation
 //!
-//! Two `stat()` calls per lookup: `.envrc` mtime and `flake.lock` mtime.
-//! A changed mtime triggers re-evaluation. Failures are never cached — the
-//! next caller retries.
+//! One `stat()` call per lookup: the `.envrc` mtime. A changed mtime
+//! triggers re-evaluation. Failures are never cached — the next caller
+//! retries.
 //!
 //! # Concurrency
 //!
@@ -69,14 +69,12 @@ pub async fn allow(dir: &Path) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fingerprint {
     envrc_mtime: Option<SystemTime>,
-    flake_lock_mtime: Option<SystemTime>,
 }
 
 impl Fingerprint {
     fn of(dir: &Path) -> Self {
         Self {
             envrc_mtime: mtime(&dir.join(".envrc")),
-            flake_lock_mtime: mtime(&dir.join("flake.lock")),
         }
     }
 }
@@ -263,7 +261,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fp = Fingerprint::of(dir.path());
         assert_eq!(fp.envrc_mtime, None);
-        assert_eq!(fp.flake_lock_mtime, None);
     }
 
     #[test]
@@ -272,17 +269,6 @@ mod tests {
         std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
         let fp = Fingerprint::of(dir.path());
         assert!(fp.envrc_mtime.is_some());
-        assert_eq!(fp.flake_lock_mtime, None);
-    }
-
-    #[test]
-    fn fingerprint_with_both_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
-        std::fs::write(dir.path().join("flake.lock"), "{}").unwrap();
-        let fp = Fingerprint::of(dir.path());
-        assert!(fp.envrc_mtime.is_some());
-        assert!(fp.flake_lock_mtime.is_some());
     }
 
     // ── Cache fast-path ─────────────────────────────────────────────
