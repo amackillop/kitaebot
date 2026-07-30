@@ -64,6 +64,29 @@ impl StateDb {
     pub(crate) fn connection(&self) -> Arc<Mutex<Connection>> {
         Arc::clone(&self.conn)
     }
+
+    /// Read the named state document. `None` if never written.
+    pub fn get_doc(&self, name: &str) -> rusqlite::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().expect("state db mutex poisoned");
+        conn.query_row("SELECT value FROM docs WHERE name = ?1", [name], |r| {
+            r.get(0)
+        })
+        .optional()
+    }
+
+    /// Write (upsert) the named state document.
+    pub fn put_doc(&self, name: &str, value: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("state db mutex poisoned");
+        conn.execute(
+            "INSERT INTO docs (name, value, updated_at)
+             VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(name) DO UPDATE
+             SET value = excluded.value, updated_at = excluded.updated_at",
+            rusqlite::params![name, value],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -89,6 +112,15 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1, "missing table {table}");
         }
+    }
+
+    #[test]
+    fn docs_roundtrip_and_upsert() {
+        let db = StateDb::open_in_memory().unwrap();
+        assert_eq!(db.get_doc("duties").unwrap(), None);
+        db.put_doc("duties", "{\"a\":1}").unwrap();
+        db.put_doc("duties", "{\"a\":2}").unwrap();
+        assert_eq!(db.get_doc("duties").unwrap().as_deref(), Some("{\"a\":2}"));
     }
 
     #[test]

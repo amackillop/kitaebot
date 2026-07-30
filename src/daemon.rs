@@ -25,6 +25,7 @@ use crate::channel::socket;
 use crate::channel::telegram::{self, TelegramChannel};
 use crate::config::GithubConfig;
 use crate::duty::{self, Duty};
+use crate::state_db::StateDb;
 use crate::tools::git::GitCli;
 use crate::tools::github::GhCli;
 use crate::workspace::Workspace;
@@ -33,6 +34,7 @@ use crate::workspace::Workspace;
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     workspace: &Workspace,
+    state_db: &StateDb,
     handle: &AgentHandle,
     duties: Vec<Duty>,
     telegram: Option<&TelegramChannel>,
@@ -44,6 +46,7 @@ pub async fn run(
 ) {
     run_with_shutdown(
         workspace,
+        state_db,
         handle,
         duties,
         telegram,
@@ -62,6 +65,7 @@ pub async fn run(
 #[allow(clippy::too_many_arguments)]
 async fn run_with_shutdown<S: Future<Output = ()>>(
     workspace: &Workspace,
+    state_db: &StateDb,
     handle: &AgentHandle,
     duties: Vec<Duty>,
     telegram: Option<&TelegramChannel>,
@@ -72,10 +76,9 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     socket_path: &Path,
     shutdown: S,
 ) {
-    let duty_state_path = workspace.state_dir().join("duties.json");
     let duty_loop = duty::run_loop(
         duties,
-        duty_state_path,
+        state_db.clone(),
         workspace.history_path(),
         handle,
         git_cli.cloned(),
@@ -182,6 +185,7 @@ mod tests {
 
         run_with_shutdown(
             &ws,
+            &StateDb::open_in_memory().unwrap(),
             &handle,
             distill_duty(),
             None,
@@ -203,9 +207,11 @@ mod tests {
         let (_dir, ws) = workspace();
         let (_sock_dir, sock_path) = sock_path();
         let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
+        let state_db = StateDb::open(&ws.state_db_path()).unwrap();
 
         run_with_shutdown(
             &ws,
+            &state_db,
             &handle,
             distill_duty(),
             None,
@@ -220,7 +226,7 @@ mod tests {
 
         // The run must be recorded: a restarted scheduler reads this
         // and does not re-fire — the restart-cadence contract.
-        let state = crate::duty::state::DutyState::load(&ws.state_dir().join("duties.json"));
+        let state = crate::duty::state::DutyState::load(&state_db);
         assert!(state.last_run("distill").is_some());
     }
 
@@ -235,6 +241,7 @@ mod tests {
 
         run_with_shutdown(
             &ws,
+            &StateDb::open_in_memory().unwrap(),
             &handle,
             vec![Duty {
                 name: "nope".into(),

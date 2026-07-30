@@ -80,6 +80,8 @@ async fn main() {
         Some("run") => {
             info!(telegram = config.telegram.enabled, "Daemon starting");
 
+            let state_db = open_state_db(&workspace);
+
             let duties = build_duties(&config);
 
             let workspace = Arc::new(workspace);
@@ -102,6 +104,7 @@ async fn main() {
                         });
                     spawn_with_engine(
                         workspace.clone(),
+                        &state_db,
                         provider,
                         tools,
                         mcp,
@@ -125,6 +128,7 @@ async fn main() {
                     });
                     spawn_with_engine(
                         workspace.clone(),
+                        &state_db,
                         provider,
                         tools,
                         mcp,
@@ -138,6 +142,7 @@ async fn main() {
 
             daemon::run(
                 &workspace,
+                &state_db,
                 &handle,
                 duties,
                 rt.telegram.as_ref(),
@@ -161,6 +166,17 @@ async fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Open the operational state database, exiting on failure. Fatal
+/// because duty cadence and poll cursors live here, and a scheduler
+/// running without them re-fires everything on restart — worse than
+/// not starting.
+fn open_state_db(workspace: &Workspace) -> state_db::StateDb {
+    state_db::StateDb::open(&workspace.state_db_path()).unwrap_or_else(|e| {
+        error!("Failed to open state database: {e}");
+        std::process::exit(1);
+    })
 }
 
 /// Built-in and operator-defined duties, scheduled from config
@@ -223,6 +239,7 @@ fn role_provider(
 #[allow(clippy::too_many_arguments)]
 fn spawn_with_engine<E: ContextEngine + 'static>(
     workspace: Arc<Workspace>,
+    state_db: &state_db::StateDb,
     provider: Arc<provider::CompletionsProvider>,
     mut tools: tools::Tools,
     mcp: tools::mcp::McpTools,
@@ -253,20 +270,11 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     // Telemetry: an open failure is logged and the daemon runs
     // unmetered and unrecorded. Opened before the task tool so
     // sub-agent turns share the ledgers.
-    let state_db = match state_db::StateDb::open(&workspace.state_db_path()) {
-        Ok(db) => Some(db),
-        Err(e) => {
-            warn!("State DB disabled: {e}");
-            None
-        }
-    };
-    let usage_ledger = state_db
-        .as_ref()
-        .map(|db| Arc::new(usage::UsageLedger::new(db)));
-    let review_ledger = state_db
-        .as_ref()
-        .filter(|_| config.review.enabled)
-        .map(|db| Arc::new(review::ReviewLedger::new(db)));
+    let usage_ledger = Some(Arc::new(usage::UsageLedger::new(state_db)));
+    let review_ledger = config
+        .review
+        .enabled
+        .then(|| Arc::new(review::ReviewLedger::new(state_db)));
     let overrides = &config.provider.model_overrides;
     let task_tool: Arc<dyn tools::Tool> = Arc::new(agent::task::TaskTool::new(
         agent::task::TypeProviders {

@@ -12,6 +12,8 @@ pub mod state;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::state_db::StateDb;
+
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -124,12 +126,12 @@ fn next_wake(duties: &[Duty], state: &DutyState, now: u64) -> u64 {
 /// duties due together run in sequence, in declaration order.
 pub async fn run_loop(
     duties: Vec<Duty>,
-    state_path: PathBuf,
+    state_db: StateDb,
     history_path: PathBuf,
     handle: &AgentHandle,
     git: Option<GitCli>,
 ) -> ! {
-    let mut state = DutyState::load(&state_path);
+    let mut state = DutyState::load(&state_db);
     loop {
         let now = crate::time::now_epoch();
         for duty in due(&duties, &state, now) {
@@ -161,7 +163,7 @@ pub async fn run_loop(
             // last_run advances even on error or closed gate: retry
             // next period, not in a tight loop (spec 24 failure modes).
             state.record_run(&duty.name, crate::time::now_epoch());
-            state.save(&state_path);
+            state.save(&state_db);
         }
         let now = crate::time::now_epoch();
         tokio::time::sleep(Duration::from_secs(next_wake(&duties, &state, now))).await;
