@@ -264,6 +264,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     let distiller = Arc::new(memory::distill::Distiller::new(
         &tools,
         workspace.path(),
+        state_db.clone(),
         config.memory.distill_threshold_tokens,
         config.sub_agents.max_iterations,
     ));

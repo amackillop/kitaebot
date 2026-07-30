@@ -113,21 +113,6 @@ impl Workspace {
         self.state_dir().join("NOTIFICATIONS.md")
     }
 
-    /// Path to the GitHub poll state file.
-    pub fn github_poll_state_path(&self) -> PathBuf {
-        self.state_dir().join("github_poll_state.json")
-    }
-
-    /// Path to the Linear poll state file.
-    pub fn linear_poll_state_path(&self) -> PathBuf {
-        self.state_dir().join("linear_poll_state.json")
-    }
-
-    /// Path to the memory distillation state file (spec 21).
-    pub fn distillation_state_path(&self) -> PathBuf {
-        self.state_dir().join("distillation_state.json")
-    }
-
     /// Path to the operational state database (usage ledger, review
     /// ledger, doc store).
     pub fn state_db_path(&self) -> PathBuf {

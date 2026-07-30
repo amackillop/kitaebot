@@ -76,7 +76,13 @@ impl TestAgent {
         let summarize = make_summarize_fn(self.provider.clone());
         // Threshold far above any test transcript, so a duty turn
         // never trips the distillation gate.
-        let distiller = Arc::new(Distiller::new(&Tools::default(), self.ws.path(), 40_000, 1));
+        let distiller = Arc::new(Distiller::new(
+            &Tools::default(),
+            self.ws.path(),
+            crate::state_db::StateDb::open_in_memory().unwrap(),
+            40_000,
+            1,
+        ));
         AgentHandle::spawn(
             self.ws,
             self.provider,

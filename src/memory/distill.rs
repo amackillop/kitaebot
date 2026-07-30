@@ -10,13 +10,14 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::info;
 
 use crate::agent::{BudgetPolicy, TurnUsage, run_turn_metered};
 use crate::engine::ephemeral::EphemeralSession;
 use crate::engine::{ContextEngine, SummarizeFn, format_messages_for_summary};
 use crate::error::Error;
 use crate::provider::Provider;
+use crate::state_db::StateDb;
 use crate::tools::{ToolCtx, Tools};
 use crate::types::Message;
 use crate::workspace::Workspace;
@@ -30,47 +31,20 @@ pub struct DistillState {
     pub watermarks: BTreeMap<String, u64>,
 }
 
+const DOC: &str = "distillation";
+
 impl DistillState {
-    /// Load state from disk. A missing or corrupt file yields empty
-    /// watermarks (distill from the start), mirroring the channel poll
-    /// cursors.
-    pub fn load(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(contents) => match serde_json::from_str::<Self>(&contents) {
-                Ok(state) => state,
-                Err(e) => {
-                    warn!("Corrupt distillation state, starting empty: {e}");
-                    Self::default()
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!("No distillation state file, starting empty");
-                Self::default()
-            }
-            Err(e) => {
-                warn!("Failed to read distillation state, starting empty: {e}");
-                Self::default()
-            }
-        }
+    /// Load from the state database. A missing or corrupt document
+    /// yields empty watermarks (distill from the start), mirroring the
+    /// channel poll cursors.
+    pub fn load(db: &StateDb) -> Self {
+        db.load_json(DOC, Self::default)
     }
 
-    /// Persist state atomically (tmp + rename).
-    pub fn save(&self, path: &Path) {
-        let json = match serde_json::to_string(self) {
-            Ok(j) => j,
-            Err(e) => {
-                error!("Failed to serialize distillation state: {e}");
-                return;
-            }
-        };
-        let tmp = path.with_extension("tmp");
-        if let Err(e) = std::fs::write(&tmp, &json) {
-            error!("Failed to write distillation state tmp: {e}");
-            return;
-        }
-        if let Err(e) = std::fs::rename(&tmp, path) {
-            error!("Failed to rename distillation state: {e}");
-        }
+    /// Persist. Failure is logged, not fatal — the same span is
+    /// re-distilled on the next gate crossing.
+    pub fn save(&self, db: &StateDb) {
+        db.save_json(DOC, self);
     }
 }
 
@@ -123,12 +97,21 @@ pub struct Distiller {
     tools: Tools,
     threshold: u64,
     max_iterations: usize,
+    /// Owns the watermark document: the distiller is the only reader
+    /// and writer of distillation progress.
+    state_db: StateDb,
 }
 
 impl Distiller {
     /// Build the distiller from the parent's base registry
     /// (post-`tools.disabled`), filtered to the memory-editing tools.
-    pub fn new(base: &Tools, workspace_dir: &Path, threshold: u64, max_iterations: usize) -> Self {
+    pub fn new(
+        base: &Tools,
+        workspace_dir: &Path,
+        state_db: StateDb,
+        threshold: u64,
+        max_iterations: usize,
+    ) -> Self {
         let tools = base.filtered(DISTILL_TOOLS);
         let names: Vec<String> = tools
             .definitions()
@@ -146,7 +129,13 @@ impl Distiller {
             tools,
             threshold,
             max_iterations,
+            state_db,
         }
+    }
+
+    /// Load the persisted watermarks for a pass.
+    pub fn load_state(&self) -> DistillState {
+        DistillState::load(&self.state_db)
     }
 }
 
@@ -221,7 +210,7 @@ pub async fn run<P: Provider, E: ContextEngine>(
     for (name, watermark) in gathered.advances {
         state.watermarks.insert(name, watermark);
     }
-    state.save(&workspace.distillation_state_path());
+    state.save(&distiller.state_db);
     info!(
         sessions = gathered.spans.len(),
         "Distillation pass complete"
@@ -327,32 +316,29 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("distillation_state.json");
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
 
         let mut state = DistillState::default();
         state.watermarks.insert("general".into(), 12);
         state.watermarks.insert("owner/repo".into(), 3);
-        state.save(&path);
+        state.save(&db);
 
-        let loaded = DistillState::load(&path);
+        let loaded = DistillState::load(&db);
         assert_eq!(loaded.watermarks.get("general"), Some(&12));
         assert_eq!(loaded.watermarks.get("owner/repo"), Some(&3));
     }
 
     #[test]
-    fn load_missing_file_is_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("does_not_exist.json");
-        assert!(DistillState::load(&path).watermarks.is_empty());
+    fn load_missing_doc_is_empty() {
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        assert!(DistillState::load(&db).watermarks.is_empty());
     }
 
     #[test]
-    fn load_corrupt_file_is_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("distillation_state.json");
-        std::fs::write(&path, "not json").unwrap();
-        assert!(DistillState::load(&path).watermarks.is_empty());
+    fn load_corrupt_doc_is_empty() {
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        db.put_doc("distillation", "not json").unwrap();
+        assert!(DistillState::load(&db).watermarks.is_empty());
     }
 
     #[test]
@@ -521,7 +507,8 @@ mod run_tests {
             transcripts: BTreeMap::new(),
         };
         let provider = Arc::new(MockProvider::new(vec![]));
-        let distiller = Distiller::new(&Tools::default(), ws.path(), 1000, 5);
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
         let mut state = DistillState::default();
 
         let out = run(
@@ -539,7 +526,7 @@ mod run_tests {
         assert!(out.is_none());
         assert_eq!(provider.call_count(), 0);
         assert!(state.watermarks.is_empty());
-        assert!(!ws.distillation_state_path().exists());
+        assert!(db.get_doc("distillation").unwrap().is_none());
     }
 
     #[tokio::test]
@@ -557,7 +544,8 @@ mod run_tests {
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
             "forced pass".into(),
         ))]));
-        let distiller = Distiller::new(&Tools::default(), ws.path(), 1000, 5);
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
         let mut state = DistillState::default();
 
         let out = run(
@@ -586,7 +574,8 @@ mod run_tests {
             transcripts: BTreeMap::new(),
         };
         let provider = Arc::new(MockProvider::new(vec![]));
-        let distiller = Distiller::new(&Tools::default(), ws.path(), 1000, 5);
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
         let mut state = DistillState::default();
 
         let out = run(
@@ -623,7 +612,8 @@ mod run_tests {
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
             "wrote canary fact".into(),
         ))]));
-        let distiller = Distiller::new(&Tools::default(), ws.path(), 1000, 5);
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
         let mut state = DistillState::default();
 
         let out = run(
@@ -644,7 +634,7 @@ mod run_tests {
         assert_eq!(state.watermarks.get("general"), Some(&2));
 
         // The advance is persisted, so the next pass resumes past it.
-        let reloaded = DistillState::load(&ws.distillation_state_path());
+        let reloaded = DistillState::load(&db);
         assert_eq!(reloaded.watermarks.get("general"), Some(&2));
     }
 
@@ -661,7 +651,8 @@ mod run_tests {
             )]),
         };
         let provider = Arc::new(MockProvider::new(vec![Err(ProviderError::RateLimited)]));
-        let distiller = Distiller::new(&Tools::default(), ws.path(), 1000, 5);
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
         let mut state = DistillState::default();
 
         let result = run(
@@ -677,6 +668,6 @@ mod run_tests {
 
         assert!(result.is_err());
         assert!(state.watermarks.is_empty());
-        assert!(!ws.distillation_state_path().exists());
+        assert!(db.get_doc("distillation").unwrap().is_none());
     }
 }

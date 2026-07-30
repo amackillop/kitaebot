@@ -6,10 +6,8 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
-
 use crate::state_db::StateDb;
+use serde::{Deserialize, Serialize};
 
 const DOC: &str = "duties";
 
@@ -26,32 +24,13 @@ impl DutyState {
     /// Load from the state database; a missing or corrupt document
     /// starts fresh.
     pub fn load(db: &StateDb) -> Self {
-        match db.get_doc(DOC) {
-            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_else(|e| {
-                warn!("Corrupt duty state, starting fresh: {e}");
-                Self::default()
-            }),
-            Ok(None) => Self::default(),
-            Err(e) => {
-                warn!("Failed to read duty state, starting fresh: {e}");
-                Self::default()
-            }
-        }
+        db.load_json(DOC, Self::default)
     }
 
     /// Persist. Failure is logged, not fatal — worst case is a
     /// catch-up run after the next restart.
     pub fn save(&self, db: &StateDb) {
-        let json = match serde_json::to_string(self) {
-            Ok(j) => j,
-            Err(e) => {
-                error!("Failed to serialize duty state: {e}");
-                return;
-            }
-        };
-        if let Err(e) = db.put_doc(DOC, &json) {
-            error!("Failed to write duty state: {e}");
-        }
+        db.save_json(DOC, self);
     }
 
     pub fn last_run(&self, duty: &str) -> Option<u64> {

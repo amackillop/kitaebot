@@ -91,24 +91,22 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         }
     };
 
-    let state_path = workspace.github_poll_state_path();
     let github_loop = async {
         // gh_cli is also Some when only the git tools are enabled;
         // the channel itself is gated on `github.enabled`. git_cli is
         // Some exactly when `github.enabled`.
         match gh_cli.filter(|_| github.enabled).zip(git_cli) {
             Some((gh, git)) => {
-                github::poll_loop(gh, git, github, handle, &state_path).await;
+                github::poll_loop(gh, git, github, handle, state_db).await;
             }
             None => std::future::pending().await,
         }
     };
 
-    let linear_state_path = workspace.linear_poll_state_path();
     let linear_loop = async {
         match linear {
             Some(ch) => {
-                linear::poll_loop(ch, handle, &linear_state_path).await;
+                linear::poll_loop(ch, handle, state_db).await;
             }
             None => std::future::pending().await,
         }

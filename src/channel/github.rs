@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use std::path::Path;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -22,6 +21,7 @@ use tracing::{error, info, warn};
 use crate::agent::AgentHandle;
 use crate::agent::envelope::{ChannelSource, GitHubRole};
 use crate::error::ToolError;
+use crate::state_db::StateDb;
 use crate::time::now_iso8601;
 use crate::tools::git::GitCli;
 use crate::tools::github::GhCli;
@@ -200,7 +200,7 @@ pub async fn poll_loop(
     git: &GitCli,
     config: &GithubConfig,
     handle: &AgentHandle,
-    state_path: &Path,
+    state_db: &StateDb,
 ) -> ! {
     let bot_login = match resolve_bot_login(gh).await {
         Ok(login) => {
@@ -213,7 +213,7 @@ pub async fn poll_loop(
         }
     };
 
-    let mut state = load_state(state_path);
+    let mut state = load_state(state_db);
     info!(last_poll = %state.last_poll, "GitHub channel starting");
 
     let mut tick = time::interval(Duration::from_secs(config.poll_interval_secs));
@@ -221,11 +221,11 @@ pub async fn poll_loop(
 
     loop {
         tick.tick().await;
-        match poll_once(gh, git, config, handle, &bot_login, &mut state, state_path).await {
+        match poll_once(gh, git, config, handle, &bot_login, &mut state, state_db).await {
             Ok(count) => {
                 info!(count, "GitHub poll: dispatched {count} items");
                 state.last_poll = now_iso8601();
-                save_state(state_path, &state);
+                save_state(state_db, &state);
             }
             Err(e) => {
                 error!("GitHub poll error (will retry next tick): {e}");
@@ -245,11 +245,11 @@ async fn poll_once(
     handle: &AgentHandle,
     bot_login: &str,
     state: &mut PollState,
-    state_path: &Path,
+    state_db: &StateDb,
 ) -> Result<usize, ToolError> {
     let mut count = feedback_pass(gh, config, handle, bot_login, &state.last_poll).await?;
-    count += review_request_pass(gh, git, config, handle, bot_login, state, state_path).await?;
-    count += tracked_pass(gh, git, config, handle, bot_login, state, state_path).await;
+    count += review_request_pass(gh, git, config, handle, bot_login, state, state_db).await?;
+    count += tracked_pass(gh, git, config, handle, bot_login, state, state_db).await;
     Ok(count)
 }
 
@@ -366,7 +366,7 @@ async fn review_request_pass(
     handle: &AgentHandle,
     bot_login: &str,
     state: &mut PollState,
-    state_path: &Path,
+    state_db: &StateDb,
 ) -> Result<usize, ToolError> {
     let prs = list_review_requested_prs(gh).await?;
 
@@ -396,7 +396,7 @@ async fn review_request_pass(
             continue;
         }
         state.reviewed.insert(d.key, d.head_sha);
-        save_state(state_path, state);
+        save_state(state_db, state);
         send(
             handle,
             d.pr_number,
@@ -423,7 +423,7 @@ async fn tracked_pass(
     handle: &AgentHandle,
     bot_login: &str,
     state: &mut PollState,
-    state_path: &Path,
+    state_db: &StateDb,
 ) -> usize {
     let mut snapshots = Vec::new();
     let mut corrupt_keys = Vec::new();
@@ -468,7 +468,7 @@ async fn tracked_pass(
         state.reviewed.remove(key);
     }
     if !corrupt_keys.is_empty() || !prunes.is_empty() {
-        save_state(state_path, state);
+        save_state(state_db, state);
     }
 
     let mut count = 0;
@@ -484,7 +484,7 @@ async fn tracked_pass(
             continue;
         }
         state.reviewed.insert(d.key, d.head_sha);
-        save_state(state_path, state);
+        save_state(state_db, state);
         send(
             handle,
             d.pr_number,
@@ -971,44 +971,17 @@ fn format_tracked_turn(
 // State persistence
 // ---------------------------------------------------------------------------
 
-fn load_state(path: &Path) -> PollState {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => match serde_json::from_str::<PollState>(&contents) {
-            Ok(state) => state,
-            Err(e) => {
-                warn!("Corrupt poll state, starting from now: {e}");
-                PollState::starting_now()
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            info!("No poll state file, starting from now");
-            PollState::starting_now()
-        }
-        Err(e) => {
-            warn!("Failed to read poll state, starting from now: {e}");
-            PollState::starting_now()
-        }
-    }
+const DOC: &str = "github_poll";
+
+fn load_state(db: &StateDb) -> PollState {
+    db.load_json(DOC, || {
+        info!("No poll state, starting from now");
+        PollState::starting_now()
+    })
 }
 
-fn save_state(path: &Path, state: &PollState) {
-    let json = match serde_json::to_string(state) {
-        Ok(j) => j,
-        Err(e) => {
-            error!("Failed to serialize poll state: {e}");
-            return;
-        }
-    };
-
-    // Atomic write: tmp + rename.
-    let tmp = path.with_extension("tmp");
-    if let Err(e) = std::fs::write(&tmp, &json) {
-        error!("Failed to write poll state tmp: {e}");
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        error!("Failed to rename poll state: {e}");
-    }
+fn save_state(db: &StateDb, state: &PollState) {
+    db.save_json(DOC, state);
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,36 +1117,34 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
 
         let state = PollState {
             last_poll: "2025-01-15T10:00:00Z".to_string(),
             reviewed: BTreeMap::from([("owner/repo#42".to_string(), "abc123".to_string())]),
         };
-        save_state(&path, &state);
-        let loaded = load_state(&path);
+        save_state(&db, &state);
+        let loaded = load_state(&db);
         assert_eq!(loaded.last_poll, "2025-01-15T10:00:00Z");
         assert_eq!(loaded.reviewed, state.reviewed);
     }
 
     #[test]
-    fn load_legacy_state_without_reviewed_map() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        std::fs::write(&path, r#"{"last_poll":"2025-01-15T10:00:00Z"}"#).unwrap();
+    fn load_state_without_reviewed_map() {
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        db.put_doc("github_poll", r#"{"last_poll":"2025-01-15T10:00:00Z"}"#)
+            .unwrap();
 
-        let loaded = load_state(&path);
+        let loaded = load_state(&db);
         assert_eq!(loaded.last_poll, "2025-01-15T10:00:00Z");
         assert!(loaded.reviewed.is_empty());
     }
 
     #[test]
-    fn load_missing_file_returns_now() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nonexistent.json");
+    fn load_missing_doc_returns_now() {
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
 
-        let loaded = load_state(&path);
+        let loaded = load_state(&db);
         // Should be a valid ISO 8601 timestamp (not empty, not an error).
         assert!(loaded.last_poll.ends_with('Z'));
         assert!(loaded.last_poll.contains('T'));
@@ -1181,12 +1152,11 @@ mod tests {
     }
 
     #[test]
-    fn load_corrupt_file_returns_now() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        std::fs::write(&path, "not json at all").unwrap();
+    fn load_corrupt_doc_returns_now() {
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        db.put_doc("github_poll", "not json at all").unwrap();
 
-        let loaded = load_state(&path);
+        let loaded = load_state(&db);
         assert!(loaded.last_poll.ends_with('Z'));
         assert!(loaded.last_poll.contains('T'));
     }

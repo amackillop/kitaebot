@@ -13,7 +13,6 @@ mod execution_checkout;
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
-use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +24,7 @@ use crate::agent::AgentHandle;
 use crate::agent::envelope::ChannelSource;
 use crate::clients::linear::{Issue, LinearClient};
 use crate::error::LinearError;
+use crate::state_db::StateDb;
 use crate::time::now_iso8601;
 use crate::tools::git::GitCli;
 
@@ -98,7 +98,7 @@ fn is_transient(err: &LinearError) -> bool {
 ///
 /// Resolves the viewer once at startup; failure disables the channel
 /// (logged, then pending forever) rather than crashing the daemon.
-pub async fn poll_loop(channel: &LinearChannel, handle: &AgentHandle, state_path: &Path) -> ! {
+pub async fn poll_loop(channel: &LinearChannel, handle: &AgentHandle, state_db: &StateDb) -> ! {
     let viewer = match channel.client.viewer().await {
         Ok(v) => {
             info!(name = %v.name, email = %v.email, "Linear channel resolved bot identity");
@@ -110,7 +110,7 @@ pub async fn poll_loop(channel: &LinearChannel, handle: &AgentHandle, state_path
         }
     };
 
-    let mut state = load_state(state_path);
+    let mut state = load_state(state_db);
     info!(last_poll = %state.last_poll, "Linear channel starting");
 
     let mut tick = time::interval(channel.interval);
@@ -140,7 +140,7 @@ pub async fn poll_loop(channel: &LinearChannel, handle: &AgentHandle, state_path
         info!(count, "Linear poll: dispatched {count} items");
 
         state = next;
-        save_state(state_path, &state);
+        save_state(state_db, &state);
     }
 }
 
@@ -222,44 +222,17 @@ impl PollState {
     }
 }
 
-pub fn load_state(path: &Path) -> PollState {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => match serde_json::from_str(&contents) {
-            Ok(state) => state,
-            Err(e) => {
-                warn!("Corrupt Linear poll state, starting from now: {e}");
-                PollState::starting_now()
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            info!("No Linear poll state file, starting from now");
-            PollState::starting_now()
-        }
-        Err(e) => {
-            warn!("Failed to read Linear poll state, starting from now: {e}");
-            PollState::starting_now()
-        }
-    }
+const DOC: &str = "linear_poll";
+
+pub fn load_state(db: &StateDb) -> PollState {
+    db.load_json(DOC, || {
+        info!("No Linear poll state, starting from now");
+        PollState::starting_now()
+    })
 }
 
-pub fn save_state(path: &Path, state: &PollState) {
-    let json = match serde_json::to_string(state) {
-        Ok(j) => j,
-        Err(e) => {
-            error!("Failed to serialize Linear poll state: {e}");
-            return;
-        }
-    };
-
-    // Atomic write: tmp + rename.
-    let tmp = path.with_extension("tmp");
-    if let Err(e) = std::fs::write(&tmp, &json) {
-        error!("Failed to write Linear poll state tmp: {e}");
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        error!("Failed to rename Linear poll state: {e}");
-    }
+pub fn save_state(db: &StateDb, state: &PollState) {
+    db.save_json(DOC, state);
 }
 
 // ---------------------------------------------------------------------------
@@ -667,27 +640,25 @@ mod tests {
 
     #[test]
     fn state_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
 
         let st = state("2026-07-05T12:00:00Z", &["MDK-1"]);
-        save_state(&path, &st);
-        let loaded = load_state(&path);
+        save_state(&db, &st);
+        let loaded = load_state(&db);
         assert_eq!(loaded.last_poll, "2026-07-05T12:00:00Z");
         assert!(loaded.announced_issues.contains("MDK-1"));
     }
 
     #[test]
     fn load_missing_or_corrupt_state_starts_now() {
-        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
 
-        let missing = load_state(&dir.path().join("nope.json"));
+        let missing = load_state(&db);
         assert!(missing.last_poll.ends_with('Z'));
         assert!(missing.announced_issues.is_empty());
 
-        let path = dir.path().join("state.json");
-        std::fs::write(&path, "not json").unwrap();
-        let corrupt = load_state(&path);
+        db.put_doc("linear_poll", "not json").unwrap();
+        let corrupt = load_state(&db);
         assert!(corrupt.last_poll.ends_with('Z'));
         assert!(corrupt.announced_issues.is_empty());
     }

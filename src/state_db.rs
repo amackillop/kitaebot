@@ -75,6 +75,44 @@ impl StateDb {
         .optional()
     }
 
+    /// Load a JSON state document, falling back on `fallback` when the
+    /// document is missing, unreadable, or corrupt. Loss of any cursor
+    /// document is benign by design — every owner degrades to
+    /// starting-from-now semantics.
+    pub fn load_json<T: serde::de::DeserializeOwned>(
+        &self,
+        name: &str,
+        fallback: impl FnOnce() -> T,
+    ) -> T {
+        match self.get_doc(name) {
+            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_else(|e| {
+                tracing::warn!(doc = name, "Corrupt state document, starting fresh: {e}");
+                fallback()
+            }),
+            Ok(None) => fallback(),
+            Err(e) => {
+                tracing::warn!(
+                    doc = name,
+                    "Failed to read state document, starting fresh: {e}"
+                );
+                fallback()
+            }
+        }
+    }
+
+    /// Persist a JSON state document. Failure is logged, not fatal —
+    /// the owner retries at its next save point.
+    pub fn save_json<T: serde::Serialize>(&self, name: &str, value: &T) {
+        match serde_json::to_string(value) {
+            Ok(json) => {
+                if let Err(e) = self.put_doc(name, &json) {
+                    tracing::error!(doc = name, "Failed to write state document: {e}");
+                }
+            }
+            Err(e) => tracing::error!(doc = name, "Failed to serialize state document: {e}"),
+        }
+    }
+
     /// Write (upsert) the named state document.
     pub fn put_doc(&self, name: &str, value: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().expect("state db mutex poisoned");

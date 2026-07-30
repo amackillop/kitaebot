@@ -274,7 +274,7 @@ async fn distill_pass(
     session: &str,
     gate: distill::Gate,
 ) -> Result<Option<String>, String> {
-    let mut state = distill::DistillState::load(&workspace.distillation_state_path());
+    let mut state = distiller.load_state();
     let out = distill::run(
         engine,
         distiller,
