@@ -177,15 +177,8 @@ mod tests {
         let mut ctx = ContextConfig::default();
         // 10-token threshold so a small payload externalizes.
         ctx.lcm.large_file_threshold = 10;
-        let state_dir = dir.path().join("state");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        let mut engine = LcmEngine::new(
-            &dir.path().join("lcm.db"),
-            state_dir,
-            ctx,
-            canned_summarize("summary"),
-        )
-        .unwrap();
+        let mut engine =
+            LcmEngine::new(dir.path().join("context"), ctx, canned_summarize("summary")).unwrap();
 
         engine
             .push_message(Message::ToolCalls {

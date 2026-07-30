@@ -26,16 +26,14 @@ Resolved via fallback chain:
 ├── AGENTS.md                # Agent instructions (Nix-provisioned)
 ├── USER.md                  # User profile (Nix-provisioned, optional)
 │
-├── sessions/                # Flat-engine session storage
+├── context/                 # Context-engine-owned storage (spec 14)
 │   └── <name>.json          # One file per session
 │
 ├── memory/                  # Memory subsystem (spec 21)
 │   ├── MEMORY.md            # Index, injected into the system prompt
 │   └── topics/              # On-demand topic files
 │
-├── state/                   # Machine-owned runtime state
-│   ├── active_session       # Last active session name
-│   ├── lcm.db               # LCM engine store (+ lcm/ payloads)
+├── state/                   # Machine-owned operational state
 │   ├── kitaebot.db          # Operational DB: ledgers + cursor docs
 │   ├── HISTORY.md           # Duty execution log (spec 24)
 │   ├── NOTIFICATIONS.md     # Mirror of sent notifications (spec 17)
@@ -50,19 +48,20 @@ Backup and restore ([spec 09](09-vm.md)) turns on this split:
 
 | Durable | Derived |
 |---------|---------|
-| `state/` — the two databases, `state/lcm/payloads/`, the `.md` logs | `projects/`, `reviews/`, `.diffs/` — re-cloned or regenerated |
-| `memory/` | build caches (`.cargo`, `.npm`, `.cache`, `.local`) |
+| `context/` — whatever the engine keeps there | `projects/`, `reviews/`, `.diffs/` — re-cloned or regenerated |
+| `state/` — `kitaebot.db`, the `.md` logs | build caches (`.cargo`, `.npm`, `.cache`, `.local`) |
+| `memory/` | |
 | | Nix-provisioned symlinks (`SOUL.md`, `AGENTS.md`, `USER.md`, `config.toml`) |
 
 Durable state measured ~10 MB against ~6 GB of derived, which is what
-makes restoring onto a fresh machine cheap. `state/lcm/payloads/` is the
-easy one to miss: `large_files` rows reference those blobs, so a backup
-without them leaves `lcm_grep` with nothing to search.
+makes restoring onto a fresh machine cheap. `context/lcm/payloads/` is
+the easy one to miss: `large_files` rows reference those blobs, so a
+backup without them leaves `lcm_grep` with nothing to search.
 
 ### Initialization
 
 `Workspace::init()` resolves the path and delegates to `init_at()`, which
-creates the directory tree: workspace root, `sessions/`, `memory/`,
+creates the directory tree: workspace root, `context/`, `memory/`,
 `projects/`, `state/`.
 
 Prompt files (`SOUL.md`, `AGENTS.md`, `USER.md`) and
@@ -93,7 +92,7 @@ changing them requires a rebuild and restart regardless.
 | Method | Returns |
 |--------|---------|
 | `path()` | Workspace root |
-| `sessions_dir()` | `sessions/` |
+| `context_dir()` | `context/` — handed whole to the engine (spec 14) |
 | `state_dir()` | `state/` |
 | `history_path()` | `state/HISTORY.md` |
 | `notifications_path()` | `state/NOTIFICATIONS.md` |
@@ -103,7 +102,7 @@ changing them requires a rebuild and restart regardless.
 
 ### Owns
 
-- Directory structure creation (`sessions/`, `memory/`, `projects/`, `state/`)
+- Directory structure creation (`context/`, `memory/`, `projects/`, `state/`)
 - Path resolution (env var / XDG fallback)
 - System prompt assembly (concatenation of prompt files)
 - Path helpers for well-known files

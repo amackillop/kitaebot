@@ -1,8 +1,9 @@
 //! Flat session implementation of [`ContextEngine`].
 //!
-//! Each session is a separate JSON file under `sessions/<name>.json`.
-//! The active session name is persisted to `state/active_session` so
-//! it survives daemon restarts.
+//! The engine owns everything under the workspace's `context/`
+//! directory: one JSON file per session in `context/sessions/`, and
+//! the active-session cursor at `context/active_session` so it
+//! survives daemon restarts.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -49,7 +50,7 @@ pub struct FlatSession {
     session: Session,
     active_name: String,
     sessions_dir: PathBuf,
-    state_dir: PathBuf,
+    context_dir: PathBuf,
     ctx: ContextConfig,
     /// Provider-reported prompt size of the last request, if any.
     /// Cleared whenever the context shrinks (compaction, clear,
@@ -59,23 +60,22 @@ pub struct FlatSession {
 }
 
 impl FlatSession {
-    /// Open the flat session engine.
-    ///
-    /// Reads `state/active_session` to restore the last active session.
-    /// Falls back to `"general"` if the file is missing or unreadable.
-    pub fn new(
-        sessions_dir: PathBuf,
-        state_dir: PathBuf,
-        ctx: ContextConfig,
-    ) -> Result<Self, EngineError> {
-        let active_name = read_active_session(&state_dir).unwrap_or_else(|| "general".into());
+    /// Open the flat session engine inside `context_dir`, which the
+    /// engine owns: sessions land in `context_dir/sessions/` and the
+    /// active-session cursor beside them. Reads the cursor to restore
+    /// the last active session, falling back to `"general"`.
+    pub fn new(context_dir: PathBuf, ctx: ContextConfig) -> Result<Self, EngineError> {
+        let sessions_dir = context_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir)
+            .map_err(|e| EngineError::Storage(format!("create {}: {e}", sessions_dir.display())))?;
+        let active_name = read_active_session(&context_dir).unwrap_or_else(|| "general".into());
         let path = session_path(&sessions_dir, &active_name);
         let session = Session::load(&path)?;
         Ok(Self {
             session,
             active_name,
             sessions_dir,
-            state_dir,
+            context_dir,
             ctx,
             observed_tokens: None,
         })
@@ -290,7 +290,7 @@ impl ContextEngine for FlatSession {
         self.session = Session::load(&path)?;
         self.observed_tokens = None;
         self.active_name = sanitized;
-        persist_active_session(&self.state_dir, &self.active_name);
+        persist_active_session(&self.context_dir, &self.active_name);
         Ok(())
     }
 
@@ -410,9 +410,9 @@ fn session_path(sessions_dir: &Path, name: &str) -> PathBuf {
     sessions_dir.join(format!("{sanitized}.json"))
 }
 
-/// Read the active session name from `state/active_session`.
-fn read_active_session(state_dir: &Path) -> Option<String> {
-    let path = state_dir.join("active_session");
+/// Read the active session name from `context/active_session`.
+fn read_active_session(context_dir: &Path) -> Option<String> {
+    let path = context_dir.join("active_session");
     fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
@@ -420,9 +420,9 @@ fn read_active_session(state_dir: &Path) -> Option<String> {
 }
 
 /// Persist the active session name atomically.
-fn persist_active_session(state_dir: &Path, name: &str) {
-    let path = state_dir.join("active_session");
-    let tmp = state_dir.join("active_session.tmp");
+fn persist_active_session(context_dir: &Path, name: &str) {
+    let path = context_dir.join("active_session");
+    let tmp = context_dir.join("active_session.tmp");
     if fs::write(&tmp, name).is_ok() {
         let _ = fs::rename(&tmp, &path);
     }
@@ -454,20 +454,11 @@ mod tests {
 
     fn temp_engine(ctx: ContextConfig) -> FlatSession {
         let dir = tempfile::tempdir().unwrap();
-        let base = dir.keep();
-        let sessions_dir = base.join("sessions");
-        let state_dir = base.join("state");
-        fs::create_dir_all(&sessions_dir).unwrap();
-        fs::create_dir_all(&state_dir).unwrap();
-        FlatSession::new(sessions_dir, state_dir, ctx).unwrap()
+        temp_engine_at(&dir.keep(), ctx)
     }
 
     fn temp_engine_at(base: &Path, ctx: ContextConfig) -> FlatSession {
-        let sessions_dir = base.join("sessions");
-        let state_dir = base.join("state");
-        fs::create_dir_all(&sessions_dir).unwrap();
-        fs::create_dir_all(&state_dir).unwrap();
-        FlatSession::new(sessions_dir, state_dir, ctx).unwrap()
+        FlatSession::new(base.join("context"), ctx).unwrap()
     }
 
     // ── Basic operations ────────────────────────────────────────────
@@ -880,7 +871,9 @@ mod tests {
         // One entry per session file, however many that is: switching
         // away from `general` saves it, so the count is not the point —
         // that no session is counted twice is.
-        let files = fs::read_dir(dir.path().join("sessions")).unwrap().count();
+        let files = fs::read_dir(dir.path().join("context/sessions"))
+            .unwrap()
+            .count();
         let report = engine.report().await.unwrap();
         assert!(
             report.starts_with(&format!("Tool Usage ({files} session")),

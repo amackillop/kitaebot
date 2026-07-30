@@ -491,7 +491,7 @@ attribute is omitted and `large_files.path` records the payload's on-disk
 location instead.
 
 **Externalization at ingest**: the oversized raw payload is written to disk
-under `state/lcm/payloads/<file_id>` and the `messages.content` row stores
+under `context/lcm/payloads/<file_id>` and the `messages.content` row stores
 the `<file>` reference, not the raw bytes. `lcm_expand` reads from disk
 when recovering originals.
 
@@ -949,9 +949,12 @@ large_file_summary_tokens = 400
 Backend selection happens at startup. Changing `context.engine` requires a
 restart. The old backend's data remains on disk but is not used.
 
-Sessions live under `<workspace>/sessions/<name>.json` for the flat
-engine and under `<workspace>/state/lcm.db` for LCM. Both paths are
-derived from the workspace root rather than configured separately.
+Every engine owns `<workspace>/context/` outright and lays it out as
+it pleases: `context/sessions/<name>.json` for the flat engine,
+`context/lcm.db` plus `context/lcm/payloads/` for LCM, and the
+`active_session` cursor beside them. The workspace hands the engine
+one directory and looks no deeper — swapping in a new engine adds its
+own files there and touches nothing else.
 
 The cheaper summarization model called for by phase 4 (large file
 handling) is configured via `provider.model_overrides.summarizer`

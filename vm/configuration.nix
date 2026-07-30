@@ -274,6 +274,7 @@ in
       # Workspace directories
       tmpfiles.rules = [
         "d /var/lib/kitaebot 0750 kitaebot kitaebot -"
+        "d /var/lib/kitaebot/context 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/memory 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/projects 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/state 0750 kitaebot kitaebot -"

@@ -79,7 +79,7 @@ pub struct LcmEngine {
     /// session without holding a reference to the engine. Updated
     /// atomically on every successful [`switch_session`] call.
     active_id: Arc<AtomicI64>,
-    state_dir: PathBuf,
+    context_dir: PathBuf,
     ctx: ContextConfig,
     /// Async compaction in flight (soft-threshold path). Set when a
     /// turn crosses the soft threshold without crossing the hard
@@ -108,21 +108,23 @@ impl LcmEngine {
     /// Returns [`EngineError::Storage`] if the database cannot be
     /// opened or the active conversation row cannot be created.
     pub fn new(
-        db_path: &Path,
-        state_dir: PathBuf,
+        context_dir: PathBuf,
         ctx: ContextConfig,
         summarize: SummarizeFn,
     ) -> Result<Self, EngineError> {
-        let conn = schema::open(db_path)?;
-        let active_name = read_active_session(&state_dir).unwrap_or_else(|| "general".into());
+        std::fs::create_dir_all(&context_dir)
+            .map_err(|e| EngineError::Storage(format!("create {}: {e}", context_dir.display())))?;
+        let db_path = context_dir.join("lcm.db");
+        let conn = schema::open(&db_path)?;
+        let active_name = read_active_session(&context_dir).unwrap_or_else(|| "general".into());
         let conversation_id = ensure_conversation(&conn, &active_name)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            db_path: db_path.to_path_buf(),
+            db_path,
             active_name,
             conversation_id,
             active_id: Arc::new(AtomicI64::new(conversation_id)),
-            state_dir,
+            context_dir,
             ctx,
             pending_compaction: None,
             summarize,
@@ -249,7 +251,7 @@ impl LcmEngine {
 
     /// Directory holding externalized payloads.
     fn payloads_dir(&self) -> PathBuf {
-        self.state_dir.join("lcm").join("payloads")
+        self.context_dir.join("lcm").join("payloads")
     }
 
     /// Write `content` to `state/lcm/payloads/<file_id>`, generate
@@ -527,7 +529,7 @@ impl ContextEngine for LcmEngine {
         self.active_name = sanitized;
         self.conversation_id = id;
         self.active_id.store(id, Ordering::Release);
-        persist_active_session(&self.state_dir, &self.active_name);
+        persist_active_session(&self.context_dir, &self.active_name);
         Ok(())
     }
 
@@ -1236,17 +1238,17 @@ pub(super) fn storage_err(e: &rusqlite::Error) -> EngineError {
 
 // ── Active session persistence ──────────────────────────────────────
 
-fn read_active_session(state_dir: &Path) -> Option<String> {
-    let path = state_dir.join("active_session");
+fn read_active_session(context_dir: &Path) -> Option<String> {
+    let path = context_dir.join("active_session");
     fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
-fn persist_active_session(state_dir: &Path, name: &str) {
-    let path = state_dir.join("active_session");
-    let tmp = state_dir.join("active_session.tmp");
+fn persist_active_session(context_dir: &Path, name: &str) {
+    let path = context_dir.join("active_session");
+    let tmp = context_dir.join("active_session.tmp");
     if fs::write(&tmp, name).is_ok() {
         let _ = fs::rename(&tmp, &path);
     }
@@ -1288,10 +1290,8 @@ mod tests {
 
     fn temp_engine_with_ctx(ctx: ContextConfig) -> (LcmEngine, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("lcm.db");
-        let state_dir = dir.path().join("state");
-        fs::create_dir_all(&state_dir).unwrap();
-        let engine = LcmEngine::new(&db_path, state_dir, ctx, canned_summarize("summary")).unwrap();
+        let engine =
+            LcmEngine::new(dir.path().join("context"), ctx, canned_summarize("summary")).unwrap();
         (engine, dir)
     }
 
@@ -1351,7 +1351,7 @@ mod tests {
         // Raw payload is on disk, lossless.
         let on_disk = fs::read_to_string(
             dir.path()
-                .join("state")
+                .join("context")
                 .join("lcm")
                 .join("payloads")
                 .join(&file_id),
@@ -1479,7 +1479,7 @@ mod tests {
         let file_id = explore::file_id(&framed);
         let on_disk = fs::read_to_string(
             dir.path()
-                .join("state")
+                .join("context")
                 .join("lcm")
                 .join("payloads")
                 .join(&file_id),
@@ -1497,19 +1497,12 @@ mod tests {
     #[tokio::test]
     async fn oversized_tool_output_externalized_without_summarizer() {
         let dir = tempfile::tempdir().unwrap();
-        let state_dir = dir.path().join("state");
-        fs::create_dir_all(&state_dir).unwrap();
         let ctx = ContextConfig {
             tool_output_tokens: 10,
             ..ContextConfig::default()
         };
-        let mut engine = LcmEngine::new(
-            &dir.path().join("lcm.db"),
-            state_dir,
-            ctx,
-            panicking_summarize(),
-        )
-        .unwrap();
+        let mut engine =
+            LcmEngine::new(dir.path().join("context"), ctx, panicking_summarize()).unwrap();
 
         let payload = {
             use std::fmt::Write as _;
@@ -1792,14 +1785,11 @@ mod tests {
     #[tokio::test]
     async fn switch_session_persists_active_name() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("lcm.db");
-        let state_dir = dir.path().join("state");
-        fs::create_dir_all(&state_dir).unwrap();
+        let context_dir = dir.path().join("context");
 
         {
             let mut engine = LcmEngine::new(
-                &db_path,
-                state_dir.clone(),
+                context_dir.clone(),
                 ContextConfig::default(),
                 canned_summarize("summary"),
             )
@@ -1808,8 +1798,7 @@ mod tests {
         }
 
         let engine = LcmEngine::new(
-            &db_path,
-            state_dir,
+            context_dir,
             ContextConfig::default(),
             canned_summarize("summary"),
         )

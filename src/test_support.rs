@@ -67,12 +67,7 @@ impl TestAgent {
     }
 
     pub(crate) fn spawn(self) -> AgentHandle {
-        let engine = FlatSession::new(
-            self.ws.sessions_dir(),
-            self.ws.state_dir(),
-            ContextConfig::default(),
-        )
-        .unwrap();
+        let engine = FlatSession::new(self.ws.context_dir(), ContextConfig::default()).unwrap();
         let summarize = make_summarize_fn(self.provider.clone());
         // Threshold far above any test transcript, so a duty turn
         // never trips the distillation gate.

@@ -790,11 +790,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         #[allow(deprecated)]
         let base = dir.into_path();
-        let sessions = base.join("sessions");
-        let state = base.join("state");
-        std::fs::create_dir_all(&sessions).unwrap();
-        std::fs::create_dir_all(&state).unwrap();
-        FlatSession::new(sessions, state, ContextConfig::default()).unwrap()
+        FlatSession::new(base.join("context"), ContextConfig::default()).unwrap()
     }
 
     fn test_summarize(provider: &Arc<MockProvider>) -> SummarizeFn {
@@ -1406,10 +1402,8 @@ mod tests {
         let tools = Tools::default();
         let summarize = test_summarize(&provider);
 
-        let sessions_dir = dir.path().join("sessions");
-        let state_dir = dir.path().join("state");
         let mut engine =
-            FlatSession::new(sessions_dir, state_dir, ContextConfig::default()).unwrap();
+            FlatSession::new(dir.path().join("context"), ContextConfig::default()).unwrap();
 
         let result = process_message_metered(
             &mut engine,

@@ -12,9 +12,9 @@ test -f "$ARCHIVE"
 # The daemon would otherwise be writing the files being replaced.
 systemctl stop kitaebot
 
-# Replace rather than merge: a merged state/ could keep payload blobs
+# Replace rather than merge: a merged context/ could keep payload blobs
 # whose large_files rows are gone, or cursors newer than the databases.
-rm -rf "$W/state" "$W/memory"
+rm -rf "$W/state" "$W/memory" "$W/context"
 tar -C "$W" -xzf "$ARCHIVE"
 
 # Own whatever the archive placed, rather than a hardcoded list that has

@@ -34,8 +34,8 @@ The agent loop calls the LLM, dispatches tool calls in parallel, checks outputs 
 
 Conversation state lives behind the `ContextEngine` trait, selected via `context.engine`:
 
-- **flat** (default) — per-name JSON session files under `workspace/sessions/`; compacts by summarizing the whole history when the token budget is exceeded.
-- **lcm** — hierarchical compaction over a SQLite DAG at `state/lcm.db`. Old messages collapse into summary nodes (background at a soft threshold, blocking at a hard threshold); the `lcm_*` tools let the agent search and re-expand compacted history.
+- **flat** (default) — per-name JSON session files under `workspace/context/sessions/`; compacts by summarizing the whole history when the token budget is exceeded.
+- **lcm** — hierarchical compaction over a SQLite DAG at `context/lcm.db`. Old messages collapse into summary nodes (background at a soft threshold, blocking at a hard threshold); the `lcm_*` tools let the agent search and re-expand compacted history.
 
 Sub-agents run on an ephemeral in-memory engine that never compacts.
 

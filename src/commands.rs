@@ -381,12 +381,7 @@ mod tests {
     use crate::types::Message;
 
     async fn engine_with_sessions(dir: &std::path::Path, names: &[&str]) -> FlatSession {
-        let sessions_dir = dir.join("sessions");
-        let state_dir = dir.join("state");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        std::fs::create_dir_all(&state_dir).unwrap();
-        let mut engine =
-            FlatSession::new(sessions_dir, state_dir, ContextConfig::default()).unwrap();
+        let mut engine = FlatSession::new(dir.join("context"), ContextConfig::default()).unwrap();
         for name in names {
             engine.switch_session(name).await.unwrap();
             engine

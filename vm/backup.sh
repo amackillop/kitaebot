@@ -27,10 +27,18 @@ for f in "$W"/state/active_session "$W"/state/*.md; do
     cp -a "$f" "$S/state/"
 done
 
-# Externalized tool output. The large_files rows reference these blobs,
-# so omitting them leaves lcm_grep with nothing to search.
-if [ -d "$W/state/lcm" ]; then
-    cp -a "$W/state/lcm" "$S/state/"
+# The context engine's directory: databases via VACUUM INTO, everything
+# else (payload blobs, sessions, the active_session cursor) is plain
+# files, safe to copy live.
+if [ -d "$W/context" ]; then
+    mkdir -p "$S/context"
+    chmod --reference="$W/context" "$S/context"
+    for db in "$W"/context/*.db; do
+        [ -e "$db" ] || continue
+        sqlite3 "$db" "VACUUM INTO '$S/context/$(basename "$db")'"
+    done
+    find "$W/context" -mindepth 1 -maxdepth 1 ! -name '*.db*' \
+        -exec cp -a {} "$S/context/" \;
 fi
 
 cp -a "$W/memory" "$S/"
@@ -38,4 +46,4 @@ cp -a "$W/memory" "$S/"
 # Name the entries rather than ".": an archive containing "./" stamps
 # that entry's owner and mode onto the extraction target, and this one
 # would carry the mktemp -d directory's root:root 0700.
-tar -C "$S" -czf - state memory
+tar -C "$S" -czf - state memory $( [ -d "$S/context" ] && echo context )

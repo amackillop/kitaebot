@@ -55,7 +55,7 @@ impl Workspace {
         };
 
         mk(&path)?;
-        mk(&path.join("sessions"))?;
+        mk(&path.join("context"))?;
         mk(&path.join("memory"))?;
         mk(&path.join("memory/topics"))?;
         mk(&path.join("projects"))?;
@@ -86,9 +86,11 @@ impl Workspace {
         &self.root
     }
 
-    /// Directory holding per-session storage.
-    pub fn sessions_dir(&self) -> PathBuf {
-        self.root.join("sessions")
+    /// Directory owned by the active context engine (spec 14): its
+    /// store, sessions, and cursors, laid out however the engine
+    /// chooses. The workspace hands over the path and looks no deeper.
+    pub fn context_dir(&self) -> PathBuf {
+        self.root.join("context")
     }
 
     /// Directory holding machine-owned runtime state (engine store,
@@ -215,7 +217,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
 
-        assert!(ws.path().join("sessions").is_dir());
+        assert!(ws.path().join("context").is_dir());
         assert!(ws.path().join("memory").is_dir());
         assert!(ws.path().join("memory/topics").is_dir());
         assert!(ws.path().join("projects").is_dir());
