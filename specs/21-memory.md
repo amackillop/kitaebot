@@ -138,6 +138,12 @@ reading session history through the context engine abstraction:
   entries invalidated by newer events; enforce the index cap.
 - The watermarks advance only after a successful pass, so a failed
   distillation retries over the same span.
+- **Priming:** an absent watermark *document* (fresh state database)
+  is primed at every existing session's current tip and persisted, so
+  an engine store older than the state database is grandfathered
+  rather than reprocessed — the poll cursors' starting-now semantics,
+  in positions. A session missing from a *present* document is newer
+  than the document and distills from its first event.
 
 ### Provenance discipline
 

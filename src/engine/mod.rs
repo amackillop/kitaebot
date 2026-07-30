@@ -194,6 +194,19 @@ pub trait ContextEngine: Send + Sync {
         after: u64,
         max_tokens: u64,
     ) -> impl Future<Output = Result<Vec<Message>, EngineError>> + Send;
+
+    /// Each session's current tip: the position `transcript_since`
+    /// would advance to after consuming everything. Used to prime
+    /// fresh distillation state so history predating the state
+    /// database is grandfathered rather than reprocessed (spec 21) —
+    /// the poll cursors' starting-now semantics, in positions.
+    /// Sessions with no events are omitted. The default is for engines
+    /// with no durable history.
+    fn latest_positions(
+        &self,
+    ) -> impl Future<Output = Result<BTreeMap<String, u64>, EngineError>> + Send {
+        async { Ok(BTreeMap::new()) }
+    }
 }
 
 /// Role-setting system prompt for every summarization call. The

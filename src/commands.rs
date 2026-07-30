@@ -274,7 +274,10 @@ async fn distill_pass(
     session: &str,
     gate: distill::Gate,
 ) -> Result<Option<String>, String> {
-    let mut state = distiller.load_state();
+    let mut state = distiller
+        .load_state(engine)
+        .await
+        .map_err(|e| format!("Distillation state load failed: {e}"))?;
     let out = distill::run(
         engine,
         distiller,

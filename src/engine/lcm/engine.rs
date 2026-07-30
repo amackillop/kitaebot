@@ -545,6 +545,11 @@ impl ContextEngine for LcmEngine {
         run_blocking(conn, move |c| pending_distill_tokens_sync(c, &since)).await
     }
 
+    async fn latest_positions(&self) -> Result<BTreeMap<String, u64>, EngineError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(conn, move |c| latest_positions_sync(c)).await
+    }
+
     async fn transcript_since(
         &self,
         session: &str,
@@ -703,6 +708,28 @@ fn list_sessions_sync(conn: &mut Connection) -> Result<Vec<SessionInfo>, EngineE
         out.push(r.map_err(|e| storage_err(&e))?);
     }
     Ok(out)
+}
+
+/// Each conversation's next-unseen seq (`MAX(seq) + 1`), for priming
+/// fresh distillation state at the current tips. Conversations with
+/// no messages are omitted by the join.
+fn latest_positions_sync(conn: &Connection) -> Result<BTreeMap<String, u64>, EngineError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.name, MAX(m.seq) + 1 FROM conversations c \
+             JOIN messages m ON m.conversation_id = c.conversation_id \
+             GROUP BY c.conversation_id",
+        )
+        .map_err(|e| storage_err(&e))?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| storage_err(&e))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| storage_err(&e))?;
+    Ok(rows
+        .into_iter()
+        .map(|(stem, tip)| (desanitize_name(&stem), tip.cast_unsigned()))
+        .collect())
 }
 
 /// Sum each conversation's undistilled `token_count` for the distill
@@ -1820,6 +1847,28 @@ mod tests {
 
         let beta = sessions.iter().find(|s| s.name == "beta").unwrap();
         assert_eq!(beta.message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn latest_positions_reports_session_tips() {
+        let (mut engine, _dir) = temp_engine();
+        assert!(engine.latest_positions().await.unwrap().is_empty());
+        for content in ["one", "two"] {
+            engine
+                .push_message(Message::User {
+                    content: content.into(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let tips = engine.latest_positions().await.unwrap();
+        let tip = *tips.get("general").expect("session has a tip");
+        // The tip is exactly where a full transcript_since would
+        // advance to: nothing pending beyond it.
+        let caught_up = BTreeMap::from([("general".to_string(), tip)]);
+        let pending = engine.pending_distill_tokens(&caught_up).await.unwrap();
+        assert!(!pending.contains_key("general"));
     }
 
     #[tokio::test]

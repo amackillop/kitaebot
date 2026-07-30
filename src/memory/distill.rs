@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::agent::{BudgetPolicy, TurnUsage, run_turn_metered};
 use crate::engine::ephemeral::EphemeralSession;
@@ -34,11 +34,25 @@ pub struct DistillState {
 const DOC: &str = "distillation";
 
 impl DistillState {
-    /// Load from the state database. A missing or corrupt document
-    /// yields empty watermarks (distill from the start), mirroring the
-    /// channel poll cursors.
-    pub fn load(db: &StateDb) -> Self {
-        db.load_json(DOC, Self::default)
+    /// Load from the state database. `None` when the document is
+    /// missing, unreadable, or corrupt — the caller reprimes at the
+    /// engine's current tips rather than starting from position zero,
+    /// which would reprocess every surviving session.
+    pub fn load(db: &StateDb) -> Option<Self> {
+        match db.get_doc(DOC) {
+            Ok(Some(json)) => match serde_json::from_str(&json) {
+                Ok(state) => Some(state),
+                Err(e) => {
+                    warn!("Corrupt distillation state, repriming: {e}");
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(e) => {
+                warn!("Failed to read distillation state, repriming: {e}");
+                None
+            }
+        }
     }
 
     /// Persist. Failure is logged, not fatal — the same span is
@@ -133,9 +147,26 @@ impl Distiller {
         }
     }
 
-    /// Load the persisted watermarks for a pass.
-    pub fn load_state(&self) -> DistillState {
-        DistillState::load(&self.state_db)
+    /// Load the persisted watermarks for a pass, priming absent state
+    /// at the engine's current tips. An absent document means a fresh
+    /// install (no history; priming is a no-op) or an engine store
+    /// older than the state database, whose history must not be
+    /// reprocessed. A session missing from a *present* document is a
+    /// conversation newer than the document and distills from its
+    /// first event, as before.
+    pub async fn load_state<E: ContextEngine>(&self, engine: &E) -> Result<DistillState, Error> {
+        if let Some(state) = DistillState::load(&self.state_db) {
+            return Ok(state);
+        }
+        let state = DistillState {
+            watermarks: engine.latest_positions().await?,
+        };
+        state.save(&self.state_db);
+        info!(
+            sessions = state.watermarks.len(),
+            "Primed distillation watermarks at current session tips"
+        );
+        Ok(state)
     }
 }
 
@@ -323,22 +354,24 @@ mod tests {
         state.watermarks.insert("owner/repo".into(), 3);
         state.save(&db);
 
-        let loaded = DistillState::load(&db);
+        let loaded = DistillState::load(&db).expect("saved doc loads");
         assert_eq!(loaded.watermarks.get("general"), Some(&12));
         assert_eq!(loaded.watermarks.get("owner/repo"), Some(&3));
     }
 
     #[test]
-    fn load_missing_doc_is_empty() {
+    fn load_missing_doc_is_none() {
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        assert!(DistillState::load(&db).watermarks.is_empty());
+        assert!(DistillState::load(&db).is_none());
     }
 
     #[test]
-    fn load_corrupt_doc_is_empty() {
+    fn load_corrupt_doc_is_none() {
+        // None, not default: a corrupt document must reprime rather
+        // than restart from position zero.
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
         db.put_doc("distillation", "not json").unwrap();
-        assert!(DistillState::load(&db).watermarks.is_empty());
+        assert!(DistillState::load(&db).is_none());
     }
 
     #[test]
@@ -434,6 +467,15 @@ mod run_tests {
             _since: &BTreeMap<String, u64>,
         ) -> Result<BTreeMap<String, u64>, EngineError> {
             Ok(self.pending.clone())
+        }
+
+        async fn latest_positions(&self) -> Result<BTreeMap<String, u64>, EngineError> {
+            Ok(self
+                .transcripts
+                .iter()
+                .filter(|(_, msgs)| !msgs.is_empty())
+                .map(|(name, msgs)| (name.clone(), msgs.len() as u64))
+                .collect())
         }
 
         async fn transcript_since(
@@ -634,8 +676,66 @@ mod run_tests {
         assert_eq!(state.watermarks.get("general"), Some(&2));
 
         // The advance is persisted, so the next pass resumes past it.
-        let reloaded = DistillState::load(&db);
+        let reloaded = DistillState::load(&db).expect("advance persisted");
         assert_eq!(reloaded.watermarks.get("general"), Some(&2));
+    }
+
+    #[tokio::test]
+    async fn fresh_state_primes_at_tips_instead_of_reprocessing() {
+        let (_dir, ws) = workspace();
+        // An engine store with history that predates the state db.
+        let engine = FakeEngine {
+            pending: BTreeMap::from([("general".into(), 5_000)]),
+            transcripts: BTreeMap::from([(
+                "general".into(),
+                vec![
+                    Message::User {
+                        content: "old".into(),
+                    },
+                    Message::User {
+                        content: "history".into(),
+                    },
+                ],
+            )]),
+        };
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
+
+        let state = distiller.load_state(&engine).await.unwrap();
+
+        assert_eq!(
+            state.watermarks.get("general"),
+            Some(&2),
+            "pre-existing history must be grandfathered at its tip"
+        );
+        assert!(
+            DistillState::load(&db).is_some(),
+            "priming must persist so a restart does not reprime"
+        );
+        assert_eq!(provider.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn primed_state_survives_reload_unchanged() {
+        let (_dir, ws) = workspace();
+        let engine = FakeEngine {
+            pending: BTreeMap::new(),
+            transcripts: BTreeMap::from([(
+                "general".into(),
+                vec![Message::User {
+                    content: "x".into(),
+                }],
+            )]),
+        };
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
+
+        let first = distiller.load_state(&engine).await.unwrap();
+        // New history arrives after priming; a reload must keep the
+        // primed watermark, not advance it — the new span is pending.
+        let second = distiller.load_state(&engine).await.unwrap();
+        assert_eq!(first.watermarks, second.watermarks);
     }
 
     #[tokio::test]

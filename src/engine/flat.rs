@@ -342,6 +342,17 @@ impl ContextEngine for FlatSession {
         Ok(sessions)
     }
 
+    async fn latest_positions(&self) -> Result<BTreeMap<String, u64>, EngineError> {
+        let mut out = BTreeMap::new();
+        for info in self.list_sessions().await? {
+            let len = self.session_messages(&info.name).len();
+            if len > 0 {
+                out.insert(info.name, u64::try_from(len).unwrap_or(u64::MAX));
+            }
+        }
+        Ok(out)
+    }
+
     async fn pending_distill_tokens(
         &self,
         since: &BTreeMap<String, u64>,
@@ -899,6 +910,22 @@ mod tests {
     }
 
     // ── Distillation tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn latest_positions_reports_session_tips() {
+        let mut engine = temp_engine(ContextConfig::default());
+        assert!(engine.latest_positions().await.unwrap().is_empty());
+        for content in ["one", "two"] {
+            engine
+                .push_message(Message::User {
+                    content: content.into(),
+                })
+                .await
+                .unwrap();
+        }
+        let tips = engine.latest_positions().await.unwrap();
+        assert_eq!(tips.get("general"), Some(&2));
+    }
 
     #[tokio::test]
     async fn pending_distill_tokens_sums_undistilled_per_session() {
