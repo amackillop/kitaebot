@@ -47,8 +47,7 @@ Schedules, per duty, config-declared:
 Scheduling rules:
 
 - **Persisted phase.** Each duty's `last_run` timestamp is persisted
-  in `state/` (JSON, following the poll-cursor pattern; no new
-  SQLite — see the state-consolidation note in FUTURE.md). A duty is
+  as the `duties` document in the state database (spec 05). A duty is
   due when `now >= next_due(last_run, schedule)`. Restarts change
   nothing: cadence derives from persisted state, not process start.
 - **Anacron catch-up.** A duty overdue at startup (the daemon was
@@ -255,15 +254,13 @@ complete scope statement for discovery and prompt duties.
   trusted repos (`git.repositories`) only.
 - Duty turns run through the normal actor; no parallel execution, no
   second agent loop.
-- Schedule, cursor, and commitment state follow the existing
-  JSON-cursor pattern in `state/`; no new SQLite file (FUTURE.md
-  consolidation directive).
+- Schedule, cursor, and commitment state live in the state database
+  (spec 05): opaque documents for load-and-save state, real tables
+  (versioned migrations) for anything queried.
 - SQL never leaves the module that owns the schema. Duty gates that
   read a ledger consume a method on it (`unreconciled_escapes()`,
   `spent_since()`), never inline queries — a gate wanting raw table
-  access is a gate asking for an API that does not exist yet. The
-  state-db consolidation (FUTURE.md) should land before phase 2
-  multiplies the query sites.
+  access is a gate asking for an API that does not exist yet.
 
 ## Open Questions
 

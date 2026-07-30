@@ -22,7 +22,7 @@ for db in "$W"/state/*.db; do
     sqlite3 "$db" "VACUUM INTO '$S/state/$(basename "$db")'"
 done
 
-for f in "$W"/state/*.json "$W"/state/active_session "$W"/state/HISTORY.md; do
+for f in "$W"/state/active_session "$W"/state/*.md; do
     [ -e "$f" ] || continue
     cp -a "$f" "$S/state/"
 done

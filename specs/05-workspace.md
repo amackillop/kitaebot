@@ -36,8 +36,7 @@ Resolved via fallback chain:
 ├── state/                   # Machine-owned runtime state
 │   ├── active_session       # Last active session name
 │   ├── lcm.db               # LCM engine store (+ lcm/ payloads)
-│   ├── github_poll_state.json  # GitHub channel poll cursor
-│   ├── linear_poll_state.json  # Linear channel poll cursor
+│   ├── kitaebot.db          # Operational DB: ledgers + cursor docs
 │   ├── HISTORY.md           # Duty execution log (spec 24)
 │   ├── NOTIFICATIONS.md     # Mirror of sent notifications (spec 17)
 │   └── review-checklist.md  # Escape checklist, derived from the ledger (spec 23)
@@ -51,7 +50,7 @@ Backup and restore ([spec 09](09-vm.md)) turns on this split:
 
 | Durable | Derived |
 |---------|---------|
-| `state/` — the databases, `state/lcm/payloads/`, the JSON cursors, `HISTORY.md` | `projects/`, `reviews/`, `.diffs/` — re-cloned or regenerated |
+| `state/` — the two databases, `state/lcm/payloads/`, the `.md` logs | `projects/`, `reviews/`, `.diffs/` — re-cloned or regenerated |
 | `memory/` | build caches (`.cargo`, `.npm`, `.cache`, `.local`) |
 | | Nix-provisioned symlinks (`SOUL.md`, `AGENTS.md`, `USER.md`, `config.toml`) |
 
@@ -98,8 +97,7 @@ changing them requires a rebuild and restart regardless.
 | `state_dir()` | `state/` |
 | `history_path()` | `state/HISTORY.md` |
 | `notifications_path()` | `state/NOTIFICATIONS.md` |
-| `github_poll_state_path()` | `state/github_poll_state.json` |
-| `linear_poll_state_path()` | `state/linear_poll_state.json` |
+| `state_db_path()` | `state/kitaebot.db` |
 
 ## Boundaries
 

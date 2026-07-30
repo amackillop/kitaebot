@@ -244,8 +244,9 @@ affected rows; it never fails the review.
 
 ### The ledger
 
-SQLite at `state/review.db`, following the `state/usage.db` pattern
-(spec: per-turn cost tracking). One row per finding:
+Tables in `state/kitaebot.db`, the operational state database shared
+with the usage ledger and cursor documents (spec 05); the schema lives
+in its versioned baseline migration. One row per finding:
 
 | Column | Meaning |
 |--------|---------|
@@ -364,10 +365,9 @@ mode; the pending column makes it measurable, and a mechanical nag
 (heartbeat duty) is built only if the data shows prompting is not
 enough.
 
-**Migration**: `state/review.db` predates these columns, so `open()`
-adds them via guarded `ALTER TABLE` (checked against
-`pragma_table_info`) — `CREATE TABLE IF NOT EXISTS` never alters an
-existing table.
+**Migration**: schema changes are versioned migrations on the state
+database (`PRAGMA user_version`, append-only SQL files), the same
+scheme as `lcm.db`.
 
 ### Workflow integration
 
@@ -473,8 +473,6 @@ that references an unavailable mechanism is worse than none.
   at feedback-processing time to keep `state/review-checklist.md`
   current. If that proves lax, the tightening is a scheduled duty that
   queries the ledger and reconciles the checklist (spec 24 phase 2).
-- **Ledger file**: own `state/review.db` vs a table in `usage.db`.
-  Separate file assumed here; one-file ops simplicity may argue otherwise.
 - **One table or two**: the `pr` gate (spec 20) shares this schema with
   the self gates, and five things in a row now mean different things
   depending on which gate wrote it:

@@ -343,7 +343,7 @@ replying to stale code.
 
 ### State persistence
 
-`state/github_poll_state.json` via atomic write (tmp + rename):
+The `github_poll` document in the state database (spec 05):
 
 ```json
 {"last_poll": "2026-07-05T12:00:00Z", "reviewed": {"owner/repo#42": "<head-sha>"}}

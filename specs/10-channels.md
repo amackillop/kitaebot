@@ -188,7 +188,8 @@ matched case-insensitively against the comment author. Comments with no
 author (e.g. integrations) are untrusted. The bot's own email must not be
 listed.
 
-**State persistence**: `state/linear_poll_state.json` via atomic write:
+**State persistence**: the `linear_poll` document in the state
+database (spec 05):
 
 ```json
 {"last_poll": "2026-07-05T12:00:00Z", "announced_issues": ["MDK-123"]}

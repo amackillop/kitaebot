@@ -62,14 +62,14 @@ pkgs.testers.nixosTest {
     with subtest("seed durable and derived state"):
         machine.succeed(f"mkdir -p {W}/state/lcm/payloads {W}/memory/topics {W}/projects/o/r")
         machine.succeed(
-            f"sqlite3 {W}/state/usage.db "
+            f"sqlite3 {W}/state/kitaebot.db "
             "'PRAGMA journal_mode=WAL; CREATE TABLE turns(x); "
             "INSERT INTO turns VALUES (1),(2),(3);'"
         )
         machine.succeed(f"echo keep > {W}/state/lcm/payloads/file_keep")
-        machine.succeed(f"echo '{{}}' > {W}/state/github_poll_state.json")
         machine.succeed(f"echo index > {W}/memory/MEMORY.md")
         machine.succeed(f"echo '[t] an entry' > {W}/state/HISTORY.md")
+        machine.succeed(f"echo '[t] a notification' > {W}/state/NOTIFICATIONS.md")
         machine.succeed(f"echo derived > {W}/projects/o/r/file")
         machine.succeed(f"chown -R kitaebot:kitaebot {W}/state {W}/memory {W}/projects")
 
@@ -77,10 +77,10 @@ pkgs.testers.nixosTest {
         machine.succeed("bash ${./backup.sh} > /tmp/backup.tar.gz")
         listing = machine.succeed("tar tzf /tmp/backup.tar.gz")
         for want in [
-            "state/usage.db",
+            "state/kitaebot.db",
             "state/lcm/payloads/file_keep",
-            "state/github_poll_state.json",
             "state/HISTORY.md",
+            "state/NOTIFICATIONS.md",
             "memory/MEMORY.md",
         ]:
             assert want in listing, f"backup omits {want}:\n{listing}"
@@ -95,11 +95,11 @@ pkgs.testers.nixosTest {
         machine.succeed(f"test -e {W}/state/lcm/payloads/file_keep")
         machine.fail(f"test -e {W}/state/lcm/payloads/file_stale")
         machine.succeed(f"test -e {W}/memory/MEMORY.md")
-        rows = machine.succeed(f"sqlite3 {W}/state/usage.db 'select count(*) from turns;'").strip()
+        rows = machine.succeed(f"sqlite3 {W}/state/kitaebot.db 'select count(*) from turns;'").strip()
         assert rows == "3", f"expected 3 rows after restore, got {rows}"
 
     with subtest("restored state is owned by the daemon user"):
-        for path in ["state/usage.db", "state/lcm/payloads/file_keep", "memory/MEMORY.md"]:
+        for path in ["state/kitaebot.db", "state/lcm/payloads/file_keep", "memory/MEMORY.md"]:
             owner = machine.succeed(f"stat -c %U {W}/{path}").strip()
             assert owner == "kitaebot", f"{path} owned by {owner}"
 
