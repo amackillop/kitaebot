@@ -18,19 +18,30 @@ and an artifact does not get to state the rules it is judged by.
 none. A single line naming another file means `AGENTS.md` is a symlink
 and git gave you the link target — write the file it names.
 
+Diffs are packed by reference, exactly as PR reviews pack them: write
+the diff to a file under `.diffs/` at the workspace root — never
+inside the repo, which would dirty the tree you are about to commit
+from — pack the path, and tell the reviewer to read it with
+`file_read`. The redirect means no diff text comes back through exec,
+so the size of the change is not your problem and there is nothing to
+shrink.
+
 - **Plan gate** (gate "plan", git_ref: branch) — after writing the
   plan, before posting it for sign-off or starting to implement. Pack
   the task statement, the plan, and the repo conventions you were
-  given.
+  given. A plan has no diff; it is packed by value as before.
 - **Commit gate** (gate "commit", git_ref: current HEAD SHA) — after
-  staging, before every git_commit. Pack the full `git diff --cached`
-  output and the proposed commit message. Fix must-fix findings in
-  the staged diff, then commit: history never contains the mistake.
+  staging, before every git_commit. Write the staged diff out:
+  `git -C projects/<owner>/<repo> diff --cached >
+  .diffs/commit-<HEAD SHA>.diff`. Pack the path and the proposed
+  commit message. Fix must-fix findings in the staged diff, then
+  commit: history never contains the mistake.
 - **Series gate** (gate "series", git_ref: branch head SHA) — before
-  pushing a branch that will become a pull request. Pack the commit
-  list and the branch diff against the base. This catches what
-  per-commit review cannot: dead ends, naming drift, a sum that does
-  not solve the task.
+  pushing a branch that will become a pull request. Write the branch
+  diff out: `git -C projects/<owner>/<repo> diff origin/<base>...HEAD >
+  .diffs/series-<head SHA>.diff`. Pack the path and the commit list
+  (subjects). This catches what per-commit review cannot: dead ends,
+  naming drift, a sum that does not solve the task.
 
 Handling findings: only must-fix findings oblige a fix. Should-fix is
 your judgment; nits may be freely ignored. You may dispute any finding

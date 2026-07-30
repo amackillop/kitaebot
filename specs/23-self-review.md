@@ -142,20 +142,24 @@ class of mistake — a wrong approach found at commit 5 costs a branch,
 found at the plan it costs one call.
 
 **2. Commit review** — after staging, before every `git_commit`. The
-parent packs: the `git diff --cached` output, the proposed commit
-message, and the paths touched. The reviewer answers: does the diff do
-what the message claims and nothing else; correctness bugs; the slop
-categories. Findings are fixed in the staged diff before committing —
-history never contains the mistake and no amend is needed.
+parent redirects the staged diff to a file under `.diffs/` at the
+workspace root (never inside the repo, which would dirty the tree
+about to be committed from) and packs the path plus the proposed
+commit message; the reviewer reads the diff with `file_read`. The
+reviewer answers: does the diff do what the message claims and nothing
+else; correctness bugs; the slop categories. Findings are fixed in the
+staged diff before committing — history never contains the mistake and
+no amend is needed.
 
 **3. Series review** — before `git_push` of a branch that will become a
-PR. The parent packs: the commit list (subjects) and the full branch diff
-against the base. The reviewer checks what per-commit review cannot see:
-does the sum solve the task; dead ends left behind (commit 4 quietly
-reverting half of commit 2); naming/convention drift across the series;
-commit boundaries that stopped making sense. If the branch diff exceeds
-the packable size, the parent packs the commit list plus per-commit stats
-and the reviewer requests specific files via `file_read`.
+PR. The parent writes the branch diff against the base to `.diffs/`
+the same way and packs the path plus the commit list (subjects). The
+reviewer checks what per-commit review cannot see: does the sum solve
+the task; dead ends left behind (commit 4 quietly reverting half of
+commit 2); naming/convention drift across the series; commit
+boundaries that stopped making sense. By-reference packing means no
+diff text crosses either context, so there is no size at which the
+gate degrades — the move the `pr` gate (spec 20) made, applied here.
 
 The parent handles findings like human review feedback: only `must-fix`
 findings oblige action; `should-fix` is the parent's judgment; `nit` is
@@ -486,9 +490,10 @@ that references an unavailable mechanism is worse than none.
   definition of two tables sharing a schema. It is not split yet because
   the argument for sharing — a human disputing a published finding is
   the strongest calibration signal the ledger can collect, and the self
-  gates can only ever record the bot disputing itself — is untested:
-  no `pr`-gate review has run. Splitting on no data would be as
-  speculative as merging on no data was.
+  gates can only ever record the bot disputing itself — has exactly one
+  data point: the first live `pr`-gate reviews (PR #5 clean, PR #6 two
+  findings, author conceded). One conceded finding is not a trend.
+  Splitting now would still be speculation.
 
   **Split when any of these happens**, rather than when someone notices
   again: a second query needs to exclude or special-case `pending` for
@@ -500,15 +505,4 @@ that references an unavailable mechanism is worse than none.
 - **Per-gate model strength**: plan review arguably deserves the
   strongest model while commit review could run cheaper. Single override
   in v1; split only if the ledger shows plan-review misses.
-- **Series-gate size threshold**: at what packed-diff size does the
-  parent degrade to list+stats? Needs a real number from usage, not a
-  guess. The `pr` gate (spec 20) dissolved its version of this question
-  rather than answering it: the parent redirects the diff to a file and
-  packs the path, so no diff text crosses either context and there is
-  no size to threshold. The same move should work at the commit and
-  series gates: those diffs are taken in a *working* checkout under
-  `projects/`, so the file lands in `.diffs/` at the workspace root
-  (spec 20) rather than in the repo it describes, which would dirty the
-  tree it is about to be committed from. What remains is doing it; until
-  then the self gates still pack by value, and the two halves of the
-  pipeline are inconsistent.
+
