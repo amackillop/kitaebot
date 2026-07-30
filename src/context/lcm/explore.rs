@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
-use crate::engine::SummarizeFn;
+use crate::context::SummarizeFn;
 use crate::types::Message;
 
 /// Bytes per head/mid/tail slice fed to the LLM for text payloads.

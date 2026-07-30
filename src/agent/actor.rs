@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tracing::{Instrument, error, field, info_span};
 
 use crate::commands;
+use crate::context::{ContextEngine, SummarizeFn};
 use crate::dispatch::{Input, Reply};
-use crate::engine::{ContextEngine, SummarizeFn};
 use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;

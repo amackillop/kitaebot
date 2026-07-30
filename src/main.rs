@@ -4,11 +4,11 @@ mod channel;
 mod clients;
 mod commands;
 mod config;
+mod context;
 mod conventions;
 mod daemon;
 mod dispatch;
 mod duty;
-mod engine;
 mod error;
 mod memory;
 mod notify;
@@ -33,7 +33,7 @@ mod workspace;
 use std::sync::Arc;
 
 use config::{Config, EngineKind};
-use engine::{ContextEngine, ToolScope};
+use context::{ContextEngine, ToolScope};
 use tracing::{error, info, warn};
 use workspace::Workspace;
 
@@ -89,7 +89,7 @@ async fn main() {
             let tools = rt.tools;
             let state_dir = workspace.state_dir();
             let summarizer = config.provider.model_overrides.summarizer.as_deref();
-            let summarize = engine::make_summarize_fn(role_provider(&provider, summarizer));
+            let summarize = context::make_summarize_fn(role_provider(&provider, summarizer));
 
             // Thresholds apply to the window minus the output reserve;
             // see Config::effective_context.
@@ -97,7 +97,7 @@ async fn main() {
             let handle = match context.engine {
                 EngineKind::Flat => {
                     let sessions_dir = workspace.sessions_dir();
-                    let engine = engine::flat::FlatSession::new(sessions_dir, state_dir, context)
+                    let engine = context::flat::FlatSession::new(sessions_dir, state_dir, context)
                         .unwrap_or_else(|e| {
                             error!("Failed to initialize flat session: {e}");
                             std::process::exit(1);
@@ -116,7 +116,7 @@ async fn main() {
                 }
                 EngineKind::Lcm => {
                     let db_path = state_dir.join("lcm.db");
-                    let engine = engine::lcm::LcmEngine::new(
+                    let engine = context::lcm::LcmEngine::new(
                         &db_path,
                         state_dir,
                         context,
@@ -245,7 +245,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     mcp: tools::mcp::McpTools,
     config: &Config,
     engine: E,
-    summarize: engine::SummarizeFn,
+    summarize: context::SummarizeFn,
     notifier: Option<Arc<notify::Notifier>>,
 ) -> agent::AgentHandle {
     // Namespacing makes collisions unlikely; if one happens anyway,

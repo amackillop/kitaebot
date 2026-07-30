@@ -5,7 +5,7 @@
 //! most output bytes, guiding optimization work. Each context engine
 //! supplies its own messages via [`ContextEngine::report`].
 //!
-//! [`ContextEngine::report`]: crate::engine::ContextEngine::report
+//! [`ContextEngine::report`]: crate::context::ContextEngine::report
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};

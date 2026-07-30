@@ -837,7 +837,7 @@ fn append_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::lcm::schema;
+    use crate::context::lcm::schema;
     use crate::tools::Tool;
 
     fn fresh_db() -> (tempfile::TempDir, std::path::PathBuf) {

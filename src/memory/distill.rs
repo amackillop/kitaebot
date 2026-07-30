@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::agent::{BudgetPolicy, TurnUsage, run_turn_metered};
-use crate::engine::ephemeral::EphemeralSession;
-use crate::engine::{ContextEngine, SummarizeFn, format_messages_for_summary};
+use crate::context::ephemeral::EphemeralSession;
+use crate::context::{ContextEngine, SummarizeFn, format_messages_for_summary};
 use crate::error::Error;
 use crate::provider::Provider;
 use crate::state_db::StateDb;
@@ -447,7 +447,7 @@ mod run_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::engine::{AssembledContext, CompactionEvent, ContextStats, SessionInfo, ToolScope};
+    use crate::context::{AssembledContext, CompactionEvent, ContextStats, SessionInfo, ToolScope};
     use crate::error::{EngineError, ProviderError};
     use crate::provider::MockProvider;
     use crate::test_support::workspace;

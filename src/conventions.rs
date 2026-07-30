@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tracing::warn;
 
-use crate::engine::names::desanitize_name;
+use crate::context::names::desanitize_name;
 use crate::tools::git::url::is_trusted_repo;
 
 /// Byte cap on injected conventions. A sanity bound, not a budget:

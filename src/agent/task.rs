@@ -18,8 +18,8 @@ use tokio::sync::mpsc;
 use tracing::{Instrument, warn};
 
 use crate::activity::Activity;
-use crate::engine::SummarizeFn;
-use crate::engine::ephemeral::EphemeralSession;
+use crate::context::SummarizeFn;
+use crate::context::ephemeral::EphemeralSession;
 use crate::error::ToolError;
 use crate::provider::Provider;
 use crate::review::{self, ReviewLedger};

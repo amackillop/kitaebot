@@ -8,9 +8,9 @@ use std::str::FromStr;
 
 use tracing::error;
 
+use crate::context::names::sanitize_name;
+use crate::context::{ContextEngine, SessionInfo, SummarizeFn};
 use crate::dispatch::Reply;
-use crate::engine::names::sanitize_name;
-use crate::engine::{ContextEngine, SessionInfo, SummarizeFn};
 use crate::memory::distill::{self, Distiller};
 use crate::provider::Provider;
 use crate::review::ReviewLedger;
@@ -377,7 +377,7 @@ async fn switch_project(engine: &mut impl ContextEngine, name: &str) -> Result<R
 mod tests {
     use super::*;
     use crate::config::ContextConfig;
-    use crate::engine::flat::FlatSession;
+    use crate::context::flat::FlatSession;
     use crate::types::Message;
 
     async fn engine_with_sessions(dir: &std::path::Path, names: &[&str]) -> FlatSession {

@@ -20,7 +20,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::activity::{self, Activity};
 use crate::agent::envelope::{ChannelSource, GitHubRole};
-use crate::engine::{ContextEngine, SummarizeFn};
+use crate::context::{ContextEngine, SummarizeFn};
 use crate::error::{Error, ToolError};
 use crate::provider::{CallUsage, Provider};
 use crate::safety;
@@ -694,8 +694,8 @@ async fn record_tool_results<E: ContextEngine>(
 mod tests {
     use super::*;
     use crate::config::ContextConfig;
-    use crate::engine::flat::FlatSession;
-    use crate::engine::make_summarize_fn;
+    use crate::context::flat::FlatSession;
+    use crate::context::make_summarize_fn;
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
     use crate::tools::{MockBlockedTool, MockTool};
@@ -1241,7 +1241,7 @@ mod tests {
     /// when `Blocked` was misclassified as success.
     #[tokio::test]
     async fn stored_tool_results_round_trip_stats_classification() {
-        use crate::engine::stats::{FailureKind, classify_failure};
+        use crate::context::stats::{FailureKind, classify_failure};
 
         let cases: Vec<(Result<String, ToolError>, Option<FailureKind>)> = vec![
             (Ok("plain output".into()), None),

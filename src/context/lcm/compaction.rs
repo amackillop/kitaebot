@@ -19,7 +19,7 @@ use super::engine::{reconstruct_message, run_blocking, storage_err};
 use super::explore::extract_file_ids;
 use super::summarize::{EscalationOutcome, summarize_with_escalation};
 use crate::config::LcmConfig;
-use crate::engine::{CompactionEvent, SummarizeFn};
+use crate::context::{CompactionEvent, SummarizeFn};
 use crate::error::EngineError;
 use crate::types::Message;
 
@@ -655,8 +655,8 @@ fn token_estimate_sync(conn: &Connection, conversation_id: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::lcm::schema;
-    use crate::engine::lcm::summarize::EscalationLevel;
+    use crate::context::lcm::schema;
+    use crate::context::lcm::summarize::EscalationLevel;
     use crate::types::estimate_tokens;
 
     fn fresh_conn() -> (tempfile::TempDir, Connection) {

@@ -10,8 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::activity::Activity;
+use crate::context::{ContextEngine, SummarizeFn};
 use crate::dispatch::Reply;
-use crate::engine::{ContextEngine, SummarizeFn};
 use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;

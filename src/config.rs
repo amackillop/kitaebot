@@ -370,7 +370,7 @@ pub struct LcmConfig {
     pub large_file_summary_tokens: u32,
 }
 
-/// Selects the [`ContextEngine`](crate::engine::ContextEngine)
+/// Selects the [`ContextEngine`](crate::context::ContextEngine)
 /// implementation. The flat session keeps each conversation in a
 /// per-name JSON file; LCM stores everything in `SQLite` with a DAG
 /// of summaries on top of raw messages.
