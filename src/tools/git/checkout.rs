@@ -24,13 +24,32 @@ pub(crate) fn rel_path(root: &str, nwo: &str) -> Result<String, ToolError> {
     ))
 }
 
+/// How [`ensure_cloned`] satisfied the request. Callers that treat a
+/// fresh clone differently from a reused checkout (`git_clone` fetches
+/// the latter) branch on this instead of re-deriving it from disk.
+pub(crate) enum Ensured {
+    /// A clone ran: the directory was missing, or held a corrupt
+    /// skeleton that was replaced.
+    Cloned(PathBuf),
+    /// A healthy checkout already existed and was left untouched.
+    Existing(PathBuf),
+}
+
+impl Ensured {
+    pub(crate) fn into_dir(self) -> PathBuf {
+        match self {
+            Self::Cloned(dir) | Self::Existing(dir) => dir,
+        }
+    }
+}
+
 /// Clone `url` into the workspace-relative `rel` unless a healthy
-/// checkout already exists. Returns the absolute checkout directory.
+/// checkout already exists.
 pub(crate) async fn ensure_cloned(
     git: &GitCli,
     url: &str,
     rel: &str,
-) -> Result<PathBuf, ToolError> {
+) -> Result<Ensured, ToolError> {
     let dir = git.workspace_root().join(rel);
     if dir.join(".git").is_dir() {
         // rev-parse is local-only: it fails only when the repo is
@@ -39,7 +58,7 @@ pub(crate) async fn ensure_cloned(
             .await
             .is_ok()
         {
-            return Ok(dir);
+            return Ok(Ensured::Existing(dir));
         }
         // A clone interrupted by machine death leaves a .git skeleton
         // git rejects; trusting is_dir() would wedge this repo forever.
@@ -57,7 +76,7 @@ pub(crate) async fn ensure_cloned(
         let _ = tokio::fs::remove_dir_all(&dir).await;
         return Err(e);
     }
-    Ok(dir)
+    Ok(Ensured::Cloned(dir))
 }
 
 /// Run git in `cwd`, failing on nonzero exit, with optional credential
@@ -149,12 +168,21 @@ mod tests {
         std::fs::create_dir_all(&wedged).unwrap();
 
         let url = format!("file://{}", origin.path().display());
-        let cloned = ensure_cloned(&git, &url, "projects/o/r").await.unwrap();
+        let ensured = ensure_cloned(&git, &url, "projects/o/r").await.unwrap();
 
         assert!(
-            run(&git, &["rev-parse", "--git-dir"], &cloned, false)
-                .await
-                .is_ok(),
+            matches!(ensured, Ensured::Cloned(_)),
+            "a rejected skeleton must be reported as a fresh clone"
+        );
+        assert!(
+            run(
+                &git,
+                &["rev-parse", "--git-dir"],
+                ensured.into_dir().as_path(),
+                false
+            )
+            .await
+            .is_ok(),
             "the skeleton must be replaced by a healthy clone"
         );
     }
@@ -173,10 +201,11 @@ mod tests {
         std::fs::write(checkout.join("work.txt"), "uncommitted").unwrap();
 
         // Unreachable URL: proves no clone is attempted.
-        ensure_cloned(&git, "file:///nowhere-at-all", "projects/o/r")
+        let ensured = ensure_cloned(&git, "file:///nowhere-at-all", "projects/o/r")
             .await
             .unwrap();
 
+        assert!(matches!(ensured, Ensured::Existing(_)));
         assert_eq!(
             std::fs::read_to_string(checkout.join("work.txt")).unwrap(),
             "uncommitted",

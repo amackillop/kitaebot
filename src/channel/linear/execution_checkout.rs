@@ -33,7 +33,7 @@ const KEPT_CACHES: &[&str] = &[".direnv", "node_modules", "target", ".venv"];
 
 /// URL-parametrized body of [`prepare`], so tests can use `file://`.
 async fn prepare_at(git: &GitCli, url: &str, rel: &str) -> Result<(), ToolError> {
-    let dir = checkout::ensure_cloned(git, url, rel).await?;
+    let dir = checkout::ensure_cloned(git, url, rel).await?.into_dir();
     checkout::run(git, &["fetch", "origin"], &dir, true).await?;
     checkout::run(
         git,

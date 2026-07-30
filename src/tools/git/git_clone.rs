@@ -66,14 +66,14 @@ impl GitClone {
         let (https_url, nwo, rel) = target(url)?;
         let dir = self.git.workspace_root().join(&rel);
 
-        let mut output = if dir.join(".git").is_dir() {
-            // Existing checkout: refresh remote refs only. The working
-            // tree may hold in-progress work; never reposition or clean.
-            checkout::run(&self.git, &["fetch", "origin"], &dir, true).await?;
-            format!("{rel} already cloned; fetched origin")
-        } else {
-            checkout::ensure_cloned(&self.git, &https_url, &rel).await?;
-            format!("Cloned to {rel}")
+        let mut output = match checkout::ensure_cloned(&self.git, &https_url, &rel).await? {
+            checkout::Ensured::Cloned(_) => format!("Cloned to {rel}"),
+            checkout::Ensured::Existing(existing) => {
+                // Refresh remote refs only. The working tree may hold
+                // in-progress work; never reposition or clean.
+                checkout::run(&self.git, &["fetch", "origin"], &existing, true).await?;
+                format!("{rel} already cloned; fetched origin")
+            }
         };
         let _ = write!(output, " (use working_dir: \"{rel}\" with exec)");
 
