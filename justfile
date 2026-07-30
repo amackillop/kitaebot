@@ -179,10 +179,17 @@ vm-ssh *flags: (vm-run flags)
 vm-shell *flags: (vm-run flags)
     ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} -t root@localhost su -s /bin/sh - kitaebot
 
-# Show the notification mirror (every message the bot sent the operator)
-vm-notifications *flags: (vm-run flags)
-    ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost \
-        cat /var/lib/kitaebot/state/NOTIFICATIONS.md
+# Show the journal; filter by topic, e.g. `just vm-journal notify`
+vm-journal topic="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{topic}}" ]; then
+        ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost \
+            "grep -F '[{{topic}}]' /var/lib/kitaebot/state/JOURNAL.md"
+    else
+        ssh -i ~/.ssh/id_ed25519 -p 2222 {{SSH_OPTS}} root@localhost \
+            cat /var/lib/kitaebot/state/JOURNAL.md
+    fi
 
 # Tail daemon, tinyproxy (refused CONNECTs), and kernel (egress drops) logs
 vm-logs:

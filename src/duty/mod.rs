@@ -72,23 +72,12 @@ fn new_commits_decision(cursor: Option<&str>, head: &str) -> NewCommits {
     }
 }
 
-/// Cap on a history entry's outcome text. The log is append-only and
-/// backed up with the rest of durable state, so a duty that replies at
-/// length should not grow it without bound.
-const HISTORY_ENTRY_MAX: usize = 500;
-
-/// Record a duty's outcome in the history log.
-///
-/// The journal has this too, but it rotates. This is the durable record
-/// of what the bot did while nobody was watching, which is the whole
-/// point of a scheduler that runs unattended.
-fn record(history_path: &std::path::Path, name: &str, outcome: &str) {
-    let entry = format!(
-        "duty {name}: {}",
-        crate::tools::truncate_output(outcome, HISTORY_ENTRY_MAX)
-    );
-    if let Err(e) = crate::workspace::append_log(history_path, &entry) {
-        warn!(duty = %name, "failed to write history: {e}");
+/// Journal a mechanical duty's outcome. Dispatch duties are journaled
+/// by the actor like every unattended turn; mechanical duties never
+/// pass through it, so the scheduler writes their record itself.
+fn record(journal_path: &std::path::Path, name: &str, outcome: &str) {
+    if let Err(e) = crate::workspace::journal(journal_path, "duty", &format!("{name}: {outcome}")) {
+        warn!(duty = %name, "failed to journal duty outcome: {e}");
     }
 }
 
@@ -127,7 +116,7 @@ fn next_wake(duties: &[Duty], state: &DutyState, now: u64) -> u64 {
 pub async fn run_loop(
     duties: Vec<Duty>,
     state_db: StateDb,
-    history_path: PathBuf,
+    journal_path: PathBuf,
     handle: &AgentHandle,
     git: Option<GitCli>,
 ) -> ! {
@@ -147,7 +136,6 @@ pub async fn run_loop(
                         handle,
                         git.as_ref(),
                         &mut state,
-                        &history_path,
                     )
                     .await;
                 }
@@ -157,7 +145,7 @@ pub async fn run_loop(
                         None => "skipped: no GitCli".into(),
                     };
                     info!(duty = %duty.name, "Duty run: {outcome}");
-                    record(&history_path, &duty.name, &outcome);
+                    record(&journal_path, &duty.name, &outcome);
                 }
             }
             // last_run advances even on error or closed gate: retry
@@ -170,7 +158,8 @@ pub async fn run_loop(
     }
 }
 
-/// Gate-check and send one dispatch duty through the actor.
+/// Gate-check and send one dispatch duty through the actor. The
+/// outcome is journaled by the actor (unattended turn), not here.
 async fn dispatch(
     duty: &Duty,
     input: &str,
@@ -178,7 +167,6 @@ async fn dispatch(
     handle: &AgentHandle,
     git: Option<&GitCli>,
     state: &mut DutyState,
-    history_path: &std::path::Path,
 ) {
     // (input, cursor to advance on success)
     let dispatch: Option<(String, Option<String>)> = match &duty.gate {
@@ -195,7 +183,6 @@ async fn dispatch(
     {
         Ok(reply) => {
             info!(duty = %duty.name, "Duty run: {}", reply.content);
-            record(history_path, &duty.name, &reply.content);
             // Advance only on success: a failed turn re-reviews the
             // same delta next period.
             if let Some(head) = new_cursor {
@@ -204,7 +191,6 @@ async fn dispatch(
         }
         Err(e) => {
             error!(duty = %duty.name, "Duty error (will retry next period): {e}");
-            record(history_path, &duty.name, &format!("failed: {e}"));
         }
     }
 }

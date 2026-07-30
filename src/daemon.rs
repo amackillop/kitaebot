@@ -79,7 +79,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     let duty_loop = duty::run_loop(
         duties,
         state_db.clone(),
-        workspace.history_path(),
+        workspace.journal_path(),
         handle,
         git_cli.cloned(),
     );

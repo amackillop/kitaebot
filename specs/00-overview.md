@@ -46,7 +46,7 @@ Existing solutions (nanobot, OpenClaw) are feature-rich but complex. Kitaebot pr
 │  │                                                    │  │
 │  │  sessions/          memory/         SOUL.md        │  │
 │  │  state/             └── MEMORY.md   AGENTS.md      │  │
-│  │  └── HISTORY.md                     USER.md        │  │
+│  │  └── JOURNAL.md                     USER.md        │  │
 │  │  projects/                          config.toml    │  │
 │  └────────────────────────────────────────────────────┘  │
 │                                                          │
@@ -130,7 +130,7 @@ All channels follow the same pattern: construct a message, send it through `Agen
 
 1. The scheduler wakes a duty that is due ([spec 24](24-self-directed-work.md))
 2. Its input is sent through `AgentHandle` with `ChannelSource::Duty`, on the duty's session
-3. The outcome is appended to `state/HISTORY.md` — durable, unlike the journal, which is where an unattended run would otherwise only be visible
+3. The outcome is appended to `state/JOURNAL.md` — durable, unlike the systemd journal, which is where an unattended run would otherwise only be visible
 
 ## Design Principles
 

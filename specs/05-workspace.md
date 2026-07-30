@@ -35,8 +35,7 @@ Resolved via fallback chain:
 │
 ├── state/                   # Machine-owned operational state
 │   ├── kitaebot.db          # Operational DB: ledgers + cursor docs
-│   ├── HISTORY.md           # Duty execution log (spec 24)
-│   ├── NOTIFICATIONS.md     # Mirror of sent notifications (spec 17)
+│   ├── JOURNAL.md           # The bot's work record: topic-tagged, append-only
 │   └── review-checklist.md  # Escape checklist, derived from the ledger (spec 23)
 │
 └── projects/                # User's working area
@@ -57,6 +56,25 @@ Durable state measured ~10 MB against ~6 GB of derived, which is what
 makes restoring onto a fresh machine cheap. `context/lcm/payloads/` is
 the easy one to miss: `large_files` rows reference those blobs, so a
 backup without them leaves `lcm_grep` with nothing to search.
+
+### The journal
+
+`state/JOURNAL.md` is the bot's work record: append-only, one
+timestamped entry per event, each tagged `[topic]` so one file stays
+greppable per concern. Admission rule: work performed, outcomes,
+failures, and messages sent to a human. Routine no-ops — a closed
+gate, an idle poll — are mechanics and stay in the tracing log; the
+`Reply.routine` flag is how a turn marks its own reply as such, since
+only the turn knows whether it did work.
+
+Writers and topics: the actor journals every non-routine unattended
+turn outcome under its source (`[duty]`, `[github]`, `[linear]`);
+the duty scheduler journals mechanical duties directly; the notifier
+mirrors every send as `[notify]` (spec 17); distillation passes land
+as `[distill]`. Entries are capped at 4000 bytes.
+
+The journal is what makes the bot's autonomous work recountable — a
+future standup duty summarizes it since a cursor (FUTURE.md).
 
 ### Initialization
 
@@ -94,8 +112,7 @@ changing them requires a rebuild and restart regardless.
 | `path()` | Workspace root |
 | `context_dir()` | `context/` — handed whole to the engine (spec 14) |
 | `state_dir()` | `state/` |
-| `history_path()` | `state/HISTORY.md` |
-| `notifications_path()` | `state/NOTIFICATIONS.md` |
+| `journal_path()` | `state/JOURNAL.md` |
 | `state_db_path()` | `state/kitaebot.db` |
 
 ## Boundaries

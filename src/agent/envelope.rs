@@ -53,6 +53,17 @@ impl ChannelSource {
     pub fn is_attended(&self) -> bool {
         matches!(self, Self::Socket | Self::Telegram)
     }
+
+    /// Journal topic for unattended outcomes (spec 05).
+    pub fn topic(&self) -> &'static str {
+        match self {
+            Self::Duty => "duty",
+            Self::GitHub { .. } => "github",
+            Self::Linear { .. } => "linear",
+            Self::Socket => "socket",
+            Self::Telegram => "telegram",
+        }
+    }
 }
 
 impl fmt::Display for ChannelSource {

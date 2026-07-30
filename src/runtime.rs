@@ -24,8 +24,7 @@ fn build_notifier(
     workspace: &Workspace,
 ) -> Arc<Notifier> {
     Arc::new(
-        Notifier::new(client.clone(), config.telegram.chat_id)
-            .with_log(workspace.notifications_path()),
+        Notifier::new(client.clone(), config.telegram.chat_id).with_log(workspace.journal_path()),
     )
 }
 

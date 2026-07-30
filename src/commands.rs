@@ -256,12 +256,14 @@ async fn distill_reply(
     .map_err(|e| format!("Distillation failed: {e}"))?;
     match pass {
         Some(summary) => Ok(Reply::text(format!("Distilled: {summary}"))),
-        None => Ok(Reply::text(idle.into())),
+        // A closed gate or empty backlog is mechanics, not an event:
+        // the journal skips routine replies.
+        None => Ok(Reply::routine(idle.into())),
     }
 }
 
 /// Run one distillation pass plus its bookkeeping: bill the turn to
-/// `session` in the ledger and append the result to HISTORY.md.
+/// `session` in the ledger and journal the result.
 /// Returns the pass summary, or `None` when no pass ran.
 #[allow(clippy::too_many_arguments)]
 async fn distill_pass(
@@ -299,11 +301,12 @@ async fn distill_pass(
                 usage,
             },
         );
-        if let Err(e) = crate::workspace::append_log(
-            &workspace.history_path(),
+        if let Err(e) = crate::workspace::journal(
+            &workspace.journal_path(),
+            "distill",
             &format!("Distilled: {summary}"),
         ) {
-            error!("Failed to write distillation history: {e}");
+            error!("Failed to journal distillation: {e}");
         }
         summary
     }))

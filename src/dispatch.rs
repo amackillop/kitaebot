@@ -40,6 +40,10 @@ impl<'a> Input<'a> {
 pub struct Reply {
     pub content: String,
     pub preformatted: bool,
+    /// A routine no-op — a closed gate, nothing to do. Channels
+    /// deliver it like any reply; the journal skips it (spec 05):
+    /// mechanics belong in the tracing log, not the work record.
+    pub routine: bool,
 }
 
 impl Reply {
@@ -47,6 +51,7 @@ impl Reply {
         Self {
             content,
             preformatted: false,
+            routine: false,
         }
     }
 
@@ -54,6 +59,16 @@ impl Reply {
         Self {
             content,
             preformatted: true,
+            routine: false,
+        }
+    }
+
+    /// A reply the journal should not record.
+    pub fn routine(content: String) -> Self {
+        Self {
+            content,
+            preformatted: false,
+            routine: true,
         }
     }
 }

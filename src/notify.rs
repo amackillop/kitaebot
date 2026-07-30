@@ -156,7 +156,7 @@ impl Notifier {
         // The mirror, not Telegram, is the durable record: log before
         // the send so a failed delivery still leaves one.
         if let Some(path) = &self.log_path
-            && let Err(e) = crate::workspace::append_log(path, &text)
+            && let Err(e) = crate::workspace::journal(path, "notify", &text)
         {
             warn!("failed to mirror notification: {e}");
         }

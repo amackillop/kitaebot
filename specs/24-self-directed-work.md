@@ -66,8 +66,11 @@ global heartbeat interval disappears.
 **HEARTBEAT.md is retired.** The task-review turn, the checkbox
 parser, and the deployed prompt-file symlink go with it. Recurring
 operator tasks become prompt duties (below); deferred one-shots
-become commitments (phase 3). `HISTORY.md` stays as the append-only
-log of duty runs. The `/heartbeat` command becomes `/duties`: run
+become commitments (phase 3). Duty outcomes land in `JOURNAL.md`
+(spec 05) under the `[duty]` topic: dispatch duties via the actor's
+unattended-outcome journaling, mechanical duties from the scheduler
+itself. Routine no-ops (a closed gate) stay out — they are tracing,
+not work. The `/heartbeat` command becomes `/duties`: run
 every duty whose gate is open, ignoring schedules — the operator's
 "run it now".
 
@@ -170,7 +173,7 @@ authorization are separated by an existing human gate.
 
 - At most N open bot-proposed issues per repo (default 3). The gate
   counts before the action runs; a full triage column stops proposal,
-  and the surplus goes to HISTORY.md, not Linear.
+  and the surplus goes to the journal, not Linear.
 - Duplicate suppression: a proposal keyed to the same evidence (same
   failing workflow, same PR) as an existing open bot-proposed issue
   is not re-filed.
@@ -211,7 +214,7 @@ work, the proposal contract.
 Owns: the duty scheduler, duty definitions, prompt duties,
 commitments, schedule and cursor state in `state/`, the proposal
 contract. Replaces spec 07 (heartbeat) entirely; subsumes spec 21
-phase 3. HISTORY.md logging is unchanged in format.
+phase 3. Journal logging is unchanged in format.
 
 Does not own: turn execution (agent actor), Linear transport (MCP /
 linear channel), review machinery (spec 23), memory writes (spec 21).
@@ -237,7 +240,7 @@ complete scope statement for discovery and prompt duties.
   reminders, and the loss is visible in `/commitments`. Cursor loss
   re-reviews one delta.
 - **Linear unreachable during proposal**: the action logs the
-  proposal to HISTORY.md and the duty retries next period; no queue,
+  proposal to the journal and the duty retries next period; no queue,
   no retry loop inside the turn.
 - **Proposal flood attempt** (a broken gate matching everything): the
   per-repo cap bounds damage to N issues; the duplicate key bounds

@@ -39,6 +39,7 @@ engine's store (`lcm.db`, payloads, `active_session`), the channels'
 poll state (`github_poll_state.json`, `linear_poll_state.json`), and
 the heartbeat's `HISTORY.md` log. Phase 1 evicts them — machine-owned
 runtime state (engine store, poll state) moves to `state/`. `HISTORY.md`
+(since merged into `JOURNAL.md`, spec 05)
 was to move next to `HEARTBEAT.md` under heartbeat ownership; the duty
 scheduler retired that owner ([spec 24](24-self-directed-work.md)) and
 the log went to `state/` with the rest of machine-owned state. No migration: deployed state starts

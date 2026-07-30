@@ -61,19 +61,6 @@ impl Workspace {
         mk(&path.join("projects"))?;
         mk(&path.join("state"))?;
 
-        // HISTORY.md was at the root while it belonged to the heartbeat
-        // (spec 21). The heartbeat is gone and the log is machine-owned,
-        // so it lives under state/ now; move an existing one rather than
-        // silently starting a second.
-        let legacy_history = path.join("HISTORY.md");
-        let history = path.join("state/HISTORY.md");
-        if legacy_history.is_file()
-            && !history.exists()
-            && let Err(e) = fs::rename(&legacy_history, &history)
-        {
-            tracing::warn!("failed to move HISTORY.md into state/: {e}");
-        }
-
         let system_prompt = read_system_prompt(&path);
         Ok(Self {
             root: path,
@@ -104,15 +91,11 @@ impl Workspace {
         self.root.join("memory")
     }
 
-    /// Path to the duty history log.
-    pub fn history_path(&self) -> PathBuf {
-        self.state_dir().join("HISTORY.md")
-    }
-
-    /// Path to the notification mirror: every message the Notifier
-    /// sends, greppable without Telegram.
-    pub fn notifications_path(&self) -> PathBuf {
-        self.state_dir().join("NOTIFICATIONS.md")
+    /// Path to the journal: the append-only, topic-tagged record of
+    /// what the bot did — duty outcomes, unattended replies, sent
+    /// notifications. Greppable by topic (`[duty]`, `[notify]`, ...).
+    pub fn journal_path(&self) -> PathBuf {
+        self.state_dir().join("JOURNAL.md")
     }
 
     /// Path to the operational state database (usage ledger, review
@@ -162,54 +145,44 @@ fn default_data_dir() -> Result<PathBuf, std::io::Error> {
     Ok(base.join(APP_NAME))
 }
 
-/// Append a timestamped entry to an append-only log file.
+/// Cap on one journal entry. Matches the notifier's send cap so a
+/// mirrored notification is never shorter in the journal than on the
+/// phone; long unattended replies are excerpted, not reproduced.
+pub const JOURNAL_ENTRY_MAX: usize = 4000;
+
+/// Append a timestamped, topic-tagged entry to the journal.
 ///
-/// Used for the duty history and the notification mirror: durable,
-/// human-readable, greppable records under `state/`.
-pub fn append_log(path: &std::path::Path, entry: &str) -> std::io::Result<()> {
+/// `[timestamp] [topic] entry`, one entry per event, capped at
+/// [`JOURNAL_ENTRY_MAX`]. Topics keep one file greppable per concern;
+/// the admission rule is spec 05's: work performed, outcomes,
+/// failures, and messages sent to a human — never routine no-ops.
+pub fn journal(path: &std::path::Path, topic: &str, entry: &str) -> std::io::Result<()> {
     use std::io::Write;
     let timestamp = crate::time::now_iso8601();
+    let entry = crate::tools::truncate_output(entry, JOURNAL_ENTRY_MAX);
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)?;
-    writeln!(file, "[{timestamp}] {entry}\n")
+    writeln!(file, "[{timestamp}] [{topic}] {entry}\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The log used to live at the root under heartbeat ownership. An
-    /// existing one moves rather than being abandoned beside a new one.
     #[test]
-    fn init_moves_a_legacy_history_into_state() {
+    fn journal_entries_are_topic_tagged_and_capped() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("HISTORY.md"), "[t] old entry\n").unwrap();
+        let path = dir.path().join("JOURNAL.md");
 
-        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        journal(&path, "duty", "warm: all repos warm").unwrap();
+        journal(&path, "notify", &"x".repeat(JOURNAL_ENTRY_MAX + 500)).unwrap();
 
-        assert_eq!(ws.history_path(), dir.path().join("state/HISTORY.md"));
-        assert_eq!(
-            fs::read_to_string(ws.history_path()).unwrap(),
-            "[t] old entry\n"
-        );
-        assert!(!dir.path().join("HISTORY.md").exists());
-    }
-
-    /// A log already in place wins; the legacy file is left alone rather
-    /// than clobbering newer history.
-    #[test]
-    fn init_keeps_the_current_history_over_a_legacy_one() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("state")).unwrap();
-        fs::write(dir.path().join("HISTORY.md"), "old\n").unwrap();
-        fs::write(dir.path().join("state/HISTORY.md"), "current\n").unwrap();
-
-        let ws = Workspace::init_at(dir.path().to_path_buf()).unwrap();
-
-        assert_eq!(fs::read_to_string(ws.history_path()).unwrap(), "current\n");
-        assert!(dir.path().join("HISTORY.md").exists());
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("] [duty] warm: all repos warm"));
+        assert!(text.contains("] [notify] x"));
+        assert!(text.contains("[truncated"), "oversized entries are capped");
     }
 
     #[test]

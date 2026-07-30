@@ -94,11 +94,11 @@ as the tool.
 ### Durable mirror
 
 Every message the `Notifier` sends — tool notifies, batch flushes,
-harness alerts — is also appended to `state/NOTIFICATIONS.md` with a
-timestamp, before the Telegram attempt, so a failed delivery still
-leaves a record. Telegram is the attention tap; the mirror is the
-durable, greppable log (`just vm-notifications`), and it rides the
-state backup (spec 05).
+harness alerts — is also appended to `state/JOURNAL.md` under the
+`[notify]` topic, before the Telegram attempt, so a failed delivery
+still leaves a record. Telegram is the attention tap; the journal is
+the durable, greppable record (`just vm-journal notify`), and it
+rides the state backup (spec 05).
 
 ### Model disclosure on unattended turns
 

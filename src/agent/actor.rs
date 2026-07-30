@@ -146,6 +146,29 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                 .await;
         }
 
+        // Unattended outcomes are the bot's autonomous work record:
+        // they land in the journal, where nothing else preserves them
+        // (spec 05). Routine no-ops — a closed gate, nothing to do —
+        // stay in the tracing log.
+        if !envelope.source.is_attended() {
+            let entry = match &result {
+                Ok(reply) if !reply.routine => {
+                    Some(format!("{}: {}", envelope.source, reply.content))
+                }
+                Err(e) => Some(format!("{}: failed: {e}", envelope.source)),
+                Ok(_) => None,
+            };
+            if let Some(entry) = entry
+                && let Err(e) = crate::workspace::journal(
+                    &self.workspace.journal_path(),
+                    envelope.source.topic(),
+                    &entry,
+                )
+            {
+                tracing::warn!("failed to journal unattended outcome: {e}");
+            }
+        }
+
         result
     }
 
@@ -619,6 +642,72 @@ mod tests {
         assert!(result.unwrap().content.contains("halted automatically"));
 
         assert!(sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unattended_outcomes_are_journaled_and_attended_are_not() {
+        let (_dir, ws) = workspace();
+        let journal = ws.journal_path();
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text("reviewed the PR".into())),
+            Ok(Response::Text("chat answer".into())),
+        ]));
+        let handle = spawn_agent(ws, provider);
+
+        handle
+            .send_message(
+                github_source(),
+                "review this".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        handle
+            .send_message(
+                ChannelSource::Socket,
+                "hi".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let text = std::fs::read_to_string(&journal).unwrap();
+        assert!(text.contains("[github]"), "unattended reply journaled");
+        assert!(text.contains("reviewed the PR"));
+        assert!(
+            !text.contains("chat answer"),
+            "attended replies have a reader; they stay out"
+        );
+    }
+
+    #[tokio::test]
+    async fn routine_replies_stay_out_of_the_journal() {
+        let (_dir, ws) = workspace();
+        let journal = ws.journal_path();
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let handle = spawn_agent(ws, provider);
+
+        // Closed distill gate: a routine no-op reply on an unattended
+        // duty turn.
+        let reply = handle
+            .send_message(
+                ChannelSource::Duty,
+                "/duty distill".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(reply.routine);
+        assert!(
+            !journal.exists(),
+            "a closed gate is mechanics, not a journal event"
+        );
     }
 
     #[tokio::test]
