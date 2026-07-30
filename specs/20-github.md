@@ -61,7 +61,7 @@ since been taken over:
   sessions with per-session watermarks, so reviewer output reaches
   `memory/topics/` wherever the turn ran — the review session was never
   load-bearing for it. What the reviewer needs back is
-  `memory/topics/review-checklist.md` and the findings ledger, both
+  `state/review-checklist.md` and the findings ledger, both
   session-independent.
 - **Prior-review recall** is authoritative on GitHub, not in a
   session: `gh pr view --json reviews` is what was actually published,

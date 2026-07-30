@@ -65,9 +65,9 @@ this type exists for is insulation from the parent's reasoning about
 know the repo's conventions or the bot's recurring mistakes can only
 catch generic slop. The role prompt instructs the reviewer to read
 `memory/MEMORY.md`, the worked repo's topic file, and
-`memory/topics/review-checklist.md` before judging. Memory files are
-ordinary workspace files reachable via `file_read`, so spec 21's
-sub-agent injection exclusion stands untouched.
+`state/review-checklist.md` before judging. All are ordinary workspace
+files reachable via `file_read`, so spec 21's sub-agent injection
+exclusion stands untouched.
 
 **Conventions come from the parent, from a trusted ref.** The reviewer
 does not read `AGENTS.md` out of the checkout it is judging. It was told
@@ -291,10 +291,12 @@ human-flagged ones. Both sources have false-positive rates; the
 `source` column keeps the streams separable so a category one source
 keeps raising and the parent keeps disputing is discounted rather than
 learned. Recurring escape categories
-feed back to the reviewer through a `review-checklist` memory topic the
-bot maintains from ledger data — the role prompt is compiled in
-(`include_str!`) and static, so the data-derived checklist lives in
-memory, which the reviewer reads at every gate.
+feed back to the reviewer through `state/review-checklist.md`, which
+the bot maintains from ledger data — the role prompt is compiled in
+(`include_str!`) and static, so the data-derived checklist must be a
+runtime file the reviewer reads at every gate. It lives in `state/`
+beside the ledger it derives from, not in memory: distillation and
+eviction own `memory/`, and derived state must be exempt from both.
 
 Reader ships in the same commit as the writer (bin-only crate dead-code
 constraint): a `/findings` command and `just findings` recipe reporting
@@ -467,11 +469,10 @@ that references an unavailable mechanism is worse than none.
 - **Category consolidation**: when does free-text collapse into an enum,
   and does the reviewer prompt's seed list get regenerated from ledger
   data mechanically or by hand?
-- **Checklist maintenance cadence**: v1 relies on prompted memory
-  discipline at feedback-processing time to keep the `review-checklist`
-  topic current. If that proves lax, the tightening is a heartbeat duty
-  that queries the ledger and reconciles the checklist — same shape as
-  distillation (spec 21).
+- **Checklist maintenance cadence**: v1 relies on prompted discipline
+  at feedback-processing time to keep `state/review-checklist.md`
+  current. If that proves lax, the tightening is a scheduled duty that
+  queries the ledger and reconciles the checklist (spec 24 phase 2).
 - **Ledger file**: own `state/review.db` vs a table in `usage.db`.
   Separate file assumed here; one-file ops simplicity may argue otherwise.
 - **One table or two**: the `pr` gate (spec 20) shares this schema with

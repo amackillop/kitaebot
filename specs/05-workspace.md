@@ -39,7 +39,8 @@ Resolved via fallback chain:
 │   ├── github_poll_state.json  # GitHub channel poll cursor
 │   ├── linear_poll_state.json  # Linear channel poll cursor
 │   ├── HISTORY.md           # Duty execution log (spec 24)
-│   └── NOTIFICATIONS.md     # Mirror of sent notifications (spec 17)
+│   ├── NOTIFICATIONS.md     # Mirror of sent notifications (spec 17)
+│   └── review-checklist.md  # Escape checklist, derived from the ledger (spec 23)
 │
 └── projects/                # User's working area
 ```

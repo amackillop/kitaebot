@@ -154,7 +154,7 @@ Scope is the `git.repositories` trust list only, for all of them.
   a Linear issue (see proposal contract) with the analysis attached.
 - **Checklist reconciliation** (from spec 23's deferred list): gate
   is a ledger query — external findings dispositioned `fixed` (true
-  escapes) not yet reflected in `memory/topics/review-checklist.md`.
+  escapes) not yet reflected in `state/review-checklist.md`.
   Action is a memory-only LLM turn folding them in. No proposal
   needed: memory writes have no outward effect.
 

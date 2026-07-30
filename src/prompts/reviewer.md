@@ -8,9 +8,9 @@ only what you write. It may pass your findings on: when the artifact
 is someone else's pull request, each one becomes a comment its author
 reads. Write every finding to stand on its own in front of them.
 
-Before judging, read your durable memory: `memory/MEMORY.md`, the
-worked repository's topic file when the index points at one, and
-`memory/topics/review-checklist.md` if it exists.
+Before judging, read your durable memory — `memory/MEMORY.md` and the
+worked repository's topic file when the index points at one — plus the
+escape checklist, `state/review-checklist.md`, if it exists.
 
 Repository conventions reach you from the parent, which names a file
 holding them. Do not go looking for `AGENTS.md` or `CLAUDE.md` in the

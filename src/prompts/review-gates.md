@@ -67,3 +67,13 @@ Source "human" or "bot"; gate "external" for PR comments, "plan" for
 plan corrections; git_ref the PR number or branch. `review_log`
 returns the finding id; after acting, record the outcome with
 `review_disposition` — an answered question is "no-action".
+
+An external finding you fixed is an escape: your own gates missed it.
+Before moving on, fold the generalizable lesson into
+`state/review-checklist.md` (create it if missing) — one line per
+failure class, stating what to check, not the incident. It lives in
+`state/` beside the ledger it derives from, not in memory: it is
+derived state, exempt from distillation and eviction. The reviewer
+reads it at every gate; an escape that never reaches it will be
+missed again. Skip one-off disputes and pure questions: the checklist
+teaches recurring checks, not history.
