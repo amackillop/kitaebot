@@ -16,6 +16,7 @@ pub(crate) mod stats;
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -207,6 +208,14 @@ pub trait ContextEngine: Send + Sync {
     ) -> impl Future<Output = Result<BTreeMap<String, u64>, EngineError>> + Send {
         async { Ok(BTreeMap::new()) }
     }
+
+    /// Stage the engine's durable state from `context_dir` into
+    /// `dest`, for `kitaebot backup` (spec 05). Runs without a
+    /// constructed engine; databases must be snapshotted consistently
+    /// ([`crate::backup::snapshot_dir`] handles the common layout).
+    /// Deliberately no default: a new engine cannot compile without
+    /// answering how it is backed up.
+    fn backup(context_dir: &Path, dest: &Path) -> Result<(), EngineError>;
 }
 
 /// Role-setting system prompt for every summarization call. The

@@ -76,6 +76,24 @@ as `[distill]`. Entries are capped at 4000 bytes.
 The journal is what makes the bot's autonomous work recountable — a
 future standup duty summarizes it since a cursor (FUTURE.md).
 
+### Backup staging
+
+`kitaebot backup <dir>` (src/backup.rs) stages every piece of durable
+state into `<dir>`; `vm-backup`'s script only archives the result.
+Selection lives in code because the script version drifted — new
+state files were silently missing from backups.
+
+Anti-drift is structural where possible and checked where not:
+`state/` and `memory/` are snapshotted wholesale (databases via
+`VACUUM INTO`, WAL sidecars skipped as subsumed, everything else
+copied), so new files there are covered automatically; `context/` is
+staged by the active engine's `ContextEngine::backup`, which has no
+default — a new engine cannot compile without answering how it is
+backed up; and any workspace-root entry that is neither staged nor in
+the `DERIVED` registry is warned about on every backup run. Staging
+runs without secrets, network, or the sandbox, and is safe against a
+live daemon.
+
 ### Initialization
 
 `Workspace::init()` resolves the path and delegates to `init_at()`, which

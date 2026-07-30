@@ -469,6 +469,13 @@ mod run_tests {
             Ok(self.pending.clone())
         }
 
+        fn backup(
+            _context_dir: &std::path::Path,
+            _dest: &std::path::Path,
+        ) -> Result<(), EngineError> {
+            Ok(())
+        }
+
         async fn latest_positions(&self) -> Result<BTreeMap<String, u64>, EngineError> {
             Ok(self
                 .transcripts

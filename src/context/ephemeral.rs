@@ -3,6 +3,7 @@
 //! See `specs/19-sub-agents.md` for the design.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::EngineError;
@@ -136,6 +137,11 @@ impl ContextEngine for EphemeralSession {
     ) -> Result<BTreeMap<String, u64>, EngineError> {
         // Single-turn context, never distilled.
         Ok(BTreeMap::new())
+    }
+
+    fn backup(_context_dir: &Path, _dest: &Path) -> Result<(), EngineError> {
+        // Nothing durable by design.
+        Ok(())
     }
 
     async fn transcript_since(

@@ -1,5 +1,6 @@
 mod activity;
 mod agent;
+mod backup;
 mod channel;
 mod clients;
 mod commands;
@@ -30,6 +31,7 @@ mod types;
 mod usage;
 mod workspace;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use config::{Config, EngineKind};
@@ -62,6 +64,12 @@ async fn main() {
     });
 
     let socket_path = std::path::Path::new(&config.socket.path);
+
+    // Backup needs no secrets, no network, and no sandbox — stage and
+    // exit before any of that is set up.
+    if std::env::args().nth(1).as_deref() == Some("backup") {
+        run_backup(&workspace, &config);
+    }
 
     // Load all secrets before sandboxing. After enforcement, credential
     // files are inaccessible — secrets exist only in memory. MCP
@@ -158,7 +166,27 @@ async fn main() {
             eprintln!("Usage: kitaebot <command>");
             eprintln!();
             eprintln!("Commands:");
-            eprintln!("  run  Start daemon (duties + channels)");
+            eprintln!("  run             Start daemon (duties + channels)");
+            eprintln!("  backup <dir>    Stage durable state into <dir> (spec 05)");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `kitaebot backup <dir>`: stage durable state and exit.
+fn run_backup(workspace: &Workspace, config: &Config) -> ! {
+    let Some(dest) = std::env::args().nth(2) else {
+        eprintln!("usage: kitaebot backup <dir>");
+        std::process::exit(2);
+    };
+    match backup::stage(
+        workspace,
+        config.effective_context().engine,
+        Path::new(&dest),
+    ) {
+        Ok(_unclassified) => std::process::exit(0),
+        Err(e) => {
+            error!("backup staging failed: {e}");
             std::process::exit(1);
         }
     }

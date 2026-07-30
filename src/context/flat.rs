@@ -380,6 +380,12 @@ impl ContextEngine for FlatSession {
         Ok(out)
     }
 
+    fn backup(context_dir: &Path, dest: &Path) -> Result<(), EngineError> {
+        // Sessions, cursor — plain files; the shared snapshot covers it.
+        crate::backup::snapshot_dir(context_dir, dest)
+            .map_err(|e| EngineError::Storage(format!("backup: {e}")))
+    }
+
     async fn transcript_since(
         &self,
         session: &str,

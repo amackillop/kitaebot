@@ -547,6 +547,13 @@ impl ContextEngine for LcmEngine {
         run_blocking(conn, move |c| pending_distill_tokens_sync(c, &since)).await
     }
 
+    fn backup(context_dir: &Path, dest: &Path) -> Result<(), EngineError> {
+        // lcm.db via VACUUM INTO, payload blobs and the cursor as
+        // plain files; the shared snapshot handles both.
+        crate::backup::snapshot_dir(context_dir, dest)
+            .map_err(|e| EngineError::Storage(format!("backup: {e}")))
+    }
+
     async fn latest_positions(&self) -> Result<BTreeMap<String, u64>, EngineError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(conn, move |c| latest_positions_sync(c)).await

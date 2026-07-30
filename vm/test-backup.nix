@@ -33,11 +33,12 @@ pkgs.testers.nixosTest {
       imports = [ self.nixosModules.vm ];
 
       kitaebot = {
-        # The scripts drive `systemctl stop/start kitaebot`, so the unit
-        # has to exist and be startable; what it runs is irrelevant.
-        # Absolute path: the unit's hardening leaves no PATH, so a bare
-        # `sleep` exits 127 and systemd restarts it forever.
-        package = pkgs.writeShellScriptBin "kitaebot" "exec ${pkgs.coreutils}/bin/sleep infinity";
+        # The real binary, not a stub: backup.sh calls `kitaebot
+        # backup` (selection lives in the binary, spec 05), and the
+        # daemon is what creates the state database this test
+        # snapshots. Fake credentials are fine — nothing here makes a
+        # provider call.
+        package = self.packages.${pkgs.system}.default;
         secretsDir = pkgs.runCommand "fake-secrets" { } ''
           mkdir -p $out
           echo fake > $out/provider-api-key
@@ -61,15 +62,19 @@ pkgs.testers.nixosTest {
 
     with subtest("seed durable and derived state"):
         machine.succeed(f"mkdir -p {W}/context/lcm/payloads {W}/memory/topics {W}/projects/o/r")
+        # The daemon owns kitaebot.db's schema (versioned migration);
+        # wait for it, then seed rows through the real table.
+        machine.wait_until_succeeds(
+            f"sqlite3 {W}/state/kitaebot.db \"SELECT 1 FROM turns LIMIT 0;\""
+        )
         machine.succeed(
             f"sqlite3 {W}/state/kitaebot.db "
-            "'PRAGMA journal_mode=WAL; CREATE TABLE turns(x); "
-            "INSERT INTO turns VALUES (1),(2),(3);'"
+            "\"INSERT INTO turns (session, source, model, calls, prompt_tokens, completion_tokens) "
+            "VALUES ('s','t','m',1,1,1),('s','t','m',1,1,1),('s','t','m',1,1,1);\""
         )
         machine.succeed(f"echo keep > {W}/context/lcm/payloads/file_keep")
         machine.succeed(f"echo index > {W}/memory/MEMORY.md")
-        machine.succeed(f"echo '[t] an entry' > {W}/state/HISTORY.md")
-        machine.succeed(f"echo '[t] a notification' > {W}/state/NOTIFICATIONS.md")
+        machine.succeed(f"echo '[t] [duty] an entry' > {W}/state/JOURNAL.md")
         machine.succeed(f"echo derived > {W}/projects/o/r/file")
         machine.succeed(f"chown -R kitaebot:kitaebot {W}/state {W}/context {W}/memory {W}/projects")
 
@@ -79,8 +84,7 @@ pkgs.testers.nixosTest {
         for want in [
             "state/kitaebot.db",
             "context/lcm/payloads/file_keep",
-            "state/HISTORY.md",
-            "state/NOTIFICATIONS.md",
+            "state/JOURNAL.md",
             "memory/MEMORY.md",
         ]:
             assert want in listing, f"backup omits {want}:\n{listing}"
@@ -95,7 +99,11 @@ pkgs.testers.nixosTest {
         machine.succeed(f"test -e {W}/context/lcm/payloads/file_keep")
         machine.fail(f"test -e {W}/context/lcm/payloads/file_stale")
         machine.succeed(f"test -e {W}/memory/MEMORY.md")
-        rows = machine.succeed(f"sqlite3 {W}/state/kitaebot.db 'select count(*) from turns;'").strip()
+        # The restarted daemon may hold the write lock (WAL conversion,
+        # startup writes); retry rather than racing it.
+        rows = machine.wait_until_succeeds(
+            f"sqlite3 -cmd '.timeout 10000' {W}/state/kitaebot.db 'select count(*) from turns;'"
+        ).strip()
         assert rows == "3", f"expected 3 rows after restore, got {rows}"
 
     with subtest("restored state is owned by the daemon user"):

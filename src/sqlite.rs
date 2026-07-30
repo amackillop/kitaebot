@@ -36,6 +36,22 @@ pub fn apply_migrations(conn: &Connection, migrations: &[&str]) -> rusqlite::Res
     Ok(())
 }
 
+/// Consistent snapshot of a live WAL database: `VACUUM INTO` walks the
+/// WAL like any reader, so the copy needs no `-wal`/`-shm` beside it.
+/// Copying the main file instead would silently drop everything not
+/// yet checkpointed.
+pub fn vacuum_into(src: &std::path::Path, dest: &std::path::Path) -> rusqlite::Result<()> {
+    let conn = Connection::open(src)?;
+    conn.execute_batch("PRAGMA busy_timeout = 30000;")?;
+    conn.execute(
+        "VACUUM INTO ?1",
+        [dest
+            .to_str()
+            .ok_or_else(|| rusqlite::Error::InvalidPath(dest.to_path_buf()))?],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
