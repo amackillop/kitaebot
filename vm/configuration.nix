@@ -304,6 +304,9 @@ in
                   export GNUPGHOME=/var/lib/kitaebot/.gnupg
                   mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
                   ${pkgs.gnupg}/bin/gpg --batch --import "$CREDENTIALS_DIRECTORY/gpg-signing-key"
+                  # The import spawns an agent that would linger in the
+                  # cgroup; signing respawns one on demand.
+                  ${pkgs.gnupg}/bin/gpgconf --kill all || true
                 '';
               in
               "${gpgImport}"

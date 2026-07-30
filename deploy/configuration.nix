@@ -102,8 +102,10 @@ in
 
   # Lock down the mount point so only root (and thus LoadCredential) can read it.
   # The 9p mount itself ignores POSIX permissions, but restricting the mount point
-  # directory prevents the kitaebot user from traversing into it.
+  # directory prevents the kitaebot user from traversing into it. Ownership is
+  # left unmanaged ("-"): tmpfiles runs as root so creation is root-owned anyway,
+  # and an explicit chown fails against the already-mounted share every boot.
   systemd.tmpfiles.rules = [
-    "d /mnt/kitaebot-secrets 0700 root root -"
+    "d /mnt/kitaebot-secrets 0700 - - -"
   ];
 }

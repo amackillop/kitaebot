@@ -203,6 +203,11 @@ impl GitCli {
                     .extend(env.iter().map(|(k, v)| (k.into(), v.into())));
             }
             Ok(None) => {}
+            // Blocked is a designed state, not a fault: review worktrees
+            // carry the repo's .envrc but are never `direnv allow`ed.
+            Err(direnv::DirenvError::Blocked) => {
+                debug!(dir = %call.cwd.display(), "envrc not allowed; running git without devshell");
+            }
             Err(ref e) => {
                 warn!(dir = %call.cwd.display(), error = %e, "direnv failed, running git without devshell");
             }
