@@ -812,6 +812,21 @@ enum AssembleRow {
     },
 }
 
+/// Assemble the ordered message array for a provider call.
+///
+/// Reads the conversation's `context_items` in `ordinal` order and
+/// rebuilds the provider-bound message list:
+///
+/// 1. A [`Message::System`] holding `system_prompt`, augmented with
+///    [`RECALL_GUIDANCE`] when any summary item is present, so the model
+///    knows it can drill back into the DAG via the LCM tools.
+/// 2. Each context item in `ordinal` order, preserving the order it was
+///    stored: message items are rebuilt via [`reconstruct_message`],
+///    summary items become a synthetic [`Message::System`] wrapping the
+///    summary in a `<summary>` tag.
+///
+/// Returns an [`AssembledContext`] whose `messages` are safe to send to
+/// the provider in array order.
 fn assemble_sync(
     conn: &Connection,
     conversation_id: i64,
