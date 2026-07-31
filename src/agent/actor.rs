@@ -445,7 +445,7 @@ mod tests {
         assert_eq!(r2.unwrap().content, "second");
 
         // Verify on disk: each session has exactly one user message.
-        let sessions = ws.context_dir().join("sessions");
+        let sessions = ws.context_dir().join("flat/sessions");
         let general = std::fs::read_to_string(sessions.join("general.json")).unwrap();
         let github = std::fs::read_to_string(sessions.join("owner--repo.json")).unwrap();
         assert!(general.contains("socket msg"));

@@ -60,11 +60,14 @@ pub struct FlatSession {
 }
 
 impl FlatSession {
-    /// Open the flat session engine inside `context_dir`, which the
-    /// engine owns: sessions land in `context_dir/sessions/` and the
-    /// active-session cursor beside them. Reads the cursor to restore
-    /// the last active session, falling back to `"general"`.
-    pub fn new(context_dir: PathBuf, ctx: ContextConfig) -> Result<Self, EngineError> {
+    /// Open the flat session engine inside `context_dir/flat/` — each
+    /// engine namespaces its own subdirectory, so switching backends
+    /// can never clobber another engine's files (spec 14). Sessions
+    /// land in `flat/sessions/` and the active-session cursor beside
+    /// them; the cursor restores the last active session, falling
+    /// back to `"general"`.
+    pub fn new(context_dir: &Path, ctx: ContextConfig) -> Result<Self, EngineError> {
+        let context_dir = context_dir.join("flat");
         let sessions_dir = context_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir)
             .map_err(|e| EngineError::Storage(format!("create {}: {e}", sessions_dir.display())))?;
@@ -464,7 +467,7 @@ mod tests {
     }
 
     fn temp_engine_at(base: &Path, ctx: ContextConfig) -> FlatSession {
-        FlatSession::new(base.join("context"), ctx).unwrap()
+        FlatSession::new(&base.join("context"), ctx).unwrap()
     }
 
     // ── Basic operations ────────────────────────────────────────────
@@ -877,7 +880,7 @@ mod tests {
         // One entry per session file, however many that is: switching
         // away from `general` saves it, so the count is not the point —
         // that no session is counted twice is.
-        let files = fs::read_dir(dir.path().join("context/sessions"))
+        let files = fs::read_dir(dir.path().join("context/flat/sessions"))
             .unwrap()
             .count();
         let report = engine.report().await.unwrap();

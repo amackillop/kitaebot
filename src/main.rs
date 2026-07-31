@@ -103,7 +103,7 @@ async fn main() {
             let context = config.effective_context();
             let handle = match context.engine {
                 EngineKind::Flat => {
-                    let engine = context::flat::FlatSession::new(workspace.context_dir(), context)
+                    let engine = context::flat::FlatSession::new(&workspace.context_dir(), context)
                         .unwrap_or_else(|e| {
                             error!("Failed to initialize flat session: {e}");
                             std::process::exit(1);
@@ -122,7 +122,7 @@ async fn main() {
                 }
                 EngineKind::Lcm => {
                     let engine = context::lcm::LcmEngine::new(
-                        workspace.context_dir(),
+                        &workspace.context_dir(),
                         context,
                         summarize.clone(),
                     )

@@ -949,12 +949,15 @@ large_file_summary_tokens = 400
 Backend selection happens at startup. Changing `context.engine` requires a
 restart. The old backend's data remains on disk but is not used.
 
-Every engine owns `<workspace>/context/` outright and lays it out as
-it pleases: `context/sessions/<name>.json` for the flat engine,
-`context/lcm.db` plus `context/lcm/payloads/` for LCM, and the
-`active_session` cursor beside them. The workspace hands the engine
-one directory and looks no deeper — swapping in a new engine adds its
-own files there and touches nothing else.
+Every engine owns a namespaced subdirectory of
+`<workspace>/context/` and lays it out as it pleases:
+`context/flat/sessions/<name>.json` for the flat engine,
+`context/lcm/lcm.db` plus `context/lcm/payloads/` for LCM, each with
+its own `active_session` cursor. The workspace hands the engine one
+directory and looks no deeper; the per-engine namespace makes the
+"old backend's data remains on disk" guarantee structural — switching
+engines cannot clobber another backend's files, including the cursor
+both would otherwise share.
 
 The cheaper summarization model called for by phase 4 (large file
 handling) is configured via `provider.model_overrides.summarizer`

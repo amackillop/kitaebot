@@ -108,10 +108,13 @@ impl LcmEngine {
     /// Returns [`EngineError::Storage`] if the database cannot be
     /// opened or the active conversation row cannot be created.
     pub fn new(
-        context_dir: PathBuf,
+        context_dir: &Path,
         ctx: ContextConfig,
         summarize: SummarizeFn,
     ) -> Result<Self, EngineError> {
+        // Each engine namespaces its own subdirectory: switching
+        // backends can never clobber another engine's files (spec 14).
+        let context_dir = context_dir.join("lcm");
         std::fs::create_dir_all(&context_dir)
             .map_err(|e| EngineError::Storage(format!("create {}: {e}", context_dir.display())))?;
         let db_path = context_dir.join("lcm.db");
@@ -251,7 +254,7 @@ impl LcmEngine {
 
     /// Directory holding externalized payloads.
     fn payloads_dir(&self) -> PathBuf {
-        self.context_dir.join("lcm").join("payloads")
+        self.context_dir.join("payloads")
     }
 
     /// Write `content` to `state/lcm/payloads/<file_id>`, generate
@@ -1297,8 +1300,12 @@ mod tests {
 
     fn temp_engine_with_ctx(ctx: ContextConfig) -> (LcmEngine, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let engine =
-            LcmEngine::new(dir.path().join("context"), ctx, canned_summarize("summary")).unwrap();
+        let engine = LcmEngine::new(
+            &dir.path().join("context"),
+            ctx,
+            canned_summarize("summary"),
+        )
+        .unwrap();
         (engine, dir)
     }
 
@@ -1509,7 +1516,7 @@ mod tests {
             ..ContextConfig::default()
         };
         let mut engine =
-            LcmEngine::new(dir.path().join("context"), ctx, panicking_summarize()).unwrap();
+            LcmEngine::new(&dir.path().join("context"), ctx, panicking_summarize()).unwrap();
 
         let payload = {
             use std::fmt::Write as _;
@@ -1796,7 +1803,7 @@ mod tests {
 
         {
             let mut engine = LcmEngine::new(
-                context_dir.clone(),
+                &context_dir,
                 ContextConfig::default(),
                 canned_summarize("summary"),
             )
@@ -1805,7 +1812,7 @@ mod tests {
         }
 
         let engine = LcmEngine::new(
-            context_dir,
+            &context_dir,
             ContextConfig::default(),
             canned_summarize("summary"),
         )

@@ -790,7 +790,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         #[allow(deprecated)]
         let base = dir.into_path();
-        FlatSession::new(base.join("context"), ContextConfig::default()).unwrap()
+        FlatSession::new(&base.join("context"), ContextConfig::default()).unwrap()
     }
 
     fn test_summarize(provider: &Arc<MockProvider>) -> SummarizeFn {
@@ -1403,7 +1403,7 @@ mod tests {
         let summarize = test_summarize(&provider);
 
         let mut engine =
-            FlatSession::new(dir.path().join("context"), ContextConfig::default()).unwrap();
+            FlatSession::new(&dir.path().join("context"), ContextConfig::default()).unwrap();
 
         let result = process_message_metered(
             &mut engine,

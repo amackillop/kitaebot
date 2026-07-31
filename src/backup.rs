@@ -129,7 +129,7 @@ mod tests {
         // Engine state: an LCM-shaped context dir with a payload blob.
         std::fs::create_dir_all(ws.context_dir().join("lcm/payloads")).unwrap();
         std::fs::write(ws.context_dir().join("lcm/payloads/blob"), "payload").unwrap();
-        std::fs::write(ws.context_dir().join("active_session"), "general").unwrap();
+        std::fs::write(ws.context_dir().join("lcm/active_session"), "general").unwrap();
         std::fs::write(ws.path().join("memory/MEMORY.md"), "index\n").unwrap();
         // Derived state that must stay out.
         std::fs::create_dir_all(ws.path().join("projects/o/r")).unwrap();
@@ -150,7 +150,7 @@ mod tests {
             "state/JOURNAL.md",
             "state/review-checklist.md",
             "context/lcm/payloads/blob",
-            "context/active_session",
+            "context/lcm/active_session",
             "memory/MEMORY.md",
         ] {
             assert!(dest.path().join(path).exists(), "missing {path}");
