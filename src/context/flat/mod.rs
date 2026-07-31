@@ -5,6 +5,8 @@
 //! the active-session cursor at `context/active_session` so it
 //! survives daemon restarts.
 
+mod session;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,9 +17,9 @@ use tracing::info;
 use super::names::{desanitize_name, sanitize_name};
 use crate::config::ContextConfig;
 use crate::error::EngineError;
-use crate::session::Session;
 use crate::tools::Tool;
 use crate::types::{Message, estimate_tokens_from_chars};
+use session::Session;
 
 use super::{
     AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,

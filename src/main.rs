@@ -20,7 +20,6 @@ mod runtime;
 mod safety;
 mod sandbox;
 mod secrets;
-mod session;
 mod sqlite;
 mod state_db;
 #[cfg(test)]

@@ -195,7 +195,7 @@ so the previous behavior is always available as a fallback.
 #### Storage
 
 One JSON file per session at `sessions/<sanitized-name>.json`, wrapping the
-`Session` struct from `src/session.rs`:
+`Session` struct from `src/context/flat/session.rs`:
 
 ```
 Session {

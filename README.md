@@ -299,7 +299,7 @@ src/
 │   ├── telegram.rs         Telegram Bot API
 │   └── linear.rs           Linear GraphQL API
 ├── context/             Context engines (ContextEngine trait)
-│   ├── flat.rs          Per-name JSON sessions, whole-history compaction
+│   ├── flat/            Per-name JSON sessions, whole-history compaction
 │   ├── ephemeral.rs     In-memory engine for sub-agents (never compacts)
 │   ├── stats.rs         Pure /stats report core (ContextEngine::report)
 │   └── lcm/             Hierarchical compaction over SQLite (lcm_* tools)
@@ -318,7 +318,6 @@ src/
 ├── sandbox.rs           Landlock policy
 ├── safety.rs            Leak detection
 ├── secrets.rs           systemd credential loading
-├── session.rs           Atomic JSON persistence
 ├── config.rs            TOML config with validation
 ├── channel/             Channels the agent talks through (spec 10)
 │   ├── socket.rs        Unix socket NDJSON channel
