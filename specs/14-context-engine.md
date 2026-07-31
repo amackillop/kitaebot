@@ -963,6 +963,36 @@ The cheaper summarization model called for by phase 4 (large file
 handling) is configured via `provider.model_overrides.summarizer`
 (see [spec 02](02-provider.md)).
 
+### Implementing a new engine
+
+The trait is the whole integration surface, but four contracts are
+not visible in the signatures:
+
+- **Dense distillation positions.** `transcript_since` positions must
+  be dense per session: the distiller advances its watermark by
+  `after + returned.len()`, and `latest_positions` must report the
+  tip the full transcript would advance to. Sparse IDs or a
+  reordering store silently corrupt watermarks (spec 21).
+- **Observed tokens drop on shrink.** `observe_tokens` records the
+  provider's ground-truth prompt size; the engine must discard it on
+  compaction, clear, and session switch, or `max(estimate, observed)`
+  re-triggers compaction forever on a stale high-water mark.
+- **Maintenance need not summarize.** `compact_if_needed` receives a
+  summarizer, not an obligation: an engine whose pressure response is
+  something else (dropping stale tool results, cache-aware pruning)
+  ignores the callback. `force_compact` currently demands an event
+  even from engines with nothing to do (see Open Questions).
+- **Backup assumes local files.** `ContextEngine::backup` stages the
+  engine's namespaced `context/<name>/` subdirectory; an engine whose
+  state is not on the local filesystem breaks this assumption and the
+  spec 05 backup contract with it.
+
+Mechanically: the constructor takes the shared `context/` directory
+and must namespace its own subdirectory inside it; wiring means one
+new `EngineKind` arm in `main.rs`'s spawn match and one in
+`backup.rs`'s stage match — both exhaustive, so the compiler walks
+you to every site.
+
 ### Active Session Persistence
 
 The active session name is written to `state/active_session` (plain text,
