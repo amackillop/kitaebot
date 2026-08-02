@@ -157,8 +157,12 @@ fn build_git(
     .with_warm(warmer.clone(), Arc::new(config.git.warm_commands()))
     .with_clone_base(&config.git.clone_base);
     let github_client = if config.github.enabled {
-        tools.extend(github::build(GhCli::new(token.clone(), workspace.path())));
-        Some(GithubClient::new(token, &config.github.api_base))
+        let client = GithubClient::new(token.clone(), &config.github.api_base);
+        tools.extend(github::build(
+            GhCli::new(token, workspace.path()),
+            github::GithubApi::new(client.clone(), workspace.path()),
+        ));
+        Some(client)
     } else {
         None
     };

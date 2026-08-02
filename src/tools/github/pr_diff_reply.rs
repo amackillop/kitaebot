@@ -6,10 +6,8 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::gh_cli::GhCli;
-use super::{Tool, ToolCtx};
+use super::{GithubApi, Tool, ToolCtx, api_err};
 use crate::error::ToolError;
-use crate::tools::cli_runner::{self, SubprocessCall};
 
 /// Reply to an inline review comment.
 ///
@@ -28,7 +26,7 @@ struct Args {
     body: String,
 }
 
-pub struct PrDiffReply(pub GhCli);
+pub struct PrDiffReply(pub GithubApi);
 
 impl Tool for PrDiffReply {
     fn name(&self) -> &'static str {
@@ -51,60 +49,56 @@ impl Tool for PrDiffReply {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-            self.run(&args.repo_dir, args.pr_number, args.comment_id, &args.body)
-                .await
+            self.run(&args).await
         })
     }
 }
 
 impl PrDiffReply {
-    fn prepare(
-        &self,
-        repo_dir: &str,
-        pr_number: u64,
-        comment_id: u64,
-        body: &str,
-    ) -> Result<SubprocessCall, ToolError> {
-        let cwd = self.0.resolve_repo_dir(repo_dir)?;
-        let endpoint =
-            format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments/{comment_id}/replies");
-        let body_field = format!("body={body}");
-        Ok(self
+    async fn run(&self, args: &Args) -> Result<String, ToolError> {
+        let nwo = self.0.nwo(&args.repo_dir).await?;
+        let reply = self
             .0
-            .prepare_gh(&["api", &endpoint, "-f", &body_field], &cwd))
-    }
-
-    async fn run(
-        &self,
-        repo_dir: &str,
-        pr_number: u64,
-        comment_id: u64,
-        body: &str,
-    ) -> Result<String, ToolError> {
-        let call = self.prepare(repo_dir, pr_number, comment_id, body)?;
-        cli_runner::exec(&call).await?.format()
+            .client()
+            .reply_to_diff_comment(&nwo, args.pr_number, args.comment_id, &args.body)
+            .await
+            .map_err(|e| api_err(&e))?;
+        Ok(format!(
+            "Reply posted on {nwo}#{} in thread {} (id {})",
+            args.pr_number, args.comment_id, reply.id
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
+    use crate::tools::github::test_helpers::stub_api_with_repo;
 
-    #[test]
-    fn replies_to_correct_endpoint() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let tool = PrDiffReply(gh);
-        let call = tool
-            .prepare(&repo, 5, 123_456, "Fixed in the latest push")
+    #[tokio::test]
+    async fn replies_to_the_thread_endpoint() {
+        let api = stub_api_with_repo("owner/repo", |method, path, body| {
+            assert_eq!(method, "POST");
+            assert_eq!(path, "repos/owner/repo/pulls/5/comments/123456/replies");
+            let payload: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            assert_eq!(payload["body"], "Fixed in the latest push");
+            br#"{"id":123999,"path":"a.rs","line":1,"body":"Fixed in the latest push",
+                "user":{"login":"bot"},"created_at":"2026-01-01T00:00:00Z"}"#
+                .to_vec()
+        });
+        let tool = PrDiffReply(api);
+        let out = tool
+            .run(&Args {
+                repo_dir: "projects/r".into(),
+                pr_number: 5,
+                comment_id: 123_456,
+                body: "Fixed in the latest push".into(),
+            })
+            .await
             .unwrap();
-        assert_eq!(call.binary, "gh");
-        assert_eq!(call.args[0], "api");
         assert_eq!(
-            call.args[1],
-            "repos/{owner}/{repo}/pulls/5/comments/123456/replies"
+            out,
+            "Reply posted on owner/repo#5 in thread 123456 (id 123999)"
         );
-        assert_eq!(call.args[2], "-f");
-        assert_eq!(call.args[3], "body=Fixed in the latest push");
     }
 }

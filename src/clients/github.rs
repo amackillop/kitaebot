@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::json;
 
 use super::RawResponse;
 use crate::error::GithubError;
@@ -24,9 +25,9 @@ use crate::secrets::Secret;
 // Closure type alias
 // ---------------------------------------------------------------------------
 
-type GetResult = Result<RawResponse, GithubError>;
-type GetFuture = Pin<Box<dyn Future<Output = GetResult> + Send>>;
-type GetFn = Arc<dyn Fn(String) -> GetFuture + Send + Sync>;
+type RequestResult = Result<RawResponse, GithubError>;
+type RequestFuture = Pin<Box<dyn Future<Output = RequestResult> + Send>>;
+type RequestFn = Arc<dyn Fn(&'static str, String, Option<Vec<u8>>) -> RequestFuture + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Client
@@ -38,7 +39,7 @@ type GetFn = Arc<dyn Fn(String) -> GetFuture + Send + Sync>;
 /// construction time. `Clone` is free (`Arc`).
 #[derive(Clone)]
 pub struct GithubClient {
-    get: GetFn,
+    request: RequestFn,
 }
 
 impl GithubClient {
@@ -49,17 +50,23 @@ impl GithubClient {
         let client =
             super::http_client(reqwest::Client::builder().timeout(Duration::from_secs(30)));
         Self {
-            get: Arc::new(move |path| {
+            request: Arc::new(move |method, path, body| {
                 let client = client.clone();
                 let token = token.clone();
                 let url = format!("{base}/{path}");
                 Box::pin(async move {
-                    let resp = client
-                        .get(&url)
+                    let method = reqwest::Method::from_bytes(method.as_bytes())
+                        .map_err(|e| GithubError::Network(e.to_string()))?;
+                    let mut req = client
+                        .request(method, &url)
                         .header("Authorization", format!("Bearer {}", token.expose()))
                         .header("Accept", "application/vnd.github+json")
                         .header("X-GitHub-Api-Version", "2022-11-28")
-                        .header("User-Agent", "kitaebot")
+                        .header("User-Agent", "kitaebot");
+                    if let Some(body) = body {
+                        req = req.header("Content-Type", "application/json").body(body);
+                    }
+                    let resp = req
                         .send()
                         .await
                         .map_err(|e| GithubError::Network(e.to_string()))?;
@@ -81,16 +88,26 @@ impl GithubClient {
     #[cfg(test)]
     pub fn from_fn<F, Fut>(f: F) -> Self
     where
-        F: Fn(String) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = GetResult> + Send + 'static,
+        F: Fn(&'static str, String, Option<Vec<u8>>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = RequestResult> + Send + 'static,
     {
         Self {
-            get: Arc::new(move |path| Box::pin(f(path))),
+            request: Arc::new(move |method, path, body| Box::pin(f(method, path, body))),
         }
     }
 
     async fn get_json<T: DeserializeOwned>(&self, path: String) -> Result<T, GithubError> {
-        let raw = (self.get)(path).await?;
+        let raw = (self.request)("GET", path, None).await?;
+        interpret_response(&raw)
+    }
+
+    async fn post_json<T: DeserializeOwned>(
+        &self,
+        path: String,
+        payload: &serde_json::Value,
+    ) -> Result<T, GithubError> {
+        let body = serde_json::to_vec(payload).map_err(|e| GithubError::Network(e.to_string()))?;
+        let raw = (self.request)("POST", path, Some(body)).await?;
         interpret_response(&raw)
     }
 
@@ -150,6 +167,43 @@ impl GithubClient {
     ) -> Result<Vec<IssueComment>, GithubError> {
         self.get_json(format!("repos/{nwo}/issues/{number}/comments?per_page=100"))
             .await
+    }
+
+    /// Users and teams whose review is still requested.
+    pub async fn requested_reviewers(
+        &self,
+        nwo: &str,
+        number: u64,
+    ) -> Result<RequestedReviewers, GithubError> {
+        self.get_json(format!("repos/{nwo}/pulls/{number}/requested_reviewers"))
+            .await
+    }
+
+    /// Submit a review. `payload` carries `body`, `event`, and
+    /// `comments` per the create-review endpoint.
+    pub async fn create_review(
+        &self,
+        nwo: &str,
+        number: u64,
+        payload: &serde_json::Value,
+    ) -> Result<CreatedReview, GithubError> {
+        self.post_json(format!("repos/{nwo}/pulls/{number}/reviews"), payload)
+            .await
+    }
+
+    /// Reply in-thread to an inline review comment.
+    pub async fn reply_to_diff_comment(
+        &self,
+        nwo: &str,
+        number: u64,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<DiffComment, GithubError> {
+        self.post_json(
+            format!("repos/{nwo}/pulls/{number}/comments/{comment_id}/replies"),
+            &json!({ "body": body }),
+        )
+        .await
     }
 }
 
@@ -293,6 +347,27 @@ pub struct PrFile {
     pub deletions: u64,
 }
 
+/// Reviewers still requested on a pull request.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RequestedReviewers {
+    pub users: Vec<UserRef>,
+    pub teams: Vec<TeamRef>,
+}
+
+/// A team reference on review requests.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TeamRef {
+    pub name: String,
+}
+
+/// The review created by the create-review endpoint.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreatedReview {
+    pub id: u64,
+    /// `APPROVED`, `COMMENTED`, or `PENDING`.
+    pub state: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -359,7 +434,9 @@ mod tests {
 
     #[tokio::test]
     async fn search_encodes_qualifiers_into_the_path() {
-        let client = GithubClient::from_fn(|path| async move {
+        let client = GithubClient::from_fn(|method, path, body| async move {
+            assert_eq!(method, "GET");
+            assert!(body.is_none());
             assert_eq!(path, "search/issues?q=is:pr+is:open+author:bot&per_page=50");
             Ok(RawResponse {
                 status: 200,
@@ -372,7 +449,8 @@ mod tests {
 
     #[tokio::test]
     async fn pull_hits_the_pulls_endpoint() {
-        let client = GithubClient::from_fn(|path| async move {
+        let client = GithubClient::from_fn(|method, path, _body| async move {
+            assert_eq!(method, "GET");
             assert_eq!(path, "repos/owner/repo/pulls/7");
             Ok(RawResponse {
                 status: 200,
@@ -389,9 +467,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_review_posts_the_payload() {
+        let client = GithubClient::from_fn(|method, path, body| async move {
+            assert_eq!(method, "POST");
+            assert_eq!(path, "repos/owner/repo/pulls/141/reviews");
+            let payload: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            assert_eq!(payload["event"], "COMMENT");
+            Ok(RawResponse {
+                status: 200,
+                body: br#"{"id":9,"state":"COMMENTED"}"#.to_vec(),
+            })
+        });
+        let review = client
+            .create_review("owner/repo", 141, &json!({"event": "COMMENT"}))
+            .await
+            .unwrap();
+        assert_eq!(review.id, 9);
+        assert_eq!(review.state, "COMMENTED");
+    }
+
+    #[tokio::test]
+    async fn reply_posts_to_the_replies_endpoint() {
+        let client = GithubClient::from_fn(|method, path, body| async move {
+            assert_eq!(method, "POST");
+            assert_eq!(path, "repos/owner/repo/pulls/5/comments/123/replies");
+            let payload: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            assert_eq!(payload["body"], "Fixed");
+            Ok(RawResponse {
+                status: 200,
+                body: br#"{"id":124,"path":"a.rs","line":1,"body":"Fixed",
+                    "user":{"login":"bot"},"created_at":"2026-01-01T00:00:00Z"}"#
+                    .to_vec(),
+            })
+        });
+        let comment = client
+            .reply_to_diff_comment("owner/repo", 5, 123, "Fixed")
+            .await
+            .unwrap();
+        assert_eq!(comment.id, 124);
+    }
+
+    #[tokio::test]
     async fn client_propagates_closure_error() {
-        let client =
-            GithubClient::from_fn(|_path| async { Err(GithubError::Network("boom".into())) });
+        let client = GithubClient::from_fn(|_method, _path, _body| async {
+            Err(GithubError::Network("boom".into()))
+        });
         let err = client.user().await.unwrap_err();
         assert!(matches!(err, GithubError::Network(_)));
     }

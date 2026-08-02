@@ -6,10 +6,8 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::gh_cli::GhCli;
-use super::{Tool, ToolCtx};
+use super::{GithubApi, Tool, ToolCtx, api_err};
 use crate::error::ToolError;
-use crate::tools::cli_runner::{self, SubprocessCall};
 
 /// Review verdict. `REQUEST_CHANGES` is deliberately unrepresentable:
 /// blocking judgments stay with humans.
@@ -48,7 +46,7 @@ struct Args {
     comments: Vec<InlineComment>,
 }
 
-pub struct PrReview(pub GhCli);
+pub struct PrReview(pub GithubApi);
 
 impl Tool for PrReview {
     fn name(&self) -> &'static str {
@@ -71,39 +69,43 @@ impl Tool for PrReview {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-            let call = self.prepare(&args)?;
-            cli_runner::exec(&call).await?.format()
+            self.run(&args).await
         })
     }
 }
 
 impl PrReview {
-    fn prepare(&self, args: &Args) -> Result<SubprocessCall, ToolError> {
-        let cwd = self.0.resolve_repo_dir(&args.repo_dir)?;
-        let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{}/reviews", args.pr_number);
-        let payload = serde_json::json!({
+    /// Pure: the create-review payload.
+    fn payload(args: &Args) -> serde_json::Value {
+        serde_json::json!({
             "body": args.body,
             "event": args.event,
             "comments": args.comments,
         })
-        .to_string();
-        let mut call = self.0.prepare_gh(
-            &["api", "--method", "POST", &endpoint, "--input", "-"],
-            &cwd,
-        );
-        call.stdin = Some(payload);
-        Ok(call)
+    }
+
+    async fn run(&self, args: &Args) -> Result<String, ToolError> {
+        let nwo = self.0.nwo(&args.repo_dir).await?;
+        let review = self
+            .0
+            .client()
+            .create_review(&nwo, args.pr_number, &Self::payload(args))
+            .await
+            .map_err(|e| api_err(&e))?;
+        Ok(format!(
+            "Review submitted on {nwo}#{}: {} (id {})",
+            args.pr_number, review.state, review.id
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
 
-    fn args(repo: &str, event: Event, comments: Vec<InlineComment>) -> Args {
+    fn args(event: Event, comments: Vec<InlineComment>) -> Args {
         Args {
-            repo_dir: repo.into(),
+            repo_dir: "projects/r".into(),
             pr_number: 141,
             body: "Looks solid.".into(),
             event,
@@ -112,45 +114,22 @@ mod tests {
     }
 
     #[test]
-    fn posts_review_payload_via_stdin() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let tool = PrReview(gh);
+    fn payload_carries_body_event_and_comments() {
         let comments = vec![InlineComment {
             path: "src/lib.rs".into(),
             line: 10,
             body: "Off by one.".into(),
         }];
-        let call = tool
-            .prepare(&args(&repo, Event::Comment, comments))
-            .unwrap();
-        assert_eq!(call.binary, "gh");
-        assert_eq!(
-            call.args,
-            [
-                "api",
-                "--method",
-                "POST",
-                "repos/{owner}/{repo}/pulls/141/reviews",
-                "--input",
-                "-"
-            ]
-        );
-        let payload: serde_json::Value =
-            serde_json::from_str(call.stdin.as_deref().unwrap()).unwrap();
+        let payload = PrReview::payload(&args(Event::Comment, comments));
         assert_eq!(payload["event"], "COMMENT");
         assert_eq!(payload["body"], "Looks solid.");
         assert_eq!(payload["comments"][0]["path"], "src/lib.rs");
         assert_eq!(payload["comments"][0]["line"], 10);
-        assert!(call.has_env("GH_TOKEN"));
     }
 
     #[test]
     fn approve_serializes_uppercase_with_empty_comments() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let tool = PrReview(gh);
-        let call = tool.prepare(&args(&repo, Event::Approve, vec![])).unwrap();
-        let payload: serde_json::Value =
-            serde_json::from_str(call.stdin.as_deref().unwrap()).unwrap();
+        let payload = PrReview::payload(&args(Event::Approve, vec![]));
         assert_eq!(payload["event"], "APPROVE");
         assert_eq!(payload["comments"], serde_json::json!([]));
     }
@@ -159,5 +138,22 @@ mod tests {
     fn request_changes_is_unrepresentable() {
         let result: Result<Event, _> = serde_json::from_str("\"REQUEST_CHANGES\"");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn submits_against_the_origin_repo() {
+        let api = crate::tools::github::test_helpers::stub_api_with_repo(
+            "owner/repo",
+            |method, path, body| {
+                assert_eq!(method, "POST");
+                assert_eq!(path, "repos/owner/repo/pulls/141/reviews");
+                let payload: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+                assert_eq!(payload["event"], "APPROVE");
+                br#"{"id":7,"state":"APPROVED"}"#.to_vec()
+            },
+        );
+        let tool = PrReview(api);
+        let out = tool.run(&args(Event::Approve, vec![])).await.unwrap();
+        assert_eq!(out, "Review submitted on owner/repo#141: APPROVED (id 7)");
     }
 }

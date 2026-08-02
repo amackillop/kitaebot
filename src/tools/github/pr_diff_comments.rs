@@ -6,11 +6,9 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::gh_cli::GhCli;
-use super::types::DiffComment;
-use super::{Tool, ToolCtx};
+use super::{GithubApi, Tool, ToolCtx, api_err};
+use crate::clients::github::DiffComment;
 use crate::error::ToolError;
-use crate::tools::cli_runner::SubprocessCall;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -20,7 +18,7 @@ struct Args {
     pr_number: u64,
 }
 
-pub struct PrDiffComments(pub GhCli);
+pub struct PrDiffComments(pub GithubApi);
 
 impl Tool for PrDiffComments {
     fn name(&self) -> &'static str {
@@ -49,18 +47,8 @@ impl Tool for PrDiffComments {
 }
 
 impl PrDiffComments {
-    fn prepare(&self, repo_dir: &str, pr_number: u64) -> Result<SubprocessCall, ToolError> {
-        let cwd = self.0.resolve_repo_dir(repo_dir)?;
-        let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments");
-        Ok(self.0.prepare_gh(&["api", &endpoint], &cwd))
-    }
-
     /// Pure: format diff comments for display.
     fn format_output(comments: &[DiffComment]) -> String {
-        if comments.is_empty() {
-            return String::new();
-        }
-
         comments
             .iter()
             .map(|c| {
@@ -75,8 +63,15 @@ impl PrDiffComments {
     }
 
     async fn run(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
-        let call = self.prepare(repo_dir, pr_number)?;
-        let comments: Vec<DiffComment> = self.0.exec_parse(&call).await?;
+        let nwo = self.0.nwo(repo_dir).await?;
+        let number = u32::try_from(pr_number)
+            .map_err(|_| ToolError::InvalidArguments("PR number out of range".into()))?;
+        let comments = self
+            .0
+            .client()
+            .pull_comments(&nwo, number)
+            .await
+            .map_err(|e| api_err(&e))?;
 
         if comments.is_empty() {
             return Ok(format!("No inline comments on PR #{pr_number}."));
@@ -88,19 +83,9 @@ impl PrDiffComments {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::{Author, DiffComment};
     use super::*;
-    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
-
-    #[test]
-    fn builds_correct_api_command() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let tool = PrDiffComments(gh);
-        let call = tool.prepare(&repo, 5).unwrap();
-        assert_eq!(call.binary, "gh");
-        assert_eq!(call.args[0], "api");
-        assert!(call.args[1].contains("pulls/5/comments"));
-    }
+    use crate::clients::github::UserRef;
+    use crate::tools::github::test_helpers::stub_api_with_repo;
 
     #[test]
     fn formats_comments() {
@@ -110,18 +95,20 @@ mod tests {
                 path: "src/main.rs".to_string(),
                 line: Some(42),
                 body: "Nit: rename this".to_string(),
-                user: Author {
+                user: UserRef {
                     login: "alice".to_string(),
                 },
+                created_at: "2025-01-15T10:00:00Z".to_string(),
             },
             DiffComment {
                 id: 101,
                 path: "src/lib.rs".to_string(),
                 line: None,
                 body: "Outdated".to_string(),
-                user: Author {
+                user: UserRef {
                     login: "bob".to_string(),
                 },
+                created_at: "2025-01-15T10:00:00Z".to_string(),
             },
         ];
         let result = PrDiffComments::format_output(&comments);
@@ -136,9 +123,15 @@ Outdated"
         );
     }
 
-    #[test]
-    fn empty_comments() {
-        let result = PrDiffComments::format_output(&[]);
-        assert!(result.is_empty());
+    #[tokio::test]
+    async fn fetches_from_the_origin_repo() {
+        let api = stub_api_with_repo("owner/repo", |method, path, _body| {
+            assert_eq!(method, "GET");
+            assert_eq!(path, "repos/owner/repo/pulls/5/comments?per_page=100");
+            b"[]".to_vec()
+        });
+        let tool = PrDiffComments(api);
+        let out = tool.run("projects/r", 5).await.unwrap();
+        assert_eq!(out, "No inline comments on PR #5.");
     }
 }

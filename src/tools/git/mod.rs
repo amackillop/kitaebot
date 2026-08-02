@@ -84,7 +84,7 @@ pub(crate) async fn origin_trusted(dir: &Path, trusted: &[String]) -> bool {
         .is_some_and(|nwo| url::is_trusted_repo(&nwo, trusted))
 }
 
-async fn origin_nwo(dir: &Path) -> Option<String> {
+pub(crate) async fn origin_nwo(dir: &Path) -> Option<String> {
     use crate::tools::cli_runner::{self, SubprocessCall};
 
     let call = SubprocessCall {

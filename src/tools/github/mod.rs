@@ -49,18 +49,58 @@ pub use pr_reviews::PrReviews;
 // Re-export parent utility so tool files can `use super::Tool`.
 pub(crate) use super::{Tool, ToolCtx};
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Build the GitHub tools from a pre-constructed [`GhCli`].
-pub(crate) fn build(gh: GhCli) -> Vec<Arc<dyn Tool>> {
+use crate::clients::github::GithubClient;
+use crate::error::ToolError;
+
+/// Shared context for REST-backed GitHub tools: the API client plus
+/// repo-dir resolution against the workspace. The `owner/repo` a tool
+/// acts on comes from the checkout's origin remote — the model names
+/// a directory, never a repo.
+#[derive(Clone)]
+pub struct GithubApi {
+    client: GithubClient,
+    workspace_root: PathBuf,
+}
+
+impl GithubApi {
+    pub fn new(client: GithubClient, workspace_root: impl Into<PathBuf>) -> Self {
+        Self {
+            client,
+            workspace_root: workspace_root.into(),
+        }
+    }
+
+    fn client(&self) -> &GithubClient {
+        &self.client
+    }
+
+    /// Resolve a workspace-relative repo dir to its origin `owner/repo`.
+    async fn nwo(&self, repo_dir: &str) -> Result<String, ToolError> {
+        let dir = crate::tools::git::resolve_repo_dir(&self.workspace_root, repo_dir)?;
+        crate::tools::git::origin_nwo(&dir).await.ok_or_else(|| {
+            ToolError::InvalidArguments(format!("cannot resolve origin owner/repo for {repo_dir}"))
+        })
+    }
+}
+
+/// Map a client error into the tool error surface.
+fn api_err(e: &crate::error::GithubError) -> ToolError {
+    ToolError::ExecutionFailed(e.to_string())
+}
+
+/// Build the GitHub tools.
+pub(crate) fn build(gh: GhCli, api: GithubApi) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(CiStatus(gh.clone())),
         Arc::new(Gh(gh.clone())),
         Arc::new(PrCreate(gh.clone())),
-        Arc::new(PrDiffComments(gh.clone())),
-        Arc::new(PrDiffReply(gh.clone())),
-        Arc::new(PrList(gh.clone())),
-        Arc::new(PrReview(gh.clone())),
-        Arc::new(PrReviews(gh)),
+        Arc::new(PrDiffComments(api.clone())),
+        Arc::new(PrDiffReply(api.clone())),
+        Arc::new(PrList(gh)),
+        Arc::new(PrReview(api.clone())),
+        Arc::new(PrReviews(api)),
     ]
 }

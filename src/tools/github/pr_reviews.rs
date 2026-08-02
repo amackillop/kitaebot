@@ -7,11 +7,9 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::gh_cli::GhCli;
-use super::types::PrReviewsResponse;
-use super::{Tool, ToolCtx};
+use super::{GithubApi, Tool, ToolCtx, api_err};
+use crate::clients::github::{IssueComment, PrReview, RequestedReviewers};
 use crate::error::ToolError;
-use crate::tools::cli_runner::SubprocessCall;
 
 /// Fetch top-level review verdicts and PR conversation comments.
 ///
@@ -26,7 +24,7 @@ struct Args {
     pr_number: u64,
 }
 
-pub struct PrReviews(pub GhCli);
+pub struct PrReviews(pub GithubApi);
 
 impl Tool for PrReviews {
     fn name(&self) -> &'static str {
@@ -55,55 +53,43 @@ impl Tool for PrReviews {
 }
 
 impl PrReviews {
-    fn prepare(&self, repo_dir: &str, pr_number: u64) -> Result<SubprocessCall, ToolError> {
-        let cwd = self.0.resolve_repo_dir(repo_dir)?;
-        let number = pr_number.to_string();
-        Ok(self.0.prepare_gh(
-            &[
-                "pr",
-                "view",
-                &number,
-                "--json",
-                "reviews,reviewRequests,comments",
-            ],
-            &cwd,
-        ))
-    }
-
-    /// Pure: format the review response for display.
-    fn format_output(resp: &PrReviewsResponse, pr_number: u64) -> String {
+    /// Pure: format reviews, pending reviewers, and comments.
+    fn format_output(
+        reviews: &[PrReview],
+        pending: &RequestedReviewers,
+        comments: &[IssueComment],
+        pr_number: u64,
+    ) -> String {
         let mut output = String::new();
 
-        if !resp.review_requests.is_empty() {
+        let names: Vec<&str> = pending
+            .users
+            .iter()
+            .map(|u| u.login.as_str())
+            .chain(pending.teams.iter().map(|t| t.name.as_str()))
+            .collect();
+        if !names.is_empty() {
             output.push_str("Pending reviewers: ");
-            let names: Vec<&str> = resp
-                .review_requests
-                .iter()
-                .map(|r| {
-                    r.login
-                        .as_deref()
-                        .or(r.name.as_deref())
-                        .unwrap_or("unknown")
-                })
-                .collect();
             output.push_str(&names.join(", "));
             output.push_str("\n\n");
         }
 
-        for r in &resp.reviews {
+        for r in reviews {
             let _ = writeln!(
                 output,
                 "@{} {} ({})",
-                r.author.login, r.state, r.submitted_at
+                r.user.login,
+                r.state,
+                r.submitted_at.as_deref().unwrap_or("pending"),
             );
-            if !r.body.is_empty() {
-                let _ = writeln!(output, "{}", r.body);
+            if let Some(body) = r.body.as_deref().filter(|b| !b.is_empty()) {
+                let _ = writeln!(output, "{body}");
             }
             output.push('\n');
         }
 
-        for c in &resp.comments {
-            let _ = writeln!(output, "@{} ({})\n{}", c.author.login, c.created_at, c.body);
+        for c in comments {
+            let _ = writeln!(output, "@{} ({})\n{}", c.user.login, c.created_at, c.body);
             output.push('\n');
         }
 
@@ -115,55 +101,63 @@ impl PrReviews {
     }
 
     async fn run(&self, repo_dir: &str, pr_number: u64) -> Result<String, ToolError> {
-        let call = self.prepare(repo_dir, pr_number)?;
-        let resp: PrReviewsResponse = self.0.exec_parse(&call).await?;
-        Ok(Self::format_output(&resp, pr_number))
+        let nwo = self.0.nwo(repo_dir).await?;
+        let client = self.0.client();
+        let number = u32::try_from(pr_number)
+            .map_err(|_| ToolError::InvalidArguments("PR number out of range".into()))?;
+        let reviews = client
+            .pull_reviews(&nwo, number)
+            .await
+            .map_err(|e| api_err(&e))?;
+        let pending = client
+            .requested_reviewers(&nwo, pr_number)
+            .await
+            .map_err(|e| api_err(&e))?;
+        let comments = client
+            .issue_comments(&nwo, number)
+            .await
+            .map_err(|e| api_err(&e))?;
+        Ok(Self::format_output(
+            &reviews, &pending, &comments, pr_number,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::*;
     use super::*;
-    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
+    use crate::clients::github::{TeamRef, UserRef};
 
-    #[test]
-    fn builds_correct_command() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let tool = PrReviews(gh);
-        let call = tool.prepare(&repo, 42).unwrap();
-        assert_eq!(call.binary, "gh");
-        assert!(call.args.contains(&"42".to_string()));
+    fn user(login: &str) -> UserRef {
+        UserRef {
+            login: login.into(),
+        }
     }
 
     #[test]
     fn formats_reviews_and_comments() {
-        let resp = PrReviewsResponse {
-            reviews: vec![Review {
-                author: Author {
-                    login: "alice".to_string(),
-                },
-                body: "Looks good".to_string(),
-                state: "APPROVED".to_string(),
-                submitted_at: "2025-01-15T10:00:00Z".to_string(),
-            }],
-            review_requests: vec![ReviewRequest {
-                login: Some("bob".to_string()),
-                name: None,
-            }],
-            comments: vec![PrCommentEntry {
-                author: Author {
-                    login: "carol".to_string(),
-                },
-                body: "What about edge cases?".to_string(),
-                created_at: "2025-01-15T11:00:00Z".to_string(),
+        let reviews = vec![PrReview {
+            user: user("alice"),
+            body: Some("Looks good".into()),
+            state: "APPROVED".into(),
+            submitted_at: Some("2025-01-15T10:00:00Z".into()),
+        }];
+        let pending = RequestedReviewers {
+            users: vec![user("bob")],
+            teams: vec![TeamRef {
+                name: "platform".into(),
             }],
         };
-        let result = PrReviews::format_output(&resp, 42);
+        let comments = vec![IssueComment {
+            user: user("carol"),
+            body: "What about edge cases?".into(),
+            created_at: "2025-01-15T11:00:00Z".into(),
+        }];
+        let result = PrReviews::format_output(&reviews, &pending, &comments, 42);
         assert_eq!(
             result,
             "\
-Pending reviewers: bob
+Pending reviewers: bob, platform
 
 @alice APPROVED (2025-01-15T10:00:00Z)
 Looks good
@@ -177,12 +171,11 @@ What about edge cases?
 
     #[test]
     fn empty() {
-        let resp = PrReviewsResponse {
-            reviews: vec![],
-            review_requests: vec![],
-            comments: vec![],
+        let pending = RequestedReviewers {
+            users: vec![],
+            teams: vec![],
         };
-        let result = PrReviews::format_output(&resp, 1);
+        let result = PrReviews::format_output(&[], &pending, &[], 1);
         assert_eq!(result, "No reviews or comments on PR #1.");
     }
 }
