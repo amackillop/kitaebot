@@ -149,7 +149,7 @@ async fn main() {
                 &handle,
                 duties,
                 rt.telegram.as_ref(),
-                rt.gh_cli.as_ref(),
+                rt.github.as_ref(),
                 rt.git_cli.as_ref(),
                 &config.github,
                 rt.linear.as_ref(),

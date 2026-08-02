@@ -20,126 +20,47 @@ use tracing::{error, info, warn};
 
 use crate::agent::AgentHandle;
 use crate::agent::envelope::{ChannelSource, GitHubRole};
-use crate::error::ToolError;
+use crate::clients::github::{
+    DiffComment, GithubClient, IssueComment, PrCommit, PrFile, PrReview, SearchIssue,
+};
+use crate::error::GithubError;
 use crate::state_db::StateDb;
 use crate::time::now_iso8601;
 use crate::tools::git::GitCli;
-use crate::tools::github::GhCli;
 
 // ---------------------------------------------------------------------------
-// Types — channel-specific, intentionally duplicating tool types.
+// Types — composites over the REST client's wire types.
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct GhUser {
-    login: String,
+/// Reviews and conversation comments on one PR, fetched together.
+struct PrFeedback {
+    reviews: Vec<PrReview>,
+    comments: Vec<IssueComment>,
 }
 
-#[derive(Deserialize)]
-struct SearchResult {
-    number: u32,
-    title: String,
-    repository: Repository,
-}
-
-#[derive(Deserialize)]
-struct Repository {
-    #[serde(rename = "nameWithOwner")]
-    name_with_owner: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Review {
-    author: Author,
-    body: String,
-    state: String,
-    submitted_at: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PrComment {
-    author: Author,
-    body: String,
-    created_at: String,
-}
-
-#[derive(Deserialize)]
-struct DiffComment {
-    /// Comment id, needed to reply in-thread via the replies endpoint.
-    id: u64,
-    path: String,
-    line: Option<u64>,
-    body: String,
-    user: Author,
-    created_at: String,
-}
-
-#[derive(Deserialize)]
-struct Author {
-    login: String,
-}
-
-/// Aggregate response from `gh pr view --json reviews,comments`.
-#[derive(Deserialize)]
-struct PrViewResponse {
-    reviews: Vec<Review>,
-    comments: Vec<PrComment>,
-}
-
-/// A PR from the review-requested search.
-#[derive(Deserialize)]
-struct ReviewRequestPr {
-    number: u32,
-    title: String,
-    repository: Repository,
-    author: Author,
-    #[serde(default)]
-    body: String,
-}
-
-/// Response from `gh pr view --json headRefOid,baseRefName,commits,files`.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Head, base, commits, and files of a review-requested PR.
 struct ReviewPrView {
-    head_ref_oid: String,
-    base_ref_name: String,
-    commits: Vec<Commit>,
-    files: Vec<ChangedFile>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Commit {
-    oid: String,
-    message_headline: String,
-    message_body: String,
-}
-
-#[derive(Deserialize)]
-struct ChangedFile {
-    path: String,
-    additions: u64,
-    deletions: u64,
+    head_sha: String,
+    base_ref: String,
+    commits: Vec<PrCommit>,
+    files: Vec<PrFile>,
 }
 
 /// A review-requested PR with head SHA, base, commits, and files resolved.
 struct ReviewCandidate {
-    pr: ReviewRequestPr,
+    pr: SearchIssue,
+    nwo: String,
     view: ReviewPrView,
 }
 
-/// Response from `gh pr view --json state,title,headRefOid,baseRefName,comments`.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// State, head, and conversation of a tracked PR.
 struct TrackedPrView {
-    /// `OPEN`, `CLOSED`, or `MERGED`.
+    /// `open` or `closed` (merged PRs are `closed`).
     state: String,
     title: String,
-    head_ref_oid: String,
-    base_ref_name: String,
-    comments: Vec<PrComment>,
+    head_sha: String,
+    base_ref: String,
+    comments: Vec<IssueComment>,
 }
 
 /// Current state of a tracked reviewed PR, fetched once per tick.
@@ -196,13 +117,13 @@ impl PollState {
 /// On first boot (or missing state file), `last_poll` is set to "now"
 /// so we don't replay entire PR histories.
 pub async fn poll_loop(
-    gh: &GhCli,
+    client: &GithubClient,
     git: &GitCli,
     config: &GithubConfig,
     handle: &AgentHandle,
     state_db: &StateDb,
 ) -> ! {
-    let bot_login = match resolve_bot_login(gh).await {
+    let bot_login = match resolve_bot_login(client).await {
         Ok(login) => {
             info!(login = %login, "GitHub channel resolved bot identity");
             login
@@ -221,7 +142,11 @@ pub async fn poll_loop(
 
     loop {
         tick.tick().await;
-        match poll_once(gh, git, config, handle, &bot_login, &mut state, state_db).await {
+        match poll_once(
+            client, git, config, handle, &bot_login, &mut state, state_db,
+        )
+        .await
+        {
             Ok(count) => {
                 info!(count, "GitHub poll: dispatched {count} items");
                 state.last_poll = now_iso8601();
@@ -239,49 +164,59 @@ pub async fn poll_loop(
 // ---------------------------------------------------------------------------
 
 async fn poll_once(
-    gh: &GhCli,
+    client: &GithubClient,
     git: &GitCli,
     config: &GithubConfig,
     handle: &AgentHandle,
     bot_login: &str,
     state: &mut PollState,
     state_db: &StateDb,
-) -> Result<usize, ToolError> {
-    let mut count = feedback_pass(gh, config, handle, bot_login, &state.last_poll).await?;
-    count += review_request_pass(gh, git, config, handle, bot_login, state, state_db).await?;
-    count += tracked_pass(gh, git, config, handle, bot_login, state, state_db).await;
+) -> Result<usize, GithubError> {
+    let mut count = feedback_pass(client, config, handle, bot_login, &state.last_poll).await?;
+    count += review_request_pass(client, git, config, handle, bot_login, state, state_db).await?;
+    count += tracked_pass(client, git, config, handle, bot_login, state, state_db).await;
     Ok(count)
 }
 
 /// Pass 1: feedback (reviews, comments, diff comments) on the bot's
 /// own open PRs.
 async fn feedback_pass(
-    gh: &GhCli,
+    client: &GithubClient,
     config: &GithubConfig,
     handle: &AgentHandle,
     bot_login: &str,
     last_poll: &str,
-) -> Result<usize, ToolError> {
+) -> Result<usize, GithubError> {
     let trust = Trust::new(config);
-    let prs = list_bot_prs(gh).await?;
+    let prs = list_bot_prs(client, bot_login).await?;
     let mut count = 0;
 
     for pr in &prs {
-        let nwo = &pr.repository.name_with_owner;
+        let Some(nwo) = pr.nwo() else {
+            warn!(
+                number = pr.number,
+                "Skipping PR with unparseable repository URL"
+            );
+            continue;
+        };
 
-        let view = fetch_pr_view(gh, nwo, pr.number).await?;
-        let diff_comments = fetch_diff_comments(gh, nwo, pr.number).await?;
+        let feedback = fetch_pr_feedback(client, &nwo, pr.number).await?;
+        let diff_comments = client.pull_comments(&nwo, pr.number).await?;
 
-        for review in &view.reviews {
-            if review.author.login == bot_login {
+        for review in &feedback.reviews {
+            if review.user.login == bot_login {
                 continue;
             }
-            if review.submitted_at.as_str() <= last_poll {
+            // Absent on pending reviews, which are invisible drafts.
+            let Some(submitted_at) = review.submitted_at.as_deref() else {
+                continue;
+            };
+            if submitted_at <= last_poll {
                 continue;
             }
-            if !trust.allows(&review.author.login) {
+            if !trust.allows(&review.user.login) {
                 warn!(
-                    author = %review.author.login,
+                    author = %review.user.login,
                     "Skipping review from untrusted user"
                 );
                 continue;
@@ -289,24 +224,24 @@ async fn feedback_pass(
             send(
                 handle,
                 pr.number,
-                nwo,
+                &nwo,
                 GitHubRole::Author,
-                format_review(pr, nwo, review),
+                format_review(pr, &nwo, review),
             )
             .await;
             count += 1;
         }
 
-        for comment in &view.comments {
-            if comment.author.login == bot_login {
+        for comment in &feedback.comments {
+            if comment.user.login == bot_login {
                 continue;
             }
             if comment.created_at.as_str() <= last_poll {
                 continue;
             }
-            if !trust.allows(&comment.author.login) {
+            if !trust.allows(&comment.user.login) {
                 warn!(
-                    author = %comment.author.login,
+                    author = %comment.user.login,
                     "Skipping comment from untrusted user"
                 );
                 continue;
@@ -314,9 +249,9 @@ async fn feedback_pass(
             send(
                 handle,
                 pr.number,
-                nwo,
+                &nwo,
                 GitHubRole::Author,
-                format_comment(pr, nwo, comment),
+                format_comment(pr, &nwo, comment),
             )
             .await;
             count += 1;
@@ -339,9 +274,9 @@ async fn feedback_pass(
             send(
                 handle,
                 pr.number,
-                nwo,
+                &nwo,
                 GitHubRole::Author,
-                format_diff_comment(pr, nwo, dc),
+                format_diff_comment(pr, &nwo, dc),
             )
             .await;
             count += 1;
@@ -360,21 +295,27 @@ async fn feedback_pass(
 /// *before* the turn runs, so a failed turn does not re-trigger every
 /// tick. Re-reviews on later pushes are the tracked pass's job.
 async fn review_request_pass(
-    gh: &GhCli,
+    client: &GithubClient,
     git: &GitCli,
     config: &GithubConfig,
     handle: &AgentHandle,
     bot_login: &str,
     state: &mut PollState,
     state_db: &StateDb,
-) -> Result<usize, ToolError> {
-    let prs = list_review_requested_prs(gh).await?;
+) -> Result<usize, GithubError> {
+    let prs = list_review_requested_prs(client, bot_login).await?;
 
     let mut candidates = Vec::new();
     for pr in prs {
-        let nwo = pr.repository.name_with_owner.clone();
-        match fetch_review_view(gh, &nwo, pr.number).await {
-            Ok(view) => candidates.push(ReviewCandidate { pr, view }),
+        let Some(nwo) = pr.nwo() else {
+            warn!(
+                number = pr.number,
+                "Skipping PR with unparseable repository URL"
+            );
+            continue;
+        };
+        match fetch_review_view(client, &nwo, pr.number).await {
+            Ok(view) => candidates.push(ReviewCandidate { pr, nwo, view }),
             Err(e) => {
                 warn!(
                     pr = %format!("{nwo}#{}", pr.number),
@@ -417,7 +358,7 @@ async fn review_request_pass(
 /// single combined turn. Closed and merged PRs are pruned. Infallible:
 /// per-PR fetch failures skip that PR for the tick.
 async fn tracked_pass(
-    gh: &GhCli,
+    client: &GithubClient,
     git: &GitCli,
     config: &GithubConfig,
     handle: &AgentHandle,
@@ -433,14 +374,14 @@ async fn tracked_pass(
             corrupt_keys.push(key.clone());
             continue;
         };
-        let view = match fetch_tracked_pr(gh, nwo, pr_number).await {
+        let view = match fetch_tracked_pr(client, nwo, pr_number).await {
             Ok(view) => view,
             Err(e) => {
                 warn!(pr = %key, "Skipping tracked PR this tick, fetch failed: {e}");
                 continue;
             }
         };
-        let diff_comments = match fetch_diff_comments(gh, nwo, pr_number).await {
+        let diff_comments = match client.pull_comments(nwo, pr_number).await {
             Ok(dcs) => dcs,
             Err(e) => {
                 warn!(pr = %key, "Skipping tracked PR this tick, diff comment fetch failed: {e}");
@@ -580,16 +521,16 @@ fn decide_review_requests(
     let mut dispatches = Vec::new();
     for candidate in candidates {
         let pr = &candidate.pr;
-        let nwo = &pr.repository.name_with_owner;
+        let nwo = &candidate.nwo;
         let key = format!("{nwo}#{}", pr.number);
 
-        if pr.author.login == bot_login {
+        if pr.user.login == bot_login {
             continue;
         }
-        if !trust.allows(&pr.author.login) {
+        if !trust.allows(&pr.user.login) {
             warn!(
                 pr = %key,
-                author = %pr.author.login,
+                author = %pr.user.login,
                 "Skipping review request on PR from untrusted author"
             );
             continue;
@@ -607,10 +548,10 @@ fn decide_review_requests(
 
         dispatches.push(ReviewDispatch {
             key,
-            head_sha: candidate.view.head_ref_oid.clone(),
+            head_sha: candidate.view.head_sha.clone(),
             pr_number: pr.number,
             repo: nwo.clone(),
-            base: candidate.view.base_ref_name.clone(),
+            base: candidate.view.base_ref.clone(),
             message: format_review_request(pr, nwo, &candidate.view, &checkout),
         });
     }
@@ -634,7 +575,7 @@ fn decide_tracked(
     let mut prunes = Vec::new();
 
     for s in snapshots {
-        if s.view.state != "OPEN" {
+        if s.view.state != "open" {
             info!(pr = %s.key, state = %s.view.state, "Pruning closed tracked PR");
             prunes.push(s.key.clone());
             continue;
@@ -643,7 +584,7 @@ fn decide_tracked(
             continue;
         };
 
-        let pushed = &s.view.head_ref_oid != prev_sha;
+        let pushed = &s.view.head_sha != prev_sha;
         let comments = tracked_comments(s, bot_login, trust, last_poll);
         if !pushed && comments.is_empty() {
             continue;
@@ -658,10 +599,10 @@ fn decide_tracked(
 
         dispatches.push(ReviewDispatch {
             key: s.key.clone(),
-            head_sha: s.view.head_ref_oid.clone(),
+            head_sha: s.view.head_sha.clone(),
             pr_number: s.pr_number,
             repo: s.nwo.clone(),
-            base: s.view.base_ref_name.clone(),
+            base: s.view.base_ref.clone(),
             message: format_tracked_turn(
                 s,
                 pushed.then_some(prev_sha.as_str()),
@@ -684,13 +625,13 @@ fn tracked_comments(
 ) -> Vec<String> {
     let mut items = Vec::new();
     for c in &s.view.comments {
-        if c.author.login == bot_login
+        if c.user.login == bot_login
             || c.created_at.as_str() <= last_poll
-            || !trust.allows(&c.author.login)
+            || !trust.allows(&c.user.login)
         {
             continue;
         }
-        items.push(format!("Comment by @{}:\n{}", c.author.login, c.body));
+        items.push(format!("Comment by @{}:\n{}", c.user.login, c.body));
     }
     for dc in &s.diff_comments {
         if dc.user.login == bot_login
@@ -711,143 +652,97 @@ fn tracked_comments(
 }
 
 // ---------------------------------------------------------------------------
-// gh CLI calls
+// REST calls
 // ---------------------------------------------------------------------------
 
-async fn resolve_bot_login(gh: &GhCli) -> Result<String, ToolError> {
-    let call = gh.prepare_gh(&["api", "user"], gh.workspace_root());
-    let user: GhUser = gh.exec_parse(&call).await?;
-    Ok(user.login)
+async fn resolve_bot_login(client: &GithubClient) -> Result<String, GithubError> {
+    Ok(client.user().await?.login)
 }
 
-async fn list_bot_prs(gh: &GhCli) -> Result<Vec<SearchResult>, ToolError> {
-    let call = gh.prepare_gh(
-        &[
-            "search",
-            "prs",
-            "--author=@me",
-            "--state=open",
-            "--json",
-            "number,title,repository",
-        ],
-        gh.workspace_root(),
-    );
-    gh.exec_parse(&call).await
+async fn list_bot_prs(client: &GithubClient, login: &str) -> Result<Vec<SearchIssue>, GithubError> {
+    client
+        .search_prs(&format!("is:pr is:open author:{login}"))
+        .await
 }
 
-async fn fetch_pr_view(gh: &GhCli, nwo: &str, pr_number: u32) -> Result<PrViewResponse, ToolError> {
-    let number = pr_number.to_string();
-    let repo_flag = format!("-R{nwo}");
-    let call = gh.prepare_gh(
-        &[
-            "pr",
-            "view",
-            &number,
-            &repo_flag,
-            "--json",
-            "reviews,comments",
-        ],
-        gh.workspace_root(),
-    );
-    gh.exec_parse(&call).await
+async fn list_review_requested_prs(
+    client: &GithubClient,
+    login: &str,
+) -> Result<Vec<SearchIssue>, GithubError> {
+    client
+        .search_prs(&format!("is:pr is:open review-requested:{login}"))
+        .await
 }
 
-async fn list_review_requested_prs(gh: &GhCli) -> Result<Vec<ReviewRequestPr>, ToolError> {
-    let call = gh.prepare_gh(
-        &[
-            "search",
-            "prs",
-            "--review-requested=@me",
-            "--state=open",
-            "--json",
-            "number,title,repository,author,body",
-        ],
-        gh.workspace_root(),
-    );
-    gh.exec_parse(&call).await
+async fn fetch_pr_feedback(
+    client: &GithubClient,
+    nwo: &str,
+    pr_number: u32,
+) -> Result<PrFeedback, GithubError> {
+    Ok(PrFeedback {
+        reviews: client.pull_reviews(nwo, pr_number).await?,
+        comments: client.issue_comments(nwo, pr_number).await?,
+    })
 }
 
 async fn fetch_review_view(
-    gh: &GhCli,
+    client: &GithubClient,
     nwo: &str,
     pr_number: u32,
-) -> Result<ReviewPrView, ToolError> {
-    let number = pr_number.to_string();
-    let repo_flag = format!("-R{nwo}");
-    let call = gh.prepare_gh(
-        &[
-            "pr",
-            "view",
-            &number,
-            &repo_flag,
-            "--json",
-            "headRefOid,baseRefName,commits,files",
-        ],
-        gh.workspace_root(),
-    );
-    gh.exec_parse(&call).await
+) -> Result<ReviewPrView, GithubError> {
+    let pull = client.pull(nwo, pr_number).await?;
+    Ok(ReviewPrView {
+        head_sha: pull.head.sha,
+        base_ref: pull.base.ref_name,
+        commits: client.pull_commits(nwo, pr_number).await?,
+        files: client.pull_files(nwo, pr_number).await?,
+    })
 }
 
 async fn fetch_tracked_pr(
-    gh: &GhCli,
+    client: &GithubClient,
     nwo: &str,
     pr_number: u32,
-) -> Result<TrackedPrView, ToolError> {
-    let number = pr_number.to_string();
-    let repo_flag = format!("-R{nwo}");
-    let call = gh.prepare_gh(
-        &[
-            "pr",
-            "view",
-            &number,
-            &repo_flag,
-            "--json",
-            "state,title,headRefOid,baseRefName,comments",
-        ],
-        gh.workspace_root(),
-    );
-    gh.exec_parse(&call).await
-}
-
-async fn fetch_diff_comments(
-    gh: &GhCli,
-    nwo: &str,
-    pr_number: u32,
-) -> Result<Vec<DiffComment>, ToolError> {
-    let endpoint = format!("repos/{nwo}/pulls/{pr_number}/comments");
-    let call = gh.prepare_gh(&["api", &endpoint], gh.workspace_root());
-    gh.exec_parse(&call).await
+) -> Result<TrackedPrView, GithubError> {
+    let pull = client.pull(nwo, pr_number).await?;
+    Ok(TrackedPrView {
+        state: pull.state,
+        title: pull.title,
+        head_sha: pull.head.sha,
+        base_ref: pull.base.ref_name,
+        comments: client.issue_comments(nwo, pr_number).await?,
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
 
-fn format_review(pr: &SearchResult, nwo: &str, review: &Review) -> String {
+fn format_review(pr: &SearchIssue, nwo: &str, review: &PrReview) -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
         "Review on PR #{} \"{}\" ({nwo}) by @{}: {}",
-        pr.number, pr.title, review.author.login, review.state,
+        pr.number, pr.title, review.user.login, review.state,
     );
-    if !review.body.is_empty() {
-        let _ = writeln!(s, "\n{}", review.body);
+    if let Some(body) = review.body.as_deref().filter(|b| !b.is_empty()) {
+        let _ = writeln!(s, "\n{body}");
     }
     s
 }
 
-fn format_comment(pr: &SearchResult, nwo: &str, comment: &PrComment) -> String {
+fn format_comment(pr: &SearchIssue, nwo: &str, comment: &IssueComment) -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
         "Comment on PR #{} \"{}\" ({nwo}) by @{}:",
-        pr.number, pr.title, comment.author.login,
+        pr.number, pr.title, comment.user.login,
     );
     let _ = writeln!(s, "\n{}", comment.body);
     s
 }
 
-fn format_diff_comment(pr: &SearchResult, nwo: &str, dc: &DiffComment) -> String {
+fn format_diff_comment(pr: &SearchIssue, nwo: &str, dc: &DiffComment) -> String {
     let location = dc
         .line
         .map_or(dc.path.clone(), |l| format!("{}:{l}", dc.path));
@@ -861,8 +756,13 @@ fn format_diff_comment(pr: &SearchResult, nwo: &str, dc: &DiffComment) -> String
     s
 }
 
+/// Split a full commit message into (headline, body).
+fn split_message(message: &str) -> (&str, &str) {
+    message.split_once('\n').unwrap_or((message, ""))
+}
+
 fn format_review_request(
-    pr: &ReviewRequestPr,
+    pr: &SearchIssue,
     nwo: &str,
     view: &ReviewPrView,
     checkout: &str,
@@ -872,26 +772,27 @@ fn format_review_request(
     let _ = writeln!(
         s,
         "Your review was requested on PR #{n} \"{}\" ({nwo}) by author @{}.",
-        pr.title, pr.author.login,
+        pr.title, pr.user.login,
     );
-    if !pr.body.is_empty() {
-        let _ = writeln!(s, "\nPR description:\n{}", pr.body);
+    if let Some(body) = pr.body.as_deref().filter(|b| !b.is_empty()) {
+        let _ = writeln!(s, "\nPR description:\n{body}");
     }
-    let base = &view.base_ref_name;
-    let head = &view.head_ref_oid;
+    let base = &view.base_ref;
+    let head = &view.head_sha;
     let _ = writeln!(s, "\nBase branch: {base}");
     if !view.files.is_empty() {
         let _ = writeln!(s, "\nChanged files:");
         for f in &view.files {
-            let _ = writeln!(s, "- {} (+{} -{})", f.path, f.additions, f.deletions);
+            let _ = writeln!(s, "- {} (+{} -{})", f.filename, f.additions, f.deletions);
         }
     }
     if !view.commits.is_empty() {
         let _ = writeln!(s, "\nCommits:");
         for c in &view.commits {
-            let short = c.oid.get(..10).unwrap_or(&c.oid);
-            let _ = writeln!(s, "\n{short} {}", c.message_headline);
-            let body = c.message_body.trim();
+            let short = c.sha.get(..10).unwrap_or(&c.sha);
+            let (headline, body) = split_message(&c.commit.message);
+            let _ = writeln!(s, "\n{short} {headline}");
+            let body = body.trim();
             if !body.is_empty() {
                 let _ = writeln!(s, "\n{body}");
             }
@@ -917,7 +818,7 @@ fn format_tracked_turn(
 ) -> String {
     let n = s.pr_number;
     let nwo = &s.nwo;
-    let head = &s.view.head_ref_oid;
+    let head = &s.view.head_sha;
     let mut msg = String::new();
 
     if let Some(prev) = prev_sha {
@@ -991,23 +892,32 @@ fn save_state(db: &StateDb, state: &PollState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::github::{CommitDetail, UserRef};
+
+    fn user(login: &str) -> UserRef {
+        UserRef {
+            login: login.to_string(),
+        }
+    }
+
+    fn search_issue(number: u32, title: &str, nwo: &str, author: &str) -> SearchIssue {
+        SearchIssue {
+            number,
+            title: title.to_string(),
+            body: None,
+            user: user(author),
+            repository_url: format!("https://api.github.com/repos/{nwo}"),
+        }
+    }
 
     #[test]
     fn format_review_approved() {
-        let pr = SearchResult {
-            number: 5,
-            title: "Add feature".to_string(),
-            repository: Repository {
-                name_with_owner: "owner/repo".to_string(),
-            },
-        };
-        let review = Review {
-            author: Author {
-                login: "alice".to_string(),
-            },
-            body: "Looks good!".to_string(),
+        let pr = search_issue(5, "Add feature", "owner/repo", "bot");
+        let review = PrReview {
+            user: user("alice"),
+            body: Some("Looks good!".to_string()),
             state: "APPROVED".to_string(),
-            submitted_at: "2025-01-15T10:00:00Z".to_string(),
+            submitted_at: Some("2025-01-15T10:00:00Z".to_string()),
         };
         let result = format_review(&pr, "owner/repo", &review);
         assert_eq!(
@@ -1018,20 +928,12 @@ mod tests {
 
     #[test]
     fn format_review_empty_body() {
-        let pr = SearchResult {
-            number: 3,
-            title: "Fix bug".to_string(),
-            repository: Repository {
-                name_with_owner: "o/r".to_string(),
-            },
-        };
-        let review = Review {
-            author: Author {
-                login: "bob".to_string(),
-            },
-            body: String::new(),
+        let pr = search_issue(3, "Fix bug", "o/r", "bot");
+        let review = PrReview {
+            user: user("bob"),
+            body: None,
             state: "CHANGES_REQUESTED".to_string(),
-            submitted_at: "2025-01-15T10:00:00Z".to_string(),
+            submitted_at: Some("2025-01-15T10:00:00Z".to_string()),
         };
         let result = format_review(&pr, "o/r", &review);
         assert_eq!(
@@ -1042,17 +944,9 @@ mod tests {
 
     #[test]
     fn format_comment_basic() {
-        let pr = SearchResult {
-            number: 7,
-            title: "Update docs".to_string(),
-            repository: Repository {
-                name_with_owner: "owner/repo".to_string(),
-            },
-        };
-        let comment = PrComment {
-            author: Author {
-                login: "carol".to_string(),
-            },
+        let pr = search_issue(7, "Update docs", "owner/repo", "bot");
+        let comment = IssueComment {
+            user: user("carol"),
             body: "What about edge cases?".to_string(),
             created_at: "2025-01-15T11:00:00Z".to_string(),
         };
@@ -1065,21 +959,13 @@ mod tests {
 
     #[test]
     fn format_diff_comment_with_line() {
-        let pr = SearchResult {
-            number: 2,
-            title: "Refactor".to_string(),
-            repository: Repository {
-                name_with_owner: "o/r".to_string(),
-            },
-        };
+        let pr = search_issue(2, "Refactor", "o/r", "bot");
         let dc = DiffComment {
             id: 1,
             path: "src/main.rs".to_string(),
             line: Some(42),
             body: "Nit: rename this".to_string(),
-            user: Author {
-                login: "dave".to_string(),
-            },
+            user: user("dave"),
             created_at: "2025-01-15T12:00:00Z".to_string(),
         };
         let result = format_diff_comment(&pr, "o/r", &dc);
@@ -1091,21 +977,13 @@ mod tests {
 
     #[test]
     fn format_diff_comment_no_line() {
-        let pr = SearchResult {
-            number: 2,
-            title: "Refactor".to_string(),
-            repository: Repository {
-                name_with_owner: "o/r".to_string(),
-            },
-        };
+        let pr = search_issue(2, "Refactor", "o/r", "bot");
         let dc = DiffComment {
             id: 2,
             path: "src/lib.rs".to_string(),
             line: None,
             body: "Outdated".to_string(),
-            user: Author {
-                login: "eve".to_string(),
-            },
+            user: user("eve"),
             created_at: "2025-01-15T12:00:00Z".to_string(),
         };
         let result = format_diff_comment(&pr, "o/r", &dc);
@@ -1162,28 +1040,23 @@ mod tests {
     }
 
     fn candidate(nwo: &str, number: u32, author: &str, sha: &str) -> ReviewCandidate {
+        let mut pr = search_issue(number, "Add feature", nwo, author);
+        pr.body = Some("Please take a look.".to_string());
         ReviewCandidate {
-            pr: ReviewRequestPr {
-                number,
-                title: "Add feature".to_string(),
-                repository: Repository {
-                    name_with_owner: nwo.to_string(),
-                },
-                author: Author {
-                    login: author.to_string(),
-                },
-                body: "Please take a look.".to_string(),
-            },
+            pr,
+            nwo: nwo.to_string(),
             view: ReviewPrView {
-                head_ref_oid: sha.to_string(),
-                base_ref_name: "main".to_string(),
-                commits: vec![Commit {
-                    oid: "abc1234567890".to_string(),
-                    message_headline: "Fix the frobnicator".to_string(),
-                    message_body: "It was broken because of reasons.".to_string(),
+                head_sha: sha.to_string(),
+                base_ref: "main".to_string(),
+                commits: vec![PrCommit {
+                    sha: "abc1234567890".to_string(),
+                    commit: CommitDetail {
+                        message: "Fix the frobnicator\n\nIt was broken because of reasons."
+                            .to_string(),
+                    },
                 }],
-                files: vec![ChangedFile {
-                    path: "src/frob.rs".to_string(),
+                files: vec![PrFile {
+                    filename: "src/frob.rs".to_string(),
                     additions: 10,
                     deletions: 2,
                 }],
@@ -1318,7 +1191,7 @@ mod tests {
     #[test]
     fn review_request_omits_empty_body() {
         let mut c = candidate("o/r", 3, "alice", "abc");
-        c.pr.body = String::new();
+        c.pr.body = None;
         let dispatches =
             decide_review_requests(&[c], &BTreeMap::new(), "bot", &trust("alice", &[], &[]));
         assert_eq!(dispatches.len(), 1);
@@ -1333,19 +1206,17 @@ mod tests {
             view: TrackedPrView {
                 state: state.to_string(),
                 title: "Add feature".to_string(),
-                head_ref_oid: head_sha.to_string(),
-                base_ref_name: "main".to_string(),
+                head_sha: head_sha.to_string(),
+                base_ref: "main".to_string(),
                 comments: Vec::new(),
             },
             diff_comments: Vec::new(),
         }
     }
 
-    fn pr_comment(author: &str, body: &str, created_at: &str) -> PrComment {
-        PrComment {
-            author: Author {
-                login: author.to_string(),
-            },
+    fn pr_comment(author: &str, body: &str, created_at: &str) -> IssueComment {
+        IssueComment {
+            user: user(author),
             body: body.to_string(),
             created_at: created_at.to_string(),
         }
@@ -1361,9 +1232,10 @@ mod tests {
 
     #[test]
     fn tracked_prunes_closed_and_merged() {
+        // Merged PRs are also `closed` in the REST API.
         let snapshots = vec![
-            snapshot("o/r", 1, "CLOSED", "abc"),
-            snapshot("o/r", 2, "MERGED", "abc"),
+            snapshot("o/r", 1, "closed", "abc"),
+            snapshot("o/r", 2, "closed", "abc"),
         ];
         let mut map = reviewed("o/r#1", "abc");
         map.insert("o/r#2".to_string(), "abc".to_string());
@@ -1381,7 +1253,7 @@ mod tests {
 
     #[test]
     fn tracked_unchanged_pr_is_quiet() {
-        let snapshots = vec![snapshot("o/r", 1, "OPEN", "abc")];
+        let snapshots = vec![snapshot("o/r", 1, "open", "abc")];
         let (dispatches, prunes) = decide_tracked(
             &snapshots,
             &reviewed("o/r#1", "abc"),
@@ -1395,7 +1267,7 @@ mod tests {
 
     #[test]
     fn tracked_new_sha_dispatches_incremental_re_review() {
-        let snapshots = vec![snapshot("o/r", 1, "OPEN", "new")];
+        let snapshots = vec![snapshot("o/r", 1, "open", "new")];
         let (dispatches, prunes) = decide_tracked(
             &snapshots,
             &reviewed("o/r#1", "old"),
@@ -1424,7 +1296,7 @@ mod tests {
 
     #[test]
     fn tracked_trusted_comment_dispatches_discussion() {
-        let mut s = snapshot("o/r", 1, "OPEN", "abc");
+        let mut s = snapshot("o/r", 1, "open", "abc");
         s.view
             .comments
             .push(pr_comment("alice", "Why not use a map here?", AFTER_POLL));
@@ -1433,9 +1305,7 @@ mod tests {
             path: "src/main.rs".to_string(),
             line: Some(42),
             body: "Off by one?".to_string(),
-            user: Author {
-                login: "alice".to_string(),
-            },
+            user: user("alice"),
             created_at: AFTER_POLL.to_string(),
         });
 
@@ -1467,7 +1337,7 @@ mod tests {
 
     #[test]
     fn tracked_push_and_comment_fold_into_one_turn() {
-        let mut s = snapshot("o/r", 1, "OPEN", "new");
+        let mut s = snapshot("o/r", 1, "open", "new");
         s.view
             .comments
             .push(pr_comment("alice", "Still broken?", AFTER_POLL));
@@ -1490,7 +1360,7 @@ mod tests {
 
     #[test]
     fn tracked_skips_invalid_repo_name() {
-        let snapshots = vec![snapshot("-flag/repo", 1, "OPEN", "new")];
+        let snapshots = vec![snapshot("-flag/repo", 1, "open", "new")];
         let (dispatches, prunes) = decide_tracked(
             &snapshots,
             &reviewed("-flag/repo#1", "old"),
@@ -1504,7 +1374,7 @@ mod tests {
 
     #[test]
     fn tracked_ignores_bot_old_and_untrusted_comments() {
-        let mut s = snapshot("o/r", 1, "OPEN", "abc");
+        let mut s = snapshot("o/r", 1, "open", "abc");
         s.view
             .comments
             .push(pr_comment("bot", "My own reply", AFTER_POLL));

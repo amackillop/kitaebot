@@ -222,6 +222,22 @@ pub enum TelegramError {
     Session(String),
 }
 
+/// GitHub REST API errors.
+#[derive(Clone, Debug, Error)]
+pub enum GithubError {
+    /// GitHub returned a non-2xx status.
+    #[error("GitHub API error ({status}): {body}")]
+    Api { status: u16, body: String },
+
+    /// Failed to deserialize a GitHub API response body.
+    #[error("Deserialize error: {0}")]
+    Deserialize(String),
+
+    /// HTTP request failed (timeout, DNS, connection reset, etc.).
+    #[error("Network error: {0}")]
+    Network(String),
+}
+
 /// Linear channel errors.
 #[derive(Clone, Debug, Error)]
 pub enum LinearError {

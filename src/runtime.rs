@@ -13,6 +13,7 @@ use tracing::error;
 use crate::channel::linear::LinearChannel;
 use crate::channel::telegram::TelegramChannel;
 use crate::clients::chat_completion::CompletionsClient;
+use crate::clients::github::GithubClient;
 use crate::clients::linear::LinearClient;
 use crate::clients::telegram::TelegramClient;
 use crate::config::Config;
@@ -56,7 +57,8 @@ pub struct Runtime {
     pub tools: Tools,
     pub telegram: Option<TelegramChannel>,
     pub notifier: Option<Arc<Notifier>>,
-    pub gh_cli: Option<GhCli>,
+    /// REST client for the GitHub channel; `Some` iff `github.enabled`.
+    pub github: Option<GithubClient>,
     /// Used by the GitHub channel to prepare review checkouts and by
     /// the duty scheduler to warm build caches.
     pub git_cli: Option<GitCli>,
@@ -68,7 +70,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     let warmer = Warmer::new(direnv_cache.clone());
     let mut tools = Tools::local(workspace, config, direnv_cache.clone());
 
-    let (gh_cli, git_cli) = build_git(config, workspace, &mut tools, &direnv_cache, &warmer);
+    let (github, git_cli) = build_git(config, workspace, &mut tools, &direnv_cache, &warmer);
 
     let linear = if config.linear.enabled {
         let client = LinearClient::new(secret("linear-api-key"), &config.linear.api_base);
@@ -115,20 +117,21 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         }),
         telegram,
         notifier,
-        gh_cli,
+        github,
         git_cli,
         linear,
     }
 }
 
-/// Git tools plus the two CLIs, when a GitHub token is configured.
+/// Git tools, the git CLI, and the GitHub REST client, when a GitHub
+/// token is configured.
 fn build_git(
     config: &Config,
     workspace: &Workspace,
     tools: &mut Vec<Arc<dyn Tool>>,
     direnv_cache: &DirenvCache,
     warmer: &Warmer,
-) -> (Option<GhCli>, Option<GitCli>) {
+) -> (Option<GithubClient>, Option<GitCli>) {
     if !(config.git.enabled || config.github.enabled) {
         return (None, None);
     }
@@ -143,8 +146,8 @@ fn build_git(
         ));
     }
     // Built whenever a token exists: the GitHub channel prepares
-    // review checkouts with it (gated on github.enabled in the
-    // daemon) and the duty scheduler warms build caches with it.
+    // review checkouts with it (gated on github.enabled) and the
+    // duty scheduler warms build caches with it.
     let git_cli = GitCli::new(
         token.clone(),
         workspace.path(),
@@ -152,9 +155,11 @@ fn build_git(
         config.git.trusted_repos(),
     )
     .with_warm(warmer.clone(), Arc::new(config.git.warm_commands()));
-    let gh = GhCli::new(token, workspace.path());
-    if config.github.enabled {
-        tools.extend(github::build(gh.clone()));
-    }
-    (Some(gh), Some(git_cli))
+    let github_client = if config.github.enabled {
+        tools.extend(github::build(GhCli::new(token.clone(), workspace.path())));
+        Some(GithubClient::new(token, &config.github.api_base))
+    } else {
+        None
+    };
+    (github_client, Some(git_cli))
 }

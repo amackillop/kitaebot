@@ -23,11 +23,11 @@ use crate::channel::github;
 use crate::channel::linear::{self, LinearChannel};
 use crate::channel::socket;
 use crate::channel::telegram::{self, TelegramChannel};
+use crate::clients::github::GithubClient;
 use crate::config::GithubConfig;
 use crate::duty::{self, Duty};
 use crate::state_db::StateDb;
 use crate::tools::git::GitCli;
-use crate::tools::github::GhCli;
 use crate::workspace::Workspace;
 
 /// Production entry point — runs until SIGINT or SIGTERM.
@@ -38,7 +38,7 @@ pub async fn run(
     handle: &AgentHandle,
     duties: Vec<Duty>,
     telegram: Option<&TelegramChannel>,
-    gh_cli: Option<&GhCli>,
+    github_client: Option<&GithubClient>,
     git_cli: Option<&GitCli>,
     github: &GithubConfig,
     linear: Option<&LinearChannel>,
@@ -50,7 +50,7 @@ pub async fn run(
         handle,
         duties,
         telegram,
-        gh_cli,
+        github_client,
         git_cli,
         github,
         linear,
@@ -69,7 +69,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     handle: &AgentHandle,
     duties: Vec<Duty>,
     telegram: Option<&TelegramChannel>,
-    gh_cli: Option<&GhCli>,
+    github_client: Option<&GithubClient>,
     git_cli: Option<&GitCli>,
     github: &GithubConfig,
     linear: Option<&LinearChannel>,
@@ -92,12 +92,11 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     };
 
     let github_loop = async {
-        // gh_cli is also Some when only the git tools are enabled;
-        // the channel itself is gated on `github.enabled`. git_cli is
-        // Some exactly when `github.enabled`.
-        match gh_cli.filter(|_| github.enabled).zip(git_cli) {
-            Some((gh, git)) => {
-                github::poll_loop(gh, git, github, handle, state_db).await;
+        // The REST client is built iff `github.enabled`; the filter
+        // guards against a future caller wiring it unconditionally.
+        match github_client.filter(|_| github.enabled).zip(git_cli) {
+            Some((client, git)) => {
+                github::poll_loop(client, git, github, handle, state_db).await;
             }
             None => std::future::pending().await,
         }

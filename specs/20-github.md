@@ -26,9 +26,10 @@ the channel.
 `tokio::time::interval` with `MissedTickBehavior::Skip`. Each tick runs
 both queries:
 
-1. **Own PRs**: `gh search prs --author=@me --state=open`, then per PR
-   fetch reviews, comments, and inline diff comments.
-2. **Review requests**: `gh search prs --review-requested=@me --state=open`.
+1. **Own PRs**: `GET /search/issues` with `is:pr is:open author:{bot}`,
+   then per PR fetch reviews, comments, and inline diff comments.
+2. **Review requests**: `GET /search/issues` with
+   `is:pr is:open review-requested:{bot}`.
 3. **Tracked reviewed PRs**: for each PR in the `reviewed`
    map, fetch state, head SHA, and new comments. Closed/merged PRs are
    pruned; a new head SHA triggers an incremental re-review; new trusted
@@ -143,7 +144,7 @@ value as a flag.
 
 ### Bot identity
 
-Resolved on startup via `gh api user`. All reviews/comments authored by
+Resolved on startup via `GET /user`. All reviews/comments authored by
 this login are skipped to prevent self-reply loops; PRs authored by this
 login are excluded from the review-request path (GitHub rejects
 self-reviews anyway).
@@ -164,9 +165,10 @@ and skipped.
 
 ### Feedback on own PRs
 
-For each of the bot's open PRs, fetch reviews and comments
-(`gh pr view --json reviews,comments`) and inline diff comments
-(`gh api repos/{nwo}/pulls/{n}/comments`). Skip the bot's own items,
+For each of the bot's open PRs, fetch reviews
+(`/repos/{nwo}/pulls/{n}/reviews`), conversation comments
+(`/repos/{nwo}/issues/{n}/comments`), and inline diff comments
+(`/repos/{nwo}/pulls/{n}/comments`). Skip the bot's own items,
 items older than `last_poll`, and untrusted authors. Message formats:
 
 - Review: `Review on PR #5 "Title" (owner/repo) by @alice: APPROVED\n\nBody`
@@ -186,10 +188,12 @@ Each PR from the review-request query is a review candidate, filtered:
 The dispatched message carries PR number, title, repo, author, and
 body, plus mechanically fetched context and an instruction block. The
 context — base branch, changed-file list with add/del counts, and full
-commit messages (headline and body) — comes from the same `gh pr view`
-call that resolves the head SHA, so it costs no extra request and
-matches the SHA recorded in `reviewed` exactly: the review cannot race
-a push and judge commits it was not dispatched for. Commit messages
+commit messages (headline and body) — is fetched in the same tick as
+the head SHA (`/pulls/{n}` plus its `/commits` and `/files`
+sub-resources). A push landing between those calls can list commits
+newer than the recorded SHA; the checkout is still prepared at the
+recorded SHA, and the tracked pass re-reviews the new head on the next
+tick, so the race heals itself. Commit messages
 are required reading for every review (they carry the rationale the
 code is checked against), so the harness supplies them instead of
 prompting the model to fetch them. The diff is deliberately NOT
@@ -371,6 +375,7 @@ The `github_poll` document in the state database (spec 05):
 |------------|---------|-------------|
 | `github.enabled` | `false` | Enable the GitHub channel |
 | `github.poll_interval_secs` | `300` | Seconds between poll cycles |
+| `github.api_base` | `https://api.github.com` | REST API base URL; tests point it at a loopback fixture server |
 | `github.owner` | — | Bot owner's GitHub username (required when enabled) |
 | `github.trusted_users` | `[]` | Additional trusted GitHub usernames |
 | `github.trusted_bots` | `[]` | Bot app logins whose PR feedback to act on |

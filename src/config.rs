@@ -464,6 +464,9 @@ impl GitConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GithubConfig {
+    /// Base URL of the GitHub REST API. Tests point this at a local
+    /// fixture server; `mock-network` builds refuse non-loopback hosts.
+    pub api_base: String,
     /// Enable the GitHub integration. Defaults to `false` so the daemon
     /// can start without a GitHub token.
     pub enabled: bool,
@@ -617,6 +620,7 @@ impl Default for ExecConfig {
 impl Default for GithubConfig {
     fn default() -> Self {
         Self {
+            api_base: "https://api.github.com".into(),
             enabled: false,
             poll_interval_secs: 300,
             owner: String::new(),

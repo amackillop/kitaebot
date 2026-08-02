@@ -1,4 +1,5 @@
 pub mod chat_completion;
+pub mod github;
 pub mod linear;
 pub mod telegram;
 
