@@ -144,12 +144,10 @@ kitaebot = {
     diskSize = 20480;
   };  # QEMU resources (MB)
 
-  tools = with pkgs; [                           # Packages on the exec tool's PATH
-    coreutils
-    curl
-    findutils
-    git
-    gnugrep
+  tools = with pkgs; [                           # Extra packages on the exec tool's PATH
+    curl                                         # (bash, coreutils, direnv, git, and nix
+    findutils                                    #  are always present: the daemon spawns
+    gnugrep                                      #  them itself)
     gnused
     which
   ];

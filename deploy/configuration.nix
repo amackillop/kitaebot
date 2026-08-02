@@ -24,17 +24,12 @@ in
     secretsDir = "/mnt/kitaebot-secrets";
     logLevel = "kitaebot=debug";
     tools = with pkgs; [
-      bash
-      coreutils
-      direnv
+      curl
       findutils
       gnugrep
       gnused
-      curl
-      git
       which
       lightpanda
-      nix
       # MCP servers (spec 22): spawned by the daemon, resolved via PATH.
       bkb-mcp
     ];

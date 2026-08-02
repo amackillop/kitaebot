@@ -29,7 +29,21 @@ let
   format = pkgs.formats.toml { };
   cfg = config.kitaebot;
   configFile = format.generate "config.toml" cfg.settings;
-  toolPath = lib.makeBinPath cfg.tools;
+
+  # Binaries the daemon itself spawns: bash (exec interpreter, build
+  # warm), git (checkouts, clones, ls-remote), direnv (devshell
+  # cache), nix (direnv `use flake`), and coreutils for the scripts
+  # those run. Always on the service PATH — `tools` is for extras the
+  # model uses through exec, and forgetting a runtime dependency there
+  # must not be possible.
+  runtimeTools = with pkgs; [
+    bash
+    coreutils
+    direnv
+    git
+    nix
+  ];
+  toolPath = lib.makeBinPath (runtimeTools ++ cfg.tools);
 
   # Static UID so nftables rules can reference it at load time without
   # depending on user-creation ordering.
@@ -117,8 +131,8 @@ in
     tools = lib.mkOption {
       type = lib.types.listOf lib.types.package;
       default = [ ];
-      description = "Packages whose bin/ directories are available to the exec tool";
-      example = lib.literalExpression "[ pkgs.coreutils pkgs.git pkgs.curl ]";
+      description = "Extra packages on the exec tool's PATH, beyond the daemon's own runtime dependencies (bash, coreutils, direnv, git, nix)";
+      example = lib.literalExpression "[ pkgs.curl pkgs.gnugrep ]";
     };
 
     gitConfig = lib.mkOption {
