@@ -12,7 +12,8 @@ base branch, changed files, and commit messages.
 The PR head is already checked out at the path the dispatch names,
 detached at the recorded SHA, with the base branch fetched. This
 checkout exists only for reviews: read with git (diff, log, show),
-but never switch branches, edit files, stash, or `gh pr checkout`.
+but never switch branches, edit files, stash, or re-point it at
+another ref.
 Your working checkout under `projects/` is not involved; leave it
 alone.
 
@@ -111,12 +112,12 @@ review the delta, not the whole PR:
   dispatch: `git -C reviews/<owner>/<repo> diff <prev>...HEAD >
   .diffs/pr-<n>-<head SHA>.diff`. Three dots, so a force push
   diffs from the merge base rather than producing nonsense. Fall back
-  to `gh pr diff <n> -R <nwo>` if it fails anyway.
+  to the full PR diff against `origin/<base>` if it fails anyway.
 - `git -C reviews/<owner>/<repo> log <prev>..HEAD` for the new commit
   messages. That one you do read: it is the delta's stated intent, and
   you pack it.
-- Recall your prior review; `gh pr view <n> -R <nwo> --json reviews`
-  recovers the submitted text if you no longer have the details.
+- Recall your prior review; `github_pr_reviews` recovers the
+  submitted text if you no longer have the details.
 - Dispatch the reviewer with the delta path, the substance of your
   prior review, and the question an initial review does not ask: does
   the delta address that feedback adequately, without introducing new
@@ -138,8 +139,8 @@ to each on the merits:
   defending a bad take.
 - Reply in the same thread: inline comments with the
   `github_pr_diff_reply` tool (comment IDs come from
-  `github_pr_diff_comments`), PR-level comments via
-  `gh pr comment <n> -R <nwo> --body <reply>`.
+  `github_pr_diff_comments`), PR-level comments via `github_api`
+  (POST `issues/<n>/comments`).
 - If a comment asks you to implement the fix, still never push.
   Reply in the inline thread with a ```suggestion block holding the
   replacement for the commented lines; the author commits it with one

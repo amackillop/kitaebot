@@ -252,6 +252,17 @@ impl GithubClient {
         Ok(jobs.jobs)
     }
 
+    /// Raw escape-hatch request. Returns the response unparsed so the
+    /// caller owns status interpretation.
+    pub async fn raw(
+        &self,
+        method: &'static str,
+        path: String,
+        body: Option<Vec<u8>>,
+    ) -> Result<RawResponse, GithubError> {
+        (self.request)(method, path, body).await
+    }
+
     /// Raw log text of a job. GitHub answers with a redirect to a
     /// blob URL, which reqwest follows.
     pub async fn job_logs(&self, nwo: &str, job_id: u64) -> Result<String, GithubError> {

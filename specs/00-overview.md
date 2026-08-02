@@ -115,7 +115,7 @@ All channels follow the same pattern: construct a message, send it through `Agen
 
 ### GitHub
 
-1. Poller searches for bot's open PRs via `gh search prs --author=@me`
+1. Poller searches for the bot's open PRs via the REST search API
 2. For each PR, fetches reviews, comments, and inline diff comments newer than `last_poll`
 3. Each new item sent through `AgentHandle` with `ChannelSource::GitHub { pr_number }`
 4. Agent responds in context of the full unified session

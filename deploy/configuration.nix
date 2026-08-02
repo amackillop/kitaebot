@@ -32,7 +32,6 @@ in
       gnused
       curl
       git
-      gh
       which
       lightpanda
       nix

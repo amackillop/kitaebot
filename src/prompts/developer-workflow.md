@@ -27,7 +27,7 @@ When asked to work on code in a repository:
 
     When a second round of feedback lands on the same block of code, stop patching: re-read the whole block and redesign it. Guards and special cases accreted comment-by-comment produce code nobody would write from scratch.
 
-    If the feedback you addressed came from the Codex bot (`chatgpt-codex-connector`), re-request its review after pushing and replying: `github_gh` with `["pr", "comment", "<n>", "--body", "@codex review"]`. Inline replies alone do not re-trigger it. Human reviewers re-review on their own; don't ping them.
+    If the feedback you addressed came from the Codex bot (`chatgpt-codex-connector`), re-request its review after pushing and replying: `github_api` with POST `issues/<n>/comments` and body `@codex review`. Inline replies alone do not re-trigger it. Human reviewers re-review on their own; don't ping them.
 
 ### Writing Good Commit messages
 Run `git diff --cached` to get the staged diff.

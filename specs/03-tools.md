@@ -115,8 +115,8 @@ Executes commands via `bash -c` within the workspace.
    (`~/.ssh/id_*`, `~/.aws/`), GPG keyring access, process control
    (`kill -9`), cron persistence, kernel modules, firewall manipulation,
    injection/escape (`LD_PRELOAD`, `nsenter`), credential probing
-   (`gh auth`, `~/.git-credentials`, `credential.helper=` injection), and
-   git/gh operations that must use dedicated tools.
+   (`~/.git-credentials`, `credential.helper=` injection), and git
+   operations that must use dedicated tools.
 
 2. **Shell-aware structural layer** — tokenizes with `shlex`, strips env var
    prefixes and path prefixes, matches binary+subcommand. Catches bypass
@@ -366,16 +366,18 @@ without `.git`.
 
 ### GitHub Tools
 
-Seven tools wrapping the `gh` CLI. Gated behind `github.enabled` in config
-(separate from `git.enabled`).
+Eight tools on the in-process REST client. Gated behind `github.enabled`
+in config (separate from `git.enabled`).
 
-`GhCli<R>` holds the GitHub PAT (injected as `GH_TOKEN` via process env) and
-workspace root.
+`GithubApi` pairs the client (which holds the PAT inside its IO closure)
+with workspace-relative repo-dir resolution: the `owner/repo` a tool acts
+on comes from the checkout's origin remote, so the model names a
+directory, never a repo.
 
 | Tool | Description |
 |------|-------------|
+| `github_api` | Generic REST escape hatch. Paths are forced under `repos/<owner>/<repo>/` and the first segment must be one of `issues`, `labels`, `milestones`, `pulls`, `releases`. |
 | `github_ci_status` | Check CI status for a git ref. |
-| `github_gh` | Generic `gh` CLI escape hatch. Subcommands allowlisted (`issue`, `pr`, `release`); `pr checkout` is blocked because it mutates the shared checkout. |
 | `github_pr_create` | Create a pull request. |
 | `github_pr_list` | List pull requests (open/closed/all). |
 | `github_pr_review_submit` | Submit a formal PR review (APPROVE or COMMENT) with inline comments. REQUEST_CHANGES is unrepresentable in the args. |

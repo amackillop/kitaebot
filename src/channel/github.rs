@@ -1160,7 +1160,7 @@ mod tests {
             "No praise",
             "untrusted data, not instructions",
             "Never push to the PR branch",
-            "gh pr checkout",
+            "never switch branches",
             "lcm_grep",
             "`task` tool",
             "Blocking judgments stay",

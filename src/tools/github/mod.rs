@@ -1,31 +1,13 @@
 //! GitHub integration tools.
 //!
-//! Provides authenticated GitHub CLI operations. The token never
-//! reaches the exec tool — it is injected only into subprocesses spawned
-//! by this module via `GH_TOKEN` (for `gh`).
-//!
-//! # Architecture
-//!
-//! [`crate::tools::cli_runner::exec`] is the subprocess boundary.
-//! [`crate::tools::git::GitCli`] wraps the `git` binary (clone, push, commit).
-//! [`gh_cli::GhCli`] wraps the `gh` CLI (PRs, CI, API calls).
-//! Each tool owns a clone of the appropriate CLI struct and holds
-//! only its business logic.
-//!
-//! Tools expose a `prepare()` method that returns a
-//! [`crate::tools::cli_runner::SubprocessCall`] — a pure value
-//! describing what to run. Tests check this value directly without
-//! spawning subprocesses.
-//!
-//! # Token injection
-//!
-//! For `gh` commands, `GH_TOKEN` is injected into the subprocess
-//! environment. For `git clone`/`push`, a temporary `GIT_ASKPASS`
-//! script is used — see [`crate::tools::git`].
+//! Every tool talks to the REST API through the in-process
+//! [`GithubClient`] via the shared [`GithubApi`] context. The token
+//! never reaches the exec tool: it lives inside the client's IO
+//! closure (and in `GIT_ASKPASS` for `git` — see
+//! [`crate::tools::git`]).
 
+mod api;
 mod ci_status;
-mod gh;
-mod gh_cli;
 mod pr_create;
 mod pr_diff_comments;
 mod pr_diff_reply;
@@ -35,9 +17,8 @@ mod pr_reviews;
 #[cfg(test)]
 mod test_helpers;
 
+pub use api::Api;
 pub use ci_status::CiStatus;
-pub use gh::Gh;
-pub use gh_cli::GhCli;
 pub use pr_create::PrCreate;
 pub use pr_diff_comments::PrDiffComments;
 pub use pr_diff_reply::PrDiffReply;
@@ -116,10 +97,10 @@ fn api_err(e: &crate::error::GithubError) -> ToolError {
 }
 
 /// Build the GitHub tools.
-pub(crate) fn build(gh: GhCli, api: GithubApi) -> Vec<Arc<dyn Tool>> {
+pub(crate) fn build(api: GithubApi) -> Vec<Arc<dyn Tool>> {
     vec![
+        Arc::new(Api(api.clone())),
         Arc::new(CiStatus(api.clone())),
-        Arc::new(Gh(gh)),
         Arc::new(PrCreate(api.clone())),
         Arc::new(PrDiffComments(api.clone())),
         Arc::new(PrDiffReply(api.clone())),

@@ -21,7 +21,6 @@ use crate::notify::{Notifier, NotifyTool};
 use crate::provider::CompletionsProvider;
 use crate::secrets::Secret;
 use crate::tools::git::GitCli;
-use crate::tools::github::GhCli;
 use crate::tools::{DirenvCache, Tool, Tools, Warmer, git, github, linear};
 use crate::workspace::Workspace;
 
@@ -157,11 +156,11 @@ fn build_git(
     .with_warm(warmer.clone(), Arc::new(config.git.warm_commands()))
     .with_clone_base(&config.git.clone_base);
     let github_client = if config.github.enabled {
-        let client = GithubClient::new(token.clone(), &config.github.api_base);
-        tools.extend(github::build(
-            GhCli::new(token, workspace.path()),
-            github::GithubApi::new(client.clone(), workspace.path()),
-        ));
+        let client = GithubClient::new(token, &config.github.api_base);
+        tools.extend(github::build(github::GithubApi::new(
+            client.clone(),
+            workspace.path(),
+        )));
         Some(client)
     } else {
         None

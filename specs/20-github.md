@@ -15,8 +15,8 @@ The GitHub channel connects the bot to pull requests in two directions:
    needed.
 
 Both directions share one poll loop, one identity, one trust list, and one
-state file. The GitHub *tools* (PR creation, CI status, the `gh` escape
-hatch) are part of the tool registry and stay in spec 03; this spec owns
+state file. The GitHub *tools* (PR creation, CI status, the `github_api`
+escape hatch) are part of the tool registry and stay in spec 03; this spec owns
 the channel.
 
 ## Behavior
@@ -65,7 +65,7 @@ since been taken over:
   `state/review-checklist.md` and the findings ledger, both
   session-independent.
 - **Prior-review recall** is authoritative on GitHub, not in a
-  session: `gh pr view --json reviews` is what was actually published,
+  session: `github_pr_reviews` returns what was actually published,
   where session history is what the bot believes it said after
   compaction.
 
@@ -135,8 +135,8 @@ PRs, push turns retry via the SHA delta; a comment-only turn is lost
 once `last_poll` advances — accepted, since prep failures on an
 established worktree are transient. First-use preparation is not in that
 class: it clones and registers a worktree, and can fail for reasons that
-persist across ticks (no disk, no network, a repo `gh` can reach but
-`git` cannot). Such a failure costs a comment turn per tick until it is
+persist across ticks (no disk, no network, a repo the API can reach
+but `git` cannot). Such a failure costs a comment turn per tick until it is
 fixed, and is loud in the log rather than silent. The head SHA
 must be a 40-char hex string and the base ref must not start with `-`;
 both come from the GitHub API, but git would parse an option-shaped
@@ -220,9 +220,8 @@ available, rather than in a root turn holding outward-facing tools.
 
 - The PR head is already checked out at `reviews/<owner>/<repo>`,
   detached at the recorded SHA with the base branch fetched (see
-  Review checkout). Read-only: git only to read; never
-  `gh pr checkout`. The working checkout under `projects/` is not
-  involved.
+  Review checkout). Read-only: git only to read; never a checkout
+  over it. The working checkout under `projects/` is not involved.
 - The root produces the diff by redirecting
   `git diff origin/<base>...HEAD` to a file under `.diffs/`,
   and packs its **path** into the reviewer dispatch together with the
