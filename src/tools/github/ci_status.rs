@@ -1,16 +1,15 @@
 //! `github_ci_status` tool — fetch the latest failed CI run and its logs.
 
+use std::fmt::Write;
 use std::future::Future;
 use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::gh_cli::GhCli;
-use super::types::WorkflowRun;
-use super::{Tool, ToolCtx};
+use super::{GithubApi, Tool, ToolCtx, api_err, current_branch};
+use crate::clients::github::WorkflowRun;
 use crate::error::ToolError;
-use crate::tools::cli_runner::{self, SubprocessCall};
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -21,7 +20,7 @@ struct Args {
     branch: Option<String>,
 }
 
-pub struct CiStatus(pub GhCli);
+pub struct CiStatus(pub GithubApi);
 
 impl Tool for CiStatus {
     fn name(&self) -> &'static str {
@@ -49,126 +48,74 @@ impl Tool for CiStatus {
     }
 }
 
-/// Get the current branch name from a git working directory.
-async fn current_branch(cwd: &std::path::Path) -> Result<String, ToolError> {
-    let env = crate::tools::safe_env().collect();
-    let call = SubprocessCall {
-        binary: "git",
-        args: vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
-        cwd: cwd.to_path_buf(),
-        env,
-        timeout_secs: None,
-        stdin: None,
-    };
-    let output = cli_runner::exec(&call).await?;
-    if output.exit_code != 0 {
-        return Err(ToolError::ExecutionFailed(format!(
-            "failed to get current branch: {}",
-            output.stderr
-        )));
-    }
-    Ok(output.stdout.trim().to_string())
-}
-
 impl CiStatus {
-    /// Build the command to list failed runs on a branch.
-    fn prepare_list_runs(&self, branch: &str, cwd: &std::path::Path) -> SubprocessCall {
-        self.0.prepare_gh(
-            &[
-                "run",
-                "list",
-                "--branch",
-                branch,
-                "--status",
-                "failure",
-                "--limit",
-                "1",
-                "--json",
-                "databaseId,displayTitle,createdAt,url,workflowName",
-            ],
-            cwd,
-        )
-    }
-
-    /// Build the command to fetch failed logs for a run.
-    fn prepare_view_logs(&self, run_id: &str, cwd: &std::path::Path) -> SubprocessCall {
-        self.0
-            .prepare_gh(&["run", "view", run_id, "--log-failed"], cwd)
-    }
-
-    /// Pure: format the final output.
-    fn format_output(run: &WorkflowRun, logs: &str) -> String {
-        format!(
-            "Run #{}: \"{}\" ({})\n\
-             Created: {}\n\
-             URL: {}\n\n\
-             ---\n\n\
-             {}",
-            run.database_id, run.display_title, run.workflow_name, run.created_at, run.url, logs
-        )
+    /// Pure: format the run header and per-job failure logs.
+    fn format_output(run: &WorkflowRun, logs: &[(String, String)]) -> String {
+        let mut out = format!(
+            "Run #{}: \"{}\" ({})\nCreated: {}\nURL: {}\n",
+            run.id, run.display_title, run.name, run.created_at, run.html_url
+        );
+        for (job, log) in logs {
+            let _ = write!(out, "\n--- job: {job} ---\n\n{log}");
+        }
+        out
     }
 
     async fn run(&self, repo_dir: &str, branch: Option<&str>) -> Result<String, ToolError> {
-        let cwd = self.0.resolve_repo_dir(repo_dir)?;
-
+        let dir = self.0.dir(repo_dir)?;
+        let nwo = self.0.nwo(repo_dir).await?;
         let branch_name = match branch {
             Some(b) => b.to_string(),
-            None => current_branch(&cwd).await?,
+            None => current_branch(&dir).await?,
         };
 
-        let list_call = self.prepare_list_runs(&branch_name, &cwd);
-        let runs: Vec<WorkflowRun> = self.0.exec_parse(&list_call).await?;
+        let client = self.0.client();
+        let run = client
+            .latest_failed_run(&nwo, &branch_name)
+            .await
+            .map_err(|e| api_err(&e))?
+            .ok_or_else(|| {
+                ToolError::ExecutionFailed(format!("no failed runs on branch `{branch_name}`"))
+            })?;
 
-        let run = runs.first().ok_or_else(|| {
-            ToolError::ExecutionFailed(format!("no failed runs on branch `{branch_name}`"))
-        })?;
+        // Whole-job logs, not gh's failed-steps slice: the extra lines
+        // carry the context around the failure anyway.
+        let jobs = client
+            .run_jobs(&nwo, run.id)
+            .await
+            .map_err(|e| api_err(&e))?;
+        let mut logs = Vec::new();
+        for job in jobs
+            .iter()
+            .filter(|j| j.conclusion.as_deref() == Some("failure"))
+        {
+            let log = client
+                .job_logs(&nwo, job.id)
+                .await
+                .map_err(|e| api_err(&e))?;
+            logs.push((job.name.clone(), log));
+        }
 
-        let id_str = run.database_id.to_string();
-        let logs_call = self.prepare_view_logs(&id_str, &cwd);
-        let logs = cli_runner::exec(&logs_call).await?.format()?;
-
-        Ok(Self::format_output(run, &logs))
+        Ok(Self::format_output(&run, &logs))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::WorkflowRun;
     use super::*;
-    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
-
-    #[test]
-    fn prepare_list_runs_command() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let tool = CiStatus(gh);
-        let call = tool.prepare_list_runs("main", &cwd);
-        assert_eq!(call.binary, "gh");
-        assert!(call.args.contains(&"main".to_string()));
-        assert!(call.args.contains(&"failure".to_string()));
-    }
-
-    #[test]
-    fn prepare_view_logs_command() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let cwd = gh.resolve_repo_dir(&repo).unwrap();
-        let tool = CiStatus(gh);
-        let call = tool.prepare_view_logs("9999", &cwd);
-        assert_eq!(call.binary, "gh");
-        assert!(call.args.contains(&"9999".to_string()));
-        assert!(call.args.contains(&"--log-failed".to_string()));
-    }
+    use crate::tools::github::test_helpers::stub_api_with_repo;
 
     #[test]
     fn formats_run_and_logs() {
         let run = WorkflowRun {
-            database_id: 9999,
+            id: 9999,
             display_title: "CI".to_string(),
+            name: "test".to_string(),
             created_at: "2025-01-15T10:00:00Z".to_string(),
-            url: "https://github.com/o/r/actions/runs/9999".to_string(),
-            workflow_name: "test".to_string(),
+            html_url: "https://github.com/o/r/actions/runs/9999".to_string(),
         };
-        let result = CiStatus::format_output(&run, "test-job  Step failed");
+        let logs = vec![("build".to_string(), "Step failed".to_string())];
+        let result = CiStatus::format_output(&run, &logs);
         assert_eq!(
             result,
             "\
@@ -176,9 +123,38 @@ Run #9999: \"CI\" (test)
 Created: 2025-01-15T10:00:00Z
 URL: https://github.com/o/r/actions/runs/9999
 
----
+--- job: build ---
 
-test-job  Step failed"
+Step failed"
         );
+    }
+
+    #[tokio::test]
+    async fn fetches_failed_jobs_logs_only() {
+        let api = stub_api_with_repo("owner/repo", |method, path, _body| {
+            assert_eq!(method, "GET");
+            if path.starts_with("repos/owner/repo/actions/runs?") {
+                assert!(path.contains("branch=work"));
+                assert!(path.contains("status=failure"));
+                return br#"{"workflow_runs":[{"id":7,"display_title":"CI",
+                    "name":"test","created_at":"2025-01-15T10:00:00Z",
+                    "html_url":"https://example.invalid/7"}]}"#
+                    .to_vec();
+            }
+            if path == "repos/owner/repo/actions/runs/7/jobs?per_page=100" {
+                return br#"{"jobs":[
+                    {"id":1,"name":"build","conclusion":"failure"},
+                    {"id":2,"name":"lint","conclusion":"success"}]}"#
+                    .to_vec();
+            }
+            assert_eq!(path, "repos/owner/repo/actions/jobs/1/logs");
+            b"boom at step 3".to_vec()
+        });
+        let tool = CiStatus(api);
+        let out = tool.run("projects/r", None).await.unwrap();
+        assert!(out.contains("Run #7"));
+        assert!(out.contains("--- job: build ---"));
+        assert!(out.contains("boom at step 3"));
+        assert!(!out.contains("lint"));
     }
 }

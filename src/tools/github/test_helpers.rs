@@ -30,8 +30,13 @@ where
     let repo = dir.path().join("projects/r");
     std::fs::create_dir_all(&repo).unwrap();
     let origin = format!("https://github.com/{nwo}.git");
-    for args in [vec!["init"], vec!["remote", "add", "origin", &origin]] {
+    for args in [
+        vec!["init", "-b", "work"],
+        vec!["remote", "add", "origin", &origin],
+        vec!["commit", "--allow-empty", "-m", "seed"],
+    ] {
         let out = std::process::Command::new("git")
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
             .args(&args)
             .current_dir(&repo)
             .output()

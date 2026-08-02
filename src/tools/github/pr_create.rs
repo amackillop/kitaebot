@@ -6,10 +6,8 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::gh_cli::GhCli;
-use super::{Tool, ToolCtx};
+use super::{GithubApi, Tool, ToolCtx, api_err, current_branch};
 use crate::error::ToolError;
-use crate::tools::cli_runner::{self, SubprocessCall};
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -26,7 +24,7 @@ struct Args {
     draft: bool,
 }
 
-pub struct PrCreate(pub GhCli);
+pub struct PrCreate(pub GithubApi);
 
 impl Tool for PrCreate {
     fn name(&self) -> &'static str {
@@ -49,100 +47,87 @@ impl Tool for PrCreate {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-            self.run(
-                &args.repo_dir,
-                &args.title,
-                &args.body,
-                args.base.as_deref(),
-                args.draft,
-            )
-            .await
+            self.run(&args).await
         })
     }
 }
 
 impl PrCreate {
-    fn prepare(
-        &self,
-        repo_dir: &str,
-        title: &str,
-        body: &str,
-        base: Option<&str>,
-        draft: bool,
-    ) -> Result<SubprocessCall, ToolError> {
-        let cwd = self.0.resolve_repo_dir(repo_dir)?;
-
-        let mut args = vec!["pr", "create", "--title", title, "--body", body];
-        if let Some(b) = base {
-            args.extend(["--base", b]);
-        }
-        if draft {
-            args.push("--draft");
-        }
-
-        Ok(self.0.prepare_gh(&args, &cwd))
+    /// Pure: the create-pull payload.
+    fn payload(args: &Args, head: &str, base: &str) -> serde_json::Value {
+        serde_json::json!({
+            "title": args.title,
+            "body": args.body,
+            "head": head,
+            "base": base,
+            "draft": args.draft,
+        })
     }
 
-    async fn run(
-        &self,
-        repo_dir: &str,
-        title: &str,
-        body: &str,
-        base: Option<&str>,
-        draft: bool,
-    ) -> Result<String, ToolError> {
-        let call = self.prepare(repo_dir, title, body, base, draft)?;
-        cli_runner::exec(&call).await?.format()
+    async fn run(&self, args: &Args) -> Result<String, ToolError> {
+        let dir = self.0.dir(&args.repo_dir)?;
+        let nwo = self.0.nwo(&args.repo_dir).await?;
+        // REST wants head and base spelled out where gh inferred them:
+        // head is the checked-out branch, base the repo default.
+        let head = current_branch(&dir).await?;
+        let base = match &args.base {
+            Some(base) => base.clone(),
+            None => {
+                self.0
+                    .client()
+                    .repo(&nwo)
+                    .await
+                    .map_err(|e| api_err(&e))?
+                    .default_branch
+            }
+        };
+        let pull = self
+            .0
+            .client()
+            .create_pull(&nwo, &Self::payload(args, &head, &base))
+            .await
+            .map_err(|e| api_err(&e))?;
+        Ok(format!("Created PR #{}: {}", pull.number, pull.html_url))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
+    use crate::tools::github::test_helpers::stub_api_with_repo;
 
-    #[test]
-    fn creates_pr_with_minimal_args() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let tool = PrCreate(gh);
-        let call = tool
-            .prepare(&repo, "Fix bug", "Fixes the thing", None, false)
-            .unwrap();
-        assert_eq!(call.binary, "gh");
-        assert_eq!(
-            call.args,
-            [
-                "pr",
-                "create",
-                "--title",
-                "Fix bug",
-                "--body",
-                "Fixes the thing"
-            ]
-        );
-        assert!(call.has_env("GH_TOKEN"));
+    fn args(base: Option<&str>, draft: bool) -> Args {
+        Args {
+            repo_dir: "projects/r".into(),
+            title: "Fix bug".into(),
+            body: "Fixes the thing".into(),
+            base: base.map(String::from),
+            draft,
+        }
     }
 
     #[test]
-    fn draft_with_base_appends_flags() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let tool = PrCreate(gh);
-        let call = tool
-            .prepare(&repo, "Feature", "Add feature", Some("develop"), true)
-            .unwrap();
-        assert_eq!(
-            call.args,
-            [
-                "pr",
-                "create",
-                "--title",
-                "Feature",
-                "--body",
-                "Add feature",
-                "--base",
-                "develop",
-                "--draft"
-            ]
-        );
+    fn payload_names_head_and_base() {
+        let payload = PrCreate::payload(&args(None, false), "feature", "main");
+        assert_eq!(payload["title"], "Fix bug");
+        assert_eq!(payload["head"], "feature");
+        assert_eq!(payload["base"], "main");
+        assert_eq!(payload["draft"], false);
+    }
+
+    #[tokio::test]
+    async fn explicit_base_skips_the_repo_lookup() {
+        let api = stub_api_with_repo("owner/repo", |method, path, body| {
+            assert_eq!(method, "POST");
+            assert_eq!(path, "repos/owner/repo/pulls");
+            let payload: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            assert_eq!(payload["base"], "develop");
+            assert_eq!(payload["draft"], true);
+            br#"{"number":12,"html_url":"https://github.com/owner/repo/pull/12"}"#.to_vec()
+        });
+        // The stub repo has no commits, so seed a branch for HEAD.
+        let tool = PrCreate(api);
+        let out = tool.run(&args(Some("develop"), true)).await.unwrap();
+        assert_eq!(out, "Created PR #12: https://github.com/owner/repo/pull/12");
     }
 }

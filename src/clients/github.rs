@@ -205,6 +205,70 @@ impl GithubClient {
         )
         .await
     }
+
+    /// The repository itself, for its default branch.
+    pub async fn repo(&self, nwo: &str) -> Result<Repo, GithubError> {
+        self.get_json(format!("repos/{nwo}")).await
+    }
+
+    /// Pull requests by REST state: `open`, `closed`, or `all`
+    /// (`merged` is not a REST state — filter on `merged_at`).
+    pub async fn pulls(&self, nwo: &str, state: &str) -> Result<Vec<PullSummary>, GithubError> {
+        self.get_json(format!("repos/{nwo}/pulls?state={state}&per_page=100"))
+            .await
+    }
+
+    /// Open a pull request. `payload` carries `title`, `body`, `head`,
+    /// `base`, and `draft` per the create-pull endpoint.
+    pub async fn create_pull(
+        &self,
+        nwo: &str,
+        payload: &serde_json::Value,
+    ) -> Result<CreatedPull, GithubError> {
+        self.post_json(format!("repos/{nwo}/pulls"), payload).await
+    }
+
+    /// The most recent failed workflow run on a branch, if any.
+    pub async fn latest_failed_run(
+        &self,
+        nwo: &str,
+        branch: &str,
+    ) -> Result<Option<WorkflowRun>, GithubError> {
+        let runs: WorkflowRuns = self
+            .get_json(format!(
+                "repos/{nwo}/actions/runs?branch={branch}&status=failure&per_page=1"
+            ))
+            .await?;
+        Ok(runs.workflow_runs.into_iter().next())
+    }
+
+    /// Jobs of a workflow run.
+    pub async fn run_jobs(&self, nwo: &str, run_id: u64) -> Result<Vec<Job>, GithubError> {
+        let jobs: Jobs = self
+            .get_json(format!(
+                "repos/{nwo}/actions/runs/{run_id}/jobs?per_page=100"
+            ))
+            .await?;
+        Ok(jobs.jobs)
+    }
+
+    /// Raw log text of a job. GitHub answers with a redirect to a
+    /// blob URL, which reqwest follows.
+    pub async fn job_logs(&self, nwo: &str, job_id: u64) -> Result<String, GithubError> {
+        let raw = (self.request)(
+            "GET",
+            format!("repos/{nwo}/actions/jobs/{job_id}/logs"),
+            None,
+        )
+        .await?;
+        if !(200..=299).contains(&raw.status) {
+            return Err(GithubError::Api {
+                status: raw.status,
+                body: String::from_utf8_lossy(&raw.body).into_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&raw.body).into_owned())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +430,61 @@ pub struct CreatedReview {
     pub id: u64,
     /// `APPROVED`, `COMMENTED`, or `PENDING`.
     pub state: String,
+}
+
+/// A repository from `/repos/{nwo}`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Repo {
+    pub default_branch: String,
+}
+
+/// A pull request from the list endpoint.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PullSummary {
+    pub number: u64,
+    pub title: String,
+    /// `open` or `closed`.
+    pub state: String,
+    pub html_url: String,
+    /// Set iff the PR was merged (merged PRs are `closed`).
+    pub merged_at: Option<String>,
+}
+
+/// The pull request created by the create-pull endpoint.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreatedPull {
+    pub number: u64,
+    pub html_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRuns {
+    workflow_runs: Vec<WorkflowRun>,
+}
+
+/// A workflow run from the actions runs endpoint.
+#[derive(Clone, Debug, Deserialize)]
+pub struct WorkflowRun {
+    pub id: u64,
+    pub display_title: String,
+    /// Workflow name.
+    pub name: String,
+    pub created_at: String,
+    pub html_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Jobs {
+    jobs: Vec<Job>,
+}
+
+/// A job of a workflow run.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Job {
+    pub id: u64,
+    pub name: String,
+    /// `success`, `failure`, `cancelled`, ...; absent while running.
+    pub conclusion: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

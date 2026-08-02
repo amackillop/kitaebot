@@ -6,11 +6,9 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::gh_cli::GhCli;
-use super::types::PullRequest;
-use super::{Tool, ToolCtx};
+use super::{GithubApi, Tool, ToolCtx, api_err};
+use crate::clients::github::PullSummary;
 use crate::error::ToolError;
-use crate::tools::cli_runner::SubprocessCall;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -20,7 +18,7 @@ struct Args {
     state: Option<String>,
 }
 
-pub struct PrList(pub GhCli);
+pub struct PrList(pub GithubApi);
 
 impl Tool for PrList {
     fn name(&self) -> &'static str {
@@ -48,103 +46,121 @@ impl Tool for PrList {
     }
 }
 
-impl PrList {
-    fn prepare(&self, repo_dir: &str, state: &str) -> Result<SubprocessCall, ToolError> {
-        let cwd = self.0.resolve_repo_dir(repo_dir)?;
-        validate_state(state)?;
-        Ok(self.0.prepare_gh(
-            &[
-                "pr",
-                "list",
-                "--state",
-                state,
-                "--json",
-                "number,title,state,url",
-            ],
-            &cwd,
-        ))
+/// The REST state to fetch for a requested filter. `merged` is not a
+/// REST state: fetch `closed` and filter on `merged_at`.
+fn rest_state(state: &str) -> Result<&'static str, ToolError> {
+    match state {
+        "all" => Ok("all"),
+        "closed" | "merged" => Ok("closed"),
+        "open" => Ok("open"),
+        other => Err(ToolError::InvalidArguments(format!(
+            "invalid state: {other} (expected one of: open, closed, merged, all)"
+        ))),
     }
+}
 
-    /// Pure: format pull requests for display.
-    fn format_output(prs: &[PullRequest]) -> String {
+/// Display state: merged PRs are `closed` in REST, distinguished by
+/// `merged_at`.
+fn display_state(pr: &PullSummary) -> &'static str {
+    match (pr.state.as_str(), pr.merged_at.is_some()) {
+        (_, true) => "MERGED",
+        ("open", _) => "OPEN",
+        _ => "CLOSED",
+    }
+}
+
+impl PrList {
+    /// Pure: filter to the requested state and format for display.
+    fn format_output(prs: &[PullSummary], state: &str) -> String {
         prs.iter()
-            .map(|pr| format!("#{} {} [{}]\n  {}", pr.number, pr.title, pr.state, pr.url))
+            .filter(|pr| state != "merged" || pr.merged_at.is_some())
+            .map(|pr| {
+                format!(
+                    "#{} {} [{}]\n  {}",
+                    pr.number,
+                    pr.title,
+                    display_state(pr),
+                    pr.html_url
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
 
     async fn run(&self, repo_dir: &str, state: Option<&str>) -> Result<String, ToolError> {
         let state = state.unwrap_or("open");
-        let call = self.prepare(repo_dir, state)?;
-        let prs: Vec<PullRequest> = self.0.exec_parse(&call).await?;
+        let nwo = self.0.nwo(repo_dir).await?;
+        let prs = self
+            .0
+            .client()
+            .pulls(&nwo, rest_state(state)?)
+            .await
+            .map_err(|e| api_err(&e))?;
 
-        if prs.is_empty() {
+        let output = Self::format_output(&prs, state);
+        if output.is_empty() {
             return Ok(format!("No {state} pull requests."));
         }
-
-        Ok(Self::format_output(&prs))
+        Ok(output)
     }
-}
-
-fn validate_state(state: &str) -> Result<(), ToolError> {
-    let valid_states = ["open", "closed", "merged", "all"];
-    if !valid_states.contains(&state) {
-        return Err(ToolError::InvalidArguments(format!(
-            "invalid state: {state} (expected one of: {})",
-            valid_states.join(", ")
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::PullRequest;
     use super::*;
-    use crate::tools::github::test_helpers::stub_gh_cli_with_repo;
+
+    fn pr(number: u64, state: &str, merged_at: Option<&str>) -> PullSummary {
+        PullSummary {
+            number,
+            title: format!("PR {number}"),
+            state: state.into(),
+            html_url: format!("https://github.com/o/r/pull/{number}"),
+            merged_at: merged_at.map(String::from),
+        }
+    }
 
     #[test]
     fn rejects_invalid_state() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let tool = PrList(gh);
-        let result = tool.prepare(&repo, "bogus");
-        assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
+        assert!(matches!(
+            rest_state("bogus"),
+            Err(ToolError::InvalidArguments(_))
+        ));
     }
 
     #[test]
-    fn builds_correct_list_command() {
-        let (gh, repo) = stub_gh_cli_with_repo();
-        let tool = PrList(gh);
-        let call = tool.prepare(&repo, "open").unwrap();
-        assert_eq!(call.binary, "gh");
-        assert!(call.args.contains(&"--state".to_string()));
-        assert!(call.args.contains(&"open".to_string()));
+    fn merged_fetches_closed() {
+        assert_eq!(rest_state("merged").unwrap(), "closed");
+        assert_eq!(rest_state("closed").unwrap(), "closed");
     }
 
     #[test]
-    fn formats_prs() {
+    fn formats_and_labels_states() {
         let prs = vec![
-            PullRequest {
-                number: 1,
-                title: "Fix bug".to_string(),
-                state: "OPEN".to_string(),
-                url: "https://github.com/o/r/pull/1".to_string(),
-            },
-            PullRequest {
-                number: 2,
-                title: "Add feature".to_string(),
-                state: "OPEN".to_string(),
-                url: "https://github.com/o/r/pull/2".to_string(),
-            },
+            pr(1, "open", None),
+            pr(2, "closed", Some("2025-01-15T10:00:00Z")),
+            pr(3, "closed", None),
         ];
-        let result = PrList::format_output(&prs);
+        let result = PrList::format_output(&prs, "all");
         assert_eq!(
             result,
             "\
-#1 Fix bug [OPEN]
+#1 PR 1 [OPEN]
   https://github.com/o/r/pull/1
-#2 Add feature [OPEN]
-  https://github.com/o/r/pull/2"
+#2 PR 2 [MERGED]
+  https://github.com/o/r/pull/2
+#3 PR 3 [CLOSED]
+  https://github.com/o/r/pull/3"
         );
+    }
+
+    #[test]
+    fn merged_filter_drops_unmerged_closed() {
+        let prs = vec![
+            pr(2, "closed", Some("2025-01-15T10:00:00Z")),
+            pr(3, "closed", None),
+        ];
+        let result = PrList::format_output(&prs, "merged");
+        assert!(result.contains("#2"));
+        assert!(!result.contains("#3"));
     }
 }

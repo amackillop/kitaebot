@@ -34,7 +34,6 @@ mod pr_review;
 mod pr_reviews;
 #[cfg(test)]
 mod test_helpers;
-mod types;
 
 pub use ci_status::CiStatus;
 pub use gh::Gh;
@@ -77,13 +76,38 @@ impl GithubApi {
         &self.client
     }
 
+    /// Resolve and validate a repo directory within the workspace.
+    fn dir(&self, repo_dir: &str) -> Result<PathBuf, ToolError> {
+        crate::tools::git::resolve_repo_dir(&self.workspace_root, repo_dir)
+    }
+
     /// Resolve a workspace-relative repo dir to its origin `owner/repo`.
     async fn nwo(&self, repo_dir: &str) -> Result<String, ToolError> {
-        let dir = crate::tools::git::resolve_repo_dir(&self.workspace_root, repo_dir)?;
+        let dir = self.dir(repo_dir)?;
         crate::tools::git::origin_nwo(&dir).await.ok_or_else(|| {
             ToolError::InvalidArguments(format!("cannot resolve origin owner/repo for {repo_dir}"))
         })
     }
+}
+
+/// The currently checked-out branch of a git working directory.
+async fn current_branch(cwd: &std::path::Path) -> Result<String, ToolError> {
+    let call = crate::tools::cli_runner::SubprocessCall {
+        binary: "git",
+        args: vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+        cwd: cwd.to_path_buf(),
+        env: crate::tools::safe_env().collect(),
+        timeout_secs: None,
+        stdin: None,
+    };
+    let output = crate::tools::cli_runner::exec(&call).await?;
+    if output.exit_code != 0 {
+        return Err(ToolError::ExecutionFailed(format!(
+            "failed to get current branch: {}",
+            output.stderr
+        )));
+    }
+    Ok(output.stdout.trim().to_string())
 }
 
 /// Map a client error into the tool error surface.
@@ -94,12 +118,12 @@ fn api_err(e: &crate::error::GithubError) -> ToolError {
 /// Build the GitHub tools.
 pub(crate) fn build(gh: GhCli, api: GithubApi) -> Vec<Arc<dyn Tool>> {
     vec![
-        Arc::new(CiStatus(gh.clone())),
-        Arc::new(Gh(gh.clone())),
-        Arc::new(PrCreate(gh.clone())),
+        Arc::new(CiStatus(api.clone())),
+        Arc::new(Gh(gh)),
+        Arc::new(PrCreate(api.clone())),
         Arc::new(PrDiffComments(api.clone())),
         Arc::new(PrDiffReply(api.clone())),
-        Arc::new(PrList(gh)),
+        Arc::new(PrList(api.clone())),
         Arc::new(PrReview(api.clone())),
         Arc::new(PrReviews(api)),
     ]

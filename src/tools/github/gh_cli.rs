@@ -1,17 +1,15 @@
 //! `gh` CLI subprocess wrapper.
 //!
-//! [`GhCli`] owns the token and workspace root needed by GitHub CLI
-//! tools (PRs, CI status, API calls). Auth injects `GH_TOKEN` into
-//! the subprocess environment.
+//! [`GhCli`] owns the token and workspace root needed by the
+//! `github_gh` escape hatch. Auth injects `GH_TOKEN` into the
+//! subprocess environment.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use serde::de::DeserializeOwned;
-
 use crate::error::ToolError;
 use crate::secrets::Secret;
-use crate::tools::cli_runner::{self, SubprocessCall};
+use crate::tools::cli_runner::SubprocessCall;
 
 /// Shared context for `gh` CLI tools.
 #[derive(Clone)]
@@ -50,23 +48,6 @@ impl GhCli {
             timeout_secs: None,
             stdin: None,
         }
-    }
-
-    /// Execute a [`SubprocessCall`], check exit code, and parse stdout
-    /// as JSON.
-    pub async fn exec_parse<T: DeserializeOwned>(
-        &self,
-        call: &SubprocessCall,
-    ) -> Result<T, ToolError> {
-        let output = cli_runner::exec(call).await?;
-        if output.exit_code != 0 {
-            return Err(ToolError::ExecutionFailed(format!(
-                "{}: {}",
-                output.command, output.stderr
-            )));
-        }
-        serde_json::from_str(&output.stdout)
-            .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", output.command)))
     }
 }
 
