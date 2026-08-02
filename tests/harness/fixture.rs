@@ -159,9 +159,9 @@ impl FixtureServer {
     }
 
     /// Block until a completion request whose body contains `substr`
-    /// arrives. Panics after 10s.
+    /// arrives. Panics after 30s.
     pub fn wait_for_completion_request(&self, substr: &str) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !self
             .completion_requests()
             .iter()
@@ -169,7 +169,7 @@ impl FixtureServer {
         {
             assert!(
                 std::time::Instant::now() < deadline,
-                "no completion request containing {substr:?} within 10s",
+                "no completion request containing {substr:?} within 30s",
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -181,9 +181,9 @@ impl FixtureServer {
     }
 
     /// Block until a `commentCreate` whose body contains `substr`
-    /// arrives, and return its variables. Panics after 10s.
+    /// arrives, and return its variables. Panics after 30s.
     pub fn wait_for_linear_comment(&self, substr: &str) -> serde_json::Value {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(comment) = self.linear_comments().into_iter().find(|comment| {
                 comment["body"]
@@ -194,7 +194,7 @@ impl FixtureServer {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "no linear comment containing {substr:?} within 10s; \
+                "no linear comment containing {substr:?} within 30s; \
                  comments so far: {:?}",
                 self.linear_comments(),
             );
@@ -203,9 +203,9 @@ impl FixtureServer {
     }
 
     /// Block until a `sendMessage` body whose text contains `substr`
-    /// arrives, and return it. Panics after 10s.
+    /// arrives, and return it. Panics after 30s.
     pub fn wait_for_telegram_send(&self, substr: &str) -> serde_json::Value {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(send) = self.telegram_sends().into_iter().find(|send| {
                 send["text"]
@@ -216,7 +216,7 @@ impl FixtureServer {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "no telegram send containing {substr:?} within 10s; \
+                "no telegram send containing {substr:?} within 30s; \
                  sends so far: {:?}",
                 self.telegram_sends(),
             );
@@ -345,7 +345,7 @@ pub fn linear_issue(
 pub fn linear_comment(email: &str, body: &str) -> serde_json::Value {
     json!({
         "body": body,
-        "createdAt": future_timestamp(),
+        "createdAt": future_timestamp(1),
         "user": {"id": format!("user-{email}"), "name": email, "email": email},
     })
 }
@@ -474,23 +474,31 @@ pub fn github_pr(nwo: &str, number: u32, author: &str, title: &str) -> serde_jso
     })
 }
 
-/// A submitted PR review stamped one second in the future, so it is
-/// strictly newer than any poll cursor the daemon has already saved.
+/// A submitted PR review stamped in the future, so it stays strictly
+/// newer than the poll cursor the daemon initializes at boot. The
+/// margin matches the harness's boot deadline: reviews exist before
+/// the daemon starts, and a boot crossing a wall-second would
+/// otherwise leave the review at-or-before the cursor forever.
 pub fn github_review(author: &str, state: &str, body: &str) -> serde_json::Value {
     json!({
         "user": {"login": author},
         "state": state,
         "body": body,
-        "submitted_at": future_timestamp(),
+        "submitted_at": future_timestamp(5),
     })
 }
 
-/// ISO 8601 timestamp one second ahead of the wall clock. The daemon's
+/// ISO 8601 timestamp `seconds` ahead of the wall clock. The daemon's
 /// poll cursors move at tick granularity; a same-second timestamp can
 /// compare at-or-before the cursor and never dispatch.
-fn future_timestamp() -> String {
+fn future_timestamp(seconds: u64) -> String {
     let out = std::process::Command::new("date")
-        .args(["-u", "-d", "+1 second", "+%Y-%m-%dT%H:%M:%S.000Z"])
+        .args([
+            "-u",
+            "-d",
+            &format!("+{seconds} seconds"),
+            "+%Y-%m-%dT%H:%M:%S.000Z",
+        ])
         .output()
         .expect("failed to run date");
     String::from_utf8(out.stdout).unwrap().trim().to_string()

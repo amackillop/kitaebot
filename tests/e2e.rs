@@ -278,6 +278,89 @@ fn github_review_request_then_tracked_rereview() {
     );
 }
 
+// ── Duty scheduler ──────────────────────────────────────────────────
+
+#[test]
+fn duty_prompt_dispatches_on_schedule() {
+    let fixture = FixtureServer::start();
+    // A 1s duty refires every period; the rule must survive that.
+    fixture.on_completion_always("inspect the flux capacitor", text("nothing to report"));
+    let _daemon = TestDaemon::spawn_with(
+        &fixture,
+        "[[duties.prompt]]\nname = \"watch\"\nevery = \"1s\"\n\
+         repo = \"owner/repo\"\nprompt = \"inspect the flux capacitor\"\n\n\
+         [git.repositories.\"owner/repo\"]\n",
+    );
+
+    fixture.wait_for_completion_request("inspect the flux capacitor");
+}
+
+#[test]
+fn duty_cadence_survives_restart() {
+    let fixture = FixtureServer::start();
+    fixture.on_completion_always("check the perimeter", text("all clear"));
+    let mut daemon = TestDaemon::spawn_with(
+        &fixture,
+        "[[duties.prompt]]\nname = \"patrol\"\nevery = \"1h\"\n\
+         repo = \"owner/repo\"\nprompt = \"check the perimeter\"\n\n\
+         [git.repositories.\"owner/repo\"]\n",
+    );
+
+    // Fresh state: the hourly duty is overdue and fires once.
+    fixture.wait_for_completion_request("check the perimeter");
+    // The request is observed mid-turn; last_run is recorded after
+    // the turn completes. Let the bookkeeping land before the kill.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    // A restart inside the period must not re-fire it (anacron
+    // cadence, not run-on-boot).
+    daemon.restart();
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let fired = fixture
+        .completion_requests()
+        .iter()
+        .filter(|body| body.contains("check the perimeter"))
+        .count();
+    assert_eq!(fired, 1, "restart re-fired an hourly duty");
+}
+
+#[test]
+fn duty_new_commits_gate_fires_only_on_new_commits() {
+    let fixture = FixtureServer::start();
+    let fixtures_root = tempfile::TempDir::new().unwrap();
+    harness::git_fixture_pr_repo(fixtures_root.path(), "owner/repo", 1);
+
+    fixture.on_completion_always("scan the new commits", text("scanned"));
+    // The gate requires github.enabled; a long poll interval keeps the
+    // channel itself quiet.
+    let config = format!(
+        "[github]\nenabled = true\npoll_interval_secs = 3600\nowner = \"alice\"\n\
+         api_base = \"{}\"\n\n[git]\nclone_base = \"file://{}\"\n\n\
+         [git.repositories.\"owner/repo\"]\n\n\
+         [[duties.prompt]]\nname = \"scan\"\nevery = \"1s\"\n\
+         repo = \"owner/repo\"\ngate = \"new-commits\"\n\
+         prompt = \"scan the new commits\"\n",
+        fixture.api_base(),
+        fixtures_root.path().display(),
+    );
+    let _daemon = TestDaemon::spawn_with(&fixture, &config);
+
+    // First contact primes the cursor silently; give it a few periods
+    // to prove the gate stays closed without new commits.
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    assert!(
+        !fixture
+            .completion_requests()
+            .iter()
+            .any(|body| body.contains("scan the new commits")),
+        "gate dispatched without new commits",
+    );
+
+    let sha = harness::git_fixture_commit_main(fixtures_root.path(), "owner/repo");
+    fixture.wait_for_completion_request("new commits: ");
+    fixture.wait_for_completion_request(&sha);
+}
+
 #[test]
 fn daemon_session_persists_across_clients() {
     let fixture = FixtureServer::start();

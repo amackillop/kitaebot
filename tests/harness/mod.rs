@@ -41,30 +41,24 @@ impl TestDaemon {
         );
         std::fs::write(workspace.path().join("config.toml"), config).unwrap();
 
-        let child = Command::new(assert_cmd::cargo::cargo_bin!("kitaebot"))
-            .arg("run")
-            .env("KITAEBOT_WORKSPACE", workspace.path())
-            // Hermetic HOME: git subprocesses inherit it via safe_env,
-            // so the host's git config never leaks into e2e runs.
-            .env("HOME", workspace.path())
-            .spawn()
-            .expect("failed to spawn daemon");
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !socket_path.exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "daemon did not create socket within 5s"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
+        let child = spawn_daemon(workspace.path(), &socket_path);
         Self {
             child,
             socket_path,
             workspace,
             _sock_dir: sock_dir,
         }
+    }
+
+    /// Kill the daemon and boot a fresh one on the same workspace,
+    /// for asserting on state that must survive a restart.
+    pub fn restart(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        // The kill skips the daemon's own socket cleanup; a stale
+        // socket file would satisfy the readiness wait early.
+        let _ = std::fs::remove_file(&self.socket_path);
+        self.child = spawn_daemon(self.workspace.path(), &self.socket_path);
     }
 
     /// A kchat command connected to this daemon's socket.
@@ -78,6 +72,28 @@ impl TestDaemon {
     pub fn workspace_path(&self) -> &Path {
         self.workspace.path()
     }
+}
+
+/// Spawn the daemon binary and wait for its socket.
+fn spawn_daemon(workspace: &Path, socket_path: &Path) -> Child {
+    let child = Command::new(assert_cmd::cargo::cargo_bin!("kitaebot"))
+        .arg("run")
+        .env("KITAEBOT_WORKSPACE", workspace)
+        // Hermetic HOME: git subprocesses inherit it via safe_env,
+        // so the host's git config never leaks into e2e runs.
+        .env("HOME", workspace)
+        .spawn()
+        .expect("failed to spawn daemon");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !socket_path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "daemon did not create socket within 5s"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child
 }
 
 // ── Git fixture repos ───────────────────────────────────────────────
@@ -119,6 +135,16 @@ pub fn git_fixture_pr_repo(root: &Path, nwo: &str, pr_number: u32) -> String {
     );
     git_in(&dir, &["checkout", "main"]);
     sha
+}
+
+/// Add a commit to the fixture repo's main branch, so its remote
+/// HEAD advances. Returns the new head SHA.
+pub fn git_fixture_commit_main(root: &Path, nwo: &str) -> String {
+    let dir = root.join(format!("{nwo}.git"));
+    std::fs::write(dir.join("b.txt"), "more\n").unwrap();
+    git_in(&dir, &["add", "b.txt"]);
+    git_in(&dir, &["commit", "-m", "more work"]);
+    git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string()
 }
 
 /// Add a commit to the fixture PR branch and advance its pull ref,
