@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn with_model_swaps_model_and_keeps_the_rest() {
         let client = CompletionsClient::new(
-            "https://example.invalid".to_string(),
+            "http://127.0.0.1:0".to_string(),
             crate::secrets::Secret::test("k"),
         );
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
@@ -291,7 +291,7 @@ mod tests {
     fn openrouter_extensions_enabled_only_for_openrouter() {
         let client = || {
             CompletionsClient::new(
-                "https://example.invalid".to_string(),
+                "http://127.0.0.1:0".to_string(),
                 crate::secrets::Secret::test("k"),
             )
         };

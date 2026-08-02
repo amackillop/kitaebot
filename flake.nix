@@ -83,7 +83,9 @@
             commonArgs
             // {
               inherit cargoArtifacts;
-              cargoTestExtraArgs = "--features mock-network";
+              # e2e is excluded to keep `nix flake check` fast; run it
+              # with `just test-e2e`.
+              cargoTestExtraArgs = "--features mock-network --bins --test kchat";
               # review_checkout tests spawn real git against a fixture repo.
               nativeCheckInputs = [ pkgs.git ];
             }

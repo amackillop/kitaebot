@@ -43,10 +43,7 @@ impl TelegramClient {
         #[cfg(feature = "mock-network")]
         super::assert_loopback(api_base);
         let base = api_base.trim_end_matches('/').to_string();
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .expect("failed to build HTTP client");
+        let client = super::http_client(reqwest::Client::builder().timeout(timeout));
         Self {
             post: Arc::new(move |method, body| {
                 let client = client.clone();

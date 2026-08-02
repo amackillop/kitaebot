@@ -11,6 +11,15 @@ pub struct RawResponse {
     pub body: Vec<u8>,
 }
 
+/// Build the HTTP client for the closure IO layer. `mock-network`
+/// builds skip loading system CA certificates: the nix sandbox has
+/// none, and loopback fixture servers are plain HTTP.
+pub(crate) fn http_client(builder: reqwest::ClientBuilder) -> reqwest::Client {
+    #[cfg(feature = "mock-network")]
+    let builder = builder.tls_certs_only(Vec::<reqwest::Certificate>::new());
+    builder.build().expect("failed to build HTTP client")
+}
+
 /// Refuse non-loopback base URLs — `mock-network` builds must never
 /// reach the real network, only local fixture servers.
 #[cfg(feature = "mock-network")]

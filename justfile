@@ -31,6 +31,11 @@ build:
 test:
     cargo test --features mock-network
 
+# Run the e2e suite (real daemon against a loopback fixture server;
+# excluded from `nix flake check` to keep the commit gate fast)
+test-e2e:
+    cargo test --features mock-network --test e2e
+
 # Run tests matching a name (e.g. just test-one report_counts)
 test-one name:
     cargo test --features mock-network {{name}}

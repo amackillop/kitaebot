@@ -72,10 +72,9 @@ impl LinearClient {
         #[cfg(feature = "mock-network")]
         super::assert_loopback(api_base);
         let endpoint = format!("{}/graphql", api_base.trim_end_matches('/'));
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("failed to build HTTP client");
+        let client = super::http_client(
+            reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)),
+        );
         Self {
             post: Arc::new(move |body| {
                 let client = client.clone();

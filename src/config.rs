@@ -165,10 +165,10 @@ pub struct ModelOverrides {
 
 /// `OpenAI`-compatible chat completions API.
 ///
-/// Each variant maps to a known endpoint URL. Invalid values are
-/// rejected at config parse time.
-#[derive(Debug, Default, Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Known provider names map to their endpoint URLs; a full http(s)
+/// URL selects a custom endpoint (self-hosted gateways, test fixture
+/// servers). Invalid values are rejected at config parse time.
+#[derive(Debug, Default, Clone)]
 pub enum Api {
     #[default]
     OpenRouter,
@@ -176,19 +176,48 @@ pub enum Api {
     Groq,
     Together,
     Mistral,
+    Custom(String),
 }
 
 impl Api {
     /// Endpoint URL for the chat completions API.
-    #[cfg_attr(feature = "mock-network", allow(dead_code))]
-    pub fn endpoint(self) -> &'static str {
+    pub fn endpoint(&self) -> &str {
         match self {
             Self::OpenRouter => "https://openrouter.ai/api/v1/chat/completions",
             Self::OpenAi => "https://api.openai.com/v1/chat/completions",
             Self::Groq => "https://api.groq.com/openai/v1/chat/completions",
             Self::Together => "https://api.together.xyz/v1/chat/completions",
             Self::Mistral => "https://api.mistral.ai/v1/chat/completions",
+            Self::Custom(url) => url,
         }
+    }
+}
+
+impl std::str::FromStr for Api {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "groq" => Ok(Self::Groq),
+            "mistral" => Ok(Self::Mistral),
+            "openai" => Ok(Self::OpenAi),
+            "openrouter" => Ok(Self::OpenRouter),
+            "together" => Ok(Self::Together),
+            url if url.starts_with("http://") || url.starts_with("https://") => {
+                Ok(Self::Custom(url.to_string()))
+            }
+            other => Err(format!(
+                "unknown api {other:?}: expected a provider name or an http(s) URL"
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Api {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
