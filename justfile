@@ -127,8 +127,11 @@ vm-run *flags:
     BOOT_START=$SECONDS
     nohup ./result/bin/run-kitaebot-vm > /dev/null 2>&1 &
     echo "Waiting for SSH to be ready..."
+    # A fresh qcow2's first boot initializes the image and store and
+    # can take several minutes; a warm boot answers in seconds.
+    DEADLINE=60; $FRESH && DEADLINE=300
     READY=false
-    for _ in $(seq 1 60); do
+    for _ in $(seq 1 $DEADLINE); do
         if ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=1 {{SSH_OPTS}} root@localhost exit 2>/dev/null; then
             READY=true
             break
