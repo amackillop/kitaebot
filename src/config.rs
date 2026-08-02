@@ -305,6 +305,9 @@ pub struct MemoryConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TelegramConfig {
+    /// Base URL of the Telegram Bot API. Tests point this at a local
+    /// fixture server; `mock-network` builds refuse non-loopback hosts.
+    pub api_base: String,
     /// Enable the Telegram channel. Defaults to `false` so the daemon
     /// can start without Telegram credentials.
     pub enabled: bool,
@@ -451,6 +454,9 @@ pub struct GithubConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LinearConfig {
+    /// Base URL of the Linear API. Tests point this at a local
+    /// fixture server; `mock-network` builds refuse non-loopback hosts.
+    pub api_base: String,
     /// Enable the Linear channel. Defaults to `false` so the daemon
     /// can start without a Linear API key.
     pub enabled: bool,
@@ -619,6 +625,7 @@ impl Default for MemoryConfig {
 impl Default for LinearConfig {
     fn default() -> Self {
         Self {
+            api_base: "https://api.linear.app".into(),
             enabled: false,
             poll_interval_secs: 120,
             trusted_users: Vec::new(),
@@ -649,6 +656,7 @@ impl Default for SocketConfig {
 impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
+            api_base: "https://api.telegram.org".into(),
             enabled: false,
             chat_id: 0,
             poll_timeout_secs: 30,

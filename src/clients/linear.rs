@@ -1,8 +1,9 @@
 //! Linear GraphQL API client.
 //!
 //! Pure response parsing lives in [`interpret_response`]. The IO layer is a
-//! stored closure inside [`LinearClient`] — swap it for tests or
-//! `mock-network` builds without traits or generics.
+//! stored closure inside [`LinearClient`] — swap it for tests without
+//! traits or generics. The base URL is injected so e2e tests can point at
+//! a local fixture server; `mock-network` builds refuse non-loopback hosts.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -67,55 +68,40 @@ pub struct LinearClient {
 }
 
 impl LinearClient {
-    pub fn new(api_key: Secret) -> Self {
-        #[cfg(not(feature = "mock-network"))]
-        {
-            const ENDPOINT: &str = "https://api.linear.app/graphql";
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build HTTP client");
-            Self {
-                post: Arc::new(move |body| {
-                    let client = client.clone();
-                    let api_key = api_key.clone();
-                    Box::pin(async move {
-                        // Personal API keys go bare — no `Bearer` prefix.
-                        let resp = client
-                            .post(ENDPOINT)
-                            .header("Authorization", api_key.expose())
-                            .header("Content-Type", "application/json")
-                            .body(body)
-                            .send()
-                            .await
-                            .map_err(|e| LinearError::Network(e.to_string()))?;
-                        let status = resp.status().as_u16();
-                        let bytes = resp
-                            .bytes()
-                            .await
-                            .map_err(|e| LinearError::Network(e.to_string()))?;
-                        Ok(RawResponse {
-                            status,
-                            body: bytes.to_vec(),
-                        })
-                    })
-                }),
-            }
-        }
+    pub fn new(api_key: Secret, api_base: &str) -> Self {
         #[cfg(feature = "mock-network")]
-        {
-            drop(api_key);
-            let body = br#"{"data":{}}"#;
-            Self {
-                post: Arc::new(move |_| {
-                    Box::pin(async move {
-                        Ok(RawResponse {
-                            status: 200,
-                            body: body.to_vec(),
-                        })
+        super::assert_loopback(api_base);
+        let endpoint = format!("{}/graphql", api_base.trim_end_matches('/'));
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client");
+        Self {
+            post: Arc::new(move |body| {
+                let client = client.clone();
+                let api_key = api_key.clone();
+                let endpoint = endpoint.clone();
+                Box::pin(async move {
+                    // Personal API keys go bare — no `Bearer` prefix.
+                    let resp = client
+                        .post(&endpoint)
+                        .header("Authorization", api_key.expose())
+                        .header("Content-Type", "application/json")
+                        .body(body)
+                        .send()
+                        .await
+                        .map_err(|e| LinearError::Network(e.to_string()))?;
+                    let status = resp.status().as_u16();
+                    let bytes = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| LinearError::Network(e.to_string()))?;
+                    Ok(RawResponse {
+                        status,
+                        body: bytes.to_vec(),
                     })
-                }),
-            }
+                })
+            }),
         }
     }
 

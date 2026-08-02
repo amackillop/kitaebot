@@ -44,6 +44,7 @@ and wrapped in `<pre>` tags.
 | `telegram.enabled` | `false` | Enable the Telegram channel |
 | `telegram.chat_id` | — | Authorized chat ID (required when enabled) |
 | `telegram.poll_timeout_secs` | `30` | Long-poll timeout for `getUpdates` |
+| `telegram.api_base` | `https://api.telegram.org` | Bot API base URL; tests point it at a loopback fixture server |
 
 ---
 
@@ -201,7 +202,7 @@ replayed. Announced identifiers absent from the fetched set (completed,
 cancelled, or unassigned) are pruned. `last_poll` only advances after a
 successful fetch.
 
-**API**: GraphQL over HTTPS POST to `https://api.linear.app/graphql`,
+**API**: GraphQL over HTTPS POST to `{linear.api_base}/graphql`,
 authorized with a personal API key in the `Authorization` header (no
 `Bearer` prefix). Three operations: `viewer`, `assignedIssues`, and
 `commentCreate`. Raw query strings, no GraphQL client library. No
@@ -217,6 +218,7 @@ backoff (1s, 2s, 4s) for transient errors.
 | `linear.enabled` | `false` | Enable the Linear channel |
 | `linear.poll_interval_secs` | `120` | Seconds between poll cycles |
 | `linear.trusted_users` | `[]` | Trusted email addresses (required when enabled) |
+| `linear.api_base` | `https://api.linear.app` | API base URL; tests point it at a loopback fixture server |
 
 Requires the `linear-api-key` secret.
 

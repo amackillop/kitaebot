@@ -1,8 +1,9 @@
 //! Telegram Bot API client.
 //!
 //! Pure response parsing lives in [`interpret_response`]. The IO layer is a
-//! stored closure inside [`TelegramClient`] — swap it for tests or
-//! `mock-network` builds without traits or generics.
+//! stored closure inside [`TelegramClient`] — swap it for tests without
+//! traits or generics. The base URL is injected so e2e tests can point at
+//! a local fixture server; `mock-network` builds refuse non-loopback hosts.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -38,56 +39,37 @@ pub struct TelegramClient {
 }
 
 impl TelegramClient {
-    pub fn new(bot_token: Secret, timeout: Duration) -> Self {
-        #[cfg(not(feature = "mock-network"))]
-        {
-            const BASE_URL: &str = "https://api.telegram.org/bot";
-            let client = reqwest::Client::builder()
-                .timeout(timeout)
-                .build()
-                .expect("failed to build HTTP client");
-            Self {
-                post: Arc::new(move |method, body| {
-                    let client = client.clone();
-                    let url = format!("{BASE_URL}{}/{method}", bot_token.expose());
-                    Box::pin(async move {
-                        let resp = client
-                            .post(&url)
-                            .header("Content-Type", "application/json")
-                            .body(body)
-                            .send()
-                            .await
-                            .map_err(|e| TelegramError::Network(e.to_string()))?;
-                        let status = resp.status().as_u16();
-                        let bytes = resp
-                            .bytes()
-                            .await
-                            .map_err(|e| TelegramError::Network(e.to_string()))?;
-                        Ok(RawResponse {
-                            status,
-                            body: bytes.to_vec(),
-                        })
-                    })
-                }),
-            }
-        }
+    pub fn new(bot_token: Secret, timeout: Duration, api_base: &str) -> Self {
         #[cfg(feature = "mock-network")]
-        {
-            let _ = (bot_token, timeout);
-            Self {
-                post: Arc::new(|method, _body| {
-                    Box::pin(async move {
-                        let body = match method.as_str() {
-                            "getUpdates" => br#"{"ok":true,"result":[]}"#.as_slice(),
-                            _ => br#"{"ok":true,"result":{"message_id":1,"chat":{"id":0},"text":null}}"#.as_slice(),
-                        };
-                        Ok(RawResponse {
-                            status: 200,
-                            body: body.to_vec(),
-                        })
+        super::assert_loopback(api_base);
+        let base = api_base.trim_end_matches('/').to_string();
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("failed to build HTTP client");
+        Self {
+            post: Arc::new(move |method, body| {
+                let client = client.clone();
+                let url = format!("{base}/bot{}/{method}", bot_token.expose());
+                Box::pin(async move {
+                    let resp = client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .body(body)
+                        .send()
+                        .await
+                        .map_err(|e| TelegramError::Network(e.to_string()))?;
+                    let status = resp.status().as_u16();
+                    let bytes = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| TelegramError::Network(e.to_string()))?;
+                    Ok(RawResponse {
+                        status,
+                        body: bytes.to_vec(),
                     })
-                }),
-            }
+                })
+            }),
         }
     }
 
