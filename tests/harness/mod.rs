@@ -22,12 +22,18 @@ pub struct TestDaemon {
 impl TestDaemon {
     /// Spawn the daemon wired to `fixture` for completions.
     pub fn spawn(fixture: &FixtureServer) -> Self {
+        Self::spawn_with(fixture, "")
+    }
+
+    /// Like [`TestDaemon::spawn`], with extra config.toml sections
+    /// (e.g. a `[telegram]` block pointing at the fixture).
+    pub fn spawn_with(fixture: &FixtureServer, extra_config: &str) -> Self {
         let workspace = TempDir::new().unwrap();
         let sock_dir = TempDir::new().unwrap();
         let socket_path = sock_dir.path().join("chat.sock");
 
         let config = format!(
-            "[socket]\npath = \"{}\"\n\n[provider]\napi = \"{}\"\n",
+            "[socket]\npath = \"{}\"\n\n[provider]\napi = \"{}\"\n\n{extra_config}",
             socket_path.display(),
             fixture.completions_url(),
         );

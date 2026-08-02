@@ -63,6 +63,71 @@ fn daemon_turn_with_tool_call() {
         .stderr(predicate::str::contains("Tool finished: exec"));
 }
 
+// ── Telegram channel ────────────────────────────────────────────────
+
+fn telegram_config(fixture: &FixtureServer, chat_id: i64) -> String {
+    format!(
+        "[telegram]\nenabled = true\nchat_id = {chat_id}\napi_base = \"{}\"\n",
+        fixture.api_base(),
+    )
+}
+
+#[test]
+fn telegram_message_roundtrip() {
+    let fixture = FixtureServer::start();
+    fixture.on_completion("ping", text("pong"));
+    let _daemon = TestDaemon::spawn_with(&fixture, &telegram_config(&fixture, 42));
+
+    fixture.push_telegram_update(42, "ping");
+
+    let sent = fixture.wait_for_telegram_send("pong");
+    assert_eq!(sent["chat_id"], 42);
+}
+
+#[test]
+fn telegram_ignores_foreign_chat() {
+    let fixture = FixtureServer::start();
+    fixture.on_completion("ping", text("pong"));
+    let _daemon = TestDaemon::spawn_with(&fixture, &telegram_config(&fixture, 42));
+
+    // The foreign message is queued first; updates are processed in
+    // order, so once "pong" went out it has already been skipped.
+    fixture.push_telegram_update(999, "intruder");
+    fixture.push_telegram_update(42, "ping");
+
+    fixture.wait_for_telegram_send("pong");
+    assert!(
+        fixture
+            .telegram_sends()
+            .iter()
+            .all(|send| !send["text"].as_str().unwrap().contains("intruder")),
+        "foreign chat message produced a send",
+    );
+}
+
+#[test]
+fn notify_tool_reaches_telegram() {
+    let fixture = FixtureServer::start();
+    // The turn arrives over the socket; the notification (low
+    // urgency) is batched and flushed to Telegram after the turn.
+    fixture.on_completion(
+        "notify me",
+        tool_call("notify", &serde_json::json!({"message": "deploy finished"})),
+    );
+    fixture.on_completion("Notification queued", text("done"));
+    let daemon = TestDaemon::spawn_with(&fixture, &telegram_config(&fixture, 42));
+
+    daemon
+        .kchat()
+        .write_stdin("notify me\n/exit\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("done"));
+
+    let sent = fixture.wait_for_telegram_send("deploy finished");
+    assert_eq!(sent["chat_id"], 42);
+}
+
 #[test]
 fn daemon_session_persists_across_clients() {
     let fixture = FixtureServer::start();
