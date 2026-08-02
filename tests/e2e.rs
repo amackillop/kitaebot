@@ -7,7 +7,7 @@
 
 mod harness;
 
-use harness::{FixtureServer, TestDaemon, text, tool_call};
+use harness::{FixtureServer, TestDaemon, linear_comment, linear_issue, text, tool_call};
 use predicates::prelude::*;
 use serde_json::json;
 
@@ -126,6 +126,74 @@ fn notify_tool_reaches_telegram() {
 
     let sent = fixture.wait_for_telegram_send("deploy finished");
     assert_eq!(sent["chat_id"], 42);
+}
+
+// ── Linear channel ──────────────────────────────────────────────────
+
+fn linear_config(fixture: &FixtureServer) -> String {
+    format!(
+        "[linear]\nenabled = true\npoll_interval_secs = 1\n\
+         trusted_users = [\"alice@example.com\"]\napi_base = \"{}\"\n",
+        fixture.api_base(),
+    )
+}
+
+#[test]
+fn linear_new_issue_gets_plan_comment() {
+    let fixture = FixtureServer::start();
+    fixture.on_completion("MDK-7", text("here is the plan"));
+    fixture.set_linear_issues(vec![linear_issue(
+        "MDK-7",
+        "fix the flux capacitor",
+        "owner/repo",
+        &[],
+    )]);
+    let _daemon = TestDaemon::spawn_with(&fixture, &linear_config(&fixture));
+
+    let comment = fixture.wait_for_linear_comment("here is the plan");
+    assert_eq!(comment["issueId"], "uuid-MDK-7");
+}
+
+#[test]
+fn linear_trusted_comment_dispatches_untrusted_does_not() {
+    let fixture = FixtureServer::start();
+    fixture.on_completion("MDK-9", text("plan for nine"));
+    // The poll cadence may serve the same comment on more than one
+    // tick before its timestamp falls behind the cursor, so this rule
+    // must survive a second match.
+    fixture.on_completion_always("do it please", text("done it"));
+    fixture.set_linear_issues(vec![linear_issue(
+        "MDK-9",
+        "execute the thing",
+        "owner/repo",
+        &[],
+    )]);
+    let _daemon = TestDaemon::spawn_with(&fixture, &linear_config(&fixture));
+
+    // Wait for the announcement so the issue is in the announced set
+    // and later comments go through the comment pass.
+    fixture.wait_for_linear_comment("plan for nine");
+
+    fixture.set_linear_issues(vec![linear_issue(
+        "MDK-9",
+        "execute the thing",
+        "owner/repo",
+        &[
+            linear_comment("mallory@evil.example", "hack the mainframe"),
+            linear_comment("alice@example.com", "do it please"),
+        ],
+    )]);
+
+    fixture.wait_for_linear_comment("done it");
+    // Every posted comment came from a scripted turn: the untrusted
+    // comment triggered neither a turn nor an error reply.
+    for comment in fixture.linear_comments() {
+        let body = comment["body"].as_str().unwrap();
+        assert!(
+            body.contains("plan for nine") || body.contains("done it"),
+            "unexpected comment posted: {body}",
+        );
+    }
 }
 
 #[test]

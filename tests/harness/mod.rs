@@ -3,7 +3,7 @@
 
 mod fixture;
 
-pub use fixture::{FixtureServer, text, tool_call};
+pub use fixture::{FixtureServer, linear_comment, linear_issue, text, tool_call};
 
 use std::path::PathBuf;
 use std::process::{Child, Command};

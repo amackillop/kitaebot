@@ -21,11 +21,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde_json::json;
 
-/// A scripted response: consumed by the first request whose body
-/// contains `substr`, in insertion order.
+/// A scripted response matched against request bodies in insertion
+/// order. One-shot rules are consumed by their first match.
 struct Rule {
     substr: String,
     response: serde_json::Value,
+    once: bool,
 }
 
 #[derive(Default)]
@@ -34,6 +35,8 @@ struct FixtureState {
     telegram_updates: Vec<serde_json::Value>,
     next_update_id: i64,
     telegram_sends: Vec<serde_json::Value>,
+    linear_issues: Vec<serde_json::Value>,
+    linear_comments: Vec<serde_json::Value>,
 }
 
 type SharedState = Arc<Mutex<FixtureState>>;
@@ -68,6 +71,7 @@ impl FixtureServer {
                     .route("/chat/completions", post(completions))
                     .route("/bot/getUpdates", post(get_updates))
                     .route("/bot/sendMessage", post(send_message))
+                    .route("/graphql", post(linear_graphql))
                     .with_state(router_state);
                 axum::serve(listener, app)
                     .await
@@ -91,9 +95,21 @@ impl FixtureServer {
     /// Serve `response` for the first completion request whose body
     /// contains `substr`. One-shot; add one rule per expected turn.
     pub fn on_completion(&self, substr: &str, response: serde_json::Value) {
+        self.push_rule(substr, response, true);
+    }
+
+    /// Like [`FixtureServer::on_completion`], but the rule survives
+    /// its matches. For flows where the poll cadence may legitimately
+    /// dispatch the same input more than once.
+    pub fn on_completion_always(&self, substr: &str, response: serde_json::Value) {
+        self.push_rule(substr, response, false);
+    }
+
+    fn push_rule(&self, substr: &str, response: serde_json::Value, once: bool) {
         self.state.lock().unwrap().completion_rules.push(Rule {
             substr: substr.to_string(),
             response,
+            once,
         });
     }
 
@@ -111,6 +127,38 @@ impl FixtureServer {
     /// All recorded `sendMessage` bodies so far.
     pub fn telegram_sends(&self) -> Vec<serde_json::Value> {
         self.state.lock().unwrap().telegram_sends.clone()
+    }
+
+    /// Replace the issue set served by the `assignedIssues` query.
+    pub fn set_linear_issues(&self, issues: Vec<serde_json::Value>) {
+        self.state.lock().unwrap().linear_issues = issues;
+    }
+
+    /// All recorded `commentCreate` variable sets so far.
+    pub fn linear_comments(&self) -> Vec<serde_json::Value> {
+        self.state.lock().unwrap().linear_comments.clone()
+    }
+
+    /// Block until a `commentCreate` whose body contains `substr`
+    /// arrives, and return its variables. Panics after 10s.
+    pub fn wait_for_linear_comment(&self, substr: &str) -> serde_json::Value {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(comment) = self.linear_comments().into_iter().find(|comment| {
+                comment["body"]
+                    .as_str()
+                    .is_some_and(|body| body.contains(substr))
+            }) {
+                return comment;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no linear comment containing {substr:?} within 10s; \
+                 comments so far: {:?}",
+                self.linear_comments(),
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Block until a `sendMessage` body whose text contains `substr`
@@ -144,8 +192,12 @@ async fn completions(State(state): State<SharedState>, body: String) -> Response
         .position(|rule| body.contains(&rule.substr));
     match matched {
         Some(i) => {
-            let rule = state.completion_rules.remove(i);
-            (StatusCode::OK, axum::Json(rule.response)).into_response()
+            let response = if state.completion_rules[i].once {
+                state.completion_rules.remove(i).response
+            } else {
+                state.completion_rules[i].response.clone()
+            };
+            (StatusCode::OK, axum::Json(response)).into_response()
         }
         None => (
             StatusCode::BAD_REQUEST,
@@ -193,6 +245,72 @@ async fn send_message(State(state): State<SharedState>, body: String) -> Respons
         "result": {"message_id": id, "chat": {"id": 0}, "text": null},
     }))
     .into_response()
+}
+
+/// Discriminate Linear GraphQL operations on the query text. Order
+/// matters: the assignedIssues query mentions `viewer` too.
+async fn linear_graphql(State(state): State<SharedState>, body: String) -> Response {
+    let Ok(request) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return (StatusCode::BAD_REQUEST, "graphql body is not JSON").into_response();
+    };
+    let query = request["query"].as_str().unwrap_or_default();
+    if query.contains("commentCreate") {
+        let mut state = state.lock().unwrap();
+        state.linear_comments.push(request["variables"].clone());
+        return axum::Json(json!({"data": {"commentCreate": {"success": true}}})).into_response();
+    }
+    if query.contains("assignedIssues") {
+        let issues = state.lock().unwrap().linear_issues.clone();
+        return axum::Json(json!({
+            "data": {"viewer": {"assignedIssues": {"nodes": issues}}},
+        }))
+        .into_response();
+    }
+    if query.contains("viewer") {
+        return axum::Json(json!({
+            "data": {"viewer": {
+                "id": "bot-1", "name": "Kitaebot", "email": "bot@example.com",
+            }},
+        }))
+        .into_response();
+    }
+    (
+        StatusCode::BAD_REQUEST,
+        "fixture server: unrecognized graphql operation",
+    )
+        .into_response()
+}
+
+/// A Linear issue as served by `assignedIssues`.
+pub fn linear_issue(
+    identifier: &str,
+    title: &str,
+    repo: &str,
+    comments: &[serde_json::Value],
+) -> serde_json::Value {
+    json!({
+        "id": format!("uuid-{identifier}"),
+        "identifier": identifier,
+        "title": title,
+        "description": "e2e fixture issue",
+        "labels": {"nodes": [{"name": repo}]},
+        "comments": {"nodes": comments},
+    })
+}
+
+/// A Linear issue comment stamped one second in the future, so it is
+/// strictly newer than any poll cursor the daemon has already saved.
+pub fn linear_comment(email: &str, body: &str) -> serde_json::Value {
+    let out = std::process::Command::new("date")
+        .args(["-u", "-d", "+1 second", "+%Y-%m-%dT%H:%M:%S.000Z"])
+        .output()
+        .expect("failed to run date");
+    let created_at = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    json!({
+        "body": body,
+        "createdAt": created_at,
+        "user": {"id": format!("user-{email}"), "name": email, "email": email},
+    })
 }
 
 /// A completion body holding a plain text reply.
