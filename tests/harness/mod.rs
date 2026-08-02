@@ -3,9 +3,11 @@
 
 mod fixture;
 
-pub use fixture::{FixtureServer, linear_comment, linear_issue, text, tool_call};
+pub use fixture::{
+    FixtureServer, github_pr, github_review, linear_comment, linear_issue, text, tool_call,
+};
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
 
@@ -15,7 +17,7 @@ use tempfile::TempDir;
 pub struct TestDaemon {
     child: Child,
     socket_path: PathBuf,
-    _workspace: TempDir,
+    workspace: TempDir,
     _sock_dir: TempDir,
 }
 
@@ -42,6 +44,9 @@ impl TestDaemon {
         let child = Command::new(assert_cmd::cargo::cargo_bin!("kitaebot"))
             .arg("run")
             .env("KITAEBOT_WORKSPACE", workspace.path())
+            // Hermetic HOME: git subprocesses inherit it via safe_env,
+            // so the host's git config never leaks into e2e runs.
+            .env("HOME", workspace.path())
             .spawn()
             .expect("failed to spawn daemon");
 
@@ -57,7 +62,7 @@ impl TestDaemon {
         Self {
             child,
             socket_path,
-            _workspace: workspace,
+            workspace,
             _sock_dir: sock_dir,
         }
     }
@@ -68,6 +73,68 @@ impl TestDaemon {
         cmd.arg(&self.socket_path);
         cmd
     }
+
+    /// The daemon's workspace root, for asserting on files it writes.
+    pub fn workspace_path(&self) -> &Path {
+        self.workspace.path()
+    }
+}
+
+// ── Git fixture repos ───────────────────────────────────────────────
+
+/// Run git in `dir`, panicking on failure. Identity via -c flags so
+/// the fixture works without global git config.
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Create `<root>/<owner>/<repo>.git` with a `main` commit and a PR
+/// commit reachable via `refs/pull/<n>/head`. Point `git.clone_base`
+/// at `file://<root>` to serve it. Returns the PR head SHA.
+pub fn git_fixture_pr_repo(root: &Path, nwo: &str, pr_number: u32) -> String {
+    let dir = root.join(format!("{nwo}.git"));
+    std::fs::create_dir_all(&dir).unwrap();
+    git_in(&dir, &["init", "-b", "main"]);
+    std::fs::write(dir.join("a.txt"), "base\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "base"]);
+    git_in(&dir, &["checkout", "-b", "pr-branch"]);
+    std::fs::write(dir.join("a.txt"), "pr change\n").unwrap();
+    git_in(&dir, &["commit", "-am", "pr change"]);
+    let sha = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+    git_in(
+        &dir,
+        &["update-ref", &format!("refs/pull/{pr_number}/head"), &sha],
+    );
+    git_in(&dir, &["checkout", "main"]);
+    sha
+}
+
+/// Add a commit to the fixture PR branch and advance its pull ref,
+/// simulating a push. Returns the new head SHA.
+pub fn git_fixture_push(root: &Path, nwo: &str, pr_number: u32) -> String {
+    let dir = root.join(format!("{nwo}.git"));
+    git_in(&dir, &["checkout", "pr-branch"]);
+    std::fs::write(dir.join("a.txt"), "pr v2\n").unwrap();
+    git_in(&dir, &["commit", "-am", "pr v2"]);
+    let sha = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+    git_in(
+        &dir,
+        &["update-ref", &format!("refs/pull/{pr_number}/head"), &sha],
+    );
+    git_in(&dir, &["checkout", "main"]);
+    sha
 }
 
 impl Drop for TestDaemon {

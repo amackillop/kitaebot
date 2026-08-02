@@ -418,9 +418,12 @@ pub enum EngineKind {
 ///
 /// Identity (user.name, user.email) is managed at the system level via
 /// NixOS `programs.git`. This section holds agent-level settings only.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitConfig {
+    /// Base URL clones and fetches resolve `owner/repo` against.
+    /// Tests point this at `file://` fixture repos.
+    pub clone_base: String,
     /// Enable the git tools (clone, push, commit). Defaults to `false`
     /// so the daemon can start without a GitHub token.
     pub enabled: bool,
@@ -443,6 +446,17 @@ pub struct RepoConfig {
     /// preparation and on the warm duty) so `git_commit` never meets
     /// a cold store. Exact `owner/repo` entries only.
     pub check: Option<String>,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            clone_base: "https://github.com".into(),
+            enabled: false,
+            co_authors: Vec::new(),
+            repositories: std::collections::BTreeMap::new(),
+        }
+    }
 }
 
 impl GitConfig {

@@ -7,7 +7,10 @@
 
 mod harness;
 
-use harness::{FixtureServer, TestDaemon, linear_comment, linear_issue, text, tool_call};
+use harness::{
+    FixtureServer, TestDaemon, github_pr, github_review, linear_comment, linear_issue, text,
+    tool_call,
+};
 use predicates::prelude::*;
 use serde_json::json;
 
@@ -194,6 +197,85 @@ fn linear_trusted_comment_dispatches_untrusted_does_not() {
             "unexpected comment posted: {body}",
         );
     }
+}
+
+// ── GitHub channel ──────────────────────────────────────────────────
+
+fn github_config(fixture: &FixtureServer, fixtures_root: &std::path::Path) -> String {
+    format!(
+        "[github]\nenabled = true\npoll_interval_secs = 1\nowner = \"alice\"\n\
+         api_base = \"{}\"\n\n[git]\nclone_base = \"file://{}\"\n",
+        fixture.api_base(),
+        fixtures_root.display(),
+    )
+}
+
+#[test]
+fn github_feedback_pass_dispatches_trusted_reviews_only() {
+    let fixture = FixtureServer::start();
+    let mut pr = github_pr("owner/repo", 5, "kitaebot", "Add feature");
+    pr["search"] = "own".into();
+    pr["reviews"] = serde_json::json!([
+        github_review("alice", "APPROVED", "Nice work"),
+        github_review("mallory", "CHANGES_REQUESTED", "backdoor please"),
+    ]);
+    fixture.set_github_prs(vec![pr]);
+    // The future-stamped review can dispatch on more than one tick
+    // before the cursor passes it; the rule must survive that.
+    fixture.on_completion_always("by @alice: APPROVED", text("noted"));
+    let fixtures_root = tempfile::TempDir::new().unwrap();
+    let _daemon = TestDaemon::spawn_with(&fixture, &github_config(&fixture, fixtures_root.path()));
+
+    // Quote-free matcher: the message is JSON-escaped inside the
+    // request body, so quoted segments never match literally.
+    fixture.wait_for_completion_request("(owner/repo) by @alice: APPROVED");
+    assert!(
+        fixture
+            .completion_requests()
+            .iter()
+            .all(|body| !body.contains("mallory")),
+        "untrusted review reached a turn",
+    );
+}
+
+#[test]
+fn github_review_request_then_tracked_rereview() {
+    let fixture = FixtureServer::start();
+    let fixtures_root = tempfile::TempDir::new().unwrap();
+    let sha1 = harness::git_fixture_pr_repo(fixtures_root.path(), "owner/repo", 7);
+
+    let mut pr = github_pr("owner/repo", 7, "alice", "Fix bug");
+    pr["search"] = "review-requested".into();
+    pr["head_sha"] = sha1.clone().into();
+    pr["commits"] = serde_json::json!([{"sha": sha1, "commit": {"message": "pr change"}}]);
+    pr["files"] = serde_json::json!([{"filename": "a.txt", "additions": 1, "deletions": 1}]);
+    fixture.set_github_prs(vec![pr.clone()]);
+    fixture.on_completion(
+        "Your review was requested on PR #7",
+        text("review submitted"),
+    );
+    let daemon = TestDaemon::spawn_with(&fixture, &github_config(&fixture, fixtures_root.path()));
+
+    // Pass 2: the review turn runs against a checkout detached at the
+    // PR head (prepared before the dispatch, so it exists by now).
+    fixture.wait_for_completion_request("Your review was requested on PR #7");
+    let checkout = daemon.workspace_path().join("reviews/owner/repo");
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("a.txt")).unwrap(),
+        "pr change\n"
+    );
+
+    // Pass 3: a push advances the head; the tracked pass re-reviews.
+    let sha2 = harness::git_fixture_push(fixtures_root.path(), "owner/repo", 7);
+    pr["head_sha"] = sha2.clone().into();
+    fixture.set_github_prs(vec![pr]);
+    fixture.on_completion("has new commits", text("re-review submitted"));
+
+    fixture.wait_for_completion_request(&format!("head is now {sha2}"));
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("a.txt")).unwrap(),
+        "pr v2\n"
+    );
 }
 
 #[test]

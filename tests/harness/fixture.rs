@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Path as UrlPath, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use serde_json::json;
 
 /// A scripted response matched against request bodies in insertion
@@ -32,11 +32,13 @@ struct Rule {
 #[derive(Default)]
 struct FixtureState {
     completion_rules: Vec<Rule>,
+    completion_requests: Vec<String>,
     telegram_updates: Vec<serde_json::Value>,
     next_update_id: i64,
     telegram_sends: Vec<serde_json::Value>,
     linear_issues: Vec<serde_json::Value>,
     linear_comments: Vec<serde_json::Value>,
+    github_prs: Vec<serde_json::Value>,
 }
 
 type SharedState = Arc<Mutex<FixtureState>>;
@@ -72,6 +74,17 @@ impl FixtureServer {
                     .route("/bot/getUpdates", post(get_updates))
                     .route("/bot/sendMessage", post(send_message))
                     .route("/graphql", post(linear_graphql))
+                    .route("/user", get(gh_user))
+                    .route("/search/issues", get(gh_search))
+                    .route("/repos/{owner}/{repo}/pulls/{number}", get(gh_pull))
+                    .route(
+                        "/repos/{owner}/{repo}/pulls/{number}/{resource}",
+                        get(gh_pull_resource),
+                    )
+                    .route(
+                        "/repos/{owner}/{repo}/issues/{number}/comments",
+                        get(gh_issue_comments),
+                    )
                     .with_state(router_state);
                 axum::serve(listener, app)
                     .await
@@ -134,6 +147,34 @@ impl FixtureServer {
         self.state.lock().unwrap().linear_issues = issues;
     }
 
+    /// Replace the PR set served by the GitHub routes. Build entries
+    /// with [`github_pr`].
+    pub fn set_github_prs(&self, prs: Vec<serde_json::Value>) {
+        self.state.lock().unwrap().github_prs = prs;
+    }
+
+    /// All completion request bodies received so far.
+    pub fn completion_requests(&self) -> Vec<String> {
+        self.state.lock().unwrap().completion_requests.clone()
+    }
+
+    /// Block until a completion request whose body contains `substr`
+    /// arrives. Panics after 10s.
+    pub fn wait_for_completion_request(&self, substr: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !self
+            .completion_requests()
+            .iter()
+            .any(|body| body.contains(substr))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no completion request containing {substr:?} within 10s",
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// All recorded `commentCreate` variable sets so far.
     pub fn linear_comments(&self) -> Vec<serde_json::Value> {
         self.state.lock().unwrap().linear_comments.clone()
@@ -186,6 +227,7 @@ impl FixtureServer {
 
 async fn completions(State(state): State<SharedState>, body: String) -> Response {
     let mut state = state.lock().unwrap();
+    state.completion_requests.push(body.clone());
     let matched = state
         .completion_rules
         .iter()
@@ -301,16 +343,157 @@ pub fn linear_issue(
 /// A Linear issue comment stamped one second in the future, so it is
 /// strictly newer than any poll cursor the daemon has already saved.
 pub fn linear_comment(email: &str, body: &str) -> serde_json::Value {
+    json!({
+        "body": body,
+        "createdAt": future_timestamp(),
+        "user": {"id": format!("user-{email}"), "name": email, "email": email},
+    })
+}
+
+// ── GitHub routes ───────────────────────────────────────────────────
+//
+// PRs live in FixtureState as one object each, with sub-resources
+// (reviews, comments, commits, files) embedded; the handlers slice
+// out the piece each REST endpoint serves. The bot login is fixed
+// to "kitaebot".
+
+async fn gh_user() -> Response {
+    axum::Json(json!({"login": "kitaebot"})).into_response()
+}
+
+/// Serve the search q= qualifiers: `review-requested:` and `author:`
+/// select the PRs marked with the matching `search` field.
+async fn gh_search(State(state): State<SharedState>, RawQuery(query): RawQuery) -> Response {
+    let query = query.unwrap_or_default();
+    let wanted = if query.contains("review-requested:") {
+        "review-requested"
+    } else if query.contains("author:") {
+        "own"
+    } else {
+        return (StatusCode::BAD_REQUEST, "unrecognized search query").into_response();
+    };
+    let items: Vec<serde_json::Value> = state
+        .lock()
+        .unwrap()
+        .github_prs
+        .iter()
+        .filter(|pr| pr["search"] == wanted)
+        .map(|pr| {
+            json!({
+                "number": pr["number"],
+                "title": pr["title"],
+                "body": pr["body"],
+                "user": pr["user"],
+                "repository_url":
+                    format!("https://api.github.com/repos/{}", pr["nwo"].as_str().unwrap()),
+            })
+        })
+        .collect();
+    axum::Json(json!({"total_count": items.len(), "items": items})).into_response()
+}
+
+fn find_pr(
+    state: &SharedState,
+    owner: &str,
+    repo: &str,
+    number: &str,
+) -> Option<serde_json::Value> {
+    let nwo = format!("{owner}/{repo}");
+    let number: u64 = number.parse().ok()?;
+    state
+        .lock()
+        .unwrap()
+        .github_prs
+        .iter()
+        .find(|pr| pr["nwo"] == nwo.as_str() && pr["number"] == number)
+        .cloned()
+}
+
+async fn gh_pull(
+    State(state): State<SharedState>,
+    UrlPath((owner, repo, number)): UrlPath<(String, String, String)>,
+) -> Response {
+    let Some(pr) = find_pr(&state, &owner, &repo, &number) else {
+        return (StatusCode::NOT_FOUND, "no such fixture PR").into_response();
+    };
+    axum::Json(json!({
+        "state": pr["state"],
+        "title": pr["title"],
+        "head": {"sha": pr["head_sha"], "ref": "pr-branch"},
+        "base": {"sha": "0".repeat(40), "ref": pr["base_ref"]},
+    }))
+    .into_response()
+}
+
+async fn gh_pull_resource(
+    State(state): State<SharedState>,
+    UrlPath((owner, repo, number, resource)): UrlPath<(String, String, String, String)>,
+) -> Response {
+    let Some(pr) = find_pr(&state, &owner, &repo, &number) else {
+        return (StatusCode::NOT_FOUND, "no such fixture PR").into_response();
+    };
+    let field = match resource.as_str() {
+        "comments" => "diff_comments",
+        "commits" => "commits",
+        "files" => "files",
+        "reviews" => "reviews",
+        _ => return (StatusCode::NOT_FOUND, "unknown pull sub-resource").into_response(),
+    };
+    axum::Json(pr[field].clone()).into_response()
+}
+
+async fn gh_issue_comments(
+    State(state): State<SharedState>,
+    UrlPath((owner, repo, number)): UrlPath<(String, String, String)>,
+) -> Response {
+    let Some(pr) = find_pr(&state, &owner, &repo, &number) else {
+        return (StatusCode::NOT_FOUND, "no such fixture PR").into_response();
+    };
+    axum::Json(pr["issue_comments"].clone()).into_response()
+}
+
+/// A GitHub PR with empty sub-resources. Tests set `search` to `own`
+/// or `review-requested` to surface it in the search passes, and fill
+/// `reviews`/`commits`/`files`/`diff_comments`/`issue_comments`.
+pub fn github_pr(nwo: &str, number: u32, author: &str, title: &str) -> serde_json::Value {
+    json!({
+        "nwo": nwo,
+        "number": number,
+        "title": title,
+        "body": "e2e fixture PR",
+        "state": "open",
+        "user": {"login": author},
+        "head_sha": "0".repeat(40),
+        "base_ref": "main",
+        "search": serde_json::Value::Null,
+        "reviews": [],
+        "issue_comments": [],
+        "diff_comments": [],
+        "commits": [],
+        "files": [],
+    })
+}
+
+/// A submitted PR review stamped one second in the future, so it is
+/// strictly newer than any poll cursor the daemon has already saved.
+pub fn github_review(author: &str, state: &str, body: &str) -> serde_json::Value {
+    json!({
+        "user": {"login": author},
+        "state": state,
+        "body": body,
+        "submitted_at": future_timestamp(),
+    })
+}
+
+/// ISO 8601 timestamp one second ahead of the wall clock. The daemon's
+/// poll cursors move at tick granularity; a same-second timestamp can
+/// compare at-or-before the cursor and never dispatch.
+fn future_timestamp() -> String {
     let out = std::process::Command::new("date")
         .args(["-u", "-d", "+1 second", "+%Y-%m-%dT%H:%M:%S.000Z"])
         .output()
         .expect("failed to run date");
-    let created_at = String::from_utf8(out.stdout).unwrap().trim().to_string();
-    json!({
-        "body": body,
-        "createdAt": created_at,
-        "user": {"id": format!("user-{email}"), "name": email, "email": email},
-    })
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
 /// A completion body holding a plain text reply.

@@ -28,6 +28,8 @@ pub struct GitCli {
     warmer: Warmer,
     /// Build-warm command per exact `owner/repo` (spec 03).
     warm_commands: Arc<BTreeMap<String, String>>,
+    /// Base URL `owner/repo` resolves against for clones and fetches.
+    clone_base: String,
 }
 
 impl GitCli {
@@ -45,7 +47,19 @@ impl GitCli {
             trusted_repos,
             warmer,
             warm_commands: Arc::default(),
+            clone_base: "https://github.com".into(),
         }
+    }
+
+    /// Override the clone base URL (`git.clone_base`).
+    pub fn with_clone_base(mut self, base: &str) -> Self {
+        self.clone_base = base.trim_end_matches('/').to_string();
+        self
+    }
+
+    /// Remote URL for `owner/repo`.
+    pub fn repo_url(&self, nwo: &str) -> String {
+        format!("{}/{nwo}.git", self.clone_base)
     }
 
     /// Share warm state and configured commands. The runtime calls
@@ -125,7 +139,7 @@ impl GitCli {
             Ok(rel) => rel,
             Err(e) => return format!("bad repo path: {e}"),
         };
-        let url = format!("https://github.com/{nwo}.git");
+        let url = self.repo_url(nwo);
         let dir = match super::checkout::ensure_cloned(self, &url, &rel).await {
             Ok(ensured) => ensured.into_dir(),
             Err(e) => return format!("clone failed: {e}"),
@@ -172,7 +186,7 @@ impl GitCli {
     /// Needs no checkout — the duty scheduler's new-commits gate probes
     /// repos the bot may never have cloned.
     pub async fn remote_head(&self, nwo: &str) -> Result<String, ToolError> {
-        let url = format!("https://github.com/{nwo}.git");
+        let url = self.repo_url(nwo);
         let call = self.prepare_git(&["ls-remote", &url, "HEAD"], &self.workspace_root);
         let out = self.exec_git(call, true).await?;
         if out.exit_code != 0 {

@@ -22,7 +22,7 @@ pub(super) fn checkout_rel_path(nwo: &str) -> Result<String, ToolError> {
 /// Returns the workspace-relative checkout path.
 pub(super) async fn prepare(git: &GitCli, nwo: &str) -> Result<String, ToolError> {
     let rel = checkout_rel_path(nwo)?;
-    let url = format!("https://github.com/{nwo}.git");
+    let url = git.repo_url(nwo);
     prepare_at(git, &url, &rel).await?;
     Ok(rel)
 }

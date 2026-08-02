@@ -37,7 +37,7 @@ pub(super) async fn prepare(
 ) -> Result<String, ToolError> {
     let rel = checkout_rel_path(nwo)?;
     let clone_rel = checkout::rel_path("projects", nwo)?;
-    let url = format!("https://github.com/{nwo}.git");
+    let url = git.repo_url(nwo);
     prepare_at(git, &url, &clone_rel, &rel, pr_number, head_sha, base).await?;
     Ok(rel)
 }
