@@ -63,7 +63,7 @@ Typed tools replace a generic shell. The LLM declares intent via parameters inst
 | `github_pr_diff_comments` | Fetch PR diff comments |
 | `github_pr_diff_reply` | Reply to a PR diff comment |
 | `github_ci_status` | Check CI status for a ref |
-| `github_gh` | General-purpose `gh` CLI wrapper |
+| `github_api` | GitHub REST escape hatch, scoped to the repo |
 | `task` | Delegate to a sub-agent (`explore` read-only research, `worker` implementation) |
 | `notify` | Push a message to the user via Telegram (batched by priority) |
 | `lcm_grep` | Search compacted history (LCM engine) |
@@ -104,6 +104,7 @@ just check               # Full validation: nix flake check, nix lint/fmt, clipp
 just rust-check          # Fast inner loop: cargo fmt-check + clippy + tests (not the commit gate)
 just build               # Compile
 just test                # Run tests (mock-network feature)
+just test-e2e            # E2e suite: real daemon against a loopback fixture server
 just test-one NAME       # Run tests matching a name
 just test-nixos          # Run all NixOS VM integration tests
 just test-nixos-one NAME # Run a single NixOS VM test (e.g. egress)
@@ -147,7 +148,6 @@ kitaebot = {
     coreutils
     curl
     findutils
-    gh
     git
     gnugrep
     gnused
@@ -310,9 +310,9 @@ src/
 │   ├── glob_search.rs   File pattern matching
 │   ├── grep.rs          Content search (ripgrep backend)
 │   ├── git/             Clone, commit, push, URL validation
-│   ├── github/          PR ops, CI status, generic gh CLI
+│   ├── github/          PR ops, CI status, REST escape hatch
 │   ├── network/         web_fetch, web_search (Perplexity)
-│   ├── cli_runner.rs    Subprocess boundary for git/gh
+│   ├── cli_runner.rs    Subprocess boundary for git
 │   ├── direnv.rs        Dev environment cache
 │   └── path.rs          PathGuard (traversal rejection)
 ├── sandbox.rs           Landlock policy
