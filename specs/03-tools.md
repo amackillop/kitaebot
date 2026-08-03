@@ -86,7 +86,10 @@ hardcoded, so typos are caught by tests instead.
 - **`PathGuard`** — workspace-confined path resolution. Rejects null bytes,
   `../`, and absolute paths. Canonicalizes and verifies the result is under the
   workspace root. Provides `resolve()` for existing files and `resolve_new()`
-  for files that don't exist yet. Used by all file tools.
+  for files that don't exist yet; the `resolve_writable*` variants add the
+  daemon-owned fence: `config.toml`, `context/`, and `state/` are readable but
+  not writable through the file tools, with `state/review-checklist.md` as the
+  one model-maintained exception. Used by all file tools.
 
 ---
 
@@ -106,9 +109,11 @@ Executes commands via `bash -c` within the workspace.
 **Safety guards — two-layer deny system:**
 
 1. **Regex layer** — a compiled `RegexSet` of ~70+ patterns covering:
-   destructive file ops (`rm -rf`, `shred`, `find -delete`), disk/filesystem
-   (`mkfs`, `dd`, `fdisk`, `mount`), system power (`shutdown`, `reboot`,
-   `systemctl`), privilege escalation (`sudo`, `su`, `chmod`, `chown`),
+   destructive file ops (`rm -rf`, `shred`, `find -delete`), internal state
+   (workspace-root `context/` references, redirection into `state/`),
+   disk/filesystem (`mkfs`, `dd`, `fdisk`, `mount`), system power
+   (`shutdown`, `reboot`, `systemctl`), privilege escalation (`sudo`, `su`,
+   `chmod`, `chown`),
    network exfiltration (`curl -T`, `nc -l`, `socat`), pipe-to-shell
    (`curl|sh`, `wget|sh`), reverse shells (`/dev/tcp/`, python/ruby/perl
    socket), port scanning (`nmap`, `masscan`), secret harvesting

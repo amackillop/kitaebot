@@ -1,7 +1,8 @@
 //! File writing tool.
 //!
 //! Writes content to a file in the workspace. Creates parent directories
-//! as needed. Uses `PathGuard::resolve_new` so the file need not exist yet.
+//! as needed. Uses `PathGuard::resolve_writable_new` so the file need
+//! not exist yet and daemon-owned paths are refused.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -55,7 +56,7 @@ impl Tool for FileWrite {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-            let resolved = self.guard.resolve_new(&args.path)?;
+            let resolved = self.guard.resolve_writable_new(&args.path)?;
 
             if let Some(parent) = resolved.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {

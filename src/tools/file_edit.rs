@@ -73,7 +73,7 @@ impl Tool for FileEdit {
                 ));
             }
 
-            let resolved = self.guard.resolve(&args.path)?;
+            let resolved = self.guard.resolve_writable(&args.path)?;
             debug!(path = %args.path, "Editing file");
             let content = std::fs::read_to_string(&resolved)
                 .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;

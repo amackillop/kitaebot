@@ -46,6 +46,18 @@ impl PathGuard {
         self.ensure_under_root(&candidate, path)
     }
 
+    /// Like [`PathGuard::resolve`], for tools that modify the file.
+    pub fn resolve_writable(&self, path: &str) -> Result<PathBuf, ToolError> {
+        deny_daemon_owned(path)?;
+        self.resolve(path)
+    }
+
+    /// Like [`PathGuard::resolve_new`], for tools that write the file.
+    pub fn resolve_writable_new(&self, path: &str) -> Result<PathBuf, ToolError> {
+        deny_daemon_owned(path)?;
+        self.resolve_new(path)
+    }
+
     fn validate_and_join(&self, path: &str) -> Result<PathBuf, ToolError> {
         if path.contains('\0') {
             return Err(ToolError::Blocked {
@@ -80,6 +92,35 @@ impl PathGuard {
     }
 }
 
+/// Reject writes into daemon-owned paths (the `workspace` layout consts:
+/// config, engine context, state). `path` is already validated
+/// (relative, no traversal), so component comparison suffices. The
+/// reviewer escape checklist is the one model-maintained exception.
+fn deny_daemon_owned(path: &str) -> Result<(), ToolError> {
+    use crate::workspace::{CONFIG_FILE, CONTEXT_DIR, REVIEW_CHECKLIST, STATE_DIR};
+
+    let components: Vec<&str> = Path::new(path)
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect();
+    let Some(&first) = components.first() else {
+        return Ok(());
+    };
+    if components == [STATE_DIR, REVIEW_CHECKLIST] {
+        return Ok(());
+    }
+    if [CONFIG_FILE, CONTEXT_DIR, STATE_DIR].contains(&first) {
+        return Err(ToolError::Blocked {
+            operation: format!("write {path}"),
+            guidance: format!("{first} is daemon-owned; file tools may read it but not modify it"),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +146,53 @@ mod tests {
         let guard = PathGuard::new(dir.path());
         let resolved = guard.resolve("a/b/c.txt").unwrap();
         assert_eq!(resolved, file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn writable_refuses_daemon_owned_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = PathGuard::new(dir.path());
+        for path in [
+            "config.toml",
+            "context/sessions/general.json",
+            "state/JOURNAL.md",
+            "state/kitaebot.db",
+            "./state/kitaebot.db",
+        ] {
+            assert!(
+                matches!(
+                    guard.resolve_writable_new(path),
+                    Err(ToolError::Blocked { .. })
+                ),
+                "{path} should be write-blocked",
+            );
+        }
+    }
+
+    #[test]
+    fn writable_allows_the_checklist_and_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = PathGuard::new(dir.path());
+        for path in [
+            "state/review-checklist.md",
+            "memory/topics/notes.md",
+            "projects/o/r/src/state/mod.rs",
+            "statement.txt",
+        ] {
+            assert!(
+                guard.resolve_writable_new(path).is_ok(),
+                "{path} should be writable",
+            );
+        }
+    }
+
+    #[test]
+    fn read_resolvers_still_reach_daemon_owned_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("state")).unwrap();
+        std::fs::write(dir.path().join("state/JOURNAL.md"), "log\n").unwrap();
+        let guard = PathGuard::new(dir.path());
+        assert!(guard.resolve("state/JOURNAL.md").is_ok());
     }
 
     #[test]

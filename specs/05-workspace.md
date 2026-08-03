@@ -73,6 +73,18 @@ the duty scheduler journals mechanical duties directly; the notifier
 mirrors every send as `[notify]` (spec 17); distillation passes land
 as `[distill]`. Entries are capped at 4000 bytes.
 
+### Ownership fence
+
+`config.toml`, `context/`, and `state/` are daemon-owned: the model
+reads them freely but cannot write them through its tools. PathGuard
+refuses write resolutions there (spec 03), and the exec deny list
+catches the obvious shell equivalents — workspace-root `context/`
+references and redirection into `state/`. The one exception is
+`state/review-checklist.md`, which the review gates maintain. The
+fence is policy enforcement against an honest-but-drifting model,
+not a security boundary: exec remains arbitrary code, and the VM's
+user isolation is what actually bounds it.
+
 The journal is what makes the bot's autonomous work recountable — a
 future standup duty summarizes it since a cursor (FUTURE.md).
 

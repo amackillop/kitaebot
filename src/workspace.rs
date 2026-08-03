@@ -12,6 +12,17 @@ use crate::error::WorkspaceError;
 const ENV_VAR: &str = "KITAEBOT_WORKSPACE";
 const APP_NAME: &str = "kitaebot";
 
+/// Workspace-root entries the daemon owns: the model's tools read
+/// them but never write them. `PathGuard` and the exec deny list build
+/// their fence from these names, so a rename here moves the fence
+/// with the directory instead of silently detaching it.
+pub const CONFIG_FILE: &str = "config.toml";
+pub const CONTEXT_DIR: &str = "context";
+pub const STATE_DIR: &str = "state";
+/// The one model-writable file under [`STATE_DIR`], maintained by the
+/// review gates. Relative to [`STATE_DIR`].
+pub const REVIEW_CHECKLIST: &str = "review-checklist.md";
+
 /// The agent's persona and workflow, embedded at build time so they
 /// are versioned with the code that references their tools and cannot
 /// go missing at runtime.
@@ -55,11 +66,11 @@ impl Workspace {
         };
 
         mk(&path)?;
-        mk(&path.join("context"))?;
+        mk(&path.join(CONTEXT_DIR))?;
         mk(&path.join("memory"))?;
         mk(&path.join("memory/topics"))?;
         mk(&path.join("projects"))?;
-        mk(&path.join("state"))?;
+        mk(&path.join(STATE_DIR))?;
 
         let system_prompt = read_system_prompt(&path);
         Ok(Self {
@@ -77,13 +88,13 @@ impl Workspace {
     /// store, sessions, and cursors, laid out however the engine
     /// chooses. The workspace hands over the path and looks no deeper.
     pub fn context_dir(&self) -> PathBuf {
-        self.root.join("context")
+        self.root.join(CONTEXT_DIR)
     }
 
     /// Directory holding machine-owned runtime state (engine store,
     /// channel poll cursors).
     pub fn state_dir(&self) -> PathBuf {
-        self.root.join("state")
+        self.root.join(STATE_DIR)
     }
 
     /// Directory holding the memory subsystem's files (spec 21).

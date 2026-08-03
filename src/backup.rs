@@ -32,7 +32,7 @@ const DERIVED: &[&str] = &[
     "reviews",
     ".diffs",
     // Nix-provisioned symlinks.
-    "config.toml",
+    crate::workspace::CONFIG_FILE,
     "USER.md",
     // Recreated at startup from credentials (ExecStartPre).
     ".gnupg",

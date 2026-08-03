@@ -737,7 +737,7 @@ impl Config {
     ///
     /// Missing file produces defaults. Any I/O or parse error is propagated.
     pub fn load(workspace: &Path) -> Result<Self, ConfigError> {
-        let path = workspace.join("config.toml");
+        let path = workspace.join(crate::workspace::CONFIG_FILE);
 
         let contents = match std::fs::read_to_string(&path) {
             Ok(s) => s,

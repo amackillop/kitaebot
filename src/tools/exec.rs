@@ -40,6 +40,7 @@ use crate::config::ExecConfig;
 use crate::error::ToolError;
 
 /// A deny-list entry: regex pattern + guidance shown to the LLM on match.
+#[derive(Clone, Copy)]
 struct DenyRule {
     pattern: &'static str,
     guidance: &'static str,
@@ -426,10 +427,34 @@ const DENY_RULES: &[DenyRule] = &[
     },
 ];
 
+/// The full rule list: the static rules plus the internal-state rules
+/// derived from the workspace layout consts, so a directory rename in
+/// `workspace.rs` moves the fence instead of detaching it. `PathGuard`
+/// enforces the same fence for the file tools.
+static ALL_DENY_RULES: LazyLock<Vec<DenyRule>> = LazyLock::new(|| {
+    use crate::workspace::{CONTEXT_DIR, REVIEW_CHECKLIST, STATE_DIR};
+
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    let mut rules = DENY_RULES.to_vec();
+    // Anchored so paths like src/context/ inside checkouts stay usable.
+    rules.push(DenyRule {
+        pattern: leak(format!(r#"(^|[\s"'=])(\./)?{CONTEXT_DIR}/"#)),
+        guidance: "engine context is daemon-owned; use the lcm tools for history",
+    });
+    rules.push(DenyRule {
+        pattern: leak(format!(r">\s*(\./)?{STATE_DIR}/")),
+        guidance: leak(format!(
+            "{STATE_DIR}/ is daemon-owned; only {STATE_DIR}/{REVIEW_CHECKLIST} \
+             is model-writable, via file_write"
+        )),
+    });
+    rules
+});
+
 /// Compiled deny list. `RegexSet` for fast matching, indexed into
-/// `DENY_RULES` for per-rule guidance.
+/// [`ALL_DENY_RULES`] for per-rule guidance.
 static DENY_SET: LazyLock<RegexSet> = LazyLock::new(|| {
-    RegexSet::new(DENY_RULES.iter().map(|r| r.pattern)).expect("invalid deny pattern")
+    RegexSet::new(ALL_DENY_RULES.iter().map(|r| r.pattern)).expect("invalid deny pattern")
 });
 
 /// Arguments for the exec tool.
@@ -657,7 +682,7 @@ fn nearest_envrc_dir<'a>(cwd: &'a Path, workspace_root: &Path) -> Option<&'a Pat
 fn blocked_reason(cmd: &str) -> Option<&'static str> {
     // Layer 1: regex on raw string
     if let Some(i) = DENY_SET.matches(cmd).iter().next() {
-        return Some(DENY_RULES[i].guidance);
+        return Some(ALL_DENY_RULES[i].guidance);
     }
     // Layer 2: shell-aware structural match
     command_blocked(cmd)
@@ -807,6 +832,25 @@ mod tests {
             "expected {cmd:?} to be allowed, got: {:?}",
             blocked_reason(cmd)
         );
+    }
+
+    #[test]
+    fn internal_state_rules_block_the_obvious() {
+        assert_blocked("cat context/sessions/general.json");
+        assert_blocked("ls ./context/");
+        assert_blocked("grep foo 'context/lcm.db'");
+        assert_blocked("echo forged > state/JOURNAL.md");
+        assert_blocked("echo x >> ./state/kitaebot.db");
+    }
+
+    #[test]
+    fn internal_state_rules_spare_checkout_paths_and_reads() {
+        // The bot works on its own repo: src/context/ and doc text
+        // naming state files must stay usable.
+        assert_allowed("grep -rn engine src/context/");
+        assert_allowed("git -C projects/o/r log src/context/mod.rs");
+        assert_allowed("grep notify state/JOURNAL.md");
+        assert_allowed("wc -l state/review-checklist.md");
     }
 
     #[test]
