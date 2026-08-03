@@ -152,6 +152,96 @@ impl Policy {
         Self { rules }
     }
 
+    /// Tightened per-child policy for the exec tool.
+    ///
+    /// The parent grant covers the whole workspace with `from_all` because
+    /// the daemon itself writes `state/`, `context/`, memory, etc. This
+    /// layer enumerates what an exec child legitimately needs and omits
+    /// the daemon-owned paths by default. Landlock path rules are
+    /// recursive, so the workspace root gets `ReadDir` only: listing
+    /// works everywhere, but file *reads* under `state/`, `context/`,
+    /// `memory/`, and `.gnupg` are denied along with all writes.
+    #[allow(dead_code)]
+    pub fn child_exec(workspace: &Path) -> Self {
+        use crate::workspace::{PROJECTS_DIR, REVIEW_CHECKLIST, STATE_DIR};
+
+        let abi = ABI_VERSION;
+        let all = AccessFs::from_all(abi);
+        let read_files = AccessFs::ReadFile | AccessFs::ReadDir;
+
+        let tmp_access = AccessFs::ReadFile
+            | AccessFs::ReadDir
+            | AccessFs::WriteFile
+            | AccessFs::MakeReg
+            | AccessFs::MakeDir
+            | AccessFs::MakeSym
+            | AccessFs::RemoveFile
+            | AccessFs::RemoveDir
+            | AccessFs::Execute
+            | AccessFs::Truncate;
+
+        let dev_access = AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::WriteFile;
+
+        let rules = vec![
+            Rule {
+                path: workspace.to_path_buf(),
+                access: AccessFs::ReadDir.into(),
+                presence: Presence::Required,
+                rationale: "Workspace root — list-only; file reads need a narrower rule",
+            },
+            Rule {
+                path: workspace.join(PROJECTS_DIR),
+                access: all,
+                presence: Presence::Optional,
+                rationale: "Projects — full access for builds and checkouts",
+            },
+            Rule {
+                path: workspace.join(STATE_DIR).join(REVIEW_CHECKLIST),
+                access: AccessFs::ReadFile.into(),
+                presence: Presence::Optional,
+                rationale: "Review checklist — read-only for exec inspection",
+            },
+            Rule {
+                path: PathBuf::from("/nix/store"),
+                access: AccessFs::from_read(abi),
+                presence: Presence::Optional,
+                rationale: "Nix store — read + execute",
+            },
+            Rule {
+                path: PathBuf::from("/tmp"),
+                access: tmp_access,
+                presence: Presence::Optional,
+                rationale: "Temp files — working access, no device creation",
+            },
+            Rule {
+                path: PathBuf::from("/etc"),
+                access: read_files,
+                presence: Presence::Optional,
+                rationale: "System config — read-only",
+            },
+            Rule {
+                path: PathBuf::from("/run"),
+                access: read_files,
+                presence: Presence::Optional,
+                rationale: "Runtime state — read-only",
+            },
+            Rule {
+                path: PathBuf::from("/dev"),
+                access: dev_access,
+                presence: Presence::Optional,
+                rationale: "Devices — read + write",
+            },
+            Rule {
+                path: PathBuf::from("/proc"),
+                access: read_files,
+                presence: Presence::Optional,
+                rationale: "Procfs — read-only",
+            },
+        ];
+
+        Self { rules }
+    }
+
     /// The ordered list of rules in this policy.
     pub fn rules(&self) -> &[Rule] {
         &self.rules
@@ -393,6 +483,103 @@ mod tests {
     #[test]
     fn only_workspace_is_required() {
         let policy = test_policy();
+        for rule in policy.rules() {
+            if rule.path == Path::new("/home/agent/workspace") {
+                assert_eq!(rule.presence, Presence::Required);
+            } else {
+                assert_eq!(
+                    rule.presence,
+                    Presence::Optional,
+                    "{:?} should be Optional",
+                    rule.path
+                );
+            }
+        }
+    }
+
+    fn child_policy() -> Policy {
+        Policy::child_exec(Path::new("/home/agent/workspace"))
+    }
+
+    #[test]
+    fn child_workspace_root_is_list_only_and_required() {
+        let policy = child_policy();
+        let rule = policy
+            .rules()
+            .iter()
+            .find(|r| r.path == Path::new("/home/agent/workspace"))
+            .expect("workspace root must exist");
+        // ReadFile here would recursively grant reads of state/,
+        // context/, and the keyring — the rule is list-only.
+        assert_eq!(rule.access, BitFlags::from(AccessFs::ReadDir));
+        assert_eq!(rule.presence, Presence::Required);
+    }
+
+    #[test]
+    fn child_projects_gets_full_access() {
+        let policy = child_policy();
+        let rule = policy
+            .rules()
+            .iter()
+            .find(|r| r.path == Path::new("/home/agent/workspace/projects"))
+            .expect("projects rule must exist");
+        assert_eq!(rule.access, AccessFs::from_all(ABI_VERSION));
+        assert_eq!(rule.presence, Presence::Optional);
+    }
+
+    #[test]
+    fn child_review_checklist_is_read_only() {
+        let policy = child_policy();
+        let rule = policy
+            .rules()
+            .iter()
+            .find(|r| r.path == Path::new("/home/agent/workspace/state/review-checklist.md"))
+            .expect("checklist rule must exist");
+        assert_eq!(rule.access, AccessFs::ReadFile);
+        assert_eq!(rule.presence, Presence::Optional);
+    }
+
+    #[test]
+    fn child_daemon_owned_paths_are_absent() {
+        let policy = child_policy();
+        let paths: Vec<_> = policy.rules().iter().map(|r| r.path.as_path()).collect();
+        assert!(!paths.contains(&Path::new("/home/agent/workspace/state")));
+        assert!(!paths.contains(&Path::new("/home/agent/workspace/context")));
+        assert!(!paths.contains(&Path::new("/home/agent/workspace/config.toml")));
+        assert!(!paths.contains(&Path::new("/home/agent/workspace/.gnupg")));
+    }
+
+    #[test]
+    fn child_memory_is_absent() {
+        let policy = child_policy();
+        let paths: Vec<_> = policy.rules().iter().map(|r| r.path.as_path()).collect();
+        assert!(!paths.contains(&Path::new("/home/agent/workspace/memory")));
+    }
+
+    #[test]
+    fn child_tmp_excludes_device_creation() {
+        let policy = child_policy();
+        let rule = policy
+            .rules()
+            .iter()
+            .find(|r| r.path == Path::new("/tmp"))
+            .expect("/tmp rule must exist");
+        assert!(!rule.access.contains(AccessFs::MakeChar));
+        assert!(!rule.access.contains(AccessFs::MakeBlock));
+        assert!(!rule.access.contains(AccessFs::MakeSock));
+        assert!(!rule.access.contains(AccessFs::MakeFifo));
+    }
+
+    #[test]
+    fn child_expected_rule_count() {
+        let policy = child_policy();
+        // workspace root, projects, review checklist, /nix/store, /tmp, /etc, /run, /dev, /proc
+        assert_eq!(policy.rules().len(), 9);
+    }
+
+    #[test]
+    fn child_only_workspace_root_is_required() {
+        let policy = child_policy();
         for rule in policy.rules() {
             if rule.path == Path::new("/home/agent/workspace") {
                 assert_eq!(rule.presence, Presence::Required);

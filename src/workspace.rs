@@ -18,6 +18,8 @@ const APP_NAME: &str = "kitaebot";
 /// with the directory instead of silently detaching it.
 pub const CONFIG_FILE: &str = "config.toml";
 pub const CONTEXT_DIR: &str = "context";
+/// Repository checkouts live under this directory.
+pub const PROJECTS_DIR: &str = "projects";
 pub const STATE_DIR: &str = "state";
 /// The one model-writable file under [`STATE_DIR`], maintained by the
 /// review gates. Relative to [`STATE_DIR`].
@@ -69,7 +71,7 @@ impl Workspace {
         mk(&path.join(CONTEXT_DIR))?;
         mk(&path.join("memory"))?;
         mk(&path.join("memory/topics"))?;
-        mk(&path.join("projects"))?;
+        mk(&path.join(PROJECTS_DIR))?;
         mk(&path.join(STATE_DIR))?;
 
         let system_prompt = read_system_prompt(&path);
@@ -204,7 +206,7 @@ mod tests {
         assert!(ws.path().join("context").is_dir());
         assert!(ws.path().join("memory").is_dir());
         assert!(ws.path().join("memory/topics").is_dir());
-        assert!(ws.path().join("projects").is_dir());
+        assert!(ws.path().join(PROJECTS_DIR).is_dir());
         assert!(ws.path().join("state").is_dir());
     }
 
