@@ -25,10 +25,20 @@ in
     logLevel = "kitaebot=debug";
     tools = with pkgs; [
       curl
+      diffutils
+      fd
       findutils
       gnugrep
+      gnupatch
       gnused
+      gnutar
+      gzip
+      jq
+      procps
+      python3
+      ripgrep
       which
+      xz
       lightpanda
       # MCP servers (spec 22): spawned by the daemon, resolved via PATH.
       bkb-mcp
