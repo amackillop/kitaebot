@@ -2,11 +2,52 @@
 
 ## Motivation
 
-Kernel-enforced filesystem confinement via Linux Landlock LSM. Applied at
-process startup, irrevocable, inherited by all child processes (including
-`bash -c` from the exec tool).
+Kernel-enforced filesystem confinement in two tiers. The daemon confines
+itself with Linux Landlock at startup (broad, inherited). Because that
+grant must include full workspace write — the daemon writes `state/`,
+`context/`, the journal, and memory — every child inherits full-workspace
+write too. So a second, tighter boundary is applied **per exec child**
+with bubblewrap: the workspace stays writable, but the daemon-owned paths
+are masked, moving the `state/`/`context/`/keyring fence from the
+heuristic layers ([spec 03](03-tools.md) deny-list, [spec 05](05-workspace.md)
+PathGuard) into the kernel.
 
 ## Behavior
+
+### Per-child confinement (bubblewrap)
+
+`exec.sandbox` (default off until VM-verified) wraps each `bash -c` in a
+`bwrap` invocation built by `tools::bwrap::wrap_argv`, a pure function
+over the workspace layout consts. The view **masks rather than
+reconstructs**: the workspace is bound writable so build caches under
+`HOME` keep working, and only the sensitive paths are hidden.
+
+| Path | Treatment | Effect |
+|------|-----------|--------|
+| Workspace root | `--bind` (rw) | Builds, checkouts, `.diffs/` all work |
+| `state/`, `context/` | `--tmpfs` (empty) | Writes land in throwaway memory; reads see nothing |
+| `.gnupg` | `--tmpfs` when present | The signing key is invisible to the child |
+| `config.toml` | `--ro-bind /dev/null` | Operator config reads empty |
+| `/nix/store` | `--ro-bind` | Binaries |
+| `/etc` | `--ro-bind-try` | resolv.conf, CA certs |
+| `/tmp` | `--tmpfs` | Private; also denies reading the git askpass file |
+| `/run` | *not bound* | The chat socket is unreachable |
+| network ns | *shared* | The egress proxy on loopback still routes; proxied traffic is by IP, so DNS is unneeded |
+
+Also `--unshare-pid` (the daemon is invisible, closing ptrace),
+`--unshare-ipc`, `--die-with-parent`, `--new-session`.
+
+The mask set derives from the same consts as the PathGuard fence, so a
+directory rename moves both. The pure argv is unit-tested exhaustively;
+live tests run a real `bwrap` where the kernel allows it (skipped where
+unprivileged userns is denied) and assert a masked write never reaches
+the host and the keyring reads empty. The authoritative check is the VM
+smoke, which also gates flipping the default on.
+
+**Not yet covered** (follow-up tiers): the warm duty and git hooks
+(repo-controlled code) and the authenticated `git_cli` path (the only
+spawn that should see a credential) still run under the daemon's
+inherited Landlock only.
 
 ### Architecture
 

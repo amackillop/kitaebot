@@ -477,6 +477,8 @@ pub struct Exec {
     /// Repos (`owner/repo`) whose `.envrc` may be re-allowed
     /// when a pull rewrites it and direnv revokes the clone-time approval.
     trusted_repos: Vec<String>,
+    /// Wrap each command in a per-child bubblewrap sandbox (spec 15).
+    sandbox: bool,
 }
 
 impl Exec {
@@ -491,6 +493,31 @@ impl Exec {
             timeout: Duration::from_secs(config.timeout_secs),
             direnv_cache,
             trusted_repos,
+            sandbox: config.sandbox,
+        }
+    }
+
+    /// Build the command, wrapping it in bubblewrap when the sandbox
+    /// is enabled. The env is set identically either way — bwrap
+    /// forwards its own environment to the child.
+    fn build_command(&self, command: &str, cwd: &Path) -> Command {
+        if self.sandbox {
+            let mask_gnupg = self.workspace_root.join(super::bwrap::GNUPG_DIR).is_dir();
+            let mut cmd = Command::new("bwrap");
+            cmd.args(super::bwrap::wrap_argv(
+                &self.workspace_root,
+                cwd,
+                mask_gnupg,
+            ))
+            .arg("bash")
+            .arg("-c")
+            .arg(command);
+            // bwrap applied --chdir; the daemon-side cwd is irrelevant.
+            cmd
+        } else {
+            let mut cmd = Command::new("bash");
+            cmd.arg("-c").arg(command).current_dir(cwd);
+            cmd
         }
     }
 
@@ -571,12 +598,10 @@ impl Tool for Exec {
 
             // bash (not sh) for consistent shell semantics across all
             // exec tool invocations. Direnv devshell env is injected
-            // directly via Command::envs() from the in-process cache.
-            let mut cmd = Command::new("bash");
-            cmd.arg("-c")
-                .arg(&args.command)
-                .current_dir(&cwd)
-                .env_clear()
+            // directly via Command::envs() from the in-process cache;
+            // bwrap, when enabled, forwards this same env to the child.
+            let mut cmd = self.build_command(&args.command, &cwd);
+            cmd.env_clear()
                 .envs(super::safe_env())
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1124,6 +1149,7 @@ mod tests {
             timeout: Duration::from_millis(50),
             direnv_cache: DirenvCache::new(),
             trusted_repos: Vec::new(),
+            sandbox: false,
         }
     }
 

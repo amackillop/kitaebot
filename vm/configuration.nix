@@ -38,6 +38,7 @@ let
   # must not be possible.
   runtimeTools = with pkgs; [
     bash
+    bubblewrap
     coreutils
     direnv
     git

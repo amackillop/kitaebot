@@ -2,6 +2,7 @@
 //!
 //! Tools are functions the agent can call (exec, `read_file`, `web_search`, etc.).
 
+mod bwrap;
 pub(crate) mod cli_runner;
 pub(crate) mod direnv;
 mod exec;

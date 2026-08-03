@@ -237,6 +237,10 @@ pub struct ToolsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ExecConfig {
     pub timeout_secs: u64,
+    /// Wrap each command in a bubblewrap sandbox that masks the
+    /// daemon-owned paths (spec 15). Off until the VM smoke confirms
+    /// the reconstructed view does not break builds or the devshell.
+    pub sandbox: bool,
 }
 
 /// Settings for the `web_fetch` tool.
@@ -627,7 +631,10 @@ impl LcmConfig {
 
 impl Default for ExecConfig {
     fn default() -> Self {
-        Self { timeout_secs: 600 }
+        Self {
+            timeout_secs: 600,
+            sandbox: false,
+        }
     }
 }
 
