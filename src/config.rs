@@ -237,10 +237,25 @@ pub struct ToolsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ExecConfig {
     pub timeout_secs: u64,
-    /// Wrap each command in a bubblewrap sandbox that masks the
-    /// daemon-owned paths (spec 15). Off until the VM smoke confirms
-    /// the reconstructed view does not break builds or the devshell.
-    pub sandbox: bool,
+    /// Per-child confinement mechanism (spec 15). Off until the VM
+    /// smoke confirms the tightened view does not break builds or the
+    /// devshell.
+    pub sandbox: SandboxMode,
+}
+
+/// Per-child sandbox mechanism for exec commands (spec 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxMode {
+    /// Bubblewrap namespace view masking daemon-owned paths. Needs
+    /// mount/userns syscalls loosened on the unit; kept as a
+    /// documented alternative.
+    Bwrap,
+    /// Tighter Landlock layer applied in the child via the hidden
+    /// `confine` subcommand.
+    Landlock,
+    /// No per-child layer; children inherit the daemon's Landlock.
+    Off,
 }
 
 /// Settings for the `web_fetch` tool.
@@ -637,7 +652,7 @@ impl Default for ExecConfig {
     fn default() -> Self {
         Self {
             timeout_secs: 600,
-            sandbox: false,
+            sandbox: SandboxMode::Off,
         }
     }
 }

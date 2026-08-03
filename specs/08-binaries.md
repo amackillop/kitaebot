@@ -16,21 +16,32 @@ daemon, `kchat` connects to it over a Unix socket for interactive use.
 
 ### `kitaebot`
 
-One subcommand: `run`. Bare invocation prints usage and exits with code 1.
-Unknown subcommands exit with code 1. No `clap` — raw `std::env::args()`
+Three subcommands. Bare invocation prints usage and exits with code 1;
+unknown subcommands exit with code 1. No `clap` — raw `std::env::args()`
 parsing.
 
-### Daemon Startup Sequence
+| Subcommand | Role |
+|------------|------|
+| `run` | Start the daemon |
+| `backup <dir>` | Stage durable state into `<dir>` (spec 05) and exit |
+| `confine <tier> <workspace> -- <cmd...>` | Hidden (not in usage output): self-re-exec helper that applies a per-child Landlock tier and execs the command ([spec 15](15-sandbox.md)) |
 
-1. Initialize tracing subscriber
-2. `Workspace::init()` — resolve path, create directories. Fatal on failure.
-3. `Config::load()` — load `config.toml` from workspace. Fatal on malformed
+### Startup Sequence
+
+1. `confine` dispatch — before tracing and the tokio runtime, because its
+   stderr belongs to the wrapped command ([spec 15](15-sandbox.md)). Never
+   returns.
+2. Initialize tracing subscriber
+3. `Workspace::init()` — resolve path, create directories. Fatal on failure.
+4. `Config::load()` — load `config.toml` from workspace. Fatal on malformed
    file; missing file uses defaults.
-4. `runtime::build()` — load secrets via `LoadCredential`, construct provider
+5. `backup` dispatch — needs no secrets, network, or sandbox; stages and
+   exits.
+6. `runtime::build()` — load secrets via `LoadCredential`, construct provider
    and tools. Fatal on missing required secrets. This happens **before**
    sandboxing so credential files are still accessible.
-5. `sandbox::apply()` — enforce Landlock. Warn and continue if unsupported.
-6. `daemon::run()` — spawn agent actor, enter channel loops.
+7. `sandbox::apply()` — enforce Landlock. Warn and continue if unsupported.
+8. `daemon::run()` — spawn agent actor, enter channel loops.
 
 ### Daemon Runtime
 
@@ -90,7 +101,8 @@ See [spec 10](10-channels.md) for the full socket protocol.
 | Workspace init failure | Print message, exit 1 |
 | Config load failure (malformed TOML) | Print message, exit 1 |
 | Secret load failure | Print message, exit 1 |
-| Sandbox unsupported | Warn, continue without sandbox |
+| Sandbox unsupported | Warn, continue without sandbox (daemon only) |
+| `confine` enforcement failure or downgrade | Exit 1; the wrapped command does not run ([spec 15](15-sandbox.md)) |
 | Socket bind failure | Log warning, park the socket loop (daemon continues without socket) |
 | Turn error (during daemon operation) | Log and continue |
 

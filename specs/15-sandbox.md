@@ -6,43 +6,75 @@ Kernel-enforced filesystem confinement in two tiers. The daemon confines
 itself with Linux Landlock at startup (broad, inherited). Because that
 grant must include full workspace write — the daemon writes `state/`,
 `context/`, the journal, and memory — every child inherits full-workspace
-write too. So a second, tighter boundary is applied **per exec child**
-with bubblewrap: the workspace stays writable, but the daemon-owned paths
-are masked, moving the `state/`/`context/`/keyring fence from the
+write too. So a second, tighter boundary is applied **per exec child**:
+the child re-enforces a narrower Landlock policy on itself before running
+the command, moving the `state/`/`context/`/keyring fence from the
 heuristic layers ([spec 03](03-tools.md) deny-list, [spec 05](05-workspace.md)
 PathGuard) into the kernel.
 
 ## Behavior
 
-### Per-child confinement (bubblewrap)
+### Per-child confinement (Landlock tiers)
 
-`exec.sandbox` (default off until VM-verified) wraps each `bash -c` in a
-`bwrap` invocation built by `tools::bwrap::wrap_argv`, a pure function
-over the workspace layout consts. The view **masks rather than
-reconstructs**: the workspace is bound writable so build caches under
-`HOME` keep working, and only the sensitive paths are hidden.
+`exec.sandbox` selects the mechanism: `"landlock"`, `"bwrap"`, or `"off"`
+(the default until the VM smoke passes). In `landlock` mode the exec tool
+spawns each command as
 
-| Path | Treatment | Effect |
-|------|-----------|--------|
-| Workspace root | `--bind` (rw) | Builds, checkouts, `.diffs/` all work |
-| `state/`, `context/` | `--tmpfs` (empty) | Writes land in throwaway memory; reads see nothing |
-| `.gnupg` | `--tmpfs` when present | The signing key is invisible to the child |
-| `config.toml` | `--ro-bind /dev/null` | Operator config reads empty |
-| `/nix/store` | `--ro-bind` | Binaries |
-| `/etc` | `--ro-bind-try` | resolv.conf, CA certs |
-| `/tmp` | `--tmpfs` | Private; also denies reading the git askpass file |
-| `/run` | *not bound* | The chat socket is unreachable |
-| network ns | *shared* | The egress proxy on loopback still routes; proxied traffic is by IP, so DNS is unneeded |
+```
+/proc/self/exe confine exec <workspace> -- bash -c <command>
+```
 
-Also `--unshare-pid` (the daemon is invisible, closing ptrace),
-`--unshare-ipc`, `--die-with-parent`, `--new-session`.
+`confine` is a hidden subcommand dispatched in `main` before tracing and
+the tokio runtime. It builds `Policy::child(tier, workspace)`, calls the
+same `enforce()` the daemon uses (Landlock rulesets stack — the child's
+effective access is the intersection with the inherited grant), and
+`exec()`s the command tail. `confine` is strictly fail-closed, unlike the
+daemon's best-effort startup: an enforcement error *or* any kernel
+downgrade (anything short of `FullyEnforced`) exits 1 and the command
+does not run. An operator who configured the landlock tier gets the tier
+or nothing. The success path writes nothing to stderr because that
+stream belongs to the wrapped command.
 
-The mask set derives from the same consts as the PathGuard fence, so a
-directory rename moves both. The pure argv is unit-tested exhaustively;
-live tests run a real `bwrap` where the kernel allows it (skipped where
-unprivileged userns is denied) and assert a masked write never reaches
-the host and the keyring reads empty. The authoritative check is the VM
-smoke, which also gates flipping the default on.
+`/proc/self/exe` is a procfs magic link (`proc_pid_exe(5)`), resolved by
+the kernel at `execve` time in the forked child through its reference to
+the running executable rather than a path lookup. The wrapper therefore
+survives the daemon's store path being rebuilt or GC'd mid-flight and
+cannot be redirected via `PATH`, `argv[0]`, or the working directory. It
+also keeps the tier policy version-locked to the daemon that spawns it.
+The `src/confine.rs` module docs cover the mechanism and further reading.
+
+The `exec` tier (`Policy::child_exec`):
+
+| Path | Access | Effect |
+|------|--------|--------|
+| Workspace root | list only (`ReadDir`) | Navigation works. Landlock rules are recursive, so `ReadFile` here would grant reads of everything beneath; with list-only, file reads and all writes under `state/`, `context/`, `memory/`, `.gnupg`, and `config.toml` are denied, and new root-level files cannot be created |
+| `projects/` | full | Builds, checkouts, `.diffs/` all work |
+| `state/review-checklist.md` | read | The one model-facing state file |
+| `/nix/store` | read + execute | Binaries |
+| `/tmp` | working access | No device or socket creation |
+| `/etc`, `/run`, `/proc` | read | resolv.conf, CA certs, procfs |
+| `/dev` | read + write | `/dev/null`, `/dev/urandom` |
+| Everything else | denied | Including the keyring once it moves out of the workspace |
+
+Reads of `state/`, `context/`, and `.gnupg` are denied because no rule
+names them and the workspace-root rule is not recursive-write: Landlock
+denies whatever no rule grants. Unix-socket **connects are not mediated**
+by this ruleset — the chat socket stays reachable path-wise, which is why
+the socket's SO_PEERCRED uid gate is load-bearing.
+
+Live tests (`tests/confine.rs`) run the real binary and assert a `state/`
+write is denied and leaves the host untouched, keyring reads are denied,
+and `projects/` writes persist; they skip where the kernel lacks
+Landlock. The authoritative check is the VM smoke, which gates flipping
+the default on.
+
+**Alternative: bubblewrap** (`"bwrap"`). Kept as a non-default option: a
+mount-namespace view that masks the daemon-owned paths with tmpfs and
+additionally unshares pid/ipc and hides `/run`. Stronger in those corners,
+but requires loosening `RestrictNamespaces` and the mount syscalls on the
+trusted daemon unit, which is why Landlock-in-child is the default
+mechanism. Argv construction lives in `tools::bwrap::wrap_argv` and stays
+unit-tested.
 
 **Not yet covered** (follow-up tiers): the warm duty and git hooks
 (repo-controlled code) and the authenticated `git_cli` path (the only
@@ -97,15 +129,20 @@ NixOS note: `/usr` and `/bin` don't exist. All binaries live in `/nix/store`.
 
 ### Enforcement Status
 
-| Status | Action |
-|--------|--------|
-| `FullyEnforced` | `info!` log |
-| `PartiallyEnforced` | `warn!` log (kernel too old for full ABI) |
-| `NotEnforced` | `warn!` log (Landlock unsupported entirely) |
+`enforce()` logs the kernel's status and returns it, so each caller
+picks its own strictness:
 
-All three return `Ok(())`. In `main.rs`, any `Err` from `apply()` is logged
-as a warning — the process continues regardless. Sandbox failure is never
-fatal.
+| Status | Daemon (`apply`) | Child (`confine`) |
+|--------|------------------|-------------------|
+| `FullyEnforced` | `info!` log, continue | run the command |
+| `PartiallyEnforced` | `warn!` log, continue (kernel too old for full ABI) | exit 1, command does not run |
+| `NotEnforced` | `warn!` log, continue (Landlock unsupported) | exit 1, command does not run |
+| `Err` | logged as warning in `main.rs`, continue | exit 1, command does not run |
+
+Daemon sandbox failure is never fatal — it is one layer of many and a
+refusal to start would take the whole agent down. The child tier is the
+opposite: it exists only when the operator asked for it, so silent
+degradation is a bug, not resilience.
 
 ## Boundaries
 
@@ -137,10 +174,10 @@ fatal.
 
 | Failure | Behavior |
 |---------|----------|
-| Required path doesn't exist | `SandboxError::OpenPath`, logged as warning, process continues unsandboxed |
+| Required path doesn't exist | `SandboxError::OpenPath`; daemon logs a warning and continues unsandboxed, `confine` exits 1 |
 | Optional path doesn't exist | Rule silently skipped |
-| Landlock unsupported | Warning logged, process continues |
-| Kernel too old for ABI V5 | `BestEffort` downgrades access flags |
+| Landlock unsupported | Daemon logs a warning and continues; `confine` exits 1 |
+| Kernel too old for ABI V5 | `BestEffort` downgrades access flags in the daemon; `confine` treats the downgrade as fatal |
 
 ## Constraints
 

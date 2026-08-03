@@ -5,6 +5,7 @@ mod channel;
 mod clients;
 mod commands;
 mod config;
+mod confine;
 mod context;
 mod conventions;
 mod daemon;
@@ -48,8 +49,17 @@ fn init_tracing() {
         .init();
 }
 
+fn main() {
+    // Hidden subcommand, dispatched before tracing: confine execs the
+    // real command, and any log line here would land in its stderr.
+    if std::env::args().nth(1).as_deref() == Some("confine") {
+        confine::run();
+    }
+    daemon_main();
+}
+
 #[tokio::main]
-async fn main() {
+async fn daemon_main() {
     init_tracing();
 
     let workspace = Workspace::init().unwrap_or_else(|e| {

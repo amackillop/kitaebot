@@ -11,6 +11,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use landlock::{
     ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
@@ -25,6 +26,38 @@ use crate::error::SandboxError;
 const ABI_VERSION: ABI = ABI::V5;
 
 // ── Policy data types ───────────────────────────────────────────────────
+
+/// Confinement tier for a child process. Names the policy a `confine`
+/// invocation applies; the string forms are the CLI argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// Exec-tool children: builds and checkouts, no daemon state.
+    Exec,
+}
+
+/// Parse error for [`Tier`]: the unrecognized tier string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown tier: {0}")]
+pub struct UnknownTier(pub String);
+
+impl FromStr for Tier {
+    type Err = UnknownTier;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "exec" => Ok(Self::Exec),
+            other => Err(UnknownTier(other.into())),
+        }
+    }
+}
+
+impl fmt::Display for Tier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exec => f.write_str("exec"),
+        }
+    }
+}
 
 /// Whether a path must exist at enforcement time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +185,13 @@ impl Policy {
         Self { rules }
     }
 
+    /// Per-child policy for the given tier.
+    pub fn child(tier: Tier, workspace: &Path) -> Self {
+        match tier {
+            Tier::Exec => Self::child_exec(workspace),
+        }
+    }
+
     /// Tightened per-child policy for the exec tool.
     ///
     /// The parent grant covers the whole workspace with `from_all` because
@@ -161,7 +201,6 @@ impl Policy {
     /// recursive, so the workspace root gets `ReadDir` only: listing
     /// works everywhere, but file *reads* under `state/`, `context/`,
     /// `memory/`, and `.gnupg` are denied along with all writes.
-    #[allow(dead_code)]
     pub fn child_exec(workspace: &Path) -> Self {
         use crate::workspace::{PROJECTS_DIR, REVIEW_CHECKLIST, STATE_DIR};
 
@@ -274,17 +313,21 @@ impl fmt::Display for Policy {
 /// Apply a Landlock filesystem sandbox scoped to `workspace`.
 ///
 /// Convenience wrapper: builds the policy and enforces it in one call.
-/// Returns `Ok(())` on success or if Landlock is unsupported (best-effort).
+/// Returns `Ok(())` on success or if Landlock is unsupported — the
+/// daemon deliberately runs best-effort (defense-in-depth, logged).
 /// Returns `Err` only on unexpected failures (e.g. bad file descriptors).
 pub fn apply(workspace: &Path, socket_path: &Path) -> Result<(), SandboxError> {
-    enforce(&Policy::new(workspace, socket_path))
+    enforce(&Policy::new(workspace, socket_path)).map(|_| ())
 }
 
 /// Enforce a [`Policy`] by creating and activating a Landlock ruleset.
 ///
 /// Logs the policy at `info` level before enforcement. After `restrict_self`
 /// the ruleset is irrevocable for this process and all children.
-pub fn enforce(policy: &Policy) -> Result<(), SandboxError> {
+///
+/// Returns the kernel's enforcement status so callers pick their own
+/// strictness: the daemon tolerates a downgrade, `confine` does not.
+pub fn enforce(policy: &Policy) -> Result<RulesetStatus, SandboxError> {
     info!("{policy}");
 
     let abi = ABI_VERSION;
@@ -320,7 +363,7 @@ pub fn enforce(policy: &Policy) -> Result<(), SandboxError> {
         }
     }
 
-    Ok(())
+    Ok(status.ruleset)
 }
 
 /// Add a Landlock path rule. Fails if the path cannot be opened.
@@ -495,6 +538,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tier_round_trips_through_its_cli_form() {
+        assert_eq!("exec".parse::<Tier>(), Ok(Tier::Exec));
+        assert_eq!(Tier::Exec.to_string(), "exec");
+        assert!("root".parse::<Tier>().is_err());
+    }
+
+    #[test]
+    fn child_dispatches_the_exec_tier() {
+        let ws = Path::new("/home/agent/workspace");
+        let by_tier = Policy::child(Tier::Exec, ws);
+        assert_eq!(by_tier.rules(), Policy::child_exec(ws).rules());
     }
 
     fn child_policy() -> Policy {

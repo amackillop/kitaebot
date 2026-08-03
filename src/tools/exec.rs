@@ -36,8 +36,9 @@ use std::pin::Pin;
 use super::direnv::{self, DirenvCache, DirenvEnv, DirenvError};
 use super::git;
 use super::{Tool, ToolCtx};
-use crate::config::ExecConfig;
+use crate::config::{ExecConfig, SandboxMode};
 use crate::error::ToolError;
+use crate::sandbox::Tier;
 
 /// A deny-list entry: regex pattern + guidance shown to the LLM on match.
 #[derive(Clone, Copy)]
@@ -477,8 +478,8 @@ pub struct Exec {
     /// Repos (`owner/repo`) whose `.envrc` may be re-allowed
     /// when a pull rewrites it and direnv revokes the clone-time approval.
     trusted_repos: Vec<String>,
-    /// Wrap each command in a per-child bubblewrap sandbox (spec 15).
-    sandbox: bool,
+    /// Per-child confinement mechanism (spec 15).
+    sandbox: SandboxMode,
 }
 
 impl Exec {
@@ -497,27 +498,46 @@ impl Exec {
         }
     }
 
-    /// Build the command, wrapping it in bubblewrap when the sandbox
-    /// is enabled. The env is set identically either way — bwrap
-    /// forwards its own environment to the child.
+    /// Build the command, wrapped per the configured sandbox mode. The
+    /// env is set identically in all modes — both wrappers forward
+    /// their own environment to the child.
     fn build_command(&self, command: &str, cwd: &Path) -> Command {
-        if self.sandbox {
-            let mask_gnupg = self.workspace_root.join(super::bwrap::GNUPG_DIR).is_dir();
-            let mut cmd = Command::new("bwrap");
-            cmd.args(super::bwrap::wrap_argv(
-                &self.workspace_root,
-                cwd,
-                mask_gnupg,
-            ))
-            .arg("bash")
-            .arg("-c")
-            .arg(command);
-            // bwrap applied --chdir; the daemon-side cwd is irrelevant.
-            cmd
-        } else {
-            let mut cmd = Command::new("bash");
-            cmd.arg("-c").arg(command).current_dir(cwd);
-            cmd
+        match self.sandbox {
+            SandboxMode::Bwrap => {
+                let mask_gnupg = self.workspace_root.join(super::bwrap::GNUPG_DIR).is_dir();
+                let mut cmd = Command::new("bwrap");
+                cmd.args(super::bwrap::wrap_argv(
+                    &self.workspace_root,
+                    cwd,
+                    mask_gnupg,
+                ))
+                .arg("bash")
+                .arg("-c")
+                .arg(command);
+                // bwrap applied --chdir; the daemon-side cwd is irrelevant.
+                cmd
+            }
+            SandboxMode::Landlock => {
+                // /proc/self/exe: resolved by the kernel at execve
+                // time in the forked child, whose image is still this
+                // binary, so it re-enters main as `confine`. See the
+                // crate::confine module docs for the full mechanism.
+                let mut cmd = Command::new("/proc/self/exe");
+                cmd.arg("confine")
+                    .arg(Tier::Exec.to_string())
+                    .arg(&self.workspace_root)
+                    .arg("--")
+                    .arg("bash")
+                    .arg("-c")
+                    .arg(command)
+                    .current_dir(cwd);
+                cmd
+            }
+            SandboxMode::Off => {
+                let mut cmd = Command::new("bash");
+                cmd.arg("-c").arg(command).current_dir(cwd);
+                cmd
+            }
         }
     }
 
@@ -1149,7 +1169,7 @@ mod tests {
             timeout: Duration::from_millis(50),
             direnv_cache: DirenvCache::new(),
             trusted_repos: Vec::new(),
-            sandbox: false,
+            sandbox: SandboxMode::Off,
         }
     }
 
