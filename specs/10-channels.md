@@ -82,9 +82,18 @@ All types carry a `content: String` field. Embedded newlines are JSON-escaped.
 Single client at a time. While serving a client, new connections receive an
 error and are closed immediately.
 
+#### Access Control
+
+On accept the daemon reads the peer's credentials (`SO_PEERCRED`) and serves
+only uids in `socket.allowed_uids` (default `[0]` — root, the operator
+reaching the VM over SSH). Any other peer receives an error and is closed.
+Landlock does not mediate unix-socket connects, so this check is the only
+thing keeping a same-uid exec child from driving the daemon as the operator.
+
 #### Connection Lifecycle
 
-1. Client connects → daemon rejects if another client is connected
+1. Client connects → daemon rejects if the peer uid is not allowed, or if
+   another client is connected
 2. Daemon sends `greeting`
 3. Client sends messages, daemon responds
 4. Client disconnects (EOF) → daemon resumes accepting
@@ -115,6 +124,7 @@ locally without being sent to the server.
 | Config key | Default | Description |
 |------------|---------|-------------|
 | `socket.path` | `/run/kitaebot/chat.sock` | Socket path |
+| `socket.allowed_uids` | `[0]` | Peer uids (SO_PEERCRED) the socket serves |
 
 #### Error Handling
 
@@ -123,6 +133,7 @@ locally without being sent to the server.
 | Socket dir missing | Log info, park forever (daemon continues without socket) |
 | Socket bind fails | Log error, park forever (daemon continues without socket) |
 | Accept fails | Log, continue accepting |
+| Peer uid not allowed | Warn log, error response, close connection |
 | Invalid JSON from client | Error response, keep connection |
 | Agent turn fails | Error response, keep connection |
 

@@ -35,8 +35,9 @@ impl TestDaemon {
         let socket_path = sock_dir.path().join("chat.sock");
 
         let config = format!(
-            "[socket]\npath = \"{}\"\n\n[provider]\napi = \"{}\"\n\n{extra_config}",
+            "[socket]\npath = \"{}\"\nallowed_uids = [{}]\n\n[provider]\napi = \"{}\"\n\n{extra_config}",
             socket_path.display(),
+            euid(),
             fixture.completions_url(),
         );
         std::fs::write(workspace.path().join("config.toml"), config).unwrap();
@@ -72,6 +73,14 @@ impl TestDaemon {
     pub fn workspace_path(&self) -> &Path {
         self.workspace.path()
     }
+}
+
+/// The effective uid, from /proc — no libc dep just for the harness.
+/// The daemon and kchat both run as this uid here; on the VM the
+/// operator is root and the default allowlist suffices.
+fn euid() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").expect("proc self").uid()
 }
 
 /// Spawn the daemon binary and wait for its socket.

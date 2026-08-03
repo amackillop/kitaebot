@@ -24,7 +24,7 @@ use crate::channel::linear::{self, LinearChannel};
 use crate::channel::socket;
 use crate::channel::telegram::{self, TelegramChannel};
 use crate::clients::github::GithubClient;
-use crate::config::GithubConfig;
+use crate::config::{GithubConfig, SocketConfig};
 use crate::duty::{self, Duty};
 use crate::state_db::StateDb;
 use crate::tools::git::GitCli;
@@ -42,7 +42,7 @@ pub async fn run(
     git_cli: Option<&GitCli>,
     github: &GithubConfig,
     linear: Option<&LinearChannel>,
-    socket_path: &Path,
+    socket_cfg: &SocketConfig,
 ) {
     run_with_shutdown(
         workspace,
@@ -54,7 +54,7 @@ pub async fn run(
         git_cli,
         github,
         linear,
-        socket_path,
+        socket_cfg,
         shutdown_signal(),
     )
     .await;
@@ -73,7 +73,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     git_cli: Option<&GitCli>,
     github: &GithubConfig,
     linear: Option<&LinearChannel>,
-    socket_path: &Path,
+    socket_cfg: &SocketConfig,
     shutdown: S,
 ) {
     let duty_loop = duty::run_loop(
@@ -111,7 +111,8 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         }
     };
 
-    let socket_loop = socket::listen(socket_path, handle);
+    let socket_path = Path::new(&socket_cfg.path);
+    let socket_loop = socket::listen(socket_path, handle, &socket_cfg.allowed_uids);
 
     tokio::select! {
         () = duty_loop => unreachable!("duty loop never exits"),
@@ -166,17 +167,20 @@ mod tests {
         }]
     }
 
-    /// Socket path in a temp dir — avoids collisions and `/run` dependency.
-    fn sock_path() -> (tempfile::TempDir, std::path::PathBuf) {
+    /// Socket config on a temp dir — avoids collisions and `/run` dependency.
+    fn sock_config() -> (tempfile::TempDir, SocketConfig) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.sock");
-        (dir, path)
+        let config = SocketConfig {
+            path: dir.path().join("test.sock").display().to_string(),
+            ..Default::default()
+        };
+        (dir, config)
     }
 
     #[tokio::test]
     async fn fires_immediately_then_shuts_down() {
         let (_dir, ws) = workspace();
-        let (_sock_dir, sock_path) = sock_path();
+        let (_sock_dir, sock) = sock_config();
         // Closed distill gate → gate-closed reply, but the duty fired.
         let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
 
@@ -190,7 +194,7 @@ mod tests {
             None,
             &GithubConfig::default(),
             None, // linear
-            &sock_path,
+            &sock,
             tokio::time::sleep(Duration::from_millis(50)),
         )
         .await;
@@ -202,7 +206,7 @@ mod tests {
     #[tokio::test]
     async fn duty_run_persists_state() {
         let (_dir, ws) = workspace();
-        let (_sock_dir, sock_path) = sock_path();
+        let (_sock_dir, sock) = sock_config();
         let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
         let state_db = StateDb::open(&ws.state_db_path()).unwrap();
 
@@ -216,7 +220,7 @@ mod tests {
             None,
             &GithubConfig::default(),
             None, // linear
-            &sock_path,
+            &sock,
             tokio::time::sleep(Duration::from_millis(50)),
         )
         .await;
@@ -230,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn error_does_not_crash_loop() {
         let (_dir, ws) = workspace();
-        let (_sock_dir, sock_path) = sock_path();
+        let (_sock_dir, sock) = sock_config();
 
         // An unknown duty makes the turn fail — the loop must survive,
         // record the run, and move on.
@@ -254,7 +258,7 @@ mod tests {
             None,
             &GithubConfig::default(),
             None, // linear
-            &sock_path,
+            &sock,
             tokio::time::sleep(Duration::from_millis(50)),
         )
         .await;

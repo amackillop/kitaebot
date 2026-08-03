@@ -153,7 +153,7 @@ async fn main() {
                 rt.git_cli.as_ref(),
                 &config.github,
                 rt.linear.as_ref(),
-                socket_path,
+                &config.socket,
             )
             .await;
         }

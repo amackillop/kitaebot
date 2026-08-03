@@ -356,6 +356,10 @@ pub struct TelegramConfig {
 pub struct SocketConfig {
     /// Path to the Unix domain socket.
     pub path: String,
+    /// Peer uids (`SO_PEERCRED`) the socket serves. Default root only:
+    /// the operator reaches the VM over SSH; the daemon's own same-uid
+    /// children must not drive it.
+    pub allowed_uids: Vec<u32>,
 }
 
 /// Context window management settings.
@@ -703,6 +707,7 @@ impl Default for SocketConfig {
     fn default() -> Self {
         Self {
             path: "/run/kitaebot/chat.sock".to_string(),
+            allowed_uids: vec![0],
         }
     }
 }

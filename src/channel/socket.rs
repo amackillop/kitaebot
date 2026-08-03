@@ -5,6 +5,9 @@
 //!
 //! Single client at a time: while one client is connected, new
 //! connections are accepted only to send an error and close them.
+//!
+//! Peers are gated by `SO_PEERCRED` against a uid allowlist; Landlock
+//! does not mediate unix-socket connects, so this is the only check.
 
 use std::path::Path;
 
@@ -44,7 +47,11 @@ enum ServerMsg {
 /// If the socket directory does not exist (no `RuntimeDirectory`),
 /// logs an info message and parks forever so the daemon can still
 /// run without the socket channel.
-pub async fn listen(socket_path: &Path, handle: &AgentHandle) -> ! {
+///
+/// Only peers whose uid is in `allowed_uids` are served; any other
+/// peer (including the daemon's own same-uid children) gets an error
+/// and is closed.
+pub async fn listen(socket_path: &Path, handle: &AgentHandle, allowed_uids: &[u32]) -> ! {
     let path = socket_path;
 
     // Unlink stale socket left by a previous run.
@@ -66,9 +73,15 @@ pub async fn listen(socket_path: &Path, handle: &AgentHandle) -> ! {
 
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
-                serve(&listener, stream, handle).await;
-            }
+            Ok((stream, _)) => match stream.peer_cred() {
+                Ok(cred) if allowed_uids.contains(&cred.uid()) => {
+                    serve(&listener, stream, handle).await;
+                }
+                cred => {
+                    warn!(?cred, "Socket peer outside uid allowlist, rejecting");
+                    reject(stream, "peer uid not allowed").await;
+                }
+            },
             Err(e) => error!("Socket accept error: {e}"),
         }
     }
@@ -106,7 +119,7 @@ async fn serve(listener: &UnixListener, stream: UnixStream, handle: &AgentHandle
             }
             result = listener.accept() => {
                 if let Ok((stream, _)) = result {
-                    reject(stream).await;
+                    reject(stream, "Another client is connected").await;
                 }
                 continue;
             }
@@ -189,13 +202,13 @@ async fn serve(listener: &UnixListener, stream: UnixStream, handle: &AgentHandle
     }
 }
 
-/// Send an error to a second client and close the connection.
-async fn reject(stream: UnixStream) {
+/// Send an error to a client and close the connection.
+async fn reject(stream: UnixStream, message: &str) {
     let (_, mut writer) = stream.into_split();
     let _ = send(
         &mut writer,
         &ServerMsg::Error {
-            content: "Another client is connected".into(),
+            content: message.into(),
         },
     )
     .await
@@ -312,6 +325,12 @@ mod tests {
         }
     }
 
+    /// The effective uid, from /proc — no libc dep just for tests.
+    fn euid() -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self").expect("proc self").uid()
+    }
+
     /// Spawn `listen` in the background and return a connected client.
     ///
     /// The returned `JoinHandle` and tempdirs must be held alive for the
@@ -336,6 +355,19 @@ mod tests {
         tempfile::TempDir,
         tempfile::TempDir,
     ) {
+        spawn_listener_with_uids(responses, tools, &[euid()]).await
+    }
+
+    async fn spawn_listener_with_uids(
+        responses: Vec<Result<Response, crate::error::ProviderError>>,
+        tools: Tools,
+        allowed_uids: &[u32],
+    ) -> (
+        TestClient,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
         let (ws_dir, ws) = workspace();
         let provider = Arc::new(MockProvider::new(responses));
         let handle = TestAgent::new(ws, provider)
@@ -347,8 +379,9 @@ mod tests {
         let sock_path = sock_dir.path().join("test.sock");
 
         let path = sock_path.clone();
+        let uids = allowed_uids.to_vec();
         let join = tokio::spawn(async move {
-            listen(&path, &handle).await;
+            listen(&path, &handle, &uids).await;
         });
 
         let client = TestClient::connect(&sock_path).await;
@@ -522,6 +555,24 @@ mod tests {
             .await
             .expect("serve() did not free the client slot after disconnect");
         assert!(matches!(msg, ServerMsg::Greeting { .. }));
+
+        join.abort();
+    }
+
+    #[tokio::test]
+    async fn peer_outside_allowlist_is_rejected() {
+        // No uid is allowed, so the test's own peer is refused.
+        let (mut client, join, _ws, _sock) =
+            spawn_listener_with_uids(vec![], Tools::default(), &[]).await;
+
+        match client.recv().await {
+            ServerMsg::Error { content } => assert!(content.contains("not allowed")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        // The rejection closes the connection.
+        client.buf.clear();
+        let n = client.reader.read_line(&mut client.buf).await.unwrap();
+        assert_eq!(n, 0, "rejected peer must be disconnected");
 
         join.abort();
     }
