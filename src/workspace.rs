@@ -20,7 +20,13 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const CONTEXT_DIR: &str = "context";
 /// Repository checkouts live under this directory.
 pub const PROJECTS_DIR: &str = "projects";
+/// Review worktrees prepared by the GitHub channel live here.
+pub const REVIEWS_DIR: &str = "reviews";
 pub const STATE_DIR: &str = "state";
+/// Ephemeral `GIT_ASKPASS` helpers, relative to [`STATE_DIR`]. Under
+/// `state/` so the exec tier kernel-denies it; the git tier grants it
+/// read + execute (spec 15).
+pub const ASKPASS_DIR: &str = "askpass";
 /// The one model-writable file under [`STATE_DIR`], maintained by the
 /// review gates. Relative to [`STATE_DIR`].
 pub const REVIEW_CHECKLIST: &str = "review-checklist.md";

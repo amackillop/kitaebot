@@ -94,6 +94,8 @@ pub(crate) async fn origin_nwo(dir: &Path) -> Option<String> {
         env: crate::tools::safe_env().collect(),
         timeout_secs: Some(10),
         stdin: None,
+        // Fixed argv, runs no hooks, reads one config value.
+        confine: None,
     };
     let out = cli_runner::exec(&call).await.ok()?;
     if out.exit_code != 0 {
@@ -110,10 +112,12 @@ pub(crate) fn build(
     config: &crate::config::GitConfig,
     direnv: DirenvCache,
     warmer: crate::tools::Warmer,
+    confine: bool,
 ) -> Vec<Arc<dyn Tool>> {
     let git = GitCli::new(token, workspace.path(), direnv, config.trusted_repos())
         .with_warm(warmer, Arc::new(config.warm_commands()))
-        .with_clone_base(&config.clone_base);
+        .with_clone_base(&config.clone_base)
+        .with_confinement(confine);
 
     vec![
         Arc::new(Commit::new(git.clone(), config.co_authors.clone())),

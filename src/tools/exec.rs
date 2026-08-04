@@ -33,6 +33,7 @@ use tracing::{debug, warn};
 use std::future::Future;
 use std::pin::Pin;
 
+use super::cli_runner::CONFINE_SELF;
 use super::direnv::{self, DirenvCache, DirenvEnv, DirenvError};
 use super::git;
 use super::{Tool, ToolCtx};
@@ -517,7 +518,7 @@ impl Exec {
                 // time in the forked child, whose image is still this
                 // binary, so it re-enters main as `confine`. See the
                 // crate::confine module docs for the full mechanism.
-                let mut cmd = Command::new("/proc/self/exe");
+                let mut cmd = Command::new(CONFINE_SELF);
                 cmd.arg("confine")
                     .arg(Tier::Exec.to_string())
                     .arg(&self.workspace_root)

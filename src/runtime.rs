@@ -16,7 +16,7 @@ use crate::clients::chat_completion::CompletionsClient;
 use crate::clients::github::GithubClient;
 use crate::clients::linear::LinearClient;
 use crate::clients::telegram::TelegramClient;
-use crate::config::Config;
+use crate::config::{Config, SandboxMode};
 use crate::notify::{Notifier, NotifyTool};
 use crate::provider::CompletionsProvider;
 use crate::secrets::Secret;
@@ -66,10 +66,22 @@ pub struct Runtime {
 
 pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
     let direnv_cache = DirenvCache::new();
-    let warmer = Warmer::new(direnv_cache.clone());
+    // One knob governs all child confinement. Bwrap is implemented
+    // for the exec tool only; warm and git children confine iff
+    // landlock (spec 15).
+    let confine = config.tools.exec.sandbox == SandboxMode::Landlock;
+    let warmer = Warmer::new(direnv_cache.clone())
+        .with_confinement(confine.then(|| workspace.path().to_path_buf()));
     let mut tools = Tools::local(workspace, config, direnv_cache.clone());
 
-    let (github, git_cli) = build_git(config, workspace, &mut tools, &direnv_cache, &warmer);
+    let (github, git_cli) = build_git(
+        config,
+        workspace,
+        &mut tools,
+        &direnv_cache,
+        &warmer,
+        confine,
+    );
 
     let linear = if config.linear.enabled {
         let client = LinearClient::new(secret("linear-api-key"), &config.linear.api_base);
@@ -130,6 +142,7 @@ fn build_git(
     tools: &mut Vec<Arc<dyn Tool>>,
     direnv_cache: &DirenvCache,
     warmer: &Warmer,
+    confine: bool,
 ) -> (Option<GithubClient>, Option<GitCli>) {
     if !(config.git.enabled || config.github.enabled) {
         return (None, None);
@@ -142,6 +155,7 @@ fn build_git(
             &config.git,
             direnv_cache.clone(),
             warmer.clone(),
+            confine,
         ));
     }
     // Built whenever a token exists: the GitHub channel prepares
@@ -154,7 +168,8 @@ fn build_git(
         config.git.trusted_repos(),
     )
     .with_warm(warmer.clone(), Arc::new(config.git.warm_commands()))
-    .with_clone_base(&config.git.clone_base);
+    .with_clone_base(&config.git.clone_base)
+    .with_confinement(confine);
     let github_client = if config.github.enabled {
         let client = GithubClient::new(token, &config.github.api_base);
         tools.extend(github::build(github::GithubApi::new(

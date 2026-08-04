@@ -2,7 +2,10 @@
 //!
 //! [`GitCli`] owns the token and workspace root needed by git tools
 //! (clone, push, commit). Auth uses a temporary `GIT_ASKPASS` script
-//! written to a private directory for the duration of one command.
+//! written under `state/askpass/` for the duration of one command:
+//! the exec Landlock tier denies `state/`, so exec children cannot
+//! read the token during the git window, while the git tier grants
+//! the helper read + execute (spec 15).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -12,8 +15,9 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use crate::error::ToolError;
+use crate::sandbox::Tier;
 use crate::secrets::Secret;
-use crate::tools::cli_runner::{self, CmdOutput, SubprocessCall};
+use crate::tools::cli_runner::{self, CmdOutput, Confinement, SubprocessCall};
 use crate::tools::warm::Warmer;
 use crate::tools::{DirenvCache, direnv};
 
@@ -30,6 +34,9 @@ pub struct GitCli {
     warm_commands: Arc<BTreeMap<String, String>>,
     /// Base URL `owner/repo` resolves against for clones and fetches.
     clone_base: String,
+    /// Confine git children (and their hooks) to the git Landlock
+    /// tier. `false` in unit tests (spec 15).
+    confine_children: bool,
 }
 
 impl GitCli {
@@ -48,6 +55,7 @@ impl GitCli {
             warmer,
             warm_commands: Arc::default(),
             clone_base: "https://github.com".into(),
+            confine_children: false,
         }
     }
 
@@ -55,6 +63,22 @@ impl GitCli {
     pub fn with_clone_base(mut self, base: &str) -> Self {
         self.clone_base = base.trim_end_matches('/').to_string();
         self
+    }
+
+    /// Run git children under the git Landlock tier (spec 15). Hooks
+    /// are repo-controlled code; they get exec grants plus the askpass
+    /// helper and the keyring instead of the daemon's full grant.
+    pub fn with_confinement(mut self, enabled: bool) -> Self {
+        self.confine_children = enabled;
+        self
+    }
+
+    /// The confinement for one git spawn, when enabled.
+    fn confinement(&self) -> Option<Confinement> {
+        self.confine_children.then(|| Confinement {
+            tier: Tier::Git,
+            workspace: self.workspace_root.clone(),
+        })
     }
 
     /// Remote URL for `owner/repo`.
@@ -169,7 +193,6 @@ impl GitCli {
     ///
     /// The returned call does **not** include `GIT_ASKPASS` — that is
     /// an effect created at execution time by [`Self::exec_git`].
-    #[allow(clippy::unused_self)] // method for API consistency with prepare_gh
     pub fn prepare_git(&self, args: &[&str], cwd: &Path) -> SubprocessCall {
         let env: Vec<(OsString, OsString)> = crate::tools::safe_env().collect();
         SubprocessCall {
@@ -179,6 +202,7 @@ impl GitCli {
             env,
             timeout_secs: hook_timeout(args),
             stdin: None,
+            confine: self.confinement(),
         }
     }
 
@@ -228,7 +252,7 @@ impl GitCli {
         }
 
         let askpass = if authenticated {
-            Some(AskPass::create(&self.token).await?)
+            Some(AskPass::create(&self.token, &self.workspace_root).await?)
         } else {
             None
         };
@@ -291,9 +315,11 @@ fn parse_ls_remote_head(stdout: &str) -> Option<String> {
 
 /// A temporary `GIT_ASKPASS` script that prints the token.
 ///
-/// The script lives in a private temp directory (mode 0700). The
-/// directory is owned by a `TempDir` and removed on drop, so cleanup
-/// happens even if the git command fails or the future is cancelled.
+/// The script lives in a per-call temp directory under
+/// `state/askpass/` (mode 0700): never under the shared `/tmp`, which
+/// the exec tier grants broadly. The directory is owned by a `TempDir`
+/// and removed on drop, so cleanup happens even if the git command
+/// fails or the future is cancelled.
 struct AskPass {
     /// Path to the executable script inside `_dir`.
     path: PathBuf,
@@ -302,12 +328,17 @@ struct AskPass {
 }
 
 impl AskPass {
-    async fn create(token: &Secret) -> Result<Self, ToolError> {
+    async fn create(token: &Secret, workspace_root: &Path) -> Result<Self, ToolError> {
+        use crate::workspace::{ASKPASS_DIR, STATE_DIR};
         use std::os::unix::fs::PermissionsExt;
 
+        let parent = workspace_root.join(STATE_DIR).join(ASKPASS_DIR);
+        tokio::fs::create_dir_all(&parent)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("askpass dir: {e}")))?;
         let dir = tempfile::Builder::new()
-            .prefix("kitaebot-askpass-")
-            .tempdir()
+            .prefix("askpass-")
+            .tempdir_in(&parent)
             .map_err(|e| ToolError::ExecutionFailed(format!("tmpdir: {e}")))?;
 
         let path = dir.path().join("askpass");

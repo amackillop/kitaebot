@@ -14,9 +14,22 @@ use tokio::time::{Duration, timeout};
 use tracing::debug;
 
 use crate::error::ToolError;
+use crate::sandbox::Tier;
 
 /// Default timeout for subprocess operations.
 const TIMEOUT_SECS: u64 = 120;
+
+/// The self-re-exec path for the `confine` wrapper: resolved by the
+/// kernel at execve time in the forked child, whose image is still
+/// this binary. See the [`crate::confine`] module docs.
+pub const CONFINE_SELF: &str = "/proc/self/exe";
+
+/// Landlock confinement for a subprocess: which tier, rooted where.
+#[derive(Debug, Clone)]
+pub struct Confinement {
+    pub tier: Tier,
+    pub workspace: PathBuf,
+}
 
 // ── Command output ──────────────────────────────────────────────────
 
@@ -78,6 +91,10 @@ pub struct SubprocessCall {
     pub timeout_secs: Option<u64>,
     /// Data piped to the subprocess's stdin. `None` leaves stdin closed.
     pub stdin: Option<String>,
+    /// Wrap the spawn in a per-child Landlock tier (spec 15). `None`
+    /// runs under the daemon's inherited grant — required in unit
+    /// tests, where `/proc/self/exe` is the libtest binary.
+    pub confine: Option<Confinement>,
 }
 
 impl SubprocessCall {
@@ -91,9 +108,21 @@ impl SubprocessCall {
 /// Execute a [`SubprocessCall`] by spawning a subprocess.
 pub async fn exec(call: &SubprocessCall) -> Result<CmdOutput, ToolError> {
     let args_ref: Vec<&str> = call.args.iter().map(String::as_str).collect();
-    let mut cmd = Command::new(call.binary);
-    cmd.args(&args_ref)
-        .current_dir(&call.cwd)
+    let mut cmd = if let Some(c) = &call.confine {
+        let mut cmd = Command::new(CONFINE_SELF);
+        cmd.arg("confine")
+            .arg(c.tier.to_string())
+            .arg(&c.workspace)
+            .arg("--")
+            .arg(call.binary)
+            .args(&args_ref);
+        cmd
+    } else {
+        let mut cmd = Command::new(call.binary);
+        cmd.args(&args_ref);
+        cmd
+    };
+    cmd.current_dir(&call.cwd)
         .env_clear()
         .envs(call.env.iter().map(|(k, v)| (k, v)));
     let label = format!("{} {}", call.binary, args_ref.join(" "));
@@ -152,6 +181,7 @@ mod tests {
             env: vec![("PATH".into(), std::env::var_os("PATH").unwrap_or_default())],
             timeout_secs: None,
             stdin,
+            confine: None,
         }
     }
 

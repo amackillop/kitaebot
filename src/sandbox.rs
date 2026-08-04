@@ -33,6 +33,10 @@ const ABI_VERSION: ABI = ABI::V5;
 pub enum Tier {
     /// Exec-tool children: builds and checkouts, no daemon state.
     Exec,
+    /// `GitCli` children (clone, fetch, push, commit + hooks) and
+    /// their credential window: exec grants plus review worktrees,
+    /// the askpass helper, and the signing keyring.
+    Git,
 }
 
 /// Parse error for [`Tier`]: the unrecognized tier string.
@@ -46,6 +50,7 @@ impl FromStr for Tier {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "exec" => Ok(Self::Exec),
+            "git" => Ok(Self::Git),
             other => Err(UnknownTier(other.into())),
         }
     }
@@ -55,6 +60,7 @@ impl fmt::Display for Tier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Exec => f.write_str("exec"),
+            Self::Git => f.write_str("git"),
         }
     }
 }
@@ -201,10 +207,12 @@ impl Policy {
         Self { rules }
     }
 
-    /// Per-child policy for the given tier.
-    pub fn child(tier: Tier, workspace: &Path) -> Self {
+    /// Per-child policy for the given tier. `gnupg_home` is the signing
+    /// keyring; only the git tier grants it.
+    pub fn child(tier: Tier, workspace: &Path, gnupg_home: Option<&Path>) -> Self {
         match tier {
             Tier::Exec => Self::child_exec(workspace),
+            Tier::Git => Self::child_git(workspace, gnupg_home),
         }
     }
 
@@ -323,6 +331,60 @@ impl Policy {
         Self { rules }
     }
 
+    /// Per-child policy for `GitCli` spawns: clone, fetch, push, and
+    /// commit — including repo-controlled hooks. Exec grants plus what
+    /// the git paths need: review worktrees, the askpass helper for
+    /// the credential window, and the keyring because `git commit`
+    /// signs (gpg auto-spawns its agent there).
+    ///
+    /// Re-invoking `confine git` from inside an exec child is not an
+    /// escalation: rulesets stack, so the nested policy intersects
+    /// with the already-applied exec tier and the keyring stays denied
+    /// there.
+    pub fn child_git(workspace: &Path, gnupg_home: Option<&Path>) -> Self {
+        use crate::workspace::{ASKPASS_DIR, REVIEWS_DIR, STATE_DIR};
+
+        let all = AccessFs::from_all(ABI_VERSION);
+        let mut policy = Self::child_exec(workspace);
+        policy.rules.push(Rule {
+            path: workspace.join(REVIEWS_DIR),
+            access: all,
+            presence: Presence::Optional,
+            rationale: "Review worktrees — the GitHub channel prepares checkouts",
+        });
+        policy.rules.push(Rule {
+            path: workspace.join(STATE_DIR).join(ASKPASS_DIR),
+            access: AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute,
+            presence: Presence::Optional,
+            rationale: "Askpass helpers — git executes the token script",
+        });
+        if let Some(gnupg) = gnupg_home {
+            policy.rules.push(Rule {
+                path: gnupg.to_path_buf(),
+                access: all,
+                presence: Presence::Optional,
+                rationale: "GPG keyring — commit signing",
+            });
+        }
+        policy
+    }
+
+    /// Grant read + execute on the daemon's own binary so it can
+    /// re-exec `/proc/self/exe` to launch the `confine` helper. On the
+    /// VM the binary is under `/nix/store` (already granted); in a dev
+    /// or test build it is under `target/`, which no other rule names.
+    /// Without this the re-exec fails `EACCES` on any thread that has
+    /// applied the ruleset.
+    pub fn allow_self_exec(mut self, exe: &Path) -> Self {
+        self.rules.push(Rule {
+            path: exe.to_path_buf(),
+            access: AccessFs::Execute | AccessFs::ReadFile,
+            presence: Presence::Optional,
+            rationale: "Daemon binary — re-exec for the confine helper",
+        });
+        self
+    }
+
     /// The ordered list of rules in this policy.
     pub fn rules(&self) -> &[Rule] {
         &self.rules
@@ -363,7 +425,13 @@ pub fn apply(
     socket_path: &Path,
     gnupg_home: Option<&Path>,
 ) -> Result<(), SandboxError> {
-    enforce(&Policy::new(workspace, socket_path, gnupg_home)).map(|_| ())
+    let mut policy = Policy::new(workspace, socket_path, gnupg_home);
+    // The daemon re-execs itself to launch confined children; grant
+    // its binary so that works from a thread under the ruleset.
+    if let Ok(exe) = std::env::current_exe() {
+        policy = policy.allow_self_exec(&exe);
+    }
+    enforce(&policy).map(|_| ())
 }
 
 /// Enforce a [`Policy`] by creating and activating a Landlock ruleset.
@@ -615,16 +683,73 @@ mod tests {
 
     #[test]
     fn tier_round_trips_through_its_cli_form() {
-        assert_eq!("exec".parse::<Tier>(), Ok(Tier::Exec));
-        assert_eq!(Tier::Exec.to_string(), "exec");
+        for (tier, s) in [(Tier::Exec, "exec"), (Tier::Git, "git")] {
+            assert_eq!(s.parse::<Tier>(), Ok(tier));
+            assert_eq!(tier.to_string(), s);
+        }
         assert!("root".parse::<Tier>().is_err());
     }
 
     #[test]
-    fn child_dispatches_the_exec_tier() {
+    fn child_dispatches_by_tier() {
         let ws = Path::new("/home/agent/workspace");
-        let by_tier = Policy::child(Tier::Exec, ws);
-        assert_eq!(by_tier.rules(), Policy::child_exec(ws).rules());
+        let keyring = Path::new("/var/lib/kitaebot-gnupg");
+        assert_eq!(
+            Policy::child(Tier::Exec, ws, Some(keyring)).rules(),
+            Policy::child_exec(ws).rules(),
+            "the exec tier must ignore the keyring"
+        );
+        assert_eq!(
+            Policy::child(Tier::Git, ws, Some(keyring)).rules(),
+            Policy::child_git(ws, Some(keyring)).rules(),
+        );
+    }
+
+    #[test]
+    fn git_tier_extends_exec_with_named_extras() {
+        let ws = Path::new("/home/agent/workspace");
+        let policy = Policy::child_git(ws, Some(Path::new("/var/lib/kitaebot-gnupg")));
+        let exec_len = Policy::child_exec(ws).rules().len();
+        assert_eq!(policy.rules().len(), exec_len + 3);
+        let access = |p: &str| {
+            policy
+                .rules()
+                .iter()
+                .find(|r| r.path == Path::new(p))
+                .map(|r| r.access)
+        };
+        assert_eq!(
+            access("/home/agent/workspace/reviews"),
+            Some(AccessFs::from_all(ABI_VERSION))
+        );
+        // Read + execute only: the daemon writes the script, git runs it.
+        assert_eq!(
+            access("/home/agent/workspace/state/askpass"),
+            Some(AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute)
+        );
+        assert_eq!(
+            access("/var/lib/kitaebot-gnupg"),
+            Some(AccessFs::from_all(ABI_VERSION))
+        );
+    }
+
+    #[test]
+    fn git_tier_without_keyring_omits_the_rule() {
+        let policy = Policy::child_git(Path::new("/ws"), None);
+        assert!(!policy.rules().iter().any(|r| r.rationale.contains("GPG")));
+    }
+
+    #[test]
+    fn allow_self_exec_grants_read_execute_on_the_binary() {
+        let policy = Policy::new(Path::new("/ws"), Path::new("x.sock"), None)
+            .allow_self_exec(Path::new("/nix/store/abc-kitaebot/bin/kitaebot"));
+        let rule = policy
+            .rules()
+            .iter()
+            .find(|r| r.path == Path::new("/nix/store/abc-kitaebot/bin/kitaebot"))
+            .expect("self-exe rule must exist");
+        assert_eq!(rule.access, AccessFs::Execute | AccessFs::ReadFile);
+        assert_eq!(rule.presence, Presence::Optional);
     }
 
     fn child_policy() -> Policy {

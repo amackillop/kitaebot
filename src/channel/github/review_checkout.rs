@@ -21,7 +21,7 @@ use crate::tools::git::checkout;
 
 /// Workspace-relative worktree directory for `owner/repo`.
 pub(super) fn checkout_rel_path(nwo: &str) -> Result<String, ToolError> {
-    checkout::rel_path("reviews", nwo)
+    checkout::rel_path(crate::workspace::REVIEWS_DIR, nwo)
 }
 
 /// Clone the repo if needed, fetch the PR head and base, and

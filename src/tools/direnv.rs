@@ -59,6 +59,8 @@ pub async fn allow(dir: &Path) {
         env: crate::tools::safe_env().collect(),
         timeout_secs: Some(10),
         stdin: None,
+        // Records approval in the trust db; runs no repo code.
+        confine: None,
     };
     if let Err(e) = cli_runner::exec(&call).await {
         debug!(dir = %dir.display(), error = %e, "direnv allow failed");
@@ -212,6 +214,10 @@ async fn evaluate_direnv(dir: &Path) -> Result<HashMap<String, String>, DirenvEr
         env: crate::tools::safe_env().collect(),
         timeout_secs: Some(900),
         stdin: None,
+        // Evaluates the flake devshell -- repo-controlled code under
+        // the daemon grant. Confining it needs tier plumbing through
+        // DirenvCache; planned follow-up.
+        confine: None,
     };
 
     let output = cli_runner::exec(&call)

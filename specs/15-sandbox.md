@@ -17,18 +17,29 @@ PathGuard) into the kernel.
 ### Per-child confinement (Landlock tiers)
 
 `exec.sandbox` selects the mechanism: `"landlock"` (the default),
-`"bwrap"`, or `"off"`. In `landlock` mode the exec tool spawns each
-command as
+`"bwrap"`, or `"off"`. In `landlock` mode every same-uid child that runs
+repo-influenced code is wrapped, each in the tier that fits it:
+
+| Spawn | Tier | Grants beyond exec |
+|-------|------|--------------------|
+| exec tool (`bash -c`) | `exec` | — |
+| warm command (`Warmer`) | `exec` | — |
+| `GitCli`: clone, fetch, push, commit + hooks | `git` | `reviews/`, the askpass helper (r+x), the signing keyring |
+
+A wrapped command is spawned as
 
 ```
-/proc/self/exe confine exec <workspace> -- bash -c <command>
+/proc/self/exe confine <tier> <workspace> -- <binary> <args...>
 ```
 
 `confine` is a hidden subcommand dispatched in `main` before tracing and
 the tokio runtime. It builds `Policy::child(tier, workspace)`, calls the
 same `enforce()` the daemon uses (Landlock rulesets stack — the child's
 effective access is the intersection with the inherited grant), and
-`exec()`s the command tail. `confine` is strictly fail-closed, unlike the
+`exec()`s the command tail. The `git` tier is a superset of `exec`, so
+re-invoking `confine git` from inside an already-`exec`-confined child
+cannot widen access: the intersection keeps the keyring and askpass
+denied. `confine` is strictly fail-closed, unlike the
 daemon's best-effort startup: an enforcement error *or* any kernel
 downgrade (anything short of `FullyEnforced`) exits 1 and the command
 does not run. An operator who configured the landlock tier gets the tier
@@ -63,6 +74,26 @@ and the workspace-root rule is not recursive-write: Landlock denies
 whatever no rule grants. Unix-socket **connects are not mediated**
 by this ruleset — the chat socket stays reachable path-wise, which is why
 the socket's SO_PEERCRED uid gate is load-bearing.
+
+The `git` tier (`Policy::child_git`) is the exec tier plus three rules,
+for the credential-bearing paths and repo hooks:
+
+| Path | Access | Effect |
+|------|--------|--------|
+| `reviews/` | full | The GitHub channel prepares review worktrees here |
+| `state/askpass/` | read + execute | git runs the `GIT_ASKPASS` token helper; `state/` is otherwise denied, so exec children cannot read the token during the git window |
+| `/var/lib/kitaebot-gnupg` | full | `git commit` signs; gpg auto-spawns its agent in the keyring dir |
+
+The askpass helper moved out of the shared `/tmp` (which the exec tier
+grants broadly) into `state/askpass/`, so only the git tier — never a
+concurrent exec child — can read the token script.
+
+The daemon's own policy (`Policy::new`) additionally grants read +
+execute on its own binary, resolved via `current_exe()` in `apply()`.
+The daemon re-execs `/proc/self/exe` to launch every `confine` child;
+without this grant that re-exec fails `EACCES` on any thread already
+under the ruleset. On the VM the binary is under `/nix/store` (already
+granted); the explicit rule covers dev and test builds under `target/`.
 
 Live tests (`tests/confine.rs`) run the real binary and assert a `state/`
 write is denied and leaves the host untouched, keyring reads are denied,

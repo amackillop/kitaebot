@@ -118,7 +118,11 @@ pub fn run() -> ! {
         eprintln!("usage: kitaebot confine <tier> <workspace> -- <command...>");
         std::process::exit(2);
     });
-    let policy = Policy::child(confine.tier, &confine.workspace);
+    // GNUPGHOME travels in the env the daemon set for this child
+    // (SAFE_ENV_VARS). Only the git tier grants it; reading it here
+    // from an exec child changes nothing because rulesets intersect.
+    let gnupg_home = std::env::var_os("GNUPGHOME").map(PathBuf::from);
+    let policy = Policy::child(confine.tier, &confine.workspace, gnupg_home.as_deref());
     match sandbox::enforce(&policy) {
         Ok(RulesetStatus::FullyEnforced) => {}
         Ok(status) => {

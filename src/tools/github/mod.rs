@@ -80,6 +80,8 @@ async fn current_branch(cwd: &std::path::Path) -> Result<String, ToolError> {
         env: crate::tools::safe_env().collect(),
         timeout_secs: None,
         stdin: None,
+        // Fixed argv, runs no hooks, reads one ref name.
+        confine: None,
     };
     let output = crate::tools::cli_runner::exec(&call).await?;
     if output.exit_code != 0 {

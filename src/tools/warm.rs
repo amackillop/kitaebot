@@ -13,8 +13,9 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, watch};
 use tracing::{info, warn};
 
-use super::cli_runner::{self, SubprocessCall};
+use super::cli_runner::{self, Confinement, SubprocessCall};
 use super::direnv::DirenvCache;
+use crate::sandbox::Tier;
 
 /// How the last completed warm for a directory ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +43,9 @@ enum Entry {
 #[derive(Clone)]
 pub struct Warmer {
     direnv: DirenvCache,
+    /// Confine warm commands to the exec Landlock tier, rooted at this
+    /// workspace. `None` in unit tests (spec 15).
+    confine_workspace: Option<PathBuf>,
     inner: Arc<RwLock<HashMap<PathBuf, Entry>>>,
 }
 
@@ -49,8 +53,17 @@ impl Warmer {
     pub fn new(direnv: DirenvCache) -> Self {
         Self {
             direnv,
+            confine_workspace: None,
             inner: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Run warm commands under the exec Landlock tier (spec 15). A
+    /// warm command is repo-controlled code; it gets the same grant an
+    /// exec child does.
+    pub fn with_confinement(mut self, workspace: Option<PathBuf>) -> Self {
+        self.confine_workspace = workspace;
+        self
     }
 
     /// Run `command` in `dir`'s devshell and record the outcome.
@@ -79,7 +92,11 @@ impl Warmer {
                 return *outcome;
             }
         };
-        let outcome = run(&self.direnv, dir, command).await;
+        let confine = self.confine_workspace.clone().map(|workspace| Confinement {
+            tier: Tier::Exec,
+            workspace,
+        });
+        let outcome = run(&self.direnv, dir, command, confine).await;
         self.inner
             .write()
             .await
@@ -119,7 +136,12 @@ async fn closed(mut rx: watch::Receiver<()>) {
 }
 
 /// Execute the warm command with the devshell env injected.
-async fn run(direnv: &DirenvCache, dir: &Path, command: &str) -> WarmOutcome {
+async fn run(
+    direnv: &DirenvCache,
+    dir: &Path,
+    command: &str,
+    confine: Option<Confinement>,
+) -> WarmOutcome {
     info!(dir = %dir.display(), command, "warming build cache");
     let mut env: Vec<(OsString, OsString)> = crate::tools::safe_env().collect();
     match direnv.get(dir).await {
@@ -137,6 +159,7 @@ async fn run(direnv: &DirenvCache, dir: &Path, command: &str) -> WarmOutcome {
         env,
         timeout_secs: Some(WARM_TIMEOUT_SECS),
         stdin: None,
+        confine,
     };
     match cli_runner::exec(&call).await {
         Ok(out) if out.exit_code == 0 => {
