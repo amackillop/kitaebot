@@ -76,7 +76,7 @@ All tool outputs pass through `safety::check_tool_output` and execute inside the
 
 ### Security model
 
-1. **Landlock sandbox** — Filesystem access restricted to workspace, `/nix/store` (ro), `/tmp`, `/etc` (ro), `/dev`. Applied at startup, inherited by child processes. Exec children additionally re-enforce a tighter tier on themselves via the hidden `confine` subcommand: `projects/` stays fully writable, but `state/`, `context/`, `memory/`, and the signing keyring are neither readable nor writable.
+1. **Landlock sandbox** — Filesystem access restricted to workspace, `/nix/store` (ro), `/tmp`, `/etc` (ro), `/dev`. Applied at startup, inherited by child processes. Every same-uid child that runs repo-influenced code (the exec tool, build-warm commands, and git) additionally re-enforces a tighter tier on itself via the hidden `confine` subcommand: `projects/` stays fully writable, but `state/`, `context/`, `memory/` are neither readable nor writable, and the signing keyring lives outside the workspace so no exec child names it at all. The `git` tier additionally grants the keyring and a private askpass helper for signing and authenticated fetches.
 2. **Proxy-based egress filter** — nftables restricts the kitaebot uid to loopback; all outbound HTTP(S) goes through a local tinyproxy that allows CONNECT only to allowlisted hostnames. Prevents prompt-injection-driven exfiltration.
 3. **Leak detection** — Regex scan on tool outputs before they enter the context window.
 4. **Credential isolation** — Secrets loaded via systemd `LoadCredential` before Landlock enforcement. Inaccessible to child processes.

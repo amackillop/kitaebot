@@ -2,15 +2,19 @@
 
 ## Motivation
 
-Kernel-enforced filesystem confinement in two tiers. The daemon confines
-itself with Linux Landlock at startup (broad, inherited). Because that
-grant must include full workspace write — the daemon writes `state/`,
-`context/`, the journal, and memory — every child inherits full-workspace
-write too. So a second, tighter boundary is applied **per exec child**:
-the child re-enforces a narrower Landlock policy on itself before running
-the command, moving the `state/`/`context/`/keyring fence from the
-heuristic layers ([spec 03](03-tools.md) deny-list, [spec 05](05-workspace.md)
-PathGuard) into the kernel.
+Kernel-enforced filesystem confinement in two levels. The daemon
+confines itself with Linux Landlock at startup (broad, inherited).
+Because that grant must include full workspace write — the daemon writes
+`state/`, `context/`, the journal, and memory — every child inherits
+full-workspace write too. So a second, tighter boundary is applied
+**per child** to every same-uid spawn that runs repo-influenced code
+(the exec tool, warm commands, and `GitCli`): the child re-enforces a
+narrower Landlock tier on itself before running the command, moving the
+`state/`/`context/`/keyring fence from the heuristic layers
+([spec 03](03-tools.md) deny-list, [spec 05](05-workspace.md)
+PathGuard) into the kernel. The signing keyring lives outside the
+workspace entirely ([spec 13](13-credentials.md)), so no child tier
+names it at all.
 
 ## Behavior
 
@@ -109,26 +113,34 @@ trusted daemon unit, which is why Landlock-in-child is the default
 mechanism. Argv construction lives in `tools::bwrap::wrap_argv` and stays
 unit-tested.
 
-**Not yet covered** (follow-up tiers): the warm duty and git hooks
-(repo-controlled code) and the authenticated `git_cli` path (the only
-spawn that should see a credential) still run under the daemon's
-inherited Landlock only.
+In `landlock` mode the confined spawns are: the exec tool and warm
+commands (exec tier), and every `GitCli` call including hooks (git
+tier). Fixed-argv, hook-free git calls (origin lookup, current-branch)
+stay unconfined by design — they run no repo code. **Not yet covered:**
+direnv flake-devshell evaluation still runs under the daemon's
+inherited grant; confining it needs the tier threaded through
+`DirenvCache`, a planned follow-up.
 
 ### Architecture
 
 The implementation separates **policy** (pure data) from **enforcement**
 (Landlock syscalls):
 
-- `Policy::new(workspace, socket_path)` — pure function, builds a `Vec<Rule>`.
-  Testable on any platform.
+- `Policy::new(workspace, socket_path, gnupg_home)` — pure function,
+  builds the daemon `Vec<Rule>`. Testable on any platform.
+- `Policy::child(tier, workspace, gnupg_home)` — the per-child tiers
+  (`Policy::child_exec`, `Policy::child_git`), also pure.
 - `enforce(policy)` — creates a Landlock ruleset, adds rules, calls
-  `restrict_self()`.
-- `apply(workspace, socket_path)` — convenience wrapper composing the two.
+  `restrict_self()`, returns the `RulesetStatus`.
+- `apply(workspace, socket_path, gnupg_home)` — the daemon wrapper;
+  resolves `current_exe()` and grants it before enforcing so the
+  `/proc/self/exe` re-exec works.
 
 ### Filesystem Policy
 
-Targets Landlock ABI V5 (Linux 6.7+) with `BestEffort` compatibility for
-graceful downgrade on older kernels.
+The daemon policy (`Policy::new`). Targets Landlock ABI V5 (Linux 6.7+)
+with `BestEffort` compatibility for graceful downgrade on older kernels.
+The per-child tiers are tabulated under Per-child confinement above.
 
 | Path | Access | Presence |
 |------|--------|----------|
@@ -140,6 +152,8 @@ graceful downgrade on older kernels.
 | `/dev` | `ReadFile`, `ReadDir`, `WriteFile` | Optional |
 | `/proc` | `ReadFile`, `ReadDir` | Optional |
 | Socket parent dir (dynamic) | `MakeSock`, `ReadFile`, `WriteFile`, `ReadDir`, `RemoveFile` | Optional |
+| GPG keyring (`GNUPGHOME`, when outside the workspace) | Full access | Optional |
+| Daemon binary (`current_exe()`) | Read + execute | Optional |
 | Everything else | Denied | — |
 
 Only the workspace rule is **Required** (failure to add it is a hard error).
@@ -198,7 +212,12 @@ degradation is a bug, not resilience.
 2. Egress filter (tinyproxy + nftables)
 3. Unprivileged user (`kitaebot`)
 4. systemd hardening (`ProtectSystem`, `NoNewPrivileges`, seccomp)
-5. **Landlock filesystem confinement** (this spec)
+5. **Landlock filesystem confinement** (this spec): the daemon-wide
+   ruleset, plus the tighter per-child tiers (`exec`, `git`) that deny
+   the daemon-owned paths and the keyring to spawned code. Bubblewrap
+   is a documented alternative for the exec tool, stronger in a few
+   corners but requiring the trusted unit to loosen namespace and
+   mount syscalls.
 6. Exec deny-list (heuristic UX layer)
 7. `PathGuard` (file tool workspace confinement)
 8. Output leak detection
@@ -221,5 +240,14 @@ degradation is a bug, not resilience.
 
 ## Open Questions
 
-- Should a failed Required rule (e.g. workspace path doesn't exist) be fatal
-  rather than a warning? Currently the process runs unsandboxed.
+- **Per-thread enforcement.** `restrict_self()` restricts the calling
+  thread and its future children, not the whole process. `apply()` runs
+  inside `#[tokio::main]`, so the worker pool already exists and only
+  the thread that runs `apply()` gets the daemon ruleset. This does not
+  weaken the per-child tiers (they re-enforce from scratch on whatever
+  thread they land on), but the daemon's own confinement is not
+  uniform. Fix: apply before the runtime starts, or restrict every
+  worker. Tracked in [FUTURE.md](FUTURE.md).
+- The daemon deliberately runs best-effort (a failed Required rule or an
+  unsupported kernel logs and continues) rather than refusing to start;
+  `confine` is the opposite and fail-closed. See Enforcement Status.

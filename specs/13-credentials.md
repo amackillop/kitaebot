@@ -63,7 +63,7 @@ happens daemon-side via `git_commit`, which is unaffected.
 | 0 | NixOS VM boundary ([spec 09](09-vm.md)) |
 | 1 | Secrets as files, not env vars (this spec) |
 | 2 | systemd service hardening ([spec 09](09-vm.md)) |
-| 3 | Landlock filesystem confinement ([spec 15](15-sandbox.md)) |
+| 3 | Landlock filesystem confinement, daemon-wide and per-child tiers — exec children cannot read the keyring at the kernel level ([spec 15](15-sandbox.md)) |
 | 4 | Process-level env scrubbing ([spec 03](03-tools.md)) |
 | 5 | Output scanning ([spec 11](11-safety.md)) |
 | 6 | Exec deny rules — secret harvesting, GPG keyring, signing override ([spec 03](03-tools.md)) |
