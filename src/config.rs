@@ -770,8 +770,10 @@ impl Config {
             Err(e) => return Err(ConfigError::Io(e)),
         };
 
-        let config: Self =
-            toml::from_str(&contents).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let config: Self = toml::from_str(&contents).map_err(|source| ConfigError::Parse {
+            path: path.clone(),
+            source,
+        })?;
         config.validate()?;
         Ok(config)
     }
@@ -1120,13 +1122,13 @@ memory = \"cheap/memory\"
     #[test]
     fn model_overrides_reject_unknown_role() {
         let result = load_toml("[provider.model_overrides]\nroot = \"nope\"\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
     fn reject_unknown_fields() {
         let result = load_toml("[provider]\ntypo_field = \"oops\"\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
@@ -1144,7 +1146,7 @@ memory = \"cheap/memory\"
     #[test]
     fn reject_malformed_toml() {
         let result = load_toml("not valid [[[toml");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
@@ -1169,7 +1171,7 @@ memory = \"cheap/memory\"
     #[test]
     fn duties_reject_unknown_field() {
         let result = load_toml("[duties.distill]\ntypo = 1\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
@@ -1301,7 +1303,7 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn memory_reject_unknown_field() {
         let result = load_toml("[memory]\ntypo = 1\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
@@ -1325,7 +1327,7 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn sub_agents_reject_unknown_field() {
         let result = load_toml("[sub_agents]\ntypo = 1\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
@@ -1349,7 +1351,7 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn telegram_reject_unknown_field() {
         let result = load_toml("[telegram]\ntypo = 1\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
@@ -1401,7 +1403,7 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn context_engine_reject_unknown_value() {
         let result = load_toml("[context]\nengine = \"hierarchical\"\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
@@ -1414,7 +1416,7 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn context_reject_unknown_field() {
         let result = load_toml("[context]\ntypo = 1\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
@@ -1488,7 +1490,7 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn linear_reject_unknown_field() {
         let result = load_toml("[linear]\ntypo = 1\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
@@ -1545,13 +1547,13 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn git_reject_unknown_field() {
         let result = load_toml("[git]\ntypo = 1\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
     fn repositories_reject_unknown_field() {
         let result = load_toml("[git.repositories.\"alice/repo\"]\ntypo = 1\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
@@ -1638,7 +1640,7 @@ prompt = \"Review recent commits for security issues.\"
     #[test]
     fn github_reject_unknown_field() {
         let result = load_toml("[github]\ntypo = 1\n");
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]

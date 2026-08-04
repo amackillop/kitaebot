@@ -190,9 +190,14 @@ pub enum ConfigError {
     #[error("Config I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Failed to parse TOML.
-    #[error("Config parse error: {0}")]
-    Parse(String),
+    /// Failed to parse TOML. The toml error carries line/column; the
+    /// path names which file, which it does not.
+    #[error("Failed to parse config at {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
 }
 
 /// Safety layer errors.

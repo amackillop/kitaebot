@@ -50,27 +50,20 @@ pub(crate) struct AdvertisedTool {
 /// Client-side MCP failure. `Call` is a well-formed `isError` result —
 /// the tool ran and reported failure; everything else is transport or
 /// protocol trouble.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum McpError {
     /// Stream closed or I/O failed.
+    #[error("transport: {0}")]
     Transport(String),
     /// The server answered with a JSON-RPC error object.
+    #[error("rpc error {code}: {message}")]
     Rpc { code: i64, message: String },
     /// The server sent something outside the protocol shape.
+    #[error("protocol: {0}")]
     Protocol(String),
     /// `tools/call` returned `isError: true` with this rendered content.
+    #[error("tool error: {0}")]
     Call(String),
-}
-
-impl std::fmt::Display for McpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Transport(msg) => write!(f, "transport: {msg}"),
-            Self::Rpc { code, message } => write!(f, "rpc error {code}: {message}"),
-            Self::Protocol(msg) => write!(f, "protocol: {msg}"),
-            Self::Call(msg) => write!(f, "tool error: {msg}"),
-        }
-    }
 }
 
 /// A JSON-RPC connection over a byte-stream pair.

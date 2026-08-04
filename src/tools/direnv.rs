@@ -29,23 +29,16 @@ use super::cli_runner::{self, SubprocessCall};
 pub type DirenvEnv = Arc<HashMap<String, String>>;
 
 /// Why a direnv evaluation did not yield an environment.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DirenvError {
     /// `.envrc` exists but is not allowed: never allowed, or its content
     /// changed since it was, so direnv revoked trust. Recoverable by
     /// re-running `direnv allow` (see [`allow`]) for a trusted repo.
+    #[error(".envrc is not allowed")]
     Blocked,
     /// direnv failed for some other reason.
+    #[error("{0}")]
     Failed(String),
-}
-
-impl std::fmt::Display for DirenvError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Blocked => write!(f, ".envrc is not allowed"),
-            Self::Failed(msg) => write!(f, "{msg}"),
-        }
-    }
 }
 
 /// Run `direnv allow` for a directory, trusting its current `.envrc`
