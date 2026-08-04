@@ -29,7 +29,13 @@ fn skip_without_landlock() -> bool {
 fn fixture_workspace() -> tempfile::TempDir {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let p = dir.path();
-    for sub in ["state", "projects", ".gnupg"] {
+    for sub in [
+        "state",
+        "projects",
+        ".gnupg",
+        ".cache",
+        ".local/share/direnv",
+    ] {
         std::fs::create_dir_all(p.join(sub)).unwrap();
     }
     std::fs::write(p.join("state/JOURNAL.md"), "real journal\n").unwrap();
@@ -96,6 +102,24 @@ fn projects_write_persists_to_the_host() {
         std::fs::read_to_string(ws.path().join("projects/note.txt")).unwrap(),
         "work\n"
     );
+}
+
+#[test]
+fn build_cache_write_persists_but_direnv_trust_db_is_denied() {
+    if skip_without_landlock() {
+        return;
+    }
+    let ws = fixture_workspace();
+    let out = confine(ws.path(), "echo probe > .cache/probe");
+    assert!(out.status.success(), "cache write must work: {out:?}");
+    assert!(ws.path().join(".cache/probe").exists());
+
+    let out = confine(ws.path(), "echo evil > .local/share/direnv/allow-x");
+    assert!(
+        !out.status.success(),
+        "direnv trust db write must be denied: {out:?}"
+    );
+    assert!(!ws.path().join(".local/share/direnv/allow-x").exists());
 }
 
 #[test]

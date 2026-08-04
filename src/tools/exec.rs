@@ -862,6 +862,15 @@ fn command_blocked(cmd: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    /// Exec config with the sandbox off: unit tests run inside the
+    /// test binary, whose `/proc/self/exe` has no `confine`.
+    fn test_config() -> ExecConfig {
+        ExecConfig {
+            sandbox: SandboxMode::Off,
+            ..ExecConfig::default()
+        }
+    }
+
     /// Assert that a command is blocked by the deny list.
     fn assert_blocked(cmd: &str) {
         assert!(
@@ -900,7 +909,7 @@ mod tests {
 
     #[test]
     fn test_parameters_schema() {
-        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new(), Vec::new());
+        let tool = Exec::new(".", &test_config(), DirenvCache::new(), Vec::new());
         let schema = tool.parameters();
 
         assert_eq!(schema["type"], "object");
@@ -1156,7 +1165,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_simple_command() {
-        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new(), Vec::new());
+        let tool = Exec::new(".", &test_config(), DirenvCache::new(), Vec::new());
         let args = serde_json::json!({"command": "echo hello"});
         let result = tool.execute(args, ToolCtx::default()).await.unwrap();
         assert!(result.contains("hello"));
@@ -1197,7 +1206,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_missing_command() {
-        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new(), Vec::new());
+        let tool = Exec::new(".", &test_config(), DirenvCache::new(), Vec::new());
         let args = serde_json::json!({});
         let result = tool.execute(args, ToolCtx::default()).await;
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
@@ -1205,7 +1214,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_blocked_command() {
-        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new(), Vec::new());
+        let tool = Exec::new(".", &test_config(), DirenvCache::new(), Vec::new());
         // "echo shutdown" is harmless if executed but matches the deny pattern.
         // Never use a genuinely destructive command here — if the deny list has
         // a bug, execute() will run it for real.
@@ -1219,7 +1228,7 @@ mod tests {
         // Set a variable that is NOT on the allowlist
         // SAFETY: test-only, no concurrent threads depend on this var.
         unsafe { std::env::set_var("KITAEBOT_TEST_SECRET", "leaked") };
-        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new(), Vec::new());
+        let tool = Exec::new(".", &test_config(), DirenvCache::new(), Vec::new());
         let args = serde_json::json!({"command": "echo $KITAEBOT_TEST_SECRET"});
         let result = tool.execute(args, ToolCtx::default()).await.unwrap();
         // Shell expands unset vars to empty string, so output should just be a blank line
@@ -1232,7 +1241,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_path_available() {
-        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new(), Vec::new());
+        let tool = Exec::new(".", &test_config(), DirenvCache::new(), Vec::new());
         let args = serde_json::json!({"command": "echo $PATH"});
         let result = tool.execute(args, ToolCtx::default()).await.unwrap();
         // PATH should be forwarded — output should contain something (not just "$ echo $PATH\n\n")
@@ -1291,12 +1300,7 @@ mod tests {
         std::fs::create_dir_all(repo.join("packages/pkg")).unwrap();
         std::fs::write(repo.join(".envrc"), "use flake").unwrap();
 
-        let tool = Exec::new(
-            ws.path(),
-            &ExecConfig::default(),
-            DirenvCache::new(),
-            Vec::new(),
-        );
+        let tool = Exec::new(ws.path(), &test_config(), DirenvCache::new(), Vec::new());
         let args = serde_json::json!({
             "command": "echo marker=$DEVSHELL_MARKER",
             "working_dir": "projects/owner/repo/packages/pkg",
@@ -1318,12 +1322,7 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(ws.path().join("projects/owner/repo")).unwrap();
 
-        let tool = Exec::new(
-            ws.path(),
-            &ExecConfig::default(),
-            DirenvCache::new(),
-            Vec::new(),
-        );
+        let tool = Exec::new(ws.path(), &test_config(), DirenvCache::new(), Vec::new());
         let args = serde_json::json!({
             "command": "echo marker=${DEVSHELL_MARKER:-none}",
             "working_dir": "projects/owner/repo",
@@ -1377,12 +1376,7 @@ mod tests {
     async fn test_exec_working_dir_subdir() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
-        let tool = Exec::new(
-            dir.path(),
-            &ExecConfig::default(),
-            DirenvCache::new(),
-            Vec::new(),
-        );
+        let tool = Exec::new(dir.path(), &test_config(), DirenvCache::new(), Vec::new());
         let args = serde_json::json!({"command": "pwd", "working_dir": "sub"});
         let result = tool.execute(args, ToolCtx::default()).await.unwrap();
         assert!(result.contains("sub"), "expected cwd in sub: {result}");
@@ -1391,7 +1385,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_working_dir_traversal_blocked() {
-        let tool = Exec::new(".", &ExecConfig::default(), DirenvCache::new(), Vec::new());
+        let tool = Exec::new(".", &test_config(), DirenvCache::new(), Vec::new());
         let args = serde_json::json!({"command": "pwd", "working_dir": "../escape"});
         let result = tool.execute(args, ToolCtx::default()).await;
         assert!(matches!(result, Err(ToolError::Blocked { .. })));
@@ -1400,12 +1394,7 @@ mod tests {
     #[tokio::test]
     async fn test_exec_working_dir_nonexistent() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = Exec::new(
-            dir.path(),
-            &ExecConfig::default(),
-            DirenvCache::new(),
-            Vec::new(),
-        );
+        let tool = Exec::new(dir.path(), &test_config(), DirenvCache::new(), Vec::new());
         let args = serde_json::json!({"command": "pwd", "working_dir": "no_such_dir"});
         let result = tool.execute(args, ToolCtx::default()).await;
         assert!(

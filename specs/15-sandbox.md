@@ -16,9 +16,9 @@ PathGuard) into the kernel.
 
 ### Per-child confinement (Landlock tiers)
 
-`exec.sandbox` selects the mechanism: `"landlock"`, `"bwrap"`, or `"off"`
-(the default until the VM smoke passes). In `landlock` mode the exec tool
-spawns each command as
+`exec.sandbox` selects the mechanism: `"landlock"` (the default),
+`"bwrap"`, or `"off"`. In `landlock` mode the exec tool spawns each
+command as
 
 ```
 /proc/self/exe confine exec <workspace> -- bash -c <command>
@@ -50,6 +50,8 @@ The `exec` tier (`Policy::child_exec`):
 | Workspace root | list only (`ReadDir`) | Navigation works. Landlock rules are recursive, so `ReadFile` here would grant reads of everything beneath; with list-only, file reads and all writes under `state/`, `context/`, `memory/`, `.gnupg`, and `config.toml` are denied, and new root-level files cannot be created |
 | `projects/` | full | Builds, checkouts, `.diffs/` all work |
 | `state/review-checklist.md` | read | The one model-facing state file |
+| `.cache`, `.cargo`, `.npm`, `.local/{share,state}/pnpm` | full | `HOME` is the workspace root on the VM; nix flake eval fails hard without `~/.cache/nix`, and cargo/npm/pnpm need their caches. Provisioned by tmpfiles — Landlock cannot grant a path that does not exist. Grants are named, never speculative: onboarding a repo whose toolchain caches outside XDG (`.m2`, `.gradle`, `~/go/pkg/mod`, …) means adding its rule in `Policy::child_exec` plus a tmpfiles entry in the same commit |
+| `.local/share/direnv`, `.config` | denied | The direnv trust db: repo code must not self-approve an `.envrc` the daemon later evaluates |
 | `/nix/store` | read + execute | Binaries |
 | `/tmp` | working access | No device or socket creation |
 | `/etc`, `/run`, `/proc` | read | resolv.conf, CA certs, procfs |

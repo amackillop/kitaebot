@@ -297,6 +297,14 @@ in
         "L+ /var/lib/kitaebot/USER.md - - - - ${cfg.promptsDir}/USER.md"
         "d /var/lib/kitaebot/.config/direnv 0750 kitaebot kitaebot -"
         "L+ /var/lib/kitaebot/.config/direnv/direnv.toml - - - - ${direnvConfig}"
+        # Build caches granted by the exec Landlock tier (spec 15).
+        # Landlock cannot grant a nonexistent path and exec children
+        # cannot create root-level dirs, so provision them here.
+        "d /var/lib/kitaebot/.cache 0750 kitaebot kitaebot -"
+        "d /var/lib/kitaebot/.cargo 0750 kitaebot kitaebot -"
+        "d /var/lib/kitaebot/.npm 0750 kitaebot kitaebot -"
+        "d /var/lib/kitaebot/.local/share/pnpm 0750 kitaebot kitaebot -"
+        "d /var/lib/kitaebot/.local/state/pnpm 0750 kitaebot kitaebot -"
       ];
 
       services = {

@@ -237,9 +237,7 @@ pub struct ToolsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ExecConfig {
     pub timeout_secs: u64,
-    /// Per-child confinement mechanism (spec 15). Off until the VM
-    /// smoke confirms the tightened view does not break builds or the
-    /// devshell.
+    /// Per-child confinement mechanism (spec 15).
     pub sandbox: SandboxMode,
 }
 
@@ -652,7 +650,7 @@ impl Default for ExecConfig {
     fn default() -> Self {
         Self {
             timeout_secs: 600,
-            sandbox: SandboxMode::Off,
+            sandbox: SandboxMode::Landlock,
         }
     }
 }

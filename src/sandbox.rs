@@ -201,6 +201,13 @@ impl Policy {
     /// recursive, so the workspace root gets `ReadDir` only: listing
     /// works everywhere, but file *reads* under `state/`, `context/`,
     /// `memory/`, and `.gnupg` are denied along with all writes.
+    ///
+    /// On the VM, `HOME` is the workspace root, so builds also need the
+    /// toolchain cache dirs beneath it (nix flake eval fails hard
+    /// without `~/.cache/nix`). Those are granted by name; the direnv
+    /// trust db (`.local/share/direnv`) and `.config` stay denied so
+    /// repo code cannot self-approve an `.envrc` the daemon would later
+    /// evaluate.
     pub fn child_exec(workspace: &Path) -> Self {
         use crate::workspace::{PROJECTS_DIR, REVIEW_CHECKLIST, STATE_DIR};
 
@@ -221,7 +228,7 @@ impl Policy {
 
         let dev_access = AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::WriteFile;
 
-        let rules = vec![
+        let mut rules = vec![
             Rule {
                 path: workspace.to_path_buf(),
                 access: AccessFs::ReadDir.into(),
@@ -277,6 +284,25 @@ impl Policy {
                 rationale: "Procfs — read-only",
             },
         ];
+
+        // Toolchain caches under HOME (= the workspace root on the VM).
+        // Provisioned by tmpfiles; Landlock cannot grant a missing path.
+        let caches = [
+            (
+                ".cache",
+                "Build caches — nix eval/fetcher cache, pnpm cache",
+            ),
+            (".cargo", "Cargo home — registry cache"),
+            (".npm", "npm cache"),
+            (".local/share/pnpm", "pnpm content-addressed store"),
+            (".local/state/pnpm", "pnpm state"),
+        ];
+        rules.extend(caches.map(|(dir, rationale)| Rule {
+            path: workspace.join(dir),
+            access: all,
+            presence: Presence::Optional,
+            rationale,
+        }));
 
         Self { rules }
     }
@@ -628,10 +654,44 @@ mod tests {
     }
 
     #[test]
+    fn child_build_caches_get_full_access() {
+        let policy = child_policy();
+        for cache in [
+            ".cache",
+            ".cargo",
+            ".npm",
+            ".local/share/pnpm",
+            ".local/state/pnpm",
+        ] {
+            let path = Path::new("/home/agent/workspace").join(cache);
+            let rule = policy
+                .rules()
+                .iter()
+                .find(|r| r.path == path)
+                .unwrap_or_else(|| panic!("{cache} rule must exist"));
+            assert_eq!(rule.access, AccessFs::from_all(ABI_VERSION));
+            assert_eq!(rule.presence, Presence::Optional);
+        }
+    }
+
+    #[test]
+    fn child_direnv_trust_db_and_config_are_absent() {
+        // Writable .local/share/direnv would let repo code self-approve
+        // an .envrc the daemon later evaluates.
+        let policy = child_policy();
+        for rule in policy.rules() {
+            let p = rule.path.to_string_lossy();
+            assert!(!p.contains("direnv"), "{p} must not be granted");
+            assert!(!p.contains(".config"), "{p} must not be granted");
+        }
+    }
+
+    #[test]
     fn child_expected_rule_count() {
         let policy = child_policy();
-        // workspace root, projects, review checklist, /nix/store, /tmp, /etc, /run, /dev, /proc
-        assert_eq!(policy.rules().len(), 9);
+        // workspace root, projects, review checklist, 5 build caches,
+        // /nix/store, /tmp, /etc, /run, /dev, /proc
+        assert_eq!(policy.rules().len(), 14);
     }
 
     #[test]
