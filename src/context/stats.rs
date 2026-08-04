@@ -33,6 +33,7 @@ pub(crate) enum FailureKind {
     ExecutionFailed,
     InvalidArguments,
     NotFound,
+    Spawn,
     Timeout,
     SafetyBlock,
     RepeatBlock,
@@ -45,6 +46,7 @@ impl fmt::Display for FailureKind {
             Self::ExecutionFailed => write!(f, "ExecutionFailed"),
             Self::InvalidArguments => write!(f, "InvalidArguments"),
             Self::NotFound => write!(f, "NotFound"),
+            Self::Spawn => write!(f, "Spawn"),
             Self::Timeout => write!(f, "Timeout"),
             Self::SafetyBlock => write!(f, "SafetyBlock"),
             Self::RepeatBlock => write!(f, "RepeatBlock"),
@@ -210,7 +212,9 @@ pub(crate) fn classify_failure(content: &str) -> Option<FailureKind> {
         Some(FailureKind::InvalidArguments)
     } else if content.starts_with("Error: Tool not found: ") {
         Some(FailureKind::NotFound)
-    } else if content == "Error: Tool execution timed out" {
+    } else if content.starts_with("Error: Failed to spawn ") {
+        Some(FailureKind::Spawn)
+    } else if content.starts_with("Error: ") && content.contains(" timed out after ") {
         Some(FailureKind::Timeout)
     } else if content.starts_with("Tool output blocked: ") {
         Some(FailureKind::SafetyBlock)
@@ -686,8 +690,19 @@ mod tests {
     #[test]
     fn classify_timeout() {
         assert_eq!(
-            classify_failure("Error: Tool execution timed out"),
+            classify_failure("Error: `sleep 99` timed out after 5s"),
             Some(FailureKind::Timeout),
+        );
+    }
+
+    #[test]
+    fn classify_spawn() {
+        assert_eq!(
+            classify_failure(
+                "Error: Failed to spawn `/proc/self/exe confine git /ws -- git ls-remote` \
+                 (cwd /ws): Permission denied (os error 13)"
+            ),
+            Some(FailureKind::Spawn),
         );
     }
 
@@ -799,7 +814,7 @@ mod tests {
     fn analyze_tool_error_timeout() {
         let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"sleep 999"}"#)]),
-            make_tool("c1", "Error: Tool execution timed out"),
+            make_tool("c1", "Error: `sleep 99` timed out after 5s"),
         ];
 
         let report = analyze(&[session]);
@@ -905,7 +920,7 @@ mod tests {
     fn format_report_includes_tool_errors_section() {
         let session = vec![
             make_assistant(vec![make_call("c1", "exec", r#"{"command":"sleep 999"}"#)]),
-            make_tool("c1", "Error: Tool execution timed out"),
+            make_tool("c1", "Error: `sleep 99` timed out after 5s"),
         ];
         let report = analyze(&[session]);
         let out = format_report(&report);

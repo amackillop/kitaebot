@@ -499,6 +499,21 @@ impl Exec {
         }
     }
 
+    /// The wrapper prefix the current sandbox mode prepends to
+    /// `bash -c <command>`, for error and log messages. Env-free, so it
+    /// never dumps the child environment the way `{Command:?}` would.
+    fn sandbox_prefix(&self) -> String {
+        match self.sandbox {
+            SandboxMode::Bwrap => "bwrap … bash -c".into(),
+            SandboxMode::Landlock => format!(
+                "{CONFINE_SELF} confine {} {} -- bash -c",
+                Tier::Exec,
+                self.workspace_root.display(),
+            ),
+            SandboxMode::Off => "bash -c".into(),
+        }
+    }
+
     /// Build the command, wrapped per the configured sandbox mode. The
     /// env is set identically in all modes — both wrappers forward
     /// their own environment to the child.
@@ -632,13 +647,25 @@ impl Tool for Exec {
                 cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
             }
 
-            let child = cmd
-                .spawn()
-                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            // The wrapper prefix plus the command names exactly what was
+            // launched, without dumping the child environment.
+            let spawned = format!("{} {}", self.sandbox_prefix(), args.command);
+            let child = cmd.spawn().map_err(|source| ToolError::Spawn {
+                argv: spawned.clone(),
+                cwd: cwd.display().to_string(),
+                source,
+            })?;
             let output = timeout(self.timeout, child.wait_with_output())
                 .await
-                .map_err(|_| ToolError::Timeout)?
-                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+                .map_err(|_| ToolError::Timeout {
+                    command: args.command.clone(),
+                    secs: self.timeout.as_secs(),
+                })?
+                .map_err(|source| ToolError::Spawn {
+                    argv: spawned,
+                    cwd: cwd.display().to_string(),
+                    source,
+                })?;
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1184,7 +1211,7 @@ mod tests {
         let tool = quick_timeout_tool(dir.path());
         let args = serde_json::json!({"command": "sleep 5"});
         let result = tool.execute(args, ToolCtx::default()).await;
-        assert!(matches!(result, Err(ToolError::Timeout)));
+        assert!(matches!(result, Err(ToolError::Timeout { .. })));
     }
 
     #[tokio::test]
@@ -1193,7 +1220,7 @@ mod tests {
         let tool = quick_timeout_tool(dir.path());
         let args = serde_json::json!({"command": "sleep 0.3 && touch marker"});
         let result = tool.execute(args, ToolCtx::default()).await;
-        assert!(matches!(result, Err(ToolError::Timeout)));
+        assert!(matches!(result, Err(ToolError::Timeout { .. })));
         // If the child survived the timeout it would touch the marker
         // at ~0.3s. kill_on_drop must have killed it before that.
         tokio::time::sleep(Duration::from_millis(500)).await;

@@ -465,15 +465,24 @@ pub fn enforce(policy: &Policy) -> Result<RulesetStatus, SandboxError> {
         .restrict_self()
         .map_err(|e| SandboxError::Ruleset(e.to_string()))?;
 
+    // `restrict_self` restricts the calling thread only; the id makes
+    // the per-thread scope legible in the log (see spec 15 / FUTURE).
+    let thread = format!("{:?}", std::thread::current().id());
     match status.ruleset {
         RulesetStatus::FullyEnforced => {
-            info!("Landlock sandbox applied (fully enforced)");
+            info!(thread, "Landlock sandbox applied (fully enforced)");
         }
         RulesetStatus::PartiallyEnforced => {
-            warn!("Landlock sandbox applied (partially enforced — kernel too old for full ABI)");
+            warn!(
+                thread,
+                "Landlock sandbox applied (partially enforced — kernel too old for full ABI)"
+            );
         }
         RulesetStatus::NotEnforced => {
-            warn!("Landlock not supported by running kernel — sandbox not enforced");
+            warn!(
+                thread,
+                "Landlock not supported by running kernel — sandbox not enforced"
+            );
         }
     }
 

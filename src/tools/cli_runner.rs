@@ -108,6 +108,10 @@ impl SubprocessCall {
 /// Execute a [`SubprocessCall`] by spawning a subprocess.
 pub async fn exec(call: &SubprocessCall) -> Result<CmdOutput, ToolError> {
     let args_ref: Vec<&str> = call.args.iter().map(String::as_str).collect();
+    // The argv as actually spawned — confine wrapper included, so an
+    // error or log line shows exactly what the kernel was asked to run,
+    // not the logical command it stands for.
+    let argv = confined_argv(call, &args_ref);
     let mut cmd = if let Some(c) = &call.confine {
         let mut cmd = Command::new(CONFINE_SELF);
         cmd.arg("confine")
@@ -125,29 +129,64 @@ pub async fn exec(call: &SubprocessCall) -> Result<CmdOutput, ToolError> {
     cmd.current_dir(&call.cwd)
         .env_clear()
         .envs(call.env.iter().map(|(k, v)| (k, v)));
+    // The logical command, for the returned CmdOutput's `$ …` echo.
     let label = format!("{} {}", call.binary, args_ref.join(" "));
     let timeout_secs = call.timeout_secs.unwrap_or(TIMEOUT_SECS);
-    exec_cmd(&mut cmd, label, timeout_secs, call.stdin.as_deref()).await
+    exec_cmd(
+        &mut cmd,
+        label,
+        &argv,
+        &call.cwd,
+        timeout_secs,
+        call.stdin.as_deref(),
+    )
+    .await
+}
+
+/// Render the argv as spawned, with the `confine` wrapper prefix when
+/// the call is confined, for error messages and the debug log.
+fn confined_argv(call: &SubprocessCall, args: &[&str]) -> String {
+    let tail = format!("{} {}", call.binary, args.join(" "));
+    match &call.confine {
+        Some(c) => format!(
+            "{CONFINE_SELF} confine {} {} -- {tail}",
+            c.tier,
+            c.workspace.display(),
+        ),
+        None => tail,
+    }
 }
 
 // ── Command execution ───────────────────────────────────────────────
 
 /// Run a command with timeout and collect output.
+///
+/// `argv` is the real spawned argument vector (confine wrapper and
+/// all); `label` is the logical command echoed back in the output.
 async fn exec_cmd(
     cmd: &mut Command,
-    command: String,
+    label: String,
+    argv: &str,
+    cwd: &std::path::Path,
     timeout_secs: u64,
     stdin: Option<&str>,
 ) -> Result<CmdOutput, ToolError> {
-    debug!(%command, "Running command");
+    debug!(argv, cwd = %cwd.display(), "spawning");
 
     let output = timeout(Duration::from_secs(timeout_secs), run(cmd, stdin))
         .await
-        .map_err(|_| ToolError::Timeout)?
-        .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        .map_err(|_| ToolError::Timeout {
+            command: argv.to_string(),
+            secs: timeout_secs,
+        })?
+        .map_err(|source| ToolError::Spawn {
+            argv: argv.to_string(),
+            cwd: cwd.display().to_string(),
+            source,
+        })?;
 
     Ok(CmdOutput {
-        command,
+        command: label,
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         exit_code: output.status.code().unwrap_or(-1),
@@ -183,6 +222,25 @@ mod tests {
             stdin,
             confine: None,
         }
+    }
+
+    #[test]
+    fn confined_argv_shows_the_wrapper() {
+        let mut call = cat_call(None);
+        call.binary = "git";
+        call.args = vec!["ls-remote".into(), "url".into()];
+        let bare = confined_argv(&call, &["ls-remote", "url"]);
+        assert_eq!(bare, "git ls-remote url");
+
+        call.confine = Some(Confinement {
+            tier: Tier::Git,
+            workspace: PathBuf::from("/ws"),
+        });
+        let wrapped = confined_argv(&call, &["ls-remote", "url"]);
+        assert_eq!(
+            wrapped,
+            "/proc/self/exe confine git /ws -- git ls-remote url"
+        );
     }
 
     #[tokio::test]

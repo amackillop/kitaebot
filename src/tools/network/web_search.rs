@@ -78,7 +78,10 @@ impl Tool for WebSearch {
             let response =
                 tokio::time::timeout(self.timeout, self.client.chat_completions(&request))
                     .await
-                    .map_err(|_| ToolError::Timeout)?
+                    .map_err(|_| ToolError::Timeout {
+                        command: format!("web_search {:?}", args.query),
+                        secs: self.timeout.as_secs(),
+                    })?
                     .map_err(|e| {
                         warn!("Search API error: {e}");
                         ToolError::ExecutionFailed(format!("search request failed: {e}"))

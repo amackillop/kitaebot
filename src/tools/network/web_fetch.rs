@@ -68,7 +68,10 @@ impl Tool for WebFetch {
 
             let response = tokio::time::timeout(self.timeout, self.client.get(&args.url).send())
                 .await
-                .map_err(|_| ToolError::Timeout)?
+                .map_err(|_| ToolError::Timeout {
+                    command: format!("fetch {}", args.url),
+                    secs: self.timeout.as_secs(),
+                })?
                 .map_err(|e| ToolError::ExecutionFailed(format!("fetch failed: {e}")))?;
 
             let status = response.status();

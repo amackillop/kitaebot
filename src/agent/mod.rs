@@ -1264,7 +1264,21 @@ mod tests {
                 Err(ToolError::NotFound("bogus".into())),
                 Some(FailureKind::NotFound),
             ),
-            (Err(ToolError::Timeout), Some(FailureKind::Timeout)),
+            (
+                Err(ToolError::Spawn {
+                    argv: "/proc/self/exe confine git /ws -- git ls-remote".into(),
+                    cwd: "/ws".into(),
+                    source: std::io::Error::from_raw_os_error(13),
+                }),
+                Some(FailureKind::Spawn),
+            ),
+            (
+                Err(ToolError::Timeout {
+                    command: "sleep 99".into(),
+                    secs: 5,
+                }),
+                Some(FailureKind::Timeout),
+            ),
         ];
         let (results, expected): (Vec<_>, Vec<_>) = cases.into_iter().unzip();
         let calls: Vec<ToolCall> = (0..results.len())

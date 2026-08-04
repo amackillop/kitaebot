@@ -142,9 +142,33 @@ pub enum ToolError {
     #[error("Tool not found: {0}")]
     NotFound(String),
 
-    /// Tool execution timed out.
-    #[error("Tool execution timed out")]
-    Timeout,
+    /// A subprocess failed at the OS level before its output could be
+    /// collected — an `execve`/`fork` failure (the usual case) or an
+    /// I/O error while waiting on it. Distinct from a nonzero exit,
+    /// which is not an error. Names the full argv, the cwd, and the OS
+    /// error, so e.g. a Landlock-denied `/proc/self/exe` re-exec shows
+    /// the confine wrapper in `argv` and `EACCES` in `source`.
+    #[error("Failed to spawn `{argv}` (cwd {cwd}): {source}")]
+    Spawn {
+        /// The full argument vector, including any `confine` wrapper.
+        argv: String,
+        /// Working directory the spawn was attempted from.
+        cwd: String,
+        /// The underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Tool execution timed out. Names the command and the budget so a
+    /// timeout is never a bare "timed out" with no way to tell what or
+    /// how long.
+    #[error("`{command}` timed out after {secs}s")]
+    Timeout {
+        /// The command that exceeded the budget.
+        command: String,
+        /// The budget, in seconds.
+        secs: u64,
+    },
 }
 
 /// Workspace initialization errors.

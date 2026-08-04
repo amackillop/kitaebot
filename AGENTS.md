@@ -29,6 +29,7 @@ Skip this for obvious fixes and additions.
 - **Pure core, thin effectful shell.** Separate logic from I/O. Build pure data structures that describe intent, then interpret them in a thin layer that performs effects. Test the pure core; the effectful shell should be too simple to fail.
 - **Every permission needs a concrete caller.** Don't grant capabilities speculatively. If you can't name the code path that requires it, it shouldn't exist.
 - **Specs are contracts.** When code diverges from a spec, fix the spec. Stale docs are worse than no docs. Keep the README.md up-to-date.
+- **Errors never discard information.** An error must name exactly what failed, to the fullest extent available at the failure site: the operation, the inputs it acted on (path, argv, url), and the underlying cause. Model distinct failure modes as distinct ADT variants carrying structured fields, not one stringly `Failed(String)`. Never collapse a rich source error to `e.to_string()` when you can keep it as a `#[source]`, and never substitute a friendly label for the real thing that ran.
 
 ## Style
 - Rust 2024 edition
