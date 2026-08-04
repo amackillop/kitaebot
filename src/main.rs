@@ -87,7 +87,8 @@ async fn daemon_main() {
     let rt = runtime::build(&config, &workspace);
     let mcp = tools::mcp::start(&config.mcp).await;
 
-    if let Err(e) = sandbox::apply(workspace.path(), socket_path) {
+    let gnupg_home = std::env::var_os("GNUPGHOME").map(std::path::PathBuf::from);
+    if let Err(e) = sandbox::apply(workspace.path(), socket_path, gnupg_home.as_deref()) {
         warn!("Sandbox not applied: {e}");
     }
 

@@ -94,8 +94,12 @@ pub struct Policy {
 impl Policy {
     /// Build the sandbox policy for the given workspace and socket path.
     ///
+    /// `gnupg_home` is the signing keyring dir (`GNUPGHOME`) when it
+    /// lives outside the workspace; the daemon needs it granted for
+    /// commit signing, while the child tiers never name it.
+    ///
     /// Pure function: no filesystem access, no syscalls.
-    pub fn new(workspace: &Path, socket_path: &Path) -> Self {
+    pub fn new(workspace: &Path, socket_path: &Path, gnupg_home: Option<&Path>) -> Self {
         let abi = ABI_VERSION;
         let all = AccessFs::from_all(abi);
         let read_exec = AccessFs::from_read(abi);
@@ -179,6 +183,18 @@ impl Policy {
                 access: socket_dir_access,
                 presence: Presence::Optional,
                 rationale: "Socket directory — bind, read, write, unlink",
+            });
+        }
+
+        // Signing keyring outside the workspace. Full access: signing
+        // updates the trustdb and lock files, and the agent binds its
+        // socket here (no /run/user for a system service).
+        if let Some(gnupg) = gnupg_home {
+            rules.push(Rule {
+                path: gnupg.to_path_buf(),
+                access: all,
+                presence: Presence::Optional,
+                rationale: "GPG keyring — commit signing (daemon only)",
             });
         }
 
@@ -342,8 +358,12 @@ impl fmt::Display for Policy {
 /// Returns `Ok(())` on success or if Landlock is unsupported — the
 /// daemon deliberately runs best-effort (defense-in-depth, logged).
 /// Returns `Err` only on unexpected failures (e.g. bad file descriptors).
-pub fn apply(workspace: &Path, socket_path: &Path) -> Result<(), SandboxError> {
-    enforce(&Policy::new(workspace, socket_path)).map(|_| ())
+pub fn apply(
+    workspace: &Path,
+    socket_path: &Path,
+    gnupg_home: Option<&Path>,
+) -> Result<(), SandboxError> {
+    enforce(&Policy::new(workspace, socket_path, gnupg_home)).map(|_| ())
 }
 
 /// Enforce a [`Policy`] by creating and activating a Landlock ruleset.
@@ -444,7 +464,33 @@ mod tests {
         Policy::new(
             Path::new("/home/agent/workspace"),
             Path::new("/run/kitaebot/kitaebot.sock"),
+            None,
         )
+    }
+
+    #[test]
+    fn gnupg_rule_present_only_when_a_path_is_given() {
+        let no_keyring = test_policy();
+        assert!(
+            !no_keyring
+                .rules()
+                .iter()
+                .any(|r| r.rationale.contains("GPG")),
+            "no GPG rule without a keyring path"
+        );
+
+        let with_keyring = Policy::new(
+            Path::new("/home/agent/workspace"),
+            Path::new("/run/kitaebot/kitaebot.sock"),
+            Some(Path::new("/var/lib/kitaebot-gnupg")),
+        );
+        let rule = with_keyring
+            .rules()
+            .iter()
+            .find(|r| r.path == Path::new("/var/lib/kitaebot-gnupg"))
+            .expect("gnupg rule must exist");
+        assert_eq!(rule.access, AccessFs::from_all(ABI_VERSION));
+        assert_eq!(rule.presence, Presence::Optional);
     }
 
     #[test]
@@ -506,6 +552,7 @@ mod tests {
         let policy = Policy::new(
             Path::new("/workspace"),
             Path::new("/custom/socket/dir/bot.sock"),
+            None,
         );
         let rule = policy
             .rules()
@@ -518,7 +565,7 @@ mod tests {
 
     #[test]
     fn bare_socket_filename_produces_no_socket_dir_rule() {
-        let policy = Policy::new(Path::new("/workspace"), Path::new("bot.sock"));
+        let policy = Policy::new(Path::new("/workspace"), Path::new("bot.sock"), None);
         let socket_rule = policy
             .rules()
             .iter()

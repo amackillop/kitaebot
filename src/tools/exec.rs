@@ -504,16 +504,11 @@ impl Exec {
     fn build_command(&self, command: &str, cwd: &Path) -> Command {
         match self.sandbox {
             SandboxMode::Bwrap => {
-                let mask_gnupg = self.workspace_root.join(super::bwrap::GNUPG_DIR).is_dir();
                 let mut cmd = Command::new("bwrap");
-                cmd.args(super::bwrap::wrap_argv(
-                    &self.workspace_root,
-                    cwd,
-                    mask_gnupg,
-                ))
-                .arg("bash")
-                .arg("-c")
-                .arg(command);
+                cmd.args(super::bwrap::wrap_argv(&self.workspace_root, cwd))
+                    .arg("bash")
+                    .arg("-c")
+                    .arg(command);
                 // bwrap applied --chdir; the daemon-side cwd is irrelevant.
                 cmd
             }

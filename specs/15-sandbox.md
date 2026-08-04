@@ -47,7 +47,7 @@ The `exec` tier (`Policy::child_exec`):
 
 | Path | Access | Effect |
 |------|--------|--------|
-| Workspace root | list only (`ReadDir`) | Navigation works. Landlock rules are recursive, so `ReadFile` here would grant reads of everything beneath; with list-only, file reads and all writes under `state/`, `context/`, `memory/`, `.gnupg`, and `config.toml` are denied, and new root-level files cannot be created |
+| Workspace root | list only (`ReadDir`) | Navigation works. Landlock rules are recursive, so `ReadFile` here would grant reads of everything beneath; with list-only, file reads and all writes under `state/`, `context/`, `memory/`, and `config.toml` are denied, and new root-level files cannot be created |
 | `projects/` | full | Builds, checkouts, `.diffs/` all work |
 | `state/review-checklist.md` | read | The one model-facing state file |
 | `.cache`, `.cargo`, `.npm`, `.local/{share,state}/pnpm` | full | `HOME` is the workspace root on the VM; nix flake eval fails hard without `~/.cache/nix`, and cargo/npm/pnpm need their caches. Provisioned by tmpfiles — Landlock cannot grant a path that does not exist. Grants are named, never speculative: onboarding a repo whose toolchain caches outside XDG (`.m2`, `.gradle`, `~/go/pkg/mod`, …) means adding its rule in `Policy::child_exec` plus a tmpfiles entry in the same commit |
@@ -56,11 +56,11 @@ The `exec` tier (`Policy::child_exec`):
 | `/tmp` | working access | No device or socket creation |
 | `/etc`, `/run`, `/proc` | read | resolv.conf, CA certs, procfs |
 | `/dev` | read + write | `/dev/null`, `/dev/urandom` |
-| Everything else | denied | Including the keyring once it moves out of the workspace |
+| Everything else | denied | Including the signing keyring at `/var/lib/kitaebot-gnupg`, which lives outside the workspace and is granted only in the daemon policy ([spec 13](13-credentials.md)) |
 
-Reads of `state/`, `context/`, and `.gnupg` are denied because no rule
-names them and the workspace-root rule is not recursive-write: Landlock
-denies whatever no rule grants. Unix-socket **connects are not mediated**
+Reads of `state/` and `context/` are denied because no rule names them
+and the workspace-root rule is not recursive-write: Landlock denies
+whatever no rule grants. Unix-socket **connects are not mediated**
 by this ruleset — the chat socket stays reachable path-wise, which is why
 the socket's SO_PEERCRED uid gate is load-bearing.
 

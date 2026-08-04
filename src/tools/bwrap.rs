@@ -6,7 +6,8 @@
 //! write. This builds a tighter view for each exec spawn: the
 //! workspace is bound writable, but the daemon-owned paths are masked
 //! with empty tmpfs, so a spawned binary (including one supplied by a
-//! devshell) cannot read the signing key or write daemon state.
+//! devshell) cannot write daemon state. The signing keyring lives
+//! outside the workspace and is never bound into the view.
 //!
 //! Masking, not reconstruction: the workspace is bound whole so build
 //! caches under HOME keep working, and only the sensitive paths are
@@ -22,17 +23,13 @@ use std::path::Path;
 
 use crate::workspace::{CONFIG_FILE, CONTEXT_DIR, STATE_DIR};
 
-/// The GPG keyring directory inside the workspace. Present only when
-/// commit signing is configured, so the caller passes whether to mask
-/// it (masking a missing mountpoint would fail bwrap).
-pub const GNUPG_DIR: &str = ".gnupg";
-
 /// Build the `bwrap` argv that precedes the `bash -c <command>` tail.
 ///
 /// `workspace` and `cwd` are absolute; `cwd` is under `workspace`
-/// (guaranteed by the caller's working-dir validation). When
-/// `mask_gnupg` is true the keyring is hidden as well.
-pub fn wrap_argv(workspace: &Path, cwd: &Path, mask_gnupg: bool) -> Vec<String> {
+/// (guaranteed by the caller's working-dir validation). The signing
+/// keyring needs no mask: it lives outside the workspace
+/// (`/var/lib/kitaebot-gnupg`) and is simply not bound into the view.
+pub fn wrap_argv(workspace: &Path, cwd: &Path) -> Vec<String> {
     let ws = workspace.to_string_lossy().into_owned();
     let mut argv: Vec<String> = Vec::new();
     let mut push = |s: &str| argv.push(s.to_string());
@@ -63,11 +60,7 @@ pub fn wrap_argv(workspace: &Path, cwd: &Path, mask_gnupg: bool) -> Vec<String> 
     push("--bind");
     push(&ws);
     push(&ws);
-    let mut mask_dirs = vec![STATE_DIR, CONTEXT_DIR];
-    if mask_gnupg {
-        mask_dirs.push(GNUPG_DIR);
-    }
-    for dir in mask_dirs {
+    for dir in [STATE_DIR, CONTEXT_DIR] {
         push("--tmpfs");
         push(&format!("{ws}/{dir}"));
     }
@@ -105,7 +98,7 @@ mod tests {
     }
 
     fn argv() -> Vec<String> {
-        wrap_argv(Path::new("/ws"), Path::new("/ws/projects/o/r"), true)
+        wrap_argv(Path::new("/ws"), Path::new("/ws/projects/o/r"))
     }
 
     #[test]
@@ -120,21 +113,8 @@ mod tests {
             "context/ must be masked"
         );
         assert!(
-            has_pair(&a, "--tmpfs", "/ws/.gnupg"),
-            "keyring must be masked when present"
-        );
-        assert!(
             has_triple(&a, "--ro-bind", "/dev/null", "/ws/config.toml"),
             "config.toml must be masked by an empty file"
-        );
-    }
-
-    #[test]
-    fn keyring_mask_is_conditional() {
-        let without = wrap_argv(Path::new("/ws"), Path::new("/ws"), false);
-        assert!(
-            !has_pair(&without, "--tmpfs", "/ws/.gnupg"),
-            "absent keyring must not be masked (mountpoint would be missing)"
         );
     }
 
@@ -187,7 +167,7 @@ mod tests {
     /// Run `sh -c script` under the wrapped view. `None` if bwrap could
     /// not set up the namespace here.
     fn run_wrapped(ws: &Path, cwd: &Path, script: &str) -> Option<std::process::Output> {
-        let mut argv = wrap_argv(ws, cwd, ws.join(GNUPG_DIR).is_dir());
+        let mut argv = wrap_argv(ws, cwd);
         argv.extend(["sh".into(), "-c".into(), script.into()]);
         let out = std::process::Command::new("bwrap")
             .args(&argv)
@@ -206,11 +186,10 @@ mod tests {
     fn fixture_workspace() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        for sub in ["state", "context", "projects", ".gnupg"] {
+        for sub in ["state", "context", "projects"] {
             std::fs::create_dir_all(p.join(sub)).unwrap();
         }
         std::fs::write(p.join("state/JOURNAL.md"), "real journal\n").unwrap();
-        std::fs::write(p.join(".gnupg/secret.key"), "PRIVATE\n").unwrap();
         std::fs::write(p.join("config.toml"), "[secret]\n").unwrap();
         dir
     }
@@ -237,19 +216,6 @@ mod tests {
             std::fs::read_to_string(ws.path().join("state/JOURNAL.md")).unwrap(),
             "real journal\n",
             "host state/ must not change"
-        );
-    }
-
-    #[test]
-    fn masked_keyring_reads_empty() {
-        let ws = fixture_workspace();
-        let Some(out) = run_wrapped(ws.path(), ws.path(), "cat .gnupg/secret.key 2>&1; true")
-        else {
-            return;
-        };
-        assert!(
-            !String::from_utf8_lossy(&out.stdout).contains("PRIVATE"),
-            "the signing key must be invisible to the child"
         );
     }
 

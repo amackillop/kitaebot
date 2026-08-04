@@ -305,7 +305,11 @@ in
         "d /var/lib/kitaebot/.npm 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/.local/share/pnpm 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/.local/state/pnpm 0750 kitaebot kitaebot -"
-      ];
+      ]
+      # The signing keyring lives outside the workspace so the daemon's
+      # workspace-wide Landlock grant never covers it. 0700: gpg
+      # refuses group-accessible homedirs.
+      ++ lib.optional signingEnabled "d /var/lib/kitaebot-gnupg 0700 kitaebot kitaebot -";
 
       services = {
         # Kitaebot daemon
@@ -325,8 +329,8 @@ in
             ExecStartPre = lib.optional signingEnabled (
               let
                 gpgImport = pkgs.writeShellScript "kitaebot-gpg-import" ''
-                  export GNUPGHOME=/var/lib/kitaebot/.gnupg
-                  mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
+                  export GNUPGHOME=/var/lib/kitaebot-gnupg
+                  chmod 700 "$GNUPGHOME"
                   ${pkgs.gnupg}/bin/gpg --batch --import "$CREDENTIALS_DIRECTORY/gpg-signing-key"
                   # The import spawns an agent that would linger in the
                   # cgroup; signing respawns one on demand.
@@ -368,7 +372,10 @@ in
             # Filesystem
             ProtectSystem = "strict";
             ProtectHome = true;
-            ReadWritePaths = [ "/var/lib/kitaebot" ];
+            ReadWritePaths = [
+              "/var/lib/kitaebot"
+            ]
+            ++ lib.optional signingEnabled "/var/lib/kitaebot-gnupg";
             RuntimeDirectory = "kitaebot";
             PrivateTmp = true;
 
@@ -427,7 +434,9 @@ in
             no_proxy = "localhost,127.0.0.1";
           }
           // lib.optionalAttrs signingEnabled {
-            GNUPGHOME = "/var/lib/kitaebot/.gnupg";
+            # Outside the workspace: the daemon's Landlock grants it by
+            # name and the exec tier never sees it (spec 15).
+            GNUPGHOME = "/var/lib/kitaebot-gnupg";
           };
         };
       };

@@ -40,13 +40,21 @@ vars).
 ### GPG Key Exception
 
 Unlike other secrets which remain in `CREDENTIALS_DIRECTORY` (inaccessible
-after sandboxing), the GPG key is imported into `/var/lib/kitaebot/.gnupg` at
-service start via `ExecStartPre` so git can sign commits. This keyring is
-readable by exec tool commands. Mitigations:
+after sandboxing), the GPG key is imported into `/var/lib/kitaebot-gnupg`
+at service start via `ExecStartPre` so git can sign commits. The keyring
+lives **outside the workspace**: the daemon's workspace-wide Landlock
+grant never covers it, only an explicit daemon-policy rule does
+([spec 15](15-sandbox.md)), and the exec child tier names no such path —
+exec children cannot read or write it at the kernel level. Additional
+mitigations:
 
 - `gpg` is not on the exec tool's PATH (git uses an absolute Nix store path)
 - Deny rules block `gpg --export-secret`, `.gnupg/` access, and
   `commit.gpgsign=false` overrides
+
+One consequence: exec children cannot verify signatures either
+(`git log --show-signature` fails to read the public keyring). Signing
+happens daemon-side via `git_commit`, which is unaffected.
 
 ### Defense-in-Depth Stack
 
