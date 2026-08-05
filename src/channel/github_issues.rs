@@ -514,6 +514,7 @@ mod tests {
         assert!(msg.contains("It is broken"));
         assert!(msg.contains("[alice] please prioritize"));
         assert!(msg.contains("Do not implement anything yet"));
+        assert!(msg.contains("posted verbatim"));
     }
 
     #[test]

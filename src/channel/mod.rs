@@ -22,5 +22,6 @@ const PLAN_INSTRUCTIONS: &str = "Analyze the task and reply with a review-ready 
      reading the whole plan. End with the implementation broken into a \
      sequence of small, atomic commits: each builds and passes tests on \
      its own, and a reviewer can hold the whole diff in their head. \
-     Do not implement anything yet — your reply will be posted as a \
-     comment on the ticket for approval.";
+     Do not implement anything yet — your reply is posted verbatim as \
+     a comment on the ticket for approval, so start directly with the \
+     plan: no preamble, no narration.";
