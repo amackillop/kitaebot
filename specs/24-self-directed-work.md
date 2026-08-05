@@ -161,13 +161,16 @@ Scope is the `git.repositories` trust list only, for all of them.
   needed: memory writes have no outward effect.
 
 **The proposal contract.** Discovery output that implies new work
-becomes a Linear issue created via the existing MCP tools, in a
-dedicated triage state (never directly in Todo), labeled as
-bot-proposed, body carrying the evidence (query results, links) and
-the bot's analysis. A human moves it to Todo — or deletes it. The
-Linear channel then picks it up like any other ticket. The bot never
-executes work it proposed without that transition; proposal and
-authorization are separated by an existing human gate.
+becomes a tracker ticket, body carrying the evidence (query results,
+links) and the bot's analysis. For GitHub-tracked repos the write path
+exists: `github_issue_create` files the issue unassigned, a human
+triages by assigning it to the bot, and the issues channel (spec 10)
+picks it up like any other ticket. The bot never executes work it
+proposed without that transition; proposal and authorization are
+separated by an existing human gate. Which repos file proposals to
+Linear instead of GitHub — and the Linear write path itself — is
+undesigned; it needs an explicit per-repo mapping in config, not a
+guess.
 
 **Spend and volume caps, mechanical:**
 

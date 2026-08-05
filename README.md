@@ -4,19 +4,19 @@ Autonomous programming agent in Rust. Runs in a NixOS VM with Landlock sandboxin
 
 ## Overview
 
-Kitaebot is a long-running daemon that accepts messages via Telegram, Unix socket, GitHub PR comments, or Linear issues, routes them through an LLM agent loop with tool use, and persists conversation state through a pluggable context engine. A duty scheduler runs recurring work on its own schedule.
+Kitaebot is a long-running daemon that accepts messages via Telegram, Unix socket, GitHub PR comments, GitHub issues, or Linear issues, routes them through an LLM agent loop with tool use, and persists conversation state through a pluggable context engine. A duty scheduler runs recurring work on its own schedule.
 
 Two binaries:
 
 | Binary | Purpose | Lifecycle |
 |--------|---------|-----------|
-| `kitaebot run` | Daemon (Telegram + socket + duties + GitHub + Linear) | systemd service |
+| `kitaebot run` | Daemon (Telegram + socket + duties + GitHub PRs/issues + Linear) | systemd service |
 | `kchat <socket>` | Socket client REPL | On-demand |
 
 ## Architecture
 
 ```
-Channels (Telegram, Unix socket, GitHub PR, Linear, Duties)
+Channels (Telegram, Unix socket, GitHub PRs, GitHub issues, Linear, Duties)
         │
         ├─ Messages ──► AgentHandle ──► Agent actor (sequential)
         │                                 ├─ process_message ──► LLM loop
@@ -58,6 +58,7 @@ Typed tools replace a generic shell. The LLM declares intent via parameters inst
 | `git_fetch` | Fetch refs from a remote |
 | `git_push` | Push commits to a remote |
 | `github_pr_create` | Create a pull request |
+| `github_issue_create` | Open an issue in a configured repo (unassigned; assignment is the human gate) |
 | `github_pr_list` | List pull requests |
 | `github_pr_reviews` | Fetch PR reviews |
 | `github_pr_diff_comments` | Fetch PR diff comments |
@@ -193,6 +194,10 @@ kitaebot = {
       owner = "amackillop";                # Required when enabled
       trusted_users = [];                  # Additional allowed users
       trusted_bots = [];                   # Bot apps whose PR feedback to act on
+      issues = {
+        enabled = true;                    # Poll issues assigned to the bot
+        poll_interval_secs = 300;
+      };
     };
     linear = {
       enabled = true;
@@ -321,7 +326,9 @@ src/
 │   ├── socket.rs        Unix socket NDJSON channel
 │   ├── telegram.rs      Telegram Bot API channel
 │   ├── github.rs        GitHub PR polling channel (+ review_checkout)
-│   └── linear.rs        Linear issue polling channel (+ execution_checkout)
+│   ├── github_issues.rs GitHub issue polling channel
+│   ├── linear.rs        Linear issue polling channel
+│   └── execution_checkout.rs  Fresh-base checkout prep shared by ticket channels
 ├── notify.rs            notify tool + Telegram push batching
 ├── daemon.rs            Event loop (select over enabled channels)
 ├── dispatch.rs          Input classification and Reply type

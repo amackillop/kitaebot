@@ -4,8 +4,10 @@
 
 A channel translates external messages into agent turns and delivers responses
 back. Five channels drive the same agent core: Telegram (phone), Unix socket
-(computer), GitHub PR polling (code review), Linear issue polling (work
-items), and heartbeat (periodic timer).
+(computer), GitHub PR polling (code review), and two ticket surfaces — GitHub
+issue polling and Linear issue polling. The duty scheduler
+([spec 24](24-self-directed-work.md)) drives periodic turns through the same
+actor but is not a transport channel.
 
 Each channel sends messages through `AgentHandle::send_message()` and awaits a
 reply. The actor classifies input as either a message (agent turn) or a slash
@@ -139,10 +141,86 @@ locally without being sent to the server.
 
 ---
 
-### GitHub
+### GitHub PRs
 
 Documented separately in [spec 20](20-github.md). Polls feedback on the
 bot's own PRs and review requests for others' PRs.
+
+---
+
+### GitHub issues
+
+Polls for open issues assigned to the bot account. Same choreography as
+Linear: an assigned issue becomes a work item, the bot posts an
+implementation plan as a comment, and a trusted user's comment approving
+the plan triggers end-to-end execution (branch, implement, test, push,
+PR). Shares the PR channel's REST client, identity, and trust model;
+runs as its own daemon loop with its own poll state.
+
+**Assignment is the human gate.** An issue nobody assigned to the bot
+dispatches nothing — including issues the bot filed itself via
+`github_issue_create` (the spec 24 proposal path). A human triages a
+proposal by assigning it; the channel then picks it up like any other
+ticket. The bot's own comments are skipped by login, so it never
+replies to itself.
+
+**Poll loop**: `tokio::time::interval` with `MissedTickBehavior::Skip`.
+Each tick:
+
+1. `GET /search/issues` with `is:issue is:open assignee:{bot}`
+2. Skip issues whose repo is not a `[git.repositories]` key (the repo
+   is read from the issue itself — no label convention needed)
+3. Fetch conversation comments, but only for unannounced issues (the
+   announcement embeds them) and issues whose `updated_at` passed the
+   cursor — untouched issues cost no extra request
+4. Compute events (pure core) against the persisted poll state
+5. Dispatch through the agent handle with
+   `ChannelSource::GitHubIssue { issue: "owner/repo#42" }` and the
+   repo as session hint — the same session key the PR and Linear
+   channels use
+6. Post the agent's reply as a comment on the issue
+7. Save the poll state
+
+**Events** mirror Linear's: *new issue* (not in the announced set)
+dispatches a plan-only announcement carrying title, body, and existing
+comments; *new comment* (`created_at > last_poll`, not the bot, from a
+trusted login) dispatches an execution/revision turn. Execution turns
+get a fresh base checkout prepared at `projects/<owner>/<repo>`
+(shared `execution_checkout` logic). The branch convention is
+`kitaebot_issue-{n}_<summary>` and the PR description carries
+`Closes #{n}`, so merging the PR closes the ticket — GitHub issues
+have no workflow states to move, and no state tool exists.
+
+**Access control**: reuses the PR channel's trust model — the owner is
+always trusted, plus `github.trusted_users` and `github.trusted_bots`
+(spec 20). Matched against comment author logins.
+
+**State persistence**: the `github_issues_poll` document in the state
+database, same shape as Linear's — `last_poll` cursor plus the
+announced set, keyed `owner/repo#42`. Missing or corrupt state starts
+from now. Announced keys absent from a fetch (closed, unassigned) are
+pruned.
+
+**Send retries**: comment posting retries up to 3 times with
+exponential backoff (1s, 2s, 4s) on network errors, 429, and 5xx.
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `github.issues.enabled` | `false` | Enable issue polling (requires `github.enabled`) |
+| `github.issues.poll_interval_secs` | `300` | Seconds between poll cycles |
+
+Requires `github.enabled = true` — that is what builds the REST client
+and loads the `github-token` secret.
+
+#### Error Handling
+
+| Error | Behavior |
+|-------|----------|
+| Bot login resolution fails | Log error, park forever (no polling) |
+| Search or comment fetch fails | Log error, retry next tick without advancing `last_poll` |
+| Agent turn fails | Post the error text as a comment |
+| Comment post fails after retries | Log error, continue with remaining events |
+| Repo not configured | Log warning, skip issue until it is |
 
 ---
 
@@ -151,9 +229,10 @@ bot's own PRs and review requests for others' PRs.
 Polls Linear for issues assigned to the bot's Linear user. An assigned issue
 becomes a work item: the bot posts an implementation plan as a comment, and
 a trusted user's comment approving the plan triggers end-to-end execution
-(branch, implement, test, push, PR). Issue-state transitions are handled by
-external automation keyed off the ticket id in the branch name — the bot
-never mutates issue state.
+(branch, implement, test, push, PR). The bot moves tickets between workflow
+states with the `linear_set_state` tool when the workflow has matching
+states; the ticket id in the branch name additionally links the PR to the
+issue.
 
 **Poll loop**: `tokio::time::interval` with `MissedTickBehavior::Skip`. Each
 tick:
@@ -245,10 +324,6 @@ Requires the `linear-api-key` secret.
 
 ---
 
-### Heartbeat
-
-Documented separately in [spec 07](07-heartbeat.md).
-
 ## Boundaries
 
 ### Owns
@@ -258,7 +333,8 @@ Documented separately in [spec 07](07-heartbeat.md).
 - Access control per channel
 - Verbose mode (socket and Telegram)
 - Send retries (Telegram)
-- State persistence (Linear poll cursor; GitHub's lives in spec 20)
+- State persistence (Linear and GitHub-issues poll cursors; the PR
+  channel's lives in spec 20)
 
 ### Does Not Own
 
