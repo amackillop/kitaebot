@@ -80,6 +80,7 @@ in
         owner = "amackillop";
         trusted_users = [ "npslaney" ];
         trusted_bots = [ "chatgpt-codex-connector" ];
+        issues.enabled = true;
       };
       linear = {
         enabled = true;
