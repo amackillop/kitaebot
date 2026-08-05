@@ -133,7 +133,7 @@ impl GitCli {
             debug!(dir = %dir.display(), "origin not in trusted_repos; skipping devshell warm");
             return Err("origin not in git.repositories".into());
         }
-        direnv::allow(dir).await;
+        self.direnv_cache.allow(dir).await;
         if let Err(e) = self.direnv_cache.get(dir).await {
             warn!(dir = %dir.display(), error = %e, "devshell warm failed");
             return Err(format!("devshell eval failed: {e}"));
@@ -370,13 +370,16 @@ mod tests {
 
     use super::{GitCli, LONG_TIMEOUT_SECS, hook_timeout, parse_ls_remote_head};
     use crate::secrets::Secret;
-    use crate::test_support::{ENV_LOCK, FakeDirenv};
+    use crate::test_support::FakeDirenv;
     use crate::tools::DirenvCache;
     use crate::tools::git::test_helpers::stub_git_cli_with_repo;
 
     /// A workspace with a real git checkout at `projects/o/r` whose
     /// origin parses to `o/r`, and a `GitCli` trusting it.
-    fn workspace_with_checkout(warm_command: &str) -> (GitCli, std::path::PathBuf) {
+    fn workspace_with_checkout(
+        direnv: DirenvCache,
+        warm_command: &str,
+    ) -> (GitCli, std::path::PathBuf) {
         let workspace = tempfile::tempdir().unwrap();
         let dir = workspace.path().join("projects/o/r");
         std::fs::create_dir_all(&dir).unwrap();
@@ -394,7 +397,6 @@ mod tests {
         std::fs::write(dir.join(".envrc"), "use flake").unwrap();
         let commands: std::collections::BTreeMap<String, String> =
             [("o/r".to_string(), warm_command.to_string())].into();
-        let direnv = DirenvCache::new();
         let git = GitCli::new(
             Secret::test("fake"),
             workspace.path(),
@@ -409,9 +411,8 @@ mod tests {
 
     #[tokio::test]
     async fn warm_configured_repos_warms_an_existing_checkout() {
-        let _lock = ENV_LOCK.lock().await;
-        let _fake = FakeDirenv::install("echo '{}'");
-        let (git, dir) = workspace_with_checkout("touch .warmed");
+        let fake = FakeDirenv::install("echo '{}'");
+        let (git, dir) = workspace_with_checkout(fake.cache(), "touch .warmed");
 
         let summary = git.warm_configured_repos().await;
 
@@ -425,9 +426,8 @@ mod tests {
 
     #[tokio::test]
     async fn warm_configured_repos_reports_a_failing_command() {
-        let _lock = ENV_LOCK.lock().await;
-        let _fake = FakeDirenv::install("echo '{}'");
-        let (git, dir) = workspace_with_checkout("exit 1");
+        let fake = FakeDirenv::install("echo '{}'");
+        let (git, dir) = workspace_with_checkout(fake.cache(), "exit 1");
 
         assert_eq!(git.warm_configured_repos().await, "o/r: failed");
         assert_eq!(

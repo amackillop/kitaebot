@@ -55,8 +55,12 @@ impl std::fmt::Display for Secret {
 #[cfg_attr(feature = "mock-network", allow(dead_code))]
 pub fn load_secret(name: &str) -> Result<Secret, SecretError> {
     let dir = std::env::var("CREDENTIALS_DIRECTORY").map_err(|_| SecretError::NoCredentialsDir)?;
-    let path = Path::new(&dir).join(name);
-    std::fs::read_to_string(&path)
+    load_secret_from(Path::new(&dir), name)
+}
+
+/// Env-independent core of [`load_secret`]: read and trim `<dir>/<name>`.
+fn load_secret_from(dir: &Path, name: &str) -> Result<Secret, SecretError> {
+    std::fs::read_to_string(dir.join(name))
         .map(|s| Secret(s.trim().to_string()))
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => SecretError::NotFound {
@@ -100,10 +104,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("test-key"), "  secret-value \n").unwrap();
 
-        // SAFETY: test-only, no concurrent threads depend on this var.
-        unsafe { std::env::set_var("CREDENTIALS_DIRECTORY", dir.path()) };
-        let secret = load_secret("test-key").unwrap();
-        unsafe { std::env::remove_var("CREDENTIALS_DIRECTORY") };
+        let secret = load_secret_from(dir.path(), "test-key").unwrap();
 
         assert_eq!(secret.expose(), "secret-value");
     }
@@ -112,16 +113,15 @@ mod tests {
     fn load_missing_file_returns_not_found() {
         let dir = tempfile::tempdir().unwrap();
 
-        unsafe { std::env::set_var("CREDENTIALS_DIRECTORY", dir.path()) };
-        let err = load_secret("nonexistent").unwrap_err();
-        unsafe { std::env::remove_var("CREDENTIALS_DIRECTORY") };
+        let err = load_secret_from(dir.path(), "nonexistent").unwrap_err();
 
         assert!(matches!(err, SecretError::NotFound { .. }));
     }
 
     #[test]
     fn load_missing_dir_returns_no_credentials_dir() {
-        unsafe { std::env::remove_var("CREDENTIALS_DIRECTORY") };
+        // Relies on the test environment not provisioning credentials;
+        // no test sets the variable, so there is nothing to race.
         let err = load_secret("anything").unwrap_err();
         assert!(matches!(err, SecretError::NoCredentialsDir));
     }

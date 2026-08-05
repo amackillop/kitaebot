@@ -33,31 +33,12 @@ pub type DirenvEnv = Arc<HashMap<String, String>>;
 pub enum DirenvError {
     /// `.envrc` exists but is not allowed: never allowed, or its content
     /// changed since it was, so direnv revoked trust. Recoverable by
-    /// re-running `direnv allow` (see [`allow`]) for a trusted repo.
+    /// re-running `direnv allow` (see [`DirenvCache::allow`]) for a trusted repo.
     #[error(".envrc is not allowed")]
     Blocked,
     /// direnv failed for some other reason.
     #[error("{0}")]
     Failed(String),
-}
-
-/// Run `direnv allow` for a directory, trusting its current `.envrc`
-/// content. Must complete before a `direnv export json` call can load a
-/// devshell. Best-effort: a failure is logged, not propagated.
-pub async fn allow(dir: &Path) {
-    let call = SubprocessCall {
-        binary: "direnv",
-        args: vec!["allow".into()],
-        cwd: dir.to_path_buf(),
-        env: crate::tools::safe_env().collect(),
-        timeout_secs: Some(10),
-        stdin: None,
-        // Records approval in the trust db; runs no repo code.
-        confine: None,
-    };
-    if let Err(e) = cli_runner::exec(&call).await {
-        debug!(dir = %dir.display(), error = %e, "direnv allow failed");
-    }
 }
 
 /// Filesystem fingerprint for cache invalidation.
@@ -94,12 +75,45 @@ enum CacheEntry {
 #[derive(Clone)]
 pub struct DirenvCache {
     inner: Arc<RwLock<HashMap<PathBuf, CacheEntry>>>,
+    /// The direnv executable. Tests substitute a fake script so no
+    /// test mutates the process PATH.
+    binary: &'static str,
 }
 
 impl DirenvCache {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
+            binary: "direnv",
+        }
+    }
+
+    /// A cache whose spawned direnv is `binary` — the test seam.
+    #[cfg(test)]
+    pub(crate) fn with_binary(binary: &'static str) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+            binary,
+        }
+    }
+
+    /// Run `direnv allow` for a directory, trusting its current
+    /// `.envrc` content. Must complete before a `direnv export json`
+    /// call can load a devshell. Best-effort: a failure is logged, not
+    /// propagated.
+    pub async fn allow(&self, dir: &Path) {
+        let call = SubprocessCall {
+            binary: self.binary,
+            args: vec!["allow".into()],
+            cwd: dir.to_path_buf(),
+            env: crate::tools::safe_env().collect(),
+            timeout_secs: Some(10),
+            stdin: None,
+            // Records approval in the trust db; runs no repo code.
+            confine: None,
+        };
+        if let Err(e) = cli_runner::exec(&call).await {
+            debug!(dir = %dir.display(), error = %e, "direnv allow failed");
         }
     }
 
@@ -168,7 +182,7 @@ impl DirenvCache {
             };
 
             // --- No lock held: run direnv ---
-            let result = evaluate_direnv(dir).await;
+            let result = evaluate_direnv(self.binary, dir).await;
 
             // --- Write lock: store result or remove on failure ---
             let mut cache = self.inner.write().await;
@@ -197,11 +211,14 @@ impl DirenvCache {
 }
 
 /// Run `direnv export json` and parse the result.
-async fn evaluate_direnv(dir: &Path) -> Result<HashMap<String, String>, DirenvError> {
+async fn evaluate_direnv(
+    binary: &'static str,
+    dir: &Path,
+) -> Result<HashMap<String, String>, DirenvError> {
     debug!(dir = %dir.display(), "Evaluating direnv");
 
     let call = SubprocessCall {
-        binary: "direnv",
+        binary,
         args: vec!["export".into(), "json".into()],
         cwd: dir.to_path_buf(),
         env: crate::tools::safe_env().collect(),
@@ -253,7 +270,7 @@ async fn evaluate_direnv(dir: &Path) -> Result<HashMap<String, String>, DirenvEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{ENV_LOCK, FakeDirenv};
+    use crate::test_support::FakeDirenv;
 
     // ── Fingerprint unit tests ──────────────────────────────────────
 
@@ -298,13 +315,12 @@ mod tests {
 
     #[tokio::test]
     async fn cache_parses_direnv_json() {
-        let _lock = ENV_LOCK.lock().await;
-        let _fake = FakeDirenv::install(r#"echo '{"FOO": "bar", "NUM": "42", "GONE": null}'"#);
+        let fake = FakeDirenv::install(r#"echo '{"FOO": "bar", "NUM": "42", "GONE": null}'"#);
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
 
-        let cache = DirenvCache::new();
+        let cache = fake.cache();
         let env = cache.get(dir.path()).await.unwrap().unwrap();
 
         assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
@@ -317,8 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_hit_skips_evaluation() {
-        let _lock = ENV_LOCK.lock().await;
-        let _fake = FakeDirenv::install(
+        let fake = FakeDirenv::install(
             // Append a line each time direnv is invoked.
             "echo 1 >> \"$PWD/.call-count\"\necho '{\"X\": \"1\"}'",
         );
@@ -326,7 +341,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
 
-        let cache = DirenvCache::new();
+        let cache = fake.cache();
         let _ = cache.get(dir.path()).await.unwrap();
         let _ = cache.get(dir.path()).await.unwrap();
 
@@ -336,8 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_calls_deduplicated() {
-        let _lock = ENV_LOCK.lock().await;
-        let _fake = FakeDirenv::install(
+        let fake = FakeDirenv::install(
             // Sleep so concurrent callers arrive while evaluation is in flight.
             "echo 1 >> \"$PWD/.call-count\"\nsleep 0.3\necho '{\"X\": \"1\"}'",
         );
@@ -345,7 +359,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
 
-        let cache = DirenvCache::new();
+        let cache = fake.cache();
         let path = dir.path().to_path_buf();
 
         let mut handles = Vec::new();
@@ -370,13 +384,12 @@ mod tests {
 
     #[tokio::test]
     async fn stale_fingerprint_re_evaluates() {
-        let _lock = ENV_LOCK.lock().await;
-        let _fake = FakeDirenv::install("echo 1 >> \"$PWD/.call-count\"\necho '{\"X\": \"1\"}'");
+        let fake = FakeDirenv::install("echo 1 >> \"$PWD/.call-count\"\necho '{\"X\": \"1\"}'");
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
 
-        let cache = DirenvCache::new();
+        let cache = fake.cache();
         let _ = cache.get(dir.path()).await.unwrap();
 
         // Bump .envrc mtime to invalidate the fingerprint.
@@ -395,13 +408,12 @@ mod tests {
 
     #[tokio::test]
     async fn failed_evaluation_not_cached() {
-        let _lock = ENV_LOCK.lock().await;
-        let _fake = FakeDirenv::install("echo 'boom' >&2; exit 1");
+        let fake = FakeDirenv::install("echo 'boom' >&2; exit 1");
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
 
-        let cache = DirenvCache::new();
+        let cache = fake.cache();
 
         // First call fails.
         let err = cache.get(dir.path()).await.unwrap_err();
@@ -420,15 +432,14 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_envrc_is_distinguished() {
-        let _lock = ENV_LOCK.lock().await;
-        let _fake = FakeDirenv::install(
+        let fake = FakeDirenv::install(
             "echo 'direnv: error /x/.envrc is blocked. Run `direnv allow`.' >&2; exit 1",
         );
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
 
-        let cache = DirenvCache::new();
+        let cache = fake.cache();
         let err = cache.get(dir.path()).await.unwrap_err();
         assert!(
             matches!(err, DirenvError::Blocked),

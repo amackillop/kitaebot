@@ -34,7 +34,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::cli_runner::{CONFINE_SELF, GroupKillGuard};
-use super::direnv::{self, DirenvCache, DirenvEnv, DirenvError};
+use super::direnv::{DirenvCache, DirenvEnv, DirenvError};
 use super::git;
 use super::{Tool, ToolCtx};
 use crate::config::{ExecConfig, SandboxMode};
@@ -565,7 +565,7 @@ impl Exec {
             Ok(env) => env,
             Err(DirenvError::Blocked) if git::origin_trusted(dir, &self.trusted_repos).await => {
                 debug!(dir = %dir.display(), "direnv trust revoked; re-allowing trusted repo");
-                direnv::allow(dir).await;
+                self.direnv_cache.allow(dir).await;
                 match self.direnv_cache.get(dir).await {
                     Ok(env) => env,
                     Err(e) => {
@@ -1266,18 +1266,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_env_scrubbed() {
-        // Set a variable that is NOT on the allowlist
-        // SAFETY: test-only, no concurrent threads depend on this var.
-        unsafe { std::env::set_var("KITAEBOT_TEST_SECRET", "leaked") };
+        // Cargo provides CARGO_MANIFEST_DIR to the test process, and it
+        // is not on the allowlist — a ready-made canary, no env
+        // mutation needed.
+        let canary = std::env::var("CARGO_MANIFEST_DIR")
+            .expect("cargo always sets CARGO_MANIFEST_DIR for test runs");
         let tool = Exec::new(".", &test_config(), DirenvCache::new(), Vec::new());
-        let args = serde_json::json!({"command": "echo $KITAEBOT_TEST_SECRET"});
+        let args = serde_json::json!({"command": "echo dir=$CARGO_MANIFEST_DIR"});
         let result = tool.execute(args, ToolCtx::default()).await.unwrap();
-        // Shell expands unset vars to empty string, so output should just be a blank line
+        // Shell expands unset vars to empty: the child must see nothing.
         assert!(
-            !result.contains("leaked"),
-            "secret leaked through env: {result}"
+            !result.contains(&format!("dir={canary}")),
+            "unlisted variable leaked through env: {result}"
         );
-        unsafe { std::env::remove_var("KITAEBOT_TEST_SECRET") };
     }
 
     #[tokio::test]
@@ -1331,8 +1332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_devshell_from_monorepo_subdir() {
-        let _lock = crate::test_support::ENV_LOCK.lock().await;
-        let _fake = crate::test_support::FakeDirenv::install(
+        let fake = crate::test_support::FakeDirenv::install(
             "echo 1 >> \"$PWD/.call-count\"\necho '{\"DEVSHELL_MARKER\": \"hit\"}'",
         );
 
@@ -1341,7 +1341,7 @@ mod tests {
         std::fs::create_dir_all(repo.join("packages/pkg")).unwrap();
         std::fs::write(repo.join(".envrc"), "use flake").unwrap();
 
-        let tool = Exec::new(ws.path(), &test_config(), DirenvCache::new(), Vec::new());
+        let tool = Exec::new(ws.path(), &test_config(), fake.cache(), Vec::new());
         let args = serde_json::json!({
             "command": "echo marker=$DEVSHELL_MARKER",
             "working_dir": "projects/owner/repo/packages/pkg",
