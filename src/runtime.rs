@@ -113,7 +113,11 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
         let notifier = build_notifier(&tg_client, config, workspace);
         tools.push(Arc::new(NotifyTool(notifier.clone())));
         (
-            Some(TelegramChannel::new(tg_client, config.telegram.chat_id)),
+            Some(TelegramChannel::new(
+                tg_client,
+                config.telegram.chat_id,
+                config.telegram.poll_timeout_secs,
+            )),
             Some(notifier),
         )
     } else {
