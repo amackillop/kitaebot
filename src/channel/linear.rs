@@ -9,8 +9,6 @@
 //! formatting, and poll-state persistence. The poll loop is the thin
 //! effectful shell on top.
 
-mod execution_checkout;
-
 use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::time::Duration;
@@ -20,6 +18,7 @@ use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use super::execution_checkout;
 use crate::agent::AgentHandle;
 use crate::agent::envelope::ChannelSource;
 use crate::clients::linear::{Issue, LinearClient};

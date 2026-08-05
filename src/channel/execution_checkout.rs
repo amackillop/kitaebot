@@ -1,9 +1,9 @@
 //! Execution checkout preparation.
 //!
-//! A Linear execution turn branches off the target repo, so it must
-//! start from an up-to-date base. Each repo gets a working checkout
-//! under `projects/<owner>/<repo>`; before an execution turn is
-//! dispatched, the checkout is fetched and force-detached at the
+//! An issue-driven execution turn branches off the target repo, so it
+//! must start from an up-to-date base. Each repo gets a working
+//! checkout under `projects/<owner>/<repo>`; before an execution turn
+//! is dispatched, the checkout is fetched and force-detached at the
 //! remote's default branch, then cleaned, so a stale clone from an
 //! earlier turn can never seed the branch with an outdated base.
 
