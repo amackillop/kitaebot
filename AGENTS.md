@@ -39,6 +39,7 @@ lives in the specs and the git history (see Planning); understanding it comes be
 
 ## Style
 - Rust 2024 edition
+- `unsafe` is forbidden (`[lints.rust]`); needing it means the design is wrong — find the seam
 - Functional: iterators, combinators, folds over mutable loops
 - Algebraic data types; invalid states unrepresentable
 - Static dispatch over trait objects (trait objects only for runtime polymorphism)

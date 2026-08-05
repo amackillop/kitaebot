@@ -10,6 +10,9 @@ readme = "README.md"
 keywords = ["agent", "autonomous", "ai", "bot", "llm"]
 categories = ["command-line-utilities"]
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [lints.clippy]
 correctness = { level = "deny", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
