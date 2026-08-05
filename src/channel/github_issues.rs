@@ -147,9 +147,6 @@ async fn fetch_views(
     Ok(views)
 }
 
-/// Guidance when no fresh checkout could be prepared for the agent.
-const CLONE_YOURSELF: &str = "Clone or update the repo yourself before branching.";
-
 /// Prepare a fresh base checkout for an execution turn and describe it
 /// for the agent, or `None` when the turn needs no checkout.
 async fn checkout_note(git: &GitCli, d: &Dispatch) -> Option<String> {
@@ -157,13 +154,10 @@ async fn checkout_note(git: &GitCli, d: &Dispatch) -> Option<String> {
         return None;
     }
     match execution_checkout::prepare(git, &d.nwo).await {
-        Ok(rel) => Some(format!(
-            "A fresh checkout at the default branch is ready at {rel} \
-             (use working_dir: \"{rel}\"). Branch from there; do not clone."
-        )),
+        Ok(rel) => Some(execution_checkout::ready_note(&rel)),
         Err(e) => {
             warn!(issue = %d.key, "execution checkout prep failed: {e}");
-            Some(CLONE_YOURSELF.into())
+            Some(execution_checkout::CLONE_YOURSELF.into())
         }
     }
 }
@@ -394,19 +388,7 @@ fn format_new_issue(view: &IssueView) -> String {
             let _ = writeln!(s, "[{}] {}", comment.user.login, comment.body);
         }
     }
-    let _ = writeln!(
-        s,
-        "\nAnalyze the task and reply with a review-ready implementation plan \
-         in markdown, ordered for a human reviewer. Lead with a short prose \
-         summary of the approach and the key decisions and trade-offs, then \
-         the assumptions you made and the unresolved questions you need \
-         answered — a reviewer must be able to spot a bad assumption without \
-         reading the whole plan. End with the implementation broken into a \
-         sequence of small, atomic commits: each builds and passes tests on \
-         its own, and a reviewer can hold the whole diff in their head. \
-         Do not implement anything yet — your reply will be posted as a \
-         comment on the issue for approval."
-    );
+    let _ = writeln!(s, "\n{}", super::PLAN_INSTRUCTIONS);
     s
 }
 

@@ -11,6 +11,17 @@ use crate::error::ToolError;
 use crate::tools::git::GitCli;
 use crate::tools::git::checkout;
 
+/// Guidance when no fresh checkout could be prepared for the agent.
+pub(super) const CLONE_YOURSELF: &str = "Clone or update the repo yourself before branching.";
+
+/// Describe a prepared checkout for the agent.
+pub(super) fn ready_note(rel: &str) -> String {
+    format!(
+        "A fresh checkout at the default branch is ready at {rel} \
+         (use working_dir: \"{rel}\"). Branch from there; do not clone."
+    )
+}
+
 /// Workspace-relative checkout directory for `owner/repo`.
 pub(super) fn checkout_rel_path(nwo: &str) -> Result<String, ToolError> {
     checkout::rel_path("projects", nwo)
