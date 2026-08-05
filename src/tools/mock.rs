@@ -51,12 +51,19 @@ impl Tool for MockTool {
 
 /// Mock tool that always returns `ToolError::Blocked`.
 pub struct MockBlockedTool {
+    name: &'static str,
     guidance: String,
 }
 
 impl MockBlockedTool {
     pub fn new(guidance: impl Into<String>) -> Self {
+        Self::named("mock_blocked", guidance)
+    }
+
+    /// A named instance, so tests can register several rules at once.
+    pub fn named(name: &'static str, guidance: impl Into<String>) -> Self {
         Self {
+            name,
             guidance: guidance.into(),
         }
     }
@@ -64,7 +71,7 @@ impl MockBlockedTool {
 
 impl Tool for MockBlockedTool {
     fn name(&self) -> &'static str {
-        "mock_blocked"
+        self.name
     }
 
     fn description(&self) -> &'static str {
@@ -80,10 +87,11 @@ impl Tool for MockBlockedTool {
         _args: serde_json::Value,
         _ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
+        let name = self.name;
         let guidance = self.guidance.clone();
         Box::pin(async move {
             Err(ToolError::Blocked {
-                operation: "mock_blocked".into(),
+                operation: name.into(),
                 guidance,
             })
         })

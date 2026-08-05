@@ -11,6 +11,7 @@ pub(crate) mod task;
 
 pub use handle::AgentHandle;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
 use futures::future::join_all;
@@ -42,8 +43,16 @@ const REPEAT_ERROR: &str = "ERROR: You have called this tool with identical \
     or action, or respond to the user explaining what you \
     tried and why it did not work.";
 
-/// Maximum policy violations (Blocked errors) before the turn is halted.
+/// Blocked errors from the same rule (identified by its guidance
+/// string) before the turn is halted. Distinct rules strike
+/// independently: the gate targets workarounds of one refusal, not a
+/// long turn's unrelated first offenses.
 const POLICY_STRIKE_LIMIT: usize = 2;
+
+/// Blocked rounds in one turn, across all rules, before the turn is
+/// halted anyway. Distinct rules learn independently below this cap;
+/// a turn that keeps finding new walls is probing them, not learning.
+const POLICY_ROUND_LIMIT: usize = 4;
 
 /// Byte cap on message content in log lines.
 const LOG_CONTENT_MAX: usize = 500;
@@ -399,7 +408,8 @@ async fn turn_loop(
     let tool_definitions = tools.definitions();
 
     let mut repeats = RepeatDetector::new();
-    let mut policy_strikes: usize = 0;
+    let mut policy_strikes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut blocked_rounds: usize = 0;
     let mut repeat_strikes: usize = 0;
 
     for iteration in 0..max_iterations {
@@ -498,25 +508,34 @@ async fn turn_loop(
                     .collect();
                 let results = cancellable(join_all(futures), cancel, activity_tx).await?;
 
-                let blocked_reasons: Vec<String> = results
+                let blocked: Vec<(String, String)> = results
                     .iter()
                     .filter_map(|r| match r {
                         Err(ToolError::Blocked {
                             operation,
                             guidance,
-                        }) => Some(format!("{operation} ({guidance})")),
+                        }) => Some((format!("{operation} ({guidance})"), guidance.clone())),
                         _ => None,
                     })
                     .collect();
 
                 record_tool_results(engine, &calls, results, activity_tx).await;
 
-                if !blocked_reasons.is_empty() {
-                    policy_strikes += 1;
-                    if policy_strikes >= POLICY_STRIKE_LIMIT {
-                        warn!("Policy strike limit reached, halting turn");
+                if !blocked.is_empty() {
+                    blocked_rounds += 1;
+                    // Each rule counts once per round: parallel calls were
+                    // issued before this round's directive could land.
+                    let round: BTreeSet<&str> = blocked.iter().map(|(_, g)| g.as_str()).collect();
+                    let mut halt = blocked_rounds >= POLICY_ROUND_LIMIT;
+                    for guidance in round {
+                        let strikes = policy_strikes.entry(guidance.to_string()).or_insert(0);
+                        *strikes += 1;
+                        halt |= *strikes >= POLICY_STRIKE_LIMIT;
+                    }
+                    if halt {
+                        warn!(blocked_rounds, "Policy strike limit reached, halting turn");
                         return Ok(TurnOutput::PolicyHalt {
-                            reasons: blocked_reasons,
+                            reasons: blocked.into_iter().map(|(reason, _)| reason).collect(),
                         });
                     }
                     engine
@@ -1597,6 +1616,138 @@ mod tests {
             msg.contains("not allowed"),
             "expected blocked reason in halt message, got: {msg}",
         );
+    }
+
+    #[tokio::test]
+    async fn distinct_rules_do_not_halt_the_turn() {
+        // Two first offenses against different rules (issue #7 smoke
+        // test: absolute working_dir, then deny-listed git fetch) each
+        // get a directive; only repeating one rule halts.
+        let call = |name: &str, id: &str| {
+            ToolCall::new(
+                id.to_string(),
+                ToolFunction {
+                    name: name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+            )
+        };
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::ToolCalls {
+                content: String::new(),
+                calls: vec![call("rule_a", "b1")],
+            }),
+            Ok(Response::ToolCalls {
+                content: String::new(),
+                calls: vec![call("rule_b", "b2")],
+            }),
+            Ok(text("Reporting to the user")),
+        ]));
+        let tools = Tools::new(
+            vec![
+                Arc::new(MockBlockedTool::named("rule_a", "use the a tool")),
+                Arc::new(MockBlockedTool::named("rule_b", "use the b tool")),
+            ],
+            &[],
+        )
+        .unwrap();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let result = run_turn(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Two different mistakes",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            &ToolCtx::default(),
+        )
+        .await;
+        assert_eq!(result.unwrap().into_text(), "Reporting to the user");
+    }
+
+    #[tokio::test]
+    async fn cross_rule_probing_halts_at_the_round_cap() {
+        // Four rounds, four different rules: no rule repeats, but a
+        // turn that keeps finding new walls is probing the guardrails.
+        let call = |name: &str, id: &str| {
+            ToolCall::new(
+                id.to_string(),
+                ToolFunction {
+                    name: name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+            )
+        };
+        let round = |name: &str, id: &str| {
+            Ok(Response::ToolCalls {
+                content: String::new(),
+                calls: vec![call(name, id)],
+            })
+        };
+        let provider = Arc::new(MockProvider::new(vec![
+            round("rule_a", "b1"),
+            round("rule_b", "b2"),
+            round("rule_c", "b3"),
+            round("rule_d", "b4"),
+            Ok(text("never reached")),
+        ]));
+        let tools = Tools::new(
+            vec![
+                Arc::new(MockBlockedTool::named("rule_a", "use a")),
+                Arc::new(MockBlockedTool::named("rule_b", "use b")),
+                Arc::new(MockBlockedTool::named("rule_c", "use c")),
+                Arc::new(MockBlockedTool::named("rule_d", "use d")),
+            ],
+            &[],
+        )
+        .unwrap();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let result = run_turn(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Probe everything",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            &ToolCtx::default(),
+        )
+        .await;
+        assert!(
+            matches!(result.unwrap(), TurnOutput::PolicyHalt { .. }),
+            "expected policy halt at the round cap",
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_blocks_of_one_rule_count_once() {
+        // Both calls were issued before the directive could land, so
+        // the round is one strike, not a halt.
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(blocked_tool_calls(&["b1", "b2"])),
+            Ok(text("OK I'll stop")),
+        ]));
+        let tools = blocked_tools();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let result = run_turn(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Parallel blocked calls",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            &ToolCtx::default(),
+        )
+        .await;
+        assert_eq!(result.unwrap().into_text(), "OK I'll stop");
     }
 
     #[tokio::test]

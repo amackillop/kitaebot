@@ -76,14 +76,37 @@ skipping that would leave the stored context malformed.
 
 ### Policy Violation Gate
 
-When a tool returns `ToolError::Blocked`, a per-turn strike counter increments.
+A blocked tool call is just an error string to the model: nothing stops
+it from ignoring the message and trying creative workarounds, and the
+repeat detector cannot catch that because the arguments change on every
+attempt. The gate puts a limit behind refusals: escalate to a human
+instead of letting the model negotiate with the guardrails.
 
-| Strike | Behavior |
+When a tool returns `ToolError::Blocked`, a strike counter increments for
+the rule that fired, identified by its guidance string (the convention:
+`operation` carries the variable content, guidance is static per rule).
+
+| Strike (per rule) | Behavior |
 |--------|----------|
 | 1 | Inject a system message directing the LLM to stop attempting the blocked operation. Continue the turn. |
 | 2 | Halt the turn immediately. The turn returns a distinct `PolicyHalt` outcome carrying the blocked operations and their guidance; channels render it as a synthetic response. |
 
-The strike counter resets per turn. The turn's success type is an ADT
+Distinct rules strike independently — the gate targets workarounds of a
+refusal the model has already seen, so a halt only ever fires after that
+rule's guidance reached the model in an earlier round. A long turn's
+unrelated first offenses each get their own directive and the turn
+continues (a live execution turn was once halted for an absolute
+`working_dir` plus a deny-listed `git fetch` three minutes apart,
+killing finished work at the pre-push check). Parallel calls blocked in
+the same round count once: they were issued before the directive could
+land.
+
+A total cap backstops cross-rule evasion: four blocked rounds in one
+turn halt it regardless of rule diversity. Below the cap distinct rules
+learn independently; a turn that keeps finding new walls is probing the
+guardrails, not learning them.
+
+Strike counters reset per turn. The turn's success type is an ADT
 (`Text` or `PolicyHalt`), so callers can tell a halted turn from a normal
 reply without string-sniffing — the hook for notifying on unattended
 failures.
