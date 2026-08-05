@@ -515,6 +515,19 @@ pub struct GithubConfig {
     /// GitHub App bot logins whose PR feedback the bot acts on. Matched
     /// case-insensitively; a trailing `[bot]` suffix is ignored.
     pub trusted_bots: Vec<String>,
+    /// Issue polling, nested as `[github.issues]`. Runs only when the
+    /// integration itself is enabled.
+    pub issues: GithubIssuesConfig,
+}
+
+/// GitHub issues channel settings.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubIssuesConfig {
+    /// Enable issue polling. Defaults to `false`.
+    pub enabled: bool,
+    /// Seconds between issue polling cycles. Defaults to 300 (5 minutes).
+    pub poll_interval_secs: u64,
 }
 
 /// Linear channel settings.
@@ -664,6 +677,16 @@ impl Default for GithubConfig {
             owner: String::new(),
             trusted_users: Vec::new(),
             trusted_bots: Vec::new(),
+            issues: GithubIssuesConfig::default(),
+        }
+    }
+}
+
+impl Default for GithubIssuesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: 300,
         }
     }
 }

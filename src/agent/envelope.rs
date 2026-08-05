@@ -40,6 +40,10 @@ pub enum ChannelSource {
         repo: String,
         role: GitHubRole,
     },
+    GitHubIssue {
+        /// `owner/repo#42`.
+        issue: String,
+    },
     Linear {
         issue: String,
     },
@@ -58,7 +62,7 @@ impl ChannelSource {
     pub fn topic(&self) -> &'static str {
         match self {
             Self::Duty => "duty",
-            Self::GitHub { .. } => "github",
+            Self::GitHub { .. } | Self::GitHubIssue { .. } => "github",
             Self::Linear { .. } => "linear",
             Self::Socket => "socket",
             Self::Telegram => "telegram",
@@ -71,6 +75,7 @@ impl fmt::Display for ChannelSource {
         match self {
             Self::Duty => write!(f, "Duty"),
             Self::GitHub { pr_number, .. } => write!(f, "GitHub PR #{pr_number}"),
+            Self::GitHubIssue { issue } => write!(f, "GitHub issue {issue}"),
             Self::Linear { issue } => write!(f, "Linear {issue}"),
             Self::Socket => write!(f, "Socket"),
             Self::Telegram => write!(f, "Telegram"),
@@ -118,6 +123,12 @@ mod tests {
             .is_attended()
         );
         assert!(
+            !ChannelSource::GitHubIssue {
+                issue: "owner/repo#1".into(),
+            }
+            .is_attended()
+        );
+        assert!(
             !ChannelSource::Linear {
                 issue: "MDK-1".into(),
             }
@@ -138,6 +149,14 @@ mod tests {
             role: GitHubRole::Author,
         };
         assert_eq!(src.to_string(), "GitHub PR #42");
+    }
+
+    #[test]
+    fn display_github_issue() {
+        let src = ChannelSource::GitHubIssue {
+            issue: "owner/repo#42".into(),
+        };
+        assert_eq!(src.to_string(), "GitHub issue owner/repo#42");
     }
 
     #[test]

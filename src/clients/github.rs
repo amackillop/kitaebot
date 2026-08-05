@@ -118,7 +118,7 @@ impl GithubClient {
 
     /// Search issues and PRs. `query` uses search qualifiers with
     /// spaces, e.g. `is:pr is:open author:kitaebot`.
-    pub async fn search_prs(&self, query: &str) -> Result<Vec<SearchIssue>, GithubError> {
+    pub async fn search_issues(&self, query: &str) -> Result<Vec<SearchIssue>, GithubError> {
         let q = query.replace(' ', "+");
         let results: SearchResults = self
             .get_json(format!("search/issues?q={q}&per_page=50"))
@@ -167,6 +167,20 @@ impl GithubClient {
     ) -> Result<Vec<IssueComment>, GithubError> {
         self.get_json(format!("repos/{nwo}/issues/{number}/comments?per_page=100"))
             .await
+    }
+
+    /// Comment on an issue or pull request conversation.
+    pub async fn create_issue_comment(
+        &self,
+        nwo: &str,
+        number: u32,
+        body: &str,
+    ) -> Result<IssueComment, GithubError> {
+        self.post_json(
+            format!("repos/{nwo}/issues/{number}/comments"),
+            &json!({ "body": body }),
+        )
+        .await
     }
 
     /// Users and teams whose review is still requested.
@@ -335,6 +349,8 @@ pub struct SearchIssue {
     /// API URL of the repository, e.g.
     /// `https://api.github.com/repos/owner/repo`.
     pub repository_url: String,
+    /// RFC 3339 timestamp of the last change, comments included.
+    pub updated_at: String,
 }
 
 impl SearchIssue {
@@ -544,6 +560,7 @@ mod tests {
                 login: "alice".into(),
             },
             repository_url: "https://api.github.com/repos/owner/repo".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(issue.nwo().as_deref(), Some("owner/repo"));
     }
@@ -558,6 +575,7 @@ mod tests {
                 login: "alice".into(),
             },
             repository_url: "repo/".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(issue.nwo(), None);
     }
@@ -573,7 +591,10 @@ mod tests {
                 body: br#"{"items":[]}"#.to_vec(),
             })
         });
-        let items = client.search_prs("is:pr is:open author:bot").await.unwrap();
+        let items = client
+            .search_issues("is:pr is:open author:bot")
+            .await
+            .unwrap();
         assert!(items.is_empty());
     }
 
@@ -614,6 +635,27 @@ mod tests {
             .unwrap();
         assert_eq!(review.id, 9);
         assert_eq!(review.state, "COMMENTED");
+    }
+
+    #[tokio::test]
+    async fn create_issue_comment_posts_the_body() {
+        let client = GithubClient::from_fn(|method, path, body| async move {
+            assert_eq!(method, "POST");
+            assert_eq!(path, "repos/owner/repo/issues/42/comments");
+            let payload: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            assert_eq!(payload["body"], "A plan");
+            Ok(RawResponse {
+                status: 201,
+                body: br#"{"user":{"login":"bot"},"body":"A plan",
+                    "created_at":"2026-01-01T00:00:00Z"}"#
+                    .to_vec(),
+            })
+        });
+        let comment = client
+            .create_issue_comment("owner/repo", 42, "A plan")
+            .await
+            .unwrap();
+        assert_eq!(comment.body, "A plan");
     }
 
     #[tokio::test]

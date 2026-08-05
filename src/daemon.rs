@@ -1,13 +1,14 @@
 //! Long-running daemon that drives the duty scheduler, GitHub,
 //! Linear, Telegram, and socket loops.
 //!
-//! The daemon runs five concurrent loops — the duty scheduler
+//! The daemon runs six concurrent loops — the duty scheduler
 //! dispatches scheduled duties, the GitHub PR poller checks for new
-//! reviews and comments, the Linear poller checks for assigned issues
-//! and comments, the Telegram poller long-polls for incoming messages,
-//! and the socket listener accepts Unix domain socket clients. All are
-//! pinned futures inside a single `tokio::select!`, so they make
-//! progress concurrently.
+//! reviews and comments, the GitHub issues poller checks for assigned
+//! issues, the Linear poller checks for assigned issues and comments,
+//! the Telegram poller long-polls for incoming messages, and the
+//! socket listener accepts Unix domain socket clients. All are pinned
+//! futures inside a single `tokio::select!`, so they make progress
+//! concurrently.
 //!
 //! The core loop ([`run_with_shutdown`]) is generic over its shutdown
 //! future so tests can substitute a simple `sleep` instead of real
@@ -19,10 +20,10 @@ use std::path::Path;
 use tracing::info;
 
 use crate::agent::AgentHandle;
-use crate::channel::github;
 use crate::channel::linear::{self, LinearChannel};
 use crate::channel::socket;
 use crate::channel::telegram::{self, TelegramChannel};
+use crate::channel::{github, github_issues};
 use crate::clients::github::GithubClient;
 use crate::config::{GithubConfig, SocketConfig};
 use crate::duty::{self, Duty};
@@ -41,10 +42,11 @@ pub async fn run(
     github_client: Option<&GithubClient>,
     git_cli: Option<&GitCli>,
     github: &GithubConfig,
+    repos: &[String],
     linear: Option<&LinearChannel>,
     socket_cfg: &SocketConfig,
 ) {
-    run_with_shutdown(
+    Box::pin(run_with_shutdown(
         workspace,
         state_db,
         handle,
@@ -53,10 +55,11 @@ pub async fn run(
         github_client,
         git_cli,
         github,
+        repos,
         linear,
         socket_cfg,
         shutdown_signal(),
-    )
+    ))
     .await;
 }
 
@@ -72,6 +75,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     github_client: Option<&GithubClient>,
     git_cli: Option<&GitCli>,
     github: &GithubConfig,
+    repos: &[String],
     linear: Option<&LinearChannel>,
     socket_cfg: &SocketConfig,
     shutdown: S,
@@ -102,6 +106,17 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         }
     };
 
+    let github_issues_loop = async {
+        // Issue polling piggybacks on the integration: no client is
+        // built unless `github.enabled`, and the nested flag opts in.
+        match github_client.filter(|_| github.issues.enabled).zip(git_cli) {
+            Some((client, git)) => {
+                github_issues::poll_loop(client, git, github, repos, handle, state_db).await;
+            }
+            None => std::future::pending().await,
+        }
+    };
+
     let linear_loop = async {
         match linear {
             Some(ch) => {
@@ -118,6 +133,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         () = duty_loop => unreachable!("duty loop never exits"),
         () = telegram_loop => unreachable!("telegram loop never exits"),
         () = github_loop => unreachable!("github loop never exits"),
+        () = github_issues_loop => unreachable!("github issues loop never exits"),
         () = linear_loop => unreachable!("linear loop never exits"),
         () = socket_loop => unreachable!("socket loop never exits"),
         () = shutdown => {
@@ -184,7 +200,7 @@ mod tests {
         // Closed distill gate → gate-closed reply, but the duty fired.
         let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
 
-        run_with_shutdown(
+        Box::pin(run_with_shutdown(
             &ws,
             &StateDb::open_in_memory().unwrap(),
             &handle,
@@ -193,10 +209,11 @@ mod tests {
             None,
             None,
             &GithubConfig::default(),
+            &[],  // repos
             None, // linear
             &sock,
             tokio::time::sleep(Duration::from_millis(50)),
-        )
+        ))
         .await;
 
         // If we get here without hanging, the catch-up fired and the
@@ -210,7 +227,7 @@ mod tests {
         let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
         let state_db = StateDb::open(&ws.state_db_path()).unwrap();
 
-        run_with_shutdown(
+        Box::pin(run_with_shutdown(
             &ws,
             &state_db,
             &handle,
@@ -219,10 +236,11 @@ mod tests {
             None,
             None,
             &GithubConfig::default(),
+            &[],  // repos
             None, // linear
             &sock,
             tokio::time::sleep(Duration::from_millis(50)),
-        )
+        ))
         .await;
 
         // The run must be recorded: a restarted scheduler reads this
@@ -240,7 +258,7 @@ mod tests {
         // record the run, and move on.
         let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
 
-        run_with_shutdown(
+        Box::pin(run_with_shutdown(
             &ws,
             &StateDb::open_in_memory().unwrap(),
             &handle,
@@ -257,10 +275,11 @@ mod tests {
             None,
             None,
             &GithubConfig::default(),
+            &[],  // repos
             None, // linear
             &sock,
             tokio::time::sleep(Duration::from_millis(50)),
-        )
+        ))
         .await;
 
         // Reaching here means the error didn't panic/crash.

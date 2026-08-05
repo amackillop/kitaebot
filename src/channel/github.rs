@@ -473,14 +473,14 @@ async fn send(handle: &AgentHandle, pr_number: u32, repo: &str, role: GitHubRole
 /// Who the channel acts on: the owner, listed human users, and listed
 /// bot apps. Bot logins carry a `[bot]` suffix in the REST API but not
 /// in GraphQL, so the suffix is stripped before matching the bot list.
-struct Trust<'a> {
+pub(crate) struct Trust<'a> {
     owner: &'a str,
     users: &'a [String],
     bots: &'a [String],
 }
 
 impl<'a> Trust<'a> {
-    fn new(config: &'a GithubConfig) -> Self {
+    pub(crate) fn new(config: &'a GithubConfig) -> Self {
         Self {
             owner: &config.owner,
             users: &config.trusted_users,
@@ -488,7 +488,7 @@ impl<'a> Trust<'a> {
         }
     }
 
-    fn allows(&self, login: &str) -> bool {
+    pub(crate) fn allows(&self, login: &str) -> bool {
         if login.eq_ignore_ascii_case(self.owner) {
             return true;
         }
@@ -661,7 +661,7 @@ async fn resolve_bot_login(client: &GithubClient) -> Result<String, GithubError>
 
 async fn list_bot_prs(client: &GithubClient, login: &str) -> Result<Vec<SearchIssue>, GithubError> {
     client
-        .search_prs(&format!("is:pr is:open author:{login}"))
+        .search_issues(&format!("is:pr is:open author:{login}"))
         .await
 }
 
@@ -670,7 +670,7 @@ async fn list_review_requested_prs(
     login: &str,
 ) -> Result<Vec<SearchIssue>, GithubError> {
     client
-        .search_prs(&format!("is:pr is:open review-requested:{login}"))
+        .search_issues(&format!("is:pr is:open review-requested:{login}"))
         .await
 }
 
@@ -907,6 +907,7 @@ mod tests {
             body: None,
             user: user(author),
             repository_url: format!("https://api.github.com/repos/{nwo}"),
+            updated_at: "2026-01-01T00:00:00Z".into(),
         }
     }
 

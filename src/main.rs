@@ -154,7 +154,7 @@ async fn daemon_main() {
                 }
             };
 
-            daemon::run(
+            Box::pin(daemon::run(
                 &workspace,
                 &state_db,
                 &handle,
@@ -163,9 +163,10 @@ async fn daemon_main() {
                 rt.github.as_ref(),
                 rt.git_cli.as_ref(),
                 &config.github,
+                &config.git.trusted_repos(),
                 rt.linear.as_ref(),
                 &config.socket,
-            )
+            ))
             .await;
         }
         Some(cmd) => {

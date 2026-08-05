@@ -386,6 +386,7 @@ async fn gh_search(State(state): State<SharedState>, RawQuery(query): RawQuery) 
                 "user": pr["user"],
                 "repository_url":
                     format!("https://api.github.com/repos/{}", pr["nwo"].as_str().unwrap()),
+                "updated_at": "2026-01-01T00:00:00Z",
             })
         })
         .collect();
