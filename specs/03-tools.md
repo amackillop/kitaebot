@@ -180,10 +180,15 @@ Stderr is prefixed with `STDERR:` and separated from stdout.
 
 **Process lifetime:**
 
-The child is spawned with `kill_on_drop`. Both timeout and turn cancellation
-work by dropping the wait future, which kills the direct `bash` child instead
-of orphaning it. Grandchildren that detach from the bash process may still
-survive — process-group kill is out of scope.
+The child is spawned with `kill_on_drop` as the leader of its own process
+group. Both timeout and turn cancellation work by dropping the wait future,
+which kills the direct child and sweeps the rest of the group with `SIGKILL`
+via a drop guard, so grandchildren (`bash → just → cargo → test binaries`)
+cannot outlive the turn. A normal exit disarms the sweep: whatever a
+finished command deliberately left running in the background is its own
+business. The same group semantics apply to every subprocess spawned
+through `cli_runner` (git, warm). Descendants that call `setsid` escape
+the group and the sweep; nothing short of cgroups catches those.
 
 ---
 

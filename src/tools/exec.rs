@@ -33,7 +33,7 @@ use tracing::{debug, warn};
 use std::future::Future;
 use std::pin::Pin;
 
-use super::cli_runner::CONFINE_SELF;
+use super::cli_runner::{CONFINE_SELF, GroupKillGuard};
 use super::direnv::{self, DirenvCache, DirenvEnv, DirenvError};
 use super::git;
 use super::{Tool, ToolCtx};
@@ -640,8 +640,11 @@ impl Tool for Exec {
                 // Kill the child when the future is dropped: on timeout
                 // below, or when the turn is cancelled and the parent
                 // drops the whole tool future. Command::output() would
-                // leave the process running.
-                .kill_on_drop(true);
+                // leave the process running. The guard below sweeps the
+                // rest of the process group, which this reaches only
+                // one level into.
+                .kill_on_drop(true)
+                .process_group(0);
 
             if let Some(ref env) = direnv_env {
                 cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
@@ -655,6 +658,7 @@ impl Tool for Exec {
                 cwd: cwd.display().to_string(),
                 source,
             })?;
+            let guard = GroupKillGuard::arm(&child);
             let output = timeout(self.timeout, child.wait_with_output())
                 .await
                 .map_err(|_| ToolError::Timeout {
@@ -666,6 +670,7 @@ impl Tool for Exec {
                     cwd: cwd.display().to_string(),
                     source,
                 })?;
+            guard.disarm();
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1223,6 +1228,19 @@ mod tests {
         assert!(matches!(result, Err(ToolError::Timeout { .. })));
         // If the child survived the timeout it would touch the marker
         // at ~0.3s. kill_on_drop must have killed it before that.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!dir.path().join("marker").exists());
+    }
+
+    #[tokio::test]
+    async fn test_exec_timeout_kills_grandchildren() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = quick_timeout_tool(dir.path());
+        // The backgrounded subshell outlives the direct bash child;
+        // only the group sweep can stop it touching the marker at ~0.3s.
+        let args = serde_json::json!({"command": "(sleep 0.3 && touch marker) & sleep 5"});
+        let result = tool.execute(args, ToolCtx::default()).await;
+        assert!(matches!(result, Err(ToolError::Timeout { .. })));
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(!dir.path().join("marker").exists());
     }

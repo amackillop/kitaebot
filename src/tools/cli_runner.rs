@@ -31,6 +31,42 @@ pub struct Confinement {
     pub workspace: PathBuf,
 }
 
+// ── Process-group kill guard ────────────────────────────────────────
+
+/// Kills the child's process group when dropped, unless disarmed.
+///
+/// Children are spawned as group leaders, so the sweep takes every
+/// descendant — grandchildren `kill_on_drop` cannot reach. A normal
+/// exit disarms: what a finished command deliberately left running in
+/// the background is its own business; a timeout or a cancelled turn
+/// means the turn lost control of the tree. Descendants that call
+/// `setsid` escape the group and the sweep.
+pub struct GroupKillGuard(Option<i32>);
+
+impl GroupKillGuard {
+    /// Arm for `child`'s group. The child must have been spawned with
+    /// `process_group(0)`, making its pid the pgid.
+    pub fn arm(child: &tokio::process::Child) -> Self {
+        Self(child.id().and_then(|pid| i32::try_from(pid).ok()))
+    }
+
+    /// The command completed; leave its group alone.
+    pub fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupKillGuard {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0 {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pgid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
 // ── Command output ──────────────────────────────────────────────────
 
 /// Raw output from a subprocess.
@@ -194,18 +230,29 @@ async fn exec_cmd(
 }
 
 /// Spawn and wait, piping `stdin` into the child when present.
+///
+/// The child leads its own process group, and the group is swept on
+/// timeout or cancellation (see [`GroupKillGuard`]) — a dropped wait
+/// future must not leave a `git fetch` or a warm build running.
 async fn run(cmd: &mut Command, stdin: Option<&str>) -> std::io::Result<std::process::Output> {
-    let Some(input) = stdin else {
-        return cmd.stdin(Stdio::null()).output().await;
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true);
+    match stdin {
+        Some(_) => cmd.stdin(Stdio::piped()),
+        None => cmd.stdin(Stdio::null()),
     };
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
-    let mut pipe = child.stdin.take().expect("stdin was piped");
-    pipe.write_all(input.as_bytes()).await?;
-    drop(pipe);
-    child.wait_with_output().await
+    let guard = GroupKillGuard::arm(&child);
+    if let Some(input) = stdin {
+        let mut pipe = child.stdin.take().expect("stdin was piped");
+        pipe.write_all(input.as_bytes()).await?;
+        drop(pipe);
+    }
+    let output = child.wait_with_output().await?;
+    guard.disarm();
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -255,5 +302,45 @@ mod tests {
         let out = exec(&cat_call(None)).await.unwrap();
         assert_eq!(out.stdout, "");
         assert_eq!(out.exit_code, 0);
+    }
+
+    fn bash_call(dir: &std::path::Path, script: &str, timeout_secs: u64) -> SubprocessCall {
+        SubprocessCall {
+            binary: "bash",
+            args: vec!["-c".into(), script.into()],
+            cwd: dir.to_path_buf(),
+            env: vec![("PATH".into(), std::env::var_os("PATH").unwrap_or_default())],
+            timeout_secs: Some(timeout_secs),
+            stdin: None,
+            confine: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_the_whole_group() {
+        let dir = tempfile::tempdir().unwrap();
+        // The backgrounded subshell outlives the direct bash child;
+        // only the group sweep can stop it touching the marker at ~2s.
+        let call = bash_call(dir.path(), "(sleep 2 && touch marker) & sleep 5", 1);
+
+        let err = exec(&call).await.unwrap_err();
+
+        assert!(matches!(err, ToolError::Timeout { .. }));
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!dir.path().join("marker").exists());
+    }
+
+    #[tokio::test]
+    async fn normal_exit_leaves_background_children_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        // Deliberate backgrounding is the command's business: the guard
+        // disarms on a normal exit and the grandchild survives.
+        let call = bash_call(dir.path(), "(sleep 0.2 && touch marker) &", 5);
+
+        let out = exec(&call).await.unwrap();
+
+        assert_eq!(out.exit_code, 0);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(dir.path().join("marker").exists());
     }
 }

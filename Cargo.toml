@@ -56,6 +56,7 @@ toml = "0.9.8"
 tracing = "0.1"
 tokio-util = "0.7"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+nix = { version = "0.31.3", features = ["signal"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "test-util"] }
