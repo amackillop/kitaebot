@@ -12,9 +12,13 @@ If a common workflow has no recipe, add one.
 therefore, optimize for easily reviewable changes. It is much easier to review many small diffs than
 one large diff. Provide the steps to manually verify changes if tests alone cannot do so.
 
-- When planning a non-trivial change, you can use `git --no-pager log -n 3 -L <start>,<end>:<file>`
-for more context about a particular section of code. Commit messages carry design rationale in this project so leverage that.
-Skip this for obvious fixes and additions.
+- **Chesterton's Fence is mandatory.** Before modifying or removing existing behavior, read the
+rationale for it: the owning spec in `specs/` (each mechanism's spec states its motivation) and
+`git --no-pager log -L <start>,<end>:<file>` (or `-S <symbol>`) on the code you are about to
+change. Specs and commit messages carry the design rationale in this repo, so the reason the
+fence stands is always retrievable. Your plan and commit message must state the original rationale
+and either why it no longer applies or how the change preserves it. A diagnosis or design formed
+before reading the fence's rationale is a guess. Pure additions are exempt.
 
 ### Building
 - Build exactly one commit at a time from the plan then wait for human review.
@@ -29,6 +33,8 @@ Skip this for obvious fixes and additions.
 - **Pure core, thin effectful shell.** Separate logic from I/O. Build pure data structures that describe intent, then interpret them in a thin layer that performs effects. Test the pure core; the effectful shell should be too simple to fail.
 - **Every permission needs a concrete caller.** Don't grant capabilities speculatively. If you can't name the code path that requires it, it shouldn't exist.
 - **Specs are contracts.** When code diverges from a spec, fix the spec. Stale docs are worse than no docs. Keep the README.md up-to-date.
+- **Chesterton's Fence.** Never change behavior you can't explain the existence of. The rationale
+lives in the specs and the git history (see Planning); understanding it comes before touching it.
 - **Errors never discard information.** An error must name exactly what failed, to the fullest extent available at the failure site: the operation, the inputs it acted on (path, argv, url), and the underlying cause. Model distinct failure modes as distinct ADT variants carrying structured fields, not one stringly `Failed(String)`. Never collapse a rich source error to `e.to_string()` when you can keep it as a `#[source]`, and never substitute a friendly label for the real thing that ran.
 
 ## Style
