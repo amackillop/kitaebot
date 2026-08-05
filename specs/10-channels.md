@@ -281,9 +281,3 @@ forever.
 - No message queuing — the actor processes one envelope at a time
 - No typing indicators — the agent appears offline until the response is ready
   (activity events provide partial progress when verbose is on)
-
-## Open Questions
-
-- `telegram.poll_timeout_secs` is not wired to the `getUpdates` timeout
-  parameter (hardcoded to 30). The config field only affects the HTTP client
-  timeout. Should it be connected or removed?
