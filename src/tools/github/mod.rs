@@ -8,6 +8,7 @@
 
 mod api;
 mod ci_status;
+mod issue_create;
 mod pr_create;
 mod pr_diff_comments;
 mod pr_diff_reply;
@@ -19,6 +20,7 @@ mod test_helpers;
 
 pub use api::Api;
 pub use ci_status::CiStatus;
+pub use issue_create::IssueCreate;
 pub use pr_create::PrCreate;
 pub use pr_diff_comments::PrDiffComments;
 pub use pr_diff_reply::PrDiffReply;
@@ -98,11 +100,16 @@ fn api_err(e: &crate::error::GithubError) -> ToolError {
     ToolError::ExecutionFailed(e.to_string())
 }
 
-/// Build the GitHub tools.
-pub(crate) fn build(api: GithubApi) -> Vec<Arc<dyn Tool>> {
+/// Build the GitHub tools. `repos` bounds where issues can be filed —
+/// the `[git.repositories]` keys.
+pub(crate) fn build(api: GithubApi, repos: Vec<String>) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(Api(api.clone())),
         Arc::new(CiStatus(api.clone())),
+        Arc::new(IssueCreate {
+            api: api.clone(),
+            repos,
+        }),
         Arc::new(PrCreate(api.clone())),
         Arc::new(PrDiffComments(api.clone())),
         Arc::new(PrDiffReply(api.clone())),

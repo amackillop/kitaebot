@@ -169,6 +169,20 @@ impl GithubClient {
             .await
     }
 
+    /// Open an issue.
+    pub async fn create_issue(
+        &self,
+        nwo: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<CreatedIssue, GithubError> {
+        self.post_json(
+            format!("repos/{nwo}/issues"),
+            &json!({ "title": title, "body": body }),
+        )
+        .await
+    }
+
     /// Comment on an issue or pull request conversation.
     pub async fn create_issue_comment(
         &self,
@@ -475,6 +489,13 @@ pub struct PullSummary {
     pub html_url: String,
     /// Set iff the PR was merged (merged PRs are `closed`).
     pub merged_at: Option<String>,
+}
+
+/// The issue created by the create-issue endpoint.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreatedIssue {
+    pub number: u32,
+    pub html_url: String,
 }
 
 /// The pull request created by the create-pull endpoint.

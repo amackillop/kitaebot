@@ -41,3 +41,24 @@ where
     });
     GithubApi::new(client, dir.into_path())
 }
+
+/// Build a `GithubApi` with no checkouts, for tools that name repos
+/// directly. The HTTP layer is `handler` (called with method, path,
+/// body; returns the 200 response body).
+#[allow(deprecated)] // tempfile::TempDir::into_path
+pub fn stub_api<F>(handler: F) -> GithubApi
+where
+    F: Fn(&'static str, String, Option<Vec<u8>>) -> Vec<u8> + Send + Sync + 'static,
+{
+    let handler = std::sync::Arc::new(handler);
+    let client = GithubClient::from_fn(move |method, path, body| {
+        let handler = handler.clone();
+        async move {
+            Ok(RawResponse {
+                status: 200,
+                body: handler(method, path, body),
+            })
+        }
+    });
+    GithubApi::new(client, tempfile::tempdir().unwrap().into_path())
+}

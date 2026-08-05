@@ -176,10 +176,10 @@ fn build_git(
     .with_confinement(confine);
     let github_client = if config.github.enabled {
         let client = GithubClient::new(token, &config.github.api_base);
-        tools.extend(github::build(github::GithubApi::new(
-            client.clone(),
-            workspace.path(),
-        )));
+        tools.extend(github::build(
+            github::GithubApi::new(client.clone(), workspace.path()),
+            config.git.trusted_repos(),
+        ));
         Some(client)
     } else {
         None
