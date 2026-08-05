@@ -29,11 +29,16 @@ const SEND_RETRIES: u32 = 3;
 pub struct TelegramChannel {
     client: TelegramClient,
     chat_id: i64,
+    poll_timeout_secs: u64,
 }
 
 impl TelegramChannel {
-    pub fn new(client: TelegramClient, chat_id: i64) -> Self {
-        Self { client, chat_id }
+    pub fn new(client: TelegramClient, chat_id: i64, poll_timeout_secs: u64) -> Self {
+        Self {
+            client,
+            chat_id,
+            poll_timeout_secs,
+        }
     }
 
     pub fn chat_id(&self) -> i64 {
@@ -119,7 +124,11 @@ pub async fn poll_loop(channel: &TelegramChannel, handle: &AgentHandle) -> ! {
     let mut verbose = false;
 
     loop {
-        let updates = match channel.client.poll_updates(offset, 30).await {
+        let updates = match channel
+            .client
+            .poll_updates(offset, channel.poll_timeout_secs)
+            .await
+        {
             Ok(updates) => updates,
             Err(TelegramError::Network(ref e)) => {
                 error!("Telegram poll error: {e}");
@@ -259,6 +268,7 @@ mod tests {
         send_results: Vec<Result<(), TelegramError>>,
         send_index: AtomicUsize,
         sent: Mutex<Vec<SentMessage>>,
+        last_poll_timeout: Mutex<Option<u64>>,
     }
 
     impl FakeTelegram {
@@ -268,6 +278,7 @@ mod tests {
                 send_results,
                 send_index: AtomicUsize::new(0),
                 sent: Mutex::new(Vec::new()),
+                last_poll_timeout: Mutex::new(None),
             })
         }
 
@@ -278,6 +289,10 @@ mod tests {
 
         fn sent_messages(&self) -> Vec<SentMessage> {
             self.sent.lock().unwrap().clone()
+        }
+
+        fn last_poll_timeout(&self) -> Option<u64> {
+            *self.last_poll_timeout.lock().unwrap()
         }
 
         fn ok_json(result: &impl serde::Serialize) -> Vec<u8> {
@@ -308,6 +323,8 @@ mod tests {
             async move {
                 match method.as_str() {
                     "getUpdates" => {
+                        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        *state.last_poll_timeout.lock().unwrap() = body["timeout"].as_u64();
                         let next = state.poll_results.lock().unwrap().pop_front();
                         match next {
                             Some(updates) => Ok(RawResponse {
@@ -368,7 +385,7 @@ mod tests {
     const CHAT_ID: i64 = 42;
 
     fn channel(state: &Arc<FakeTelegram>) -> TelegramChannel {
-        TelegramChannel::new(fake_client(state), CHAT_ID)
+        TelegramChannel::new(fake_client(state), CHAT_ID, 30)
     }
 
     fn spawn_handle(
@@ -617,5 +634,24 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(100), poll_loop(&ch, &handle)).await;
 
         assert!(state.sent_messages().is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_loop_uses_configured_poll_timeout() {
+        tokio::time::pause();
+        let state = FakeTelegram::new(vec![Ok(())]).with_poll_results(vec![vec![Update {
+            update_id: 1,
+            message: Some(TgMessage {
+                message_id: 1,
+                chat: Chat { id: CHAT_ID },
+                text: Some("hello".into()),
+            }),
+        }]]);
+        let ch = TelegramChannel::new(fake_client(&state), CHAT_ID, 60);
+        let (handle, _dir) = spawn_handle(vec![Ok(AgentResponse::Text("reply".into()))]);
+
+        let _ = tokio::time::timeout(Duration::from_millis(100), poll_loop(&ch, &handle)).await;
+
+        assert_eq!(state.last_poll_timeout(), Some(60));
     }
 }
