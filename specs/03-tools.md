@@ -366,7 +366,7 @@ not need authentication; clone, fetch, and push do.
 | `git_clone` | Clone a repository into the workspace. For repos listed in `git.repositories`, runs `direnv allow` synchronously then warms the direnv cache in the background. |
 | `git_commit` | Commit staged changes with co-author trailers. |
 | `git_fetch` | Fetch refs from a remote. Fetch a base branch before rebasing onto it. |
-| `git_push` | Push commits to a remote. |
+| `git_push` | Push commits to a remote. Fast-forward only — no force option: published bot branches are append-only. The flag existed for rebase/squash workflows (fc1041c), which the keyring isolation (spec 15) later made impossible via exec; its only remaining use was silently squashing a branch under review. History restructuring is a human squash at merge. |
 
 All tools take `repo_dir` (relative to workspace root) and validate it via
 `resolve_repo_dir` — rejects traversal, absolute paths, and directories
