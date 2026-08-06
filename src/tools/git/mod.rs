@@ -7,6 +7,7 @@
 pub(crate) mod checkout;
 mod commit;
 mod fetch;
+mod fixup;
 pub(crate) mod git_cli;
 mod git_clone;
 mod push;
@@ -16,6 +17,7 @@ pub(crate) mod url;
 
 pub use commit::Commit;
 pub use fetch::Fetch;
+pub use fixup::Fixup;
 pub use git_cli::GitCli;
 pub use git_clone::GitClone;
 pub use push::Push;
@@ -121,6 +123,7 @@ pub(crate) fn build(
 
     vec![
         Arc::new(Commit::new(git.clone(), config.co_authors.clone())),
+        Arc::new(Fixup(git.clone())),
         Arc::new(Push(git.clone())),
         Arc::new(Fetch(git.clone())),
         Arc::new(GitClone { git }),

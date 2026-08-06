@@ -366,7 +366,8 @@ not need authentication; clone, fetch, and push do.
 | `git_clone` | Clone a repository into the workspace. For repos listed in `git.repositories`, runs `direnv allow` synchronously then warms the direnv cache in the background. |
 | `git_commit` | Commit staged changes with co-author trailers. |
 | `git_fetch` | Fetch refs from a remote. Fetch a base branch before rebasing onto it. |
-| `git_push` | Push commits to a remote. Fast-forward only — no force option: published bot branches are append-only. The flag existed for rebase/squash workflows (fc1041c), which the keyring isolation (spec 15) later made impossible via exec; its only remaining use was silently squashing a branch under review. History restructuring is a human squash at merge. |
+| `git_push` | Push commits to a remote. Fast-forward only — no force option: published bot branches are append-only outside `git_fixup`. The flag existed for rebase/squash workflows (fc1041c), which the keyring isolation (spec 15) later made impossible via exec; its only remaining use was silently squashing a branch under review. |
+| `git_fixup` | The sanctioned history rewrite: meld the staged changes into an earlier commit of the current branch (same-base autosquash) and force-push with lease. Safety: refuses base-branch targets, dirty worktrees, and detached HEAD; verifies the final tree is byte-identical to the pre-rebase tree (melding never changes the tree, so any conflict resolution or rebase bug that alters content is rejected mechanically); on conflict or violation it aborts, restores the branch, and leaves the tweak staged for a normal commit. Runs in the git tier, so rewritten commits are signed. Moved-base rebases are out of scope by design — redo the PR. |
 
 All tools take `repo_dir` (relative to workspace root) and validate it via
 `resolve_repo_dir` — rejects traversal, absolute paths, and directories
