@@ -27,6 +27,8 @@ pub const STATE_DIR: &str = "state";
 /// `state/` so the exec tier kernel-denies it; the git tier grants it
 /// read + execute (spec 15).
 pub const ASKPASS_DIR: &str = "askpass";
+/// The error tee's rolled files, relative to [`STATE_DIR`].
+pub const ERRORS_SUBDIR: &str = "errors";
 /// The one model-writable file under [`STATE_DIR`], maintained by the
 /// review gates. Relative to [`STATE_DIR`].
 pub const REVIEW_CHECKLIST: &str = "review-checklist.md";
@@ -57,10 +59,7 @@ impl Workspace {
     ///
     /// Fallback: `$XDG_DATA_HOME/kitaebot`, then `~/.local/share/kitaebot`.
     pub fn init() -> Result<Self, WorkspaceError> {
-        let path = std::env::var(ENV_VAR)
-            .map(PathBuf::from)
-            .or_else(|_| default_data_dir())
-            .map_err(|e| WorkspaceError::Init(PathBuf::from(APP_NAME), e))?;
+        let path = resolve_root().map_err(|e| WorkspaceError::Init(PathBuf::from(APP_NAME), e))?;
         Self::init_at(path)
     }
 
@@ -148,6 +147,16 @@ fn read_system_prompt(root: &Path) -> String {
     }
 
     prompt
+}
+
+/// Workspace root from `KITAEBOT_WORKSPACE` or the XDG default,
+/// resolved without touching the filesystem. The error tee needs the
+/// path before the workspace initializes, so tracing can capture
+/// workspace-init failures themselves.
+pub fn resolve_root() -> Result<PathBuf, std::io::Error> {
+    std::env::var(ENV_VAR)
+        .map(PathBuf::from)
+        .or_else(|_| default_data_dir())
 }
 
 /// Resolve the default data directory following XDG Base Directory spec.

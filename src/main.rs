@@ -11,6 +11,7 @@ mod conventions;
 mod daemon;
 mod dispatch;
 mod duty;
+mod errlog;
 mod error;
 mod memory;
 mod notify;
@@ -39,14 +40,39 @@ use context::{ContextEngine, ToolScope};
 use tracing::{error, info, warn};
 use workspace::Workspace;
 
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+/// Stderr logging plus the error tee (spec 24): WARN/ERROR events
+/// mirrored to `state/errors/` as the self-analysis duty's symptom
+/// feed. A tee that cannot be set up disables itself with a note —
+/// logging must never stop the daemon. Returns the tee's flush guard;
+/// hold it for the process lifetime.
+fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let stderr = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "kitaebot=info".into()),
-        )
-        .with_writer(std::io::stderr)
+        );
+    let tee = workspace::resolve_root()
+        .map(|root| {
+            root.join(workspace::STATE_DIR)
+                .join(workspace::ERRORS_SUBDIR)
+        })
+        .and_then(|dir| errlog::layer(&dir))
+        .map_err(|e| eprintln!("error tee disabled: {e}"))
+        .ok();
+    let (tee_layer, guard) = match tee {
+        Some((layer, guard)) => (Some(layer), Some(guard)),
+        None => (None, None),
+    };
+    tracing_subscriber::registry()
+        .with(stderr)
+        .with(tee_layer)
         .init();
+    guard
 }
 
 fn main() {
@@ -60,7 +86,7 @@ fn main() {
 
 #[tokio::main]
 async fn daemon_main() {
-    init_tracing();
+    let _errlog_guard = init_tracing();
 
     let workspace = Workspace::init().unwrap_or_else(|e| {
         error!("Failed to initialize workspace: {e}");

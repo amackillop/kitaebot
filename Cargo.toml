@@ -58,8 +58,9 @@ shlex = "1"
 toml = "0.9.8"
 tracing = "0.1"
 tokio-util = "0.7"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 nix = { version = "0.31.3", features = ["signal"] }
+tracing-appender = "0.2.5"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "test-util"] }

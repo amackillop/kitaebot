@@ -36,6 +36,7 @@ Resolved via fallback chain:
 ├── state/                   # Machine-owned operational state
 │   ├── kitaebot.db          # Operational DB: ledgers + cursor docs
 │   ├── JOURNAL.md           # The bot's work record: topic-tagged, append-only
+│   ├── errors/              # WARN/ERROR tee, daily JSONL, 7 files kept (spec 24)
 │   └── review-checklist.md  # Escape checklist, derived from the ledger (spec 23)
 │
 └── projects/                # User's working area
