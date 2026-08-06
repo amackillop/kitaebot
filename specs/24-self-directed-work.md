@@ -145,43 +145,74 @@ last so dispatch duties due at the same tick go first.
 
 Duties whose action *generates* work rather than performing it.
 Scope is the `git.repositories` trust list only, for all of them.
-
-- **Shepherd** (from spec 21's deferred list): gate is a `gh` query
-  over the bot's own open PRs — unanswered review threads, PRs
-  whose CI is red, branches with no PR after N days. Action is an
-  LLM turn on the owning work session to push each item forward
-  (reply, fix, or propose closing).
-- **CI triage**: gate is a `gh` query for failing default-branch
-  workflows on trusted repos. Action analyzes the failure and files
-  a Linear issue (see proposal contract) with the analysis attached.
-- **Checklist reconciliation** (from spec 23's deferred list): gate
-  is a ledger query — external findings dispositioned `fixed` (true
-  escapes) not yet reflected in `state/review-checklist.md`.
-  Action is a memory-only LLM turn folding them in. No proposal
-  needed: memory writes have no outward effect.
+Gates query GitHub through the REST client (`clients/github.rs`),
+never a CLI.
 
 **The proposal contract.** Discovery output that implies new work
-becomes a tracker ticket, body carrying the evidence (query results,
-links) and the bot's analysis. For GitHub-tracked repos the write path
-exists: `github_issue_create` files the issue unassigned, a human
-triages by assigning it to the bot, and the issues channel (spec 10)
-picks it up like any other ticket. The bot never executes work it
-proposed without that transition; proposal and authorization are
-separated by an existing human gate. Which repos file proposals to
-Linear instead of GitHub — and the Linear write path itself — is
-undesigned; it needs an explicit per-repo mapping in config, not a
-guess.
+becomes a tracker ticket, body carrying the evidence and the bot's
+analysis. Routing is an explicit per-repo config mapping:
+`git.repositories."owner/repo".proposals = "github"` — a string enum
+so a Linear write path can join later; a repo without the field gets
+discovery observation but never filings. For GitHub the write path is
+`github_issue_create`: the issue files unassigned, a human triages by
+assigning it to the bot, and the issues channel (spec 10) picks it up
+like any other ticket. The bot never executes work it proposed
+without that transition; proposal and authorization are separated by
+an existing human gate.
+
+**Self-analysis** (built). Mines the bot's own problem record for
+evidence of defects in kitaebot itself — the issue #7 smoke test
+showed four real defects visible in the operational record before any
+human looked. Sources are the error tee (`state/errors/`, spec 05)
+and the journal filtered to `[notify]` entries: the alert mirror
+already is the problems journal, so successful-run prose never enters
+the delta. The gate is `(file, byte offset)` cursors plus a low token
+threshold (`min_delta_tokens`, default 200) — the delta is
+incident-shaped, not volume-shaped like distillation's. First contact
+primes at end-of-sources; a failed turn re-reads the same delta next
+period; a below-threshold delta accumulates. The turn's contract:
+investigate, ground the symptom in the bot's own checkout, then file
+at most one issue or reply that nothing is actionable. The boundary
+with distillation: distill turns experience into knowledge (memory);
+self-analysis turns anomalies into tickets. Quality defects hiding in
+*successful* outputs are out of scope. Config:
+`[duties.self_analysis]` with a schedule, the target `repo` (must be
+trusted and proposal-enabled), and `min_delta_tokens`. Runs on
+schedule only; `/duties` does not yet reach it.
+
+**Planned next, same contract:**
+
+- **CI triage**: gate is a REST query for new failing default-branch
+  workflow runs (run-id cursor per repo). Action analyzes the failure
+  and files a proposal with an evidence key
+  (`ci:{nwo}:{workflow}`) embedded, giving mechanical dedup the
+  self-analysis duty cannot have.
+- **Shepherd** (from spec 21's deferred list): the bot's own open
+  PRs — unanswered review threads, red CI, branches with no PR after
+  N days. Acts on already-authorized surface (its own PRs), so mostly
+  no proposals; the session-binding question (per-repo vs combined
+  turns) is decided at its implementation.
+- **Checklist reconciliation** (from spec 23's deferred list): ledger
+  query for unreconciled escapes; memory-only turn, no proposal
+  needed.
 
 **Spend and volume caps, mechanical:**
 
-- At most N open bot-proposed issues per repo (default 3). The gate
-  counts before the action runs; a full triage column stops proposal,
-  and the surplus goes to the journal, not Linear.
-- Duplicate suppression: a proposal keyed to the same evidence (same
-  failing workflow, same PR) as an existing open bot-proposed issue
-  is not re-filed.
-- Per-day duty-turn budget (token count from the usage ledger); duties
-  whose budget is spent skip with a logged reason.
+- At most 3 open bot-proposed issues per repo, counted by author
+  before dispatch (the bot is a normal account, so its filings are
+  author-searchable — no marker label). At the cap the duty skips and
+  journals the skip; triage frees the cap.
+- Duplicate suppression: the open bot-authored issues are injected
+  into the dispatch prompt (in-context dedup); duties with natural
+  evidence keys (CI triage) additionally embed them for mechanical
+  suppression.
+- One filing per run, stated in the turn contract: a daily duty files
+  at most ~7 a week against a cap of 3, so triage binds quickly.
+- No per-day token budget yet, deliberately: the schedule is the cost
+  ceiling (one turn per period, bounded by `max_iterations`), and the
+  usage ledger already records what a future cap would need. Add the
+  budget when duty count or cadence makes the schedule an insufficient
+  bound — with data, not in advance.
 
 ### Phase 3: commitments
 
@@ -224,9 +255,9 @@ linear channel), review machinery (spec 23), memory writes (spec 21).
 Duty and commitment actions are ordinary turns; every existing gate
 (review, egress, deny-list) applies unchanged.
 
-Assumes: system clock is sane (NTP); Linear workspace has a triage
-state the bot's token may create issues into; `git.repositories` is the
-complete scope statement for discovery and prompt duties.
+Assumes: system clock is sane (NTP); `git.repositories` is the
+complete scope statement for discovery and prompt duties, and its
+`proposals` fields are the complete routing statement for filings.
 
 ## Failure Modes
 
@@ -242,20 +273,23 @@ complete scope statement for discovery and prompt duties.
   runs each once; commitments are lost — acceptable, they are
   reminders, and the loss is visible in `/commitments`. Cursor loss
   re-reviews one delta.
-- **Linear unreachable during proposal**: the action logs the
-  proposal to the journal and the duty retries next period; no queue,
-  no retry loop inside the turn.
+- **Tracker unreachable during proposal**: the turn reports the
+  failure; the cursor did not advance, so the duty re-reads the same
+  delta next period. No queue, no retry loop inside the turn.
+- **Symptom probe fails** (unreadable journal or error files): logged,
+  duty retries next period; the cursor stays put.
 - **Proposal flood attempt** (a broken gate matching everything): the
-  per-repo cap bounds damage to N issues; the duplicate key bounds
-  repeat noise.
+  per-repo cap bounds damage to 3 open issues, and one filing per run
+  bounds the rate; the injected open list bounds repeat noise.
 
 ## Constraints
 
 - Model judgment never schedules recurring work, authorizes work, or
   spends money: schedules are config, gates are code, caps are code,
-  and outward work needs the human Linear transition. Commitments are
-  the sole, deliberately-contained exception (phase 3): one-shot,
-  visible at creation, listed, capped, cancellable.
+  and outward work needs the human tracker transition (assignment, for
+  GitHub). Commitments are the sole, deliberately-contained exception
+  (phase 3): one-shot, visible at creation, listed, capped,
+  cancellable.
 - Discovery and prompt duties read and propose against
   trusted repos (`git.repositories`) only.
 - Duty turns run through the normal actor; no parallel execution, no
@@ -274,16 +308,16 @@ complete scope statement for discovery and prompt duties.
   work sessions; does one shepherd run dispatch one turn per repo
   with items, or one combined turn? Per-repo matches session-context
   locality; combined is cheaper. Decide at implementation.
-- **Triage state discovery**: hardcode the Linear state name in
-  config, or resolve it via the MCP at startup? Config is simpler and
-  fails louder.
-- **Proposal-target abstraction**: the contract is proposal +
-  human transition + pickup, and Linear is one implementation of it;
-  GitHub Issues is the obvious second (repos with `gh` access but no
-  Linear team). Decide at phase 2 design whether a small trait
-  (propose, count open, find by dedup key) is worth defining up
-  front — the sizing question is whether the human-transition
-  detection generalizes, since the Linear channel owns it today.
+- **The Linear write path**: `proposals = "linear"` needs issue
+  creation, a triage state (hardcode the state name in config — it
+  fails louder than MCP discovery), and a human-transition signal the
+  Linear channel can detect. Whether that grows a small trait
+  (propose, count open) or stays a second match arm is decided when a
+  Linear-tracked repo actually wants proposals; GitHub shipped as
+  plain functions on purpose.
+- **`/duties` and self-analysis**: the operator run-now command only
+  reaches distillation; scheduler-side actions (warm, self-analysis)
+  need a shared execution path before `/duties` can force them.
 - **Gate vocabulary for prompt duties**: `new-commits` is the only
   gate v1 needs; new-issues, new-releases, or an RSS cursor follow
   the same cursor shape when a real watch-task wants them. A

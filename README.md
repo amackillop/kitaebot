@@ -184,8 +184,11 @@ kitaebot = {
       enabled = true;                            # Enables git tools (clone, commit, push)
       co_authors = [ "Name <email>" ];
       repositories = {                           # Listing a repo trusts its .envrc (direnv allow)
-        "owner/repo".check = "just check";       # The repo's check command; warms its build cache (spec 03)
-        "owner/other" = { };                     # Trust-only entry (no check command)
+        "owner/repo" = {
+          check = "just check";                  # The repo's check command; warms its build cache (spec 03)
+          proposals = "github";                  # Discovery duties may file issues here (spec 24)
+        };
+        "owner/other" = { };                     # Trust-only entry (no check command, no proposals)
       };
     };
     github = {
@@ -207,6 +210,10 @@ kitaebot = {
     duties = {                                   # Duty scheduler (spec 24)
       distill = { every = "1h"; };                # Token gate still applies
       warm = { every = "24h"; };                  # Build-warm duty; runs only when some repo sets check
+      self_analysis = {                           # Mine own errors/journal, propose fixes as issues
+        every = "24h";
+        repo = "owner/repo";                      # Must be trusted and proposal-enabled
+      };
       prompt = [                                  # Operator-defined watch-tasks
         {
           name = "ci-watch";
