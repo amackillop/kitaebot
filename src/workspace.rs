@@ -116,6 +116,13 @@ impl Workspace {
         self.state_dir().join("JOURNAL.md")
     }
 
+    /// Directory of the error tee's rolled JSON files (WARN/ERROR
+    /// events), the self-analysis duty's symptom source. Written by
+    /// tracing from process start via [`resolve_root`].
+    pub fn errors_dir(&self) -> PathBuf {
+        self.state_dir().join(ERRORS_SUBDIR)
+    }
+
     /// Path to the operational state database (usage ledger, review
     /// ledger, doc store).
     pub fn state_db_path(&self) -> PathBuf {

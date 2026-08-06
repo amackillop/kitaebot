@@ -282,9 +282,34 @@ pub struct DutiesConfig {
     /// Operator-defined prompt duties: recurring watch-tasks authored
     /// in config (spec 24). `[[duties.prompt]]` tables.
     pub prompt: Vec<PromptDutyConfig>,
+    /// The self-analysis discovery duty (spec 24 phase 2). Absent
+    /// means off.
+    pub self_analysis: Option<SelfAnalysisConfig>,
     /// Schedule for the build-warm duty. Registered only when some
     /// repo in `git.repositories` configures a check command.
     pub warm: ScheduleConfig,
+}
+
+/// The self-analysis discovery duty: mines the bot's own problem
+/// record and files proposals through the proposal contract.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfAnalysisConfig {
+    /// Schedule (`every` or `daily`), flattened alongside.
+    #[serde(flatten)]
+    pub schedule: ScheduleConfig,
+    /// Repo proposals are filed against (`owner/repo`). Must be in
+    /// `git.repositories` with `proposals` set.
+    pub repo: String,
+    /// Minimum estimated tokens of new symptom material before a turn
+    /// dispatches. Incident-shaped, so low: the default skips only
+    /// genuinely quiet periods.
+    #[serde(default = "default_min_delta_tokens")]
+    pub min_delta_tokens: usize,
+}
+
+fn default_min_delta_tokens() -> usize {
+    200
 }
 
 /// One operator-defined prompt duty.
@@ -467,6 +492,18 @@ pub struct RepoConfig {
     /// preparation and on the warm duty) so `git_commit` never meets
     /// a cold store. Exact `owner/repo` entries only.
     pub check: Option<String>,
+    /// Where discovery duties file proposals for this repo (spec 24
+    /// phase 2). Absent means discovery observes but never files.
+    pub proposals: Option<ProposalTracker>,
+}
+
+/// A tracker discovery proposals can be filed to.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProposalTracker {
+    /// GitHub issues via `github_issue_create`; assignment is the
+    /// human gate (spec 10).
+    Github,
 }
 
 impl Default for GitConfig {
@@ -699,6 +736,7 @@ impl Default for DutiesConfig {
                 daily: None,
             },
             prompt: Vec::new(),
+            self_analysis: None,
             warm: ScheduleConfig {
                 every: Some("24h".into()),
                 daily: None,
@@ -837,6 +875,7 @@ impl Config {
             return Err(ConfigError::Invalid(format!("duties.warm: {e}")));
         }
         self.validate_prompt_duties()?;
+        self.validate_self_analysis()?;
         self.validate_repositories()?;
         if self.memory.index_cap_bytes == 0 {
             return Err(ConfigError::Invalid(
@@ -926,7 +965,7 @@ impl Config {
             if p.name.is_empty() || p.name.contains(char::is_whitespace) {
                 return Err(ctx("name must be a single non-empty token".into()));
             }
-            if p.name == "distill" || p.name == "warm" {
+            if p.name == "distill" || p.name == "warm" || p.name == "self-analysis" {
                 return Err(ctx("name shadows a built-in duty".into()));
             }
             if !seen.insert(&p.name) {
@@ -950,6 +989,30 @@ impl Config {
             if p.gate.is_some() && !self.github.enabled {
                 return Err(ctx("gate \"new-commits\" requires github.enabled".into()));
             }
+        }
+        Ok(())
+    }
+
+    /// Validate `[duties.self_analysis]`: a parseable schedule, and a
+    /// target repo that is trusted, has a proposal tracker, and can be
+    /// queried (the cap count and the filing both need GitHub).
+    fn validate_self_analysis(&self) -> Result<(), ConfigError> {
+        let Some(sa) = &self.duties.self_analysis else {
+            return Ok(());
+        };
+        let ctx = |e: String| ConfigError::Invalid(format!("duties.self_analysis: {e}"));
+        sa.schedule.parse().map_err(ctx)?;
+        let Some(repo) = self.git.repositories.get(&sa.repo) else {
+            return Err(ctx(format!(
+                "repo {:?} is not in git.repositories",
+                sa.repo
+            )));
+        };
+        if repo.proposals.is_none() {
+            return Err(ctx(format!("repo {:?} has no proposal tracker", sa.repo)));
+        }
+        if !self.github.enabled {
+            return Err(ctx("requires github.enabled".into()));
         }
         Ok(())
     }
@@ -1676,5 +1739,60 @@ prompt = \"Review recent commits for security issues.\"
     fn github_disabled_skips_validation() {
         let cfg = load_toml("[github]\nenabled = false\npoll_interval_secs = 0\n").unwrap();
         assert!(!cfg.github.enabled);
+    }
+
+    const SELF_ANALYSIS_OK: &str = "\
+        [github]\nenabled = true\nowner = \"o\"\n\
+        [git.repositories.\"o/r\"]\nproposals = \"github\"\n\
+        [duties.self_analysis]\nevery = \"24h\"\nrepo = \"o/r\"\n";
+
+    #[test]
+    fn self_analysis_accepts_a_proposal_enabled_repo() {
+        let cfg = load_toml(SELF_ANALYSIS_OK).unwrap();
+        let sa = cfg.duties.self_analysis.unwrap();
+        assert_eq!(sa.repo, "o/r");
+        assert_eq!(sa.min_delta_tokens, 200);
+        assert_eq!(
+            cfg.git.repositories["o/r"].proposals,
+            Some(ProposalTracker::Github)
+        );
+    }
+
+    #[test]
+    fn self_analysis_rejects_untrusted_repo() {
+        let result = load_toml(
+            "[github]\nenabled = true\nowner = \"o\"\n\
+             [duties.self_analysis]\nevery = \"24h\"\nrepo = \"o/r\"\n",
+        );
+        assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("git.repositories")));
+    }
+
+    #[test]
+    fn self_analysis_rejects_repo_without_proposals() {
+        let result = load_toml(
+            "[github]\nenabled = true\nowner = \"o\"\n\
+             [git.repositories.\"o/r\"]\n\
+             [duties.self_analysis]\nevery = \"24h\"\nrepo = \"o/r\"\n",
+        );
+        assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("proposal tracker")));
+    }
+
+    #[test]
+    fn self_analysis_requires_github() {
+        let result = load_toml(
+            "[git.repositories.\"o/r\"]\nproposals = \"github\"\n\
+             [duties.self_analysis]\nevery = \"24h\"\nrepo = \"o/r\"\n",
+        );
+        assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("github.enabled")));
+    }
+
+    #[test]
+    fn prompt_duty_cannot_shadow_self_analysis() {
+        let result = load_toml(
+            "[git]\nenabled = false\n\
+             [[duties.prompt]]\nname = \"self-analysis\"\nevery = \"1h\"\n\
+             repo = \"o/r\"\nprompt = \"x\"\n",
+        );
+        assert!(matches!(result, Err(ConfigError::Invalid(m)) if m.contains("shadows")));
     }
 }

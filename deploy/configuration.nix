@@ -70,7 +70,10 @@ in
         enabled = true;
         co_authors = [ "Austin Mackillop <github.roundworm216@passmail.net>" ];
         repositories = {
-          "amackillop/kitaebot".check = "just check";
+          "amackillop/kitaebot" = {
+            check = "just check";
+            proposals = "github";
+          };
           "CumuloGlobal/open-money".check = "just check";
           "CumuloGlobal/unhuman".check = "just check";
         };
@@ -85,6 +88,10 @@ in
       linear = {
         enabled = true;
         trusted_users = [ "austin@moneydevkit.com" ];
+      };
+      duties.self_analysis = {
+        every = "24h";
+        repo = "amackillop/kitaebot";
       };
 
       # MCP servers (spec 22). bkb is pure knowledge lookup: no side

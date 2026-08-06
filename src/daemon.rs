@@ -84,8 +84,10 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         duties,
         state_db.clone(),
         workspace.journal_path(),
+        workspace.errors_dir(),
         handle,
         git_cli.cloned(),
+        github_client.cloned(),
     );
 
     let telegram_loop = async {

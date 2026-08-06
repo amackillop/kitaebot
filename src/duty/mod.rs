@@ -7,6 +7,7 @@
 //! startup (anacron catch-up) instead of resetting phase or bursting.
 
 pub mod schedule;
+pub mod self_analysis;
 pub mod state;
 
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::AgentHandle;
 use crate::agent::envelope::ChannelSource;
+use crate::clients::github::GithubClient;
 use crate::tools::git::GitCli;
 use schedule::Schedule;
 use state::DutyState;
@@ -39,6 +41,12 @@ pub enum Action {
     Dispatch {
         input: String,
         session_hint: Option<String>,
+    },
+    /// Mine the bot's own problem record and file at most one proposal
+    /// on `repo` (spec 24 phase 2).
+    SelfAnalysis {
+        repo: String,
+        min_delta_tokens: usize,
     },
     /// Prepare and warm every repo with a configured warm command, in
     /// the scheduler with no LLM turn (spec 24 self-maintenance).
@@ -113,13 +121,20 @@ fn next_wake(duties: &[Duty], state: &DutyState, now: u64) -> u64 {
 ///
 /// Serialization comes free: `send_message` awaits the actor, so two
 /// duties due together run in sequence, in declaration order.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_loop(
     duties: Vec<Duty>,
     state_db: StateDb,
     journal_path: PathBuf,
+    errors_dir: PathBuf,
     handle: &AgentHandle,
     git: Option<GitCli>,
+    github: Option<GithubClient>,
 ) -> ! {
+    let sources = self_analysis::Sources {
+        journal: journal_path.clone(),
+        errors_dir,
+    };
     let mut state = DutyState::load(&state_db);
     loop {
         let now = crate::time::now_epoch();
@@ -135,6 +150,22 @@ pub async fn run_loop(
                         session_hint.clone(),
                         handle,
                         git.as_ref(),
+                        &mut state,
+                    )
+                    .await;
+                }
+                Action::SelfAnalysis {
+                    repo,
+                    min_delta_tokens,
+                } => {
+                    run_self_analysis(
+                        duty,
+                        repo,
+                        *min_delta_tokens,
+                        &sources,
+                        handle,
+                        github.as_ref(),
+                        &journal_path,
                         &mut state,
                     )
                     .await;
@@ -193,6 +224,106 @@ async fn dispatch(
             error!(duty = %duty.name, "Duty error (will retry next period): {e}");
         }
     }
+}
+
+/// Run one self-analysis pass: probe the symptom sources, enforce the
+/// proposal cap, dispatch the analysis turn, advance the cursor on
+/// success (a failed turn re-reads the same delta next period).
+#[allow(clippy::too_many_arguments)]
+async fn run_self_analysis(
+    duty: &Duty,
+    repo: &str,
+    min_delta_tokens: usize,
+    sources: &self_analysis::Sources,
+    handle: &AgentHandle,
+    github: Option<&GithubClient>,
+    journal_path: &std::path::Path,
+    state: &mut DutyState,
+) {
+    let Some(client) = github else {
+        // Config validation requires github.enabled; reaching here
+        // means the invariant broke, not the operator.
+        error!(duty = %duty.name, "self-analysis has no GitHub client; skipping");
+        return;
+    };
+    let cursor = state.cursor(&duty.name).and_then(|c| c.parse().ok());
+    let probe = match self_analysis::probe(sources, cursor, min_delta_tokens) {
+        Ok(probe) => probe,
+        Err(e) => {
+            error!(duty = %duty.name, "symptom probe failed (will retry next period): {e}");
+            return;
+        }
+    };
+    let (delta, next) = match probe {
+        self_analysis::Probe::Prime(cursor) => {
+            info!(duty = %duty.name, "self-analysis cursor primed");
+            state.set_cursor(&duty.name, &cursor.to_string());
+            return;
+        }
+        self_analysis::Probe::Closed => {
+            info!(duty = %duty.name, "self-analysis gate closed");
+            return;
+        }
+        self_analysis::Probe::Open { delta, next } => (delta, next),
+    };
+
+    let proposals = match open_proposals(client, repo).await {
+        Ok(proposals) => proposals,
+        Err(e) => {
+            error!(duty = %duty.name, "open-proposal query failed (will retry next period): {e}");
+            return;
+        }
+    };
+    if proposals.len() >= self_analysis::PROPOSAL_CAP {
+        // The delta stays unconsumed: triage frees the cap, and the
+        // next run sees the accumulated material.
+        record(
+            journal_path,
+            &duty.name,
+            &format!(
+                "skipped: proposal cap reached ({} open on {repo})",
+                proposals.len(),
+            ),
+        );
+        return;
+    }
+
+    let prompt = self_analysis::format_prompt(repo, &delta, &proposals);
+    let cancel = CancellationToken::new();
+    match handle
+        .send_message(
+            ChannelSource::Duty,
+            prompt,
+            Some(repo.to_string()),
+            None,
+            cancel,
+        )
+        .await
+    {
+        Ok(reply) => {
+            info!(duty = %duty.name, "Duty run: {}", reply.content);
+            state.set_cursor(&duty.name, &next.to_string());
+        }
+        Err(e) => {
+            error!(duty = %duty.name, "Duty error (will retry next period): {e}");
+        }
+    }
+}
+
+/// Titles of open issues the bot already filed on `repo`, `#N title`
+/// formatted for prompt injection.
+async fn open_proposals(
+    client: &GithubClient,
+    repo: &str,
+) -> Result<Vec<String>, crate::error::GithubError> {
+    let login = client.user().await?.login;
+    let issues = client
+        .search_issues(&format!("is:issue is:open author:{login} repo:{repo}"))
+        .await?;
+    Ok(issues
+        .iter()
+        .map(|i| format!("#{} {}", i.number, i.title))
+        .collect())
 }
 
 /// Probe the new-commits gate. Returns the dispatch input and the

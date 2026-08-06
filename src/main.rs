@@ -266,6 +266,17 @@ fn build_duties(config: &Config) -> Vec<duty::Duty> {
             repo: p.repo.clone(),
         }),
     }));
+    if let Some(sa) = &config.duties.self_analysis {
+        duties.push(duty::Duty {
+            name: "self-analysis".into(),
+            action: duty::Action::SelfAnalysis {
+                repo: sa.repo.clone(),
+                min_delta_tokens: sa.min_delta_tokens,
+            },
+            schedule: parse(&sa.schedule),
+            gate: None,
+        });
+    }
     // Last: a due-together cold warm must not delay the duties above.
     if !config.git.warm_commands().is_empty() {
         duties.push(duty::Duty {
