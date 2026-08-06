@@ -70,7 +70,7 @@ in
         enabled = true;
         co_authors = [ "Austin Mackillop <github.roundworm216@passmail.net>" ];
         repositories = {
-          "amackillop/kitaebot".check = "just check";
+          "amackillop/kitaebot".check = "just check; just warm";
           "CumuloGlobal/open-money".check = "just check";
           "CumuloGlobal/unhuman".check = "just check";
         };

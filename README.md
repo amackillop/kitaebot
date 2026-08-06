@@ -104,6 +104,7 @@ nix develop              # Enter dev shell
 just check               # Full validation: nix flake check, nix lint/fmt, clippy, tests
 just rust-check          # Fast inner loop: cargo fmt-check + clippy + tests (not the commit gate)
 just build               # Compile
+just warm                # Warm the shared cargo target dir and sweep stale artifacts
 just test                # Run tests (mock-network feature)
 just test-e2e            # E2e suite: real daemon against a loopback fixture server
 just test-one NAME       # Run tests matching a name
@@ -184,7 +185,7 @@ kitaebot = {
       enabled = true;                            # Enables git tools (clone, commit, push)
       co_authors = [ "Name <email>" ];
       repositories = {                           # Listing a repo trusts its .envrc (direnv allow)
-        "owner/repo".check = "just check";       # The repo's check command; warms its build cache (spec 03)
+        "owner/repo".check = "just check; just warm"; # Check command; warms nix store + cargo target dir (spec 03)
         "owner/other" = { };                     # Trust-only entry (no check command)
       };
     };

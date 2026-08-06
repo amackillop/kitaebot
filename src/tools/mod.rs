@@ -89,6 +89,8 @@ const SAFE_ENV_VARS: &[&str] = &[
     "no_proxy",
     // Workspace
     "KITAEBOT_WORKSPACE",
+    // Build
+    "CARGO_TARGET_DIR",
     // GPG
     "GNUPGHOME",
     // Misc

@@ -508,8 +508,35 @@ Repos without one warm the devshell and nothing else.
 
 ```toml
 [git.repositories."amackillop/kitaebot"]
-check = "just check"
+check = "just check; just warm"
 ```
+
+### Cargo Target Dir
+
+A shared `CARGO_TARGET_DIR` at `workspace/projects/target` replaces
+per-repo `target/` dirs. Set in the daemon's systemd environment and
+added to `SAFE_ENV_VARS` so `safe_env()` lets it through to exec
+children, warm commands, and git hooks. Placed under `projects/` so
+the exec Landlock tier (which grants `all` on `projects/`) can write
+it; the workspace root is list-only. Survives `git clean -fdx` by
+construction — the clean runs inside individual repo dirs, and
+`projects/target` is a sibling, not a child. Per-repo `target/` is no
+longer in `KEPT_CACHES` and is swept on clean.
+
+The warm command's cargo step (`just warm`: `cargo build --tests
+--features mock-network && cargo sweep --time 7`) populates the shared dir and sweeps artifacts
+older than 7 days. `cargo-sweep` runs on the shared dir; cross-repo
+collisions are a known cargo hazard (upstream #14135) accepted because
+the agent serializes turns and the daily warm covers the cycle.
+
+### Linker
+
+mold is the linker for both working-tree and nix store builds.
+Working-tree: `.cargo/config.toml` sets target rustflags to pass
+`-fuse-ld=mold` to gcc; mold is on the devShell PATH. Nix store:
+`commonArgs` in `flake.nix` sets `RUSTFLAGS` and `nativeBuildInputs`
+with mold, so crane checks link with mold in the sandbox. Build
+scripts and proc-macros (host-compiled) still use the default linker.
 
 ## Boundaries
 
@@ -568,13 +595,6 @@ and a valid GitHub PAT loaded from credentials.
   silently when a repo renames its check; a machine-readable convention
   in the repo would be self-service but needs every repo to adopt it.
   Configured while there are two repos.
-- **Rooting the warm**: nothing holds a gcroot on what a warm builds —
-  the command is opaque (`just check`, a package script), not a
-  `nix build` with an out-link — so GC can evict it. GC is
-  pressure-triggered only ([spec 09](09-vm.md#garbage-collection)), so
-  eviction takes disk pressure, not a timer. Whether rooting needs
-  solving beyond that needs the [spec 24](24-self-directed-work.md)
-  duties running first.
 - **Read-before-edit precondition**: opencode-style enforcement
   (reject edits to files not yet read this session) would prevent
   blind edits but needs per-session read tracking in the harness. The

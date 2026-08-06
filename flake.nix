@@ -54,6 +54,13 @@
         commonArgs = {
           inherit src;
           strictDeps = true;
+          # Link with mold in the nix sandbox. Working-tree builds get
+          # it via .cargo/config.toml + the devShell package below.
+          RUSTFLAGS = [
+            "-C"
+            "link-arg=-fuse-ld=mold"
+          ];
+          nativeBuildInputs = [ pkgs.mold ];
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -124,6 +131,10 @@
             just
             jq
             rust-analyzer
+            # Linker
+            mold
+            # Cache hygiene
+            cargo-sweep
             # Nix tooling
             nixfmt-rfc-style
             statix

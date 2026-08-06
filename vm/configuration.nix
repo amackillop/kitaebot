@@ -418,6 +418,9 @@ in
           };
           environment = {
             KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
+            # Shared cargo target dir (spec 03 Build Warm). Under
+            # projects/ so the exec Landlock tier can write it.
+            CARGO_TARGET_DIR = "/var/lib/kitaebot/projects/target";
             RUST_LOG = cfg.logLevel;
             PATH = lib.mkForce toolPath;
             # All egress via the allowlisting forward proxy. Both cases
