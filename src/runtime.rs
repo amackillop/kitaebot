@@ -90,6 +90,7 @@ pub fn build(config: &Config, workspace: &Workspace) -> Runtime {
             client,
             Duration::from_secs(config.linear.poll_interval_secs),
             config.linear.trusted_users.clone(),
+            config.linear.plan_label.clone(),
             git_cli.clone(),
         ))
     } else {

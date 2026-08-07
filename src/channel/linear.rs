@@ -39,6 +39,9 @@ pub struct LinearChannel {
     client: LinearClient,
     interval: Duration,
     trusted_users: Vec<String>,
+    /// Label requesting plan-first choreography (config
+    /// `linear.plan_label`).
+    plan_label: String,
     /// Prepares a fresh base checkout for execution turns. `None` when
     /// the GitHub token is unavailable (agent clones for itself).
     git: Option<GitCli>,
@@ -49,12 +52,14 @@ impl LinearChannel {
         client: LinearClient,
         interval: Duration,
         trusted_users: Vec<String>,
+        plan_label: String,
         git: Option<GitCli>,
     ) -> Self {
         Self {
             client,
             interval,
             trusted_users,
+            plan_label,
             git,
         }
     }
@@ -130,6 +135,7 @@ pub async fn poll_loop(channel: &LinearChannel, handle: &AgentHandle, state_db: 
             &state,
             &viewer.id,
             &channel.trusted_users,
+            &channel.plan_label,
             &now_iso8601(),
         );
         let count = dispatches.len();
@@ -261,6 +267,7 @@ pub fn decide_events(
     state: &PollState,
     viewer_id: &str,
     trusted_users: &[String],
+    plan_label: &str,
     now: &str,
 ) -> (Vec<Dispatch>, PollState) {
     let mut dispatches = Vec::new();
@@ -276,12 +283,19 @@ pub fn decide_events(
         };
 
         if !state.announced_issues.contains(&issue.identifier) {
+            // The label chooses the choreography: plan-first when the
+            // human asked for one, direct execution otherwise.
+            let plan_first = has_label(issue, plan_label);
             dispatches.push(Dispatch {
                 issue_id: issue.id.clone(),
                 identifier: issue.identifier.clone(),
                 repo: repo.to_string(),
-                message: format_new_issue(issue, repo),
-                needs_checkout: false,
+                message: if plan_first {
+                    format_new_issue(issue, repo)
+                } else {
+                    format_new_issue_execute(issue, repo)
+                },
+                needs_checkout: !plan_first,
             });
             announced.insert(issue.identifier.clone());
             continue;
@@ -340,6 +354,15 @@ fn repo_label(issue: &Issue) -> Option<&str> {
     }
 }
 
+/// Whether the issue carries `label`, matched case-insensitively.
+fn has_label(issue: &Issue, label: &str) -> bool {
+    issue
+        .labels
+        .nodes
+        .iter()
+        .any(|l| l.name.eq_ignore_ascii_case(label))
+}
+
 fn is_trusted(email: &str, trusted_users: &[String]) -> bool {
     trusted_users.iter().any(|u| u.eq_ignore_ascii_case(email))
 }
@@ -371,6 +394,46 @@ fn format_new_issue(issue: &Issue, repo: &str) -> String {
          there with the linear_set_state tool (it lists the available \
          states); otherwise leave the state as-is.",
         super::PLAN_INSTRUCTIONS
+    );
+    s
+}
+
+/// The direct-execution announcement, for issues assigned without
+/// the plan label.
+fn format_new_issue_execute(issue: &Issue, repo: &str) -> String {
+    let branch = format!(
+        "kitaebot_{}_<short-summary>",
+        issue.identifier.to_lowercase()
+    );
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "Linear issue {} \"{}\" was assigned to you for direct execution \
+         (no plan requested; repo: {repo}).",
+        issue.identifier, issue.title,
+    );
+    if let Some(description) = issue.description.as_deref().filter(|d| !d.is_empty()) {
+        let _ = writeln!(s, "\nDescription:\n{description}");
+    }
+    if !issue.comments.nodes.is_empty() {
+        let _ = writeln!(s, "\nExisting comments:");
+        for comment in &issue.comments.nodes {
+            let author = comment.user.as_ref().map_or("unknown", |u| u.name.as_str());
+            let _ = writeln!(s, "[{author}] {}", comment.body);
+        }
+    }
+    let _ = writeln!(
+        s,
+        "\nImplement it end-to-end: move the ticket to an in-progress \
+         state with the linear_set_state tool if the workflow has one, \
+         then create a branch named {branch} (the ticket id in the branch \
+         name links the PR to the issue), implement, test, commit, push, \
+         and open a PR. On success reply with one line at most; the PR \
+         links itself to the ticket. Be detailed only if something failed \
+         or needs a decision. If the ticket turns out underspecified or \
+         materially larger than it reads, stop before implementing and \
+         reply with your plan or questions instead — your reply is posted \
+         verbatim as a comment on the ticket."
     );
     s
 }
@@ -455,10 +518,10 @@ mod tests {
 
     #[test]
     fn new_issue_is_announced_once() {
-        let issues = [issue("MDK-1", &["owner/repo"], vec![])];
+        let issues = [issue("MDK-1", &["owner/repo", "needs-plan"], vec![])];
         let st = state("2026-07-05T12:00:00Z", &[]);
 
-        let (dispatches, next) = decide_events(&issues, &st, "bot", &trusted(), NOW);
+        let (dispatches, next) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0].identifier, "MDK-1");
         assert_eq!(dispatches[0].issue_id, "id-MDK-1");
@@ -469,15 +532,53 @@ mod tests {
         assert_eq!(next.last_poll, NOW);
 
         // Second tick: already announced, no new comments — nothing.
-        let (dispatches, _) = decide_events(&issues, &next, "bot", &trusted(), NOW);
+        let (dispatches, _) = decide_events(&issues, &next, "bot", &trusted(), "needs-plan", NOW);
         assert!(dispatches.is_empty());
+    }
+
+    #[test]
+    fn unlabeled_issue_executes_directly() {
+        let issues = [issue("MDK-1", &["owner/repo"], vec![])];
+        let st = state("2026-07-05T12:00:00Z", &[]);
+
+        let (dispatches, next) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
+
+        assert_eq!(dispatches.len(), 1);
+        assert!(
+            dispatches[0].needs_checkout,
+            "direct execution needs a checkout"
+        );
+        let msg = &dispatches[0].message;
+        assert!(msg.contains("direct execution"), "{msg}");
+        assert!(msg.contains("kitaebot_mdk-1_<short-summary>"));
+        assert!(
+            msg.contains("stop before implementing"),
+            "needs the escape hatch"
+        );
+        assert!(!msg.contains("Do not implement anything yet"));
+        assert!(next.announced_issues.contains("MDK-1"));
+    }
+
+    #[test]
+    fn plan_label_is_case_insensitive() {
+        let issues = [issue("MDK-1", &["owner/repo", "Needs-Plan"], vec![])];
+        let st = state("2026-07-05T12:00:00Z", &[]);
+
+        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
+
+        assert!(!dispatches[0].needs_checkout);
+        assert!(
+            dispatches[0]
+                .message
+                .contains("Do not implement anything yet")
+        );
     }
 
     #[test]
     fn announcement_embeds_description_and_comments() {
         let issues = [issue(
             "MDK-1",
-            &["owner/repo"],
+            &["owner/repo", "needs-plan"],
             vec![comment(
                 "2026-07-05T11:00:00Z",
                 Some(user("u2", "Alice", TRUSTED)),
@@ -486,7 +587,7 @@ mod tests {
         )];
         let st = state("2026-07-05T12:00:00Z", &[]);
 
-        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), NOW);
+        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert_eq!(dispatches.len(), 1);
         let msg = &dispatches[0].message;
         assert!(msg.contains("It is broken"));
@@ -502,7 +603,7 @@ mod tests {
         // must not double dispatch — it rides along in the announcement.
         let issues = [issue(
             "MDK-1",
-            &["owner/repo"],
+            &["owner/repo", "needs-plan"],
             vec![comment(
                 "2026-07-05T12:30:00Z",
                 Some(user("u2", "Alice", TRUSTED)),
@@ -511,7 +612,7 @@ mod tests {
         )];
         let st = state("2026-07-05T12:00:00Z", &[]);
 
-        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), NOW);
+        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert_eq!(dispatches.len(), 1);
         assert!(dispatches[0].message.contains("assigned to you"));
     }
@@ -529,7 +630,7 @@ mod tests {
         )];
         let st = state("2026-07-05T12:00:00Z", &["MDK-1"]);
 
-        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), NOW);
+        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0].repo, "owner/repo");
         assert!(dispatches[0].needs_checkout);
@@ -552,7 +653,7 @@ mod tests {
         )];
         let st = state("2026-07-05T12:00:00Z", &["MDK-1"]);
 
-        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), NOW);
+        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert!(dispatches.is_empty());
     }
 
@@ -577,7 +678,7 @@ mod tests {
         )];
         let st = state("2026-07-05T12:00:00Z", &["MDK-1"]);
 
-        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), NOW);
+        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert!(dispatches.is_empty());
     }
 
@@ -586,7 +687,7 @@ mod tests {
         let issues = [issue("MDK-1", &["bug"], vec![])];
         let st = state("2026-07-05T12:00:00Z", &[]);
 
-        let (dispatches, next) = decide_events(&issues, &st, "bot", &trusted(), NOW);
+        let (dispatches, next) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert!(dispatches.is_empty());
         // Not added to state: announced once the label shows up.
         assert!(!next.announced_issues.contains("MDK-1"));
@@ -597,7 +698,7 @@ mod tests {
         let issues = [issue("MDK-1", &["owner/repo", "other/repo"], vec![])];
         let st = state("2026-07-05T12:00:00Z", &[]);
 
-        let (dispatches, next) = decide_events(&issues, &st, "bot", &trusted(), NOW);
+        let (dispatches, next) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert!(dispatches.is_empty());
         assert!(next.announced_issues.is_empty());
     }
@@ -607,7 +708,7 @@ mod tests {
         let issues = [issue("MDK-1", &["bug", "owner/repo", "p0"], vec![])];
         let st = state("2026-07-05T12:00:00Z", &[]);
 
-        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), NOW);
+        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0].repo, "owner/repo");
         assert!(dispatches[0].message.contains("repo: owner/repo"));
@@ -618,7 +719,7 @@ mod tests {
         let issues = [issue("MDK-2", &["owner/repo"], vec![])];
         let st = state("2026-07-05T12:00:00Z", &["MDK-1", "MDK-2"]);
 
-        let (_, next) = decide_events(&issues, &st, "bot", &trusted(), NOW);
+        let (_, next) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert!(!next.announced_issues.contains("MDK-1"));
         assert!(next.announced_issues.contains("MDK-2"));
     }
@@ -681,7 +782,13 @@ mod tests {
     }
 
     fn channel(client: LinearClient) -> LinearChannel {
-        LinearChannel::new(client, Duration::from_mins(2), trusted(), None)
+        LinearChannel::new(
+            client,
+            Duration::from_mins(2),
+            trusted(),
+            "needs-plan".into(),
+            None,
+        )
     }
 
     #[test]

@@ -207,6 +207,7 @@ kitaebot = {
       enabled = true;
       poll_interval_secs = 120;
       trusted_users = [ "user@example.com" ];    # Emails allowed to drive issues
+      plan_label = "needs-plan";                 # Labeled issues get plan-first; unlabeled execute directly
     };
     duties = {                                   # Duty scheduler (spec 24)
       distill = { every = "1h"; };                # Token gate still applies

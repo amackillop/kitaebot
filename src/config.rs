@@ -586,6 +586,10 @@ pub struct LinearConfig {
     /// Email addresses allowed to interact with the bot, matched
     /// case-insensitively. Must be non-empty when enabled.
     pub trusted_users: Vec<String>,
+    /// Label requesting plan-first choreography. An assigned issue
+    /// without it is executed directly; with it, the bot posts a plan
+    /// and waits for approval. Defaults to `needs-plan`.
+    pub plan_label: String,
 }
 
 // --- Default impls ---
@@ -766,6 +770,7 @@ impl Default for LinearConfig {
             enabled: false,
             poll_interval_secs: 120,
             trusted_users: Vec::new(),
+            plan_label: "needs-plan".into(),
         }
     }
 }
@@ -1003,6 +1008,11 @@ impl Config {
             if self.linear.trusted_users.is_empty() {
                 return Err(ConfigError::Invalid(
                     "linear trusted_users must be non-empty when enabled".into(),
+                ));
+            }
+            if self.linear.plan_label.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "linear plan_label must be non-empty".into(),
                 ));
             }
         }

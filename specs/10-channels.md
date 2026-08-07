@@ -290,6 +290,12 @@ Comments authored by the viewer are skipped to prevent self-reply loops.
   detail is reserved for failures or open decisions. Otherwise treat it as
   feedback and reply with a revised plan.
 
+**The plan label chooses the choreography**, exactly as on the GitHub
+issues channel: an issue carrying `linear.plan_label` (default
+`needs-plan`, case-insensitive) gets plan-first; without it the
+announcement is a direct execution turn, with the same judgment
+backstop. The label is read at announcement time.
+
 **Repo selection**: the target repository comes from a label on the issue —
 a label named like `owner/repo` (contains exactly one `/`). Issues without
 such a label, or with more than one, are logged and skipped entirely: not
