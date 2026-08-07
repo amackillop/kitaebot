@@ -197,6 +197,35 @@ impl GithubClient {
         .await
     }
 
+    /// One conversation comment, for authorship checks before editing.
+    pub async fn issue_comment(
+        &self,
+        nwo: &str,
+        comment_id: u64,
+    ) -> Result<IssueComment, GithubError> {
+        self.get_json(format!("repos/{nwo}/issues/comments/{comment_id}"))
+            .await
+    }
+
+    /// Replace a conversation comment's body. GitHub keeps the edit
+    /// history visible in the UI.
+    pub async fn update_issue_comment(
+        &self,
+        nwo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<IssueComment, GithubError> {
+        let payload = serde_json::to_vec(&json!({ "body": body }))
+            .map_err(|e| GithubError::Network(e.to_string()))?;
+        let raw = (self.request)(
+            "PATCH",
+            format!("repos/{nwo}/issues/comments/{comment_id}"),
+            Some(payload),
+        )
+        .await?;
+        interpret_response(&raw)
+    }
+
     /// Users and teams whose review is still requested.
     pub async fn requested_reviewers(
         &self,
@@ -413,6 +442,8 @@ pub struct PrReview {
 /// A conversation comment on an issue or PR.
 #[derive(Clone, Debug, Deserialize)]
 pub struct IssueComment {
+    /// Comment id, needed to edit in place via the update endpoint.
+    pub id: u64,
     pub user: UserRef,
     pub body: String,
     pub created_at: String,
@@ -667,7 +698,7 @@ mod tests {
             assert_eq!(payload["body"], "A plan");
             Ok(RawResponse {
                 status: 201,
-                body: br#"{"user":{"login":"bot"},"body":"A plan",
+                body: br#"{"id":7,"user":{"login":"bot"},"body":"A plan",
                     "created_at":"2026-01-01T00:00:00Z"}"#
                     .to_vec(),
             })

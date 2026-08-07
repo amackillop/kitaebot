@@ -8,6 +8,7 @@
 
 mod api;
 mod ci_status;
+mod comment_update;
 mod issue_create;
 mod pr_create;
 mod pr_diff_comments;
@@ -20,6 +21,7 @@ mod test_helpers;
 
 pub use api::Api;
 pub use ci_status::CiStatus;
+pub use comment_update::CommentUpdate;
 pub use issue_create::IssueCreate;
 pub use pr_create::PrCreate;
 pub use pr_diff_comments::PrDiffComments;
@@ -106,6 +108,10 @@ pub(crate) fn build(api: GithubApi, repos: Vec<String>) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(Api(api.clone())),
         Arc::new(CiStatus(api.clone())),
+        Arc::new(CommentUpdate {
+            api: api.clone(),
+            repos: repos.clone(),
+        }),
         Arc::new(IssueCreate {
             api: api.clone(),
             repos,

@@ -149,6 +149,7 @@ mod tests {
             }],
         };
         let comments = vec![IssueComment {
+            id: 1,
             user: user("carol"),
             body: "What about edge cases?".into(),
             created_at: "2025-01-15T11:00:00Z".into(),

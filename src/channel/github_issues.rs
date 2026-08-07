@@ -427,6 +427,7 @@ mod tests {
 
     fn comment(created_at: &str, login: &str, body: &str) -> IssueComment {
         IssueComment {
+            id: 1,
             user: UserRef {
                 login: login.into(),
             },
@@ -692,7 +693,7 @@ mod tests {
                 match results.lock().unwrap().pop_front().unwrap() {
                     Ok(()) => Ok(RawResponse {
                         status: 201,
-                        body: br#"{"user":{"login":"kitaebot"},"body":"x",
+                        body: br#"{"id":7,"user":{"login":"kitaebot"},"body":"x",
                             "created_at":"2026-08-04T13:00:00Z"}"#
                             .to_vec(),
                     }),

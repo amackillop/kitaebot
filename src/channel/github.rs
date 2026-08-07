@@ -947,6 +947,7 @@ mod tests {
     fn format_comment_basic() {
         let pr = search_issue(7, "Update docs", "owner/repo", "bot");
         let comment = IssueComment {
+            id: 1,
             user: user("carol"),
             body: "What about edge cases?".to_string(),
             created_at: "2025-01-15T11:00:00Z".to_string(),
@@ -1217,6 +1218,7 @@ mod tests {
 
     fn pr_comment(author: &str, body: &str, created_at: &str) -> IssueComment {
         IssueComment {
+            id: 1,
             user: user(author),
             body: body.to_string(),
             created_at: created_at.to_string(),
