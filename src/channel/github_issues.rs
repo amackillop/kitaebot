@@ -91,6 +91,7 @@ pub async fn poll_loop(
             &state,
             &bot_login,
             &Trust::new(config),
+            &config.issues.plan_label,
             &now_iso8601(),
         );
         let count = dispatches.len();
@@ -334,6 +335,7 @@ pub fn decide_events(
     state: &PollState,
     bot_login: &str,
     trust: &Trust,
+    plan_label: &str,
     now: &str,
 ) -> (Vec<Dispatch>, PollState) {
     let mut dispatches = Vec::new();
@@ -342,12 +344,19 @@ pub fn decide_events(
     for view in views {
         let key = view.key();
         if !state.announced_issues.contains(&key) {
+            // The label chooses the choreography: plan-first when the
+            // human asked for one, direct execution otherwise.
+            let plan_first = view.issue.has_label(plan_label);
             dispatches.push(Dispatch {
                 key: key.clone(),
                 nwo: view.nwo.clone(),
                 number: view.issue.number,
-                message: format_new_issue(view),
-                needs_checkout: false,
+                message: if plan_first {
+                    format_new_issue(view)
+                } else {
+                    format_new_issue_execute(view)
+                },
+                needs_checkout: !plan_first,
             });
             announced.insert(key);
             continue;
@@ -425,6 +434,43 @@ fn format_new_issue(view: &IssueView) -> String {
     s
 }
 
+/// The direct-execution announcement, for issues assigned without
+/// the plan label.
+fn format_new_issue_execute(view: &IssueView) -> String {
+    let branch = format!("kitaebot_issue-{}_<short-summary>", view.issue.number);
+    let number = view.issue.number;
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "GitHub issue {} \"{}\" was assigned to you for direct execution \
+         (no plan requested).",
+        view.key(),
+        view.issue.title,
+    );
+    if let Some(body) = view.issue.body.as_deref().filter(|b| !b.is_empty()) {
+        let _ = writeln!(s, "\nDescription:\n{body}");
+    }
+    if !view.comments.is_empty() {
+        let _ = writeln!(s, "\nExisting comments:");
+        for comment in &view.comments {
+            let _ = writeln!(s, "[{}] {}", comment.user.login, comment.body);
+        }
+    }
+    let _ = writeln!(
+        s,
+        "\nImplement it end-to-end: create a branch named {branch}, \
+         implement, test, commit, push, and open a PR whose description \
+         includes \"Closes #{number}\" so merging it closes this issue. \
+         On success reply with one line at most; the PR cross-references \
+         itself on the ticket. Be detailed only if something failed or \
+         needs a decision. If the ticket turns out underspecified or \
+         materially larger than it reads, stop before implementing and \
+         reply with your plan or questions instead — your reply is posted \
+         verbatim as a comment on the ticket."
+    );
+    s
+}
+
 fn format_comment(view: &IssueView, author: &str, body: &str, plan_comment: Option<u64>) -> String {
     let branch = format!("kitaebot_issue-{}_<short-summary>", view.issue.number);
     let number = view.issue.number;
@@ -492,7 +538,12 @@ mod tests {
         }
     }
 
-    fn view(number: u32, updated_at: &str, comments: Vec<IssueComment>) -> IssueView {
+    fn labeled_view(
+        number: u32,
+        updated_at: &str,
+        comments: Vec<IssueComment>,
+        labels: &[&str],
+    ) -> IssueView {
         IssueView {
             issue: SearchIssue {
                 number,
@@ -503,10 +554,20 @@ mod tests {
                 },
                 repository_url: "https://api.github.com/repos/owner/repo".into(),
                 updated_at: updated_at.into(),
+                labels: labels
+                    .iter()
+                    .map(|n| crate::clients::github::IssueLabel { name: (*n).into() })
+                    .collect(),
             },
             nwo: "owner/repo".into(),
             comments,
         }
+    }
+
+    /// A view carrying the plan label — most tests exercise the
+    /// plan-first choreography.
+    fn view(number: u32, updated_at: &str, comments: Vec<IssueComment>) -> IssueView {
+        labeled_view(number, updated_at, comments, &["needs-plan"])
     }
 
     fn state(last_poll: &str, announced: &[&str]) -> PollState {
@@ -530,7 +591,7 @@ mod tests {
 
     fn decide(views: &[IssueView], st: &PollState) -> (Vec<Dispatch>, PollState) {
         let config = config();
-        decide_events(views, st, BOT, &Trust::new(&config), NOW)
+        decide_events(views, st, BOT, &Trust::new(&config), "needs-plan", NOW)
     }
 
     #[test]
@@ -614,6 +675,49 @@ mod tests {
         assert!(msg.contains("Closes #1"));
         // No recorded plan comment: the fallback revision text applies.
         assert!(msg.contains("revise your plan and reply"));
+    }
+
+    #[test]
+    fn unlabeled_issue_executes_directly() {
+        let views = [labeled_view(1, "2026-08-04T12:30:00Z", vec![], &["bug"])];
+        let st = state("2026-08-04T12:00:00Z", &[]);
+
+        let (dispatches, next) = decide(&views, &st);
+
+        assert_eq!(dispatches.len(), 1);
+        assert!(
+            dispatches[0].needs_checkout,
+            "direct execution needs a checkout"
+        );
+        let msg = &dispatches[0].message;
+        assert!(msg.contains("direct execution"), "{msg}");
+        assert!(msg.contains("Closes #1"));
+        assert!(
+            msg.contains("stop before implementing"),
+            "needs the escape hatch"
+        );
+        assert!(!msg.contains("Do not implement anything yet"));
+        assert!(next.announced_issues.contains("owner/repo#1"));
+    }
+
+    #[test]
+    fn plan_label_is_case_insensitive() {
+        let views = [labeled_view(
+            1,
+            "2026-08-04T12:30:00Z",
+            vec![],
+            &["Needs-Plan"],
+        )];
+        let st = state("2026-08-04T12:00:00Z", &[]);
+
+        let (dispatches, _) = decide(&views, &st);
+
+        assert!(!dispatches[0].needs_checkout);
+        assert!(
+            dispatches[0]
+                .message
+                .contains("Do not implement anything yet")
+        );
     }
 
     #[test]

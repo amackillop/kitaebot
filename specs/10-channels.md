@@ -182,9 +182,20 @@ Each tick:
 7. Save the poll state
 
 **Events** mirror Linear's: *new issue* (not in the announced set)
-dispatches a plan-only announcement carrying title, body, and existing
+dispatches an announcement carrying title, body, and existing
 comments; *new comment* (`created_at > last_poll`, not the bot, from a
 trusted login) dispatches an execution/revision turn.
+
+**The plan label chooses the choreography.** An issue assigned with
+the `github.issues.plan_label` label (default `needs-plan`, matched
+case-insensitively) gets the plan-first flow: plan comment, human
+approval, then execution. Without it the announcement is a direct
+execution turn — the human made both gestures (assign + label) at
+triage, so an unlabeled assignment means "just do it"; review gates
+and PR review still stand behind the result. The prompt keeps a
+judgment backstop: a ticket that turns out underspecified or larger
+than it reads gets a plan or questions instead of code. The label is
+read at announcement time; adding it later changes nothing.
 
 **Plan revisions edit in place.** The channel records the announcement
 reply's comment id (that comment is the plan) and hands it to

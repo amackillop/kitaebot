@@ -200,6 +200,7 @@ kitaebot = {
       issues = {
         enabled = true;                    # Poll issues assigned to the bot
         poll_interval_secs = 300;
+        plan_label = "needs-plan";         # Labeled issues get plan-first; unlabeled execute directly
       };
     };
     linear = {

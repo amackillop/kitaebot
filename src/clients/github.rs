@@ -394,9 +394,26 @@ pub struct SearchIssue {
     pub repository_url: String,
     /// RFC 3339 timestamp of the last change, comments included.
     pub updated_at: String,
+    /// Issue labels. Defaulted so PR-search consumers and fixtures
+    /// that never set labels keep working.
+    #[serde(default)]
+    pub labels: Vec<IssueLabel>,
+}
+
+/// A label on an issue.
+#[derive(Clone, Debug, Deserialize)]
+pub struct IssueLabel {
+    pub name: String,
 }
 
 impl SearchIssue {
+    /// Whether the issue carries `label`, matched case-insensitively.
+    pub fn has_label(&self, label: &str) -> bool {
+        self.labels
+            .iter()
+            .any(|l| l.name.eq_ignore_ascii_case(label))
+    }
+
     /// `owner/repo`, parsed from the repository URL.
     pub fn nwo(&self) -> Option<String> {
         let mut segments = self.repository_url.rsplit('/');
@@ -613,6 +630,7 @@ mod tests {
             },
             repository_url: "https://api.github.com/repos/owner/repo".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
+            labels: Vec::new(),
         };
         assert_eq!(issue.nwo().as_deref(), Some("owner/repo"));
     }
@@ -628,6 +646,7 @@ mod tests {
             },
             repository_url: "repo/".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
+            labels: Vec::new(),
         };
         assert_eq!(issue.nwo(), None);
     }

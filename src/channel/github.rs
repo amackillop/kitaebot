@@ -908,6 +908,7 @@ mod tests {
             user: user(author),
             repository_url: format!("https://api.github.com/repos/{nwo}"),
             updated_at: "2026-01-01T00:00:00Z".into(),
+            labels: Vec::new(),
         }
     }
 

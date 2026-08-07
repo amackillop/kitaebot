@@ -565,6 +565,10 @@ pub struct GithubIssuesConfig {
     pub enabled: bool,
     /// Seconds between issue polling cycles. Defaults to 300 (5 minutes).
     pub poll_interval_secs: u64,
+    /// Label requesting plan-first choreography. An assigned issue
+    /// without it is executed directly; with it, the bot posts a plan
+    /// and waits for approval. Defaults to `needs-plan`.
+    pub plan_label: String,
 }
 
 /// Linear channel settings.
@@ -724,6 +728,7 @@ impl Default for GithubIssuesConfig {
         Self {
             enabled: false,
             poll_interval_secs: 300,
+            plan_label: "needs-plan".into(),
         }
     }
 }
@@ -895,40 +900,7 @@ impl Config {
                 "temperature must be between 0.0 and 2.0".into(),
             ));
         }
-        if self.telegram.enabled {
-            if self.telegram.chat_id == 0 {
-                return Err(ConfigError::Invalid(
-                    "telegram chat_id must be set when enabled".into(),
-                ));
-            }
-            if self.telegram.poll_timeout_secs == 0 {
-                return Err(ConfigError::Invalid(
-                    "telegram poll_timeout_secs must be > 0".into(),
-                ));
-            }
-        }
-        if self.github.enabled && self.github.poll_interval_secs == 0 {
-            return Err(ConfigError::Invalid(
-                "github poll_interval_secs must be > 0".into(),
-            ));
-        }
-        if self.github.enabled && self.github.owner.is_empty() {
-            return Err(ConfigError::Invalid(
-                "github owner must be set when enabled".into(),
-            ));
-        }
-        if self.linear.enabled {
-            if self.linear.poll_interval_secs == 0 {
-                return Err(ConfigError::Invalid(
-                    "linear poll_interval_secs must be > 0".into(),
-                ));
-            }
-            if self.linear.trusted_users.is_empty() {
-                return Err(ConfigError::Invalid(
-                    "linear trusted_users must be non-empty when enabled".into(),
-                ));
-            }
-        }
+        self.validate_channels()?;
         if self.tools.exec.timeout_secs == 0 {
             return Err(ConfigError::Invalid("timeout_secs must be > 0".into()));
         }
@@ -988,6 +960,50 @@ impl Config {
             }
             if p.gate.is_some() && !self.github.enabled {
                 return Err(ctx("gate \"new-commits\" requires github.enabled".into()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the channel sections (telegram, github, linear).
+    fn validate_channels(&self) -> Result<(), ConfigError> {
+        if self.telegram.enabled {
+            if self.telegram.chat_id == 0 {
+                return Err(ConfigError::Invalid(
+                    "telegram chat_id must be set when enabled".into(),
+                ));
+            }
+            if self.telegram.poll_timeout_secs == 0 {
+                return Err(ConfigError::Invalid(
+                    "telegram poll_timeout_secs must be > 0".into(),
+                ));
+            }
+        }
+        if self.github.enabled && self.github.poll_interval_secs == 0 {
+            return Err(ConfigError::Invalid(
+                "github poll_interval_secs must be > 0".into(),
+            ));
+        }
+        if self.github.enabled && self.github.owner.is_empty() {
+            return Err(ConfigError::Invalid(
+                "github owner must be set when enabled".into(),
+            ));
+        }
+        if self.github.issues.enabled && self.github.issues.plan_label.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "github issues plan_label must be non-empty".into(),
+            ));
+        }
+        if self.linear.enabled {
+            if self.linear.poll_interval_secs == 0 {
+                return Err(ConfigError::Invalid(
+                    "linear poll_interval_secs must be > 0".into(),
+                ));
+            }
+            if self.linear.trusted_users.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "linear trusted_users must be non-empty when enabled".into(),
+                ));
             }
         }
         Ok(())
