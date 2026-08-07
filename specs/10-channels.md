@@ -184,7 +184,18 @@ Each tick:
 **Events** mirror Linear's: *new issue* (not in the announced set)
 dispatches a plan-only announcement carrying title, body, and existing
 comments; *new comment* (`created_at > last_poll`, not the bot, from a
-trusted login) dispatches an execution/revision turn. Execution turns
+trusted login) dispatches an execution/revision turn.
+
+**Plan revisions edit in place.** The channel records the announcement
+reply's comment id (that comment is the plan) and hands it to
+revision turns, which are instructed to engage with feedback as a
+peer: update the plan comment via `github_comment_update` where
+persuaded — GitHub's edit history shows the reviewer the diff — and
+push back with reasons where not, rather than complying with changes
+the bot believes are wrong. The reply comment doubles as the
+notification, since GitHub sends none for edits. Ids are pruned with
+their issues; state predating the field falls back to
+reply-with-full-plan. Execution turns
 get a fresh base checkout prepared at `projects/<owner>/<repo>`
 (shared `execution_checkout` logic). The branch convention is
 `kitaebot_issue-{n}_<summary>` and the PR description carries

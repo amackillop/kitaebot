@@ -11,7 +11,7 @@
 //! formatting, and poll-state persistence. The poll loop is the thin
 //! effectful shell on top.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::time::Duration;
 
@@ -94,8 +94,12 @@ pub async fn poll_loop(
             &now_iso8601(),
         );
         let count = dispatches.len();
+        let mut next = next;
         for d in dispatches {
-            dispatch(client, git, handle, d).await;
+            let key = d.key.clone();
+            if let Some(plan_id) = dispatch(client, git, handle, d).await {
+                next.plan_comments.insert(key, plan_id);
+            }
         }
         info!(count, "GitHub issues poll: dispatched {count} items");
 
@@ -163,7 +167,14 @@ async fn checkout_note(git: &GitCli, d: &Dispatch) -> Option<String> {
 }
 
 /// Run one agent turn and post the reply (or error) as a comment.
-async fn dispatch(client: &GithubClient, git: &GitCli, handle: &AgentHandle, d: Dispatch) {
+/// Returns the posted comment's id for announcement turns — that
+/// comment is the plan, and revision turns need its id.
+async fn dispatch(
+    client: &GithubClient,
+    git: &GitCli,
+    handle: &AgentHandle,
+    d: Dispatch,
+) -> Option<u64> {
     let cancel = CancellationToken::new();
     let source = ChannelSource::GitHubIssue {
         issue: d.key.clone(),
@@ -187,8 +198,12 @@ async fn dispatch(client: &GithubClient, git: &GitCli, handle: &AgentHandle, d: 
             e
         }
     };
-    if let Err(e) = post_comment(client, &d.nwo, d.number, &body).await {
-        error!("GitHub issue {}: failed to post comment: {e}", d.key);
+    match post_comment(client, &d.nwo, d.number, &body).await {
+        Ok(posted) => (!d.needs_checkout).then_some(posted.id),
+        Err(e) => {
+            error!("GitHub issue {}: failed to post comment: {e}", d.key);
+            None
+        }
     }
 }
 
@@ -201,11 +216,11 @@ async fn post_comment(
     nwo: &str,
     number: u32,
     body: &str,
-) -> Result<(), GithubError> {
+) -> Result<IssueComment, GithubError> {
     let mut attempts = 0u32;
     loop {
         match client.create_issue_comment(nwo, number, body).await {
-            Ok(_) => return Ok(()),
+            Ok(posted) => return Ok(posted),
             Err(e) if attempts < POST_RETRIES && is_transient(&e) => {
                 let delay = Duration::from_secs(u64::from(1u32 << attempts));
                 attempts += 1;
@@ -231,6 +246,11 @@ pub struct PollState {
     pub last_poll: String,
     /// Issues already announced to the agent, keyed `owner/repo#42`.
     pub announced_issues: BTreeSet<String>,
+    /// The bot's plan comment per issue, keyed `owner/repo#42` — the
+    /// announcement reply's comment id, handed back to revision turns
+    /// so the plan can be edited in place.
+    #[serde(default)]
+    pub plan_comments: BTreeMap<String, u64>,
 }
 
 impl PollState {
@@ -239,6 +259,7 @@ impl PollState {
         Self {
             last_poll: now_iso8601(),
             announced_issues: BTreeSet::new(),
+            plan_comments: BTreeMap::new(),
         }
     }
 }
@@ -352,7 +373,12 @@ pub fn decide_events(
                 key: key.clone(),
                 nwo: view.nwo.clone(),
                 number: view.issue.number,
-                message: format_comment(view, &comment.user.login, &comment.body),
+                message: format_comment(
+                    view,
+                    &comment.user.login,
+                    &comment.body,
+                    state.plan_comments.get(&key).copied(),
+                ),
                 needs_checkout: true,
             });
         }
@@ -361,7 +387,14 @@ pub fn decide_events(
     let next = PollState {
         last_poll: now.to_string(),
         // Keys absent from the fetch (closed, unassigned) are pruned
-        // by rebuilding from fetched issues only.
+        // by rebuilding from fetched issues only; plan ids follow the
+        // same lifetime.
+        plan_comments: state
+            .plan_comments
+            .iter()
+            .filter(|(k, _)| announced.contains(*k))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
         announced_issues: announced,
     };
     (dispatches, next)
@@ -392,7 +425,7 @@ fn format_new_issue(view: &IssueView) -> String {
     s
 }
 
-fn format_comment(view: &IssueView, author: &str, body: &str) -> String {
+fn format_comment(view: &IssueView, author: &str, body: &str, plan_comment: Option<u64>) -> String {
     let branch = format!("kitaebot_issue-{}_<short-summary>", view.issue.number);
     let number = view.issue.number;
     let mut s = String::new();
@@ -410,9 +443,32 @@ fn format_comment(view: &IssueView, author: &str, body: &str) -> String {
          PR whose description includes \"Closes #{number}\" so merging it \
          closes this issue. On success reply with one line at most; the PR \
          cross-references itself on the ticket. Be detailed only if \
-         something failed or needs a decision. If the comment is feedback \
-         instead, revise your plan and reply with the updated plan."
+         something failed or needs a decision."
     );
+    match plan_comment {
+        Some(id) => {
+            let _ = writeln!(
+                s,
+                "\nIf the comment is feedback on the plan instead, engage \
+                 with it like a colleague — your reply is posted verbatim \
+                 as a comment, and some prose discussing the request is \
+                 welcome. Where the feedback improves the plan, revise the \
+                 plan in place with github_comment_update (your plan is \
+                 comment id {id}; the edit history shows the reviewer what \
+                 changed) and summarize the change in your reply. Where you \
+                 disagree, push back with your reasoning and leave the plan \
+                 unchanged on that point — do not adopt changes you believe \
+                 are wrong just to comply."
+            );
+        }
+        None => {
+            let _ = writeln!(
+                s,
+                "\nIf the comment is feedback instead, revise your plan and \
+                 reply with the updated plan."
+            );
+        }
+    }
     s
 }
 
@@ -457,6 +513,7 @@ mod tests {
         PollState {
             last_poll: last_poll.into(),
             announced_issues: announced.iter().map(|s| (*s).into()).collect(),
+            plan_comments: BTreeMap::new(),
         }
     }
 
@@ -555,6 +612,41 @@ mod tests {
         assert!(msg.contains("approved, go ahead"));
         assert!(msg.contains("kitaebot_issue-1_<short-summary>"));
         assert!(msg.contains("Closes #1"));
+        // No recorded plan comment: the fallback revision text applies.
+        assert!(msg.contains("revise your plan and reply"));
+    }
+
+    #[test]
+    fn known_plan_comment_enables_in_place_revision() {
+        let views = [view(
+            1,
+            "2026-08-04T12:30:00Z",
+            vec![comment("2026-08-04T12:30:00Z", "alice", "what about X?")],
+        )];
+        let mut st = state("2026-08-04T12:00:00Z", &["owner/repo#1"]);
+        st.plan_comments.insert("owner/repo#1".into(), 77);
+
+        let (dispatches, next) = decide(&views, &st);
+
+        let msg = &dispatches[0].message;
+        assert!(msg.contains("comment id 77"), "{msg}");
+        assert!(msg.contains("github_comment_update"));
+        assert!(msg.contains("disagree"), "revision must license pushback");
+        // The id survives into the next state while the issue is open.
+        assert_eq!(next.plan_comments.get("owner/repo#1"), Some(&77));
+    }
+
+    #[test]
+    fn plan_comments_are_pruned_with_their_issues() {
+        let views = [view(2, "2026-08-04T12:30:00Z", vec![])];
+        let mut st = state("2026-08-04T12:00:00Z", &["owner/repo#1", "owner/repo#2"]);
+        st.plan_comments.insert("owner/repo#1".into(), 77);
+        st.plan_comments.insert("owner/repo#2".into(), 88);
+
+        let (_, next) = decide(&views, &st);
+
+        assert_eq!(next.plan_comments.get("owner/repo#1"), None);
+        assert_eq!(next.plan_comments.get("owner/repo#2"), Some(&88));
     }
 
     #[test]
@@ -630,11 +722,29 @@ mod tests {
     fn state_round_trip() {
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
 
-        let st = state("2026-08-04T12:00:00Z", &["owner/repo#1"]);
+        let mut st = state("2026-08-04T12:00:00Z", &["owner/repo#1"]);
+        st.plan_comments.insert("owner/repo#1".into(), 77);
         save_state(&db, &st);
         let loaded = load_state(&db);
         assert_eq!(loaded.last_poll, "2026-08-04T12:00:00Z");
         assert!(loaded.announced_issues.contains("owner/repo#1"));
+        assert_eq!(loaded.plan_comments.get("owner/repo#1"), Some(&77));
+    }
+
+    #[test]
+    fn state_without_plan_comments_still_loads() {
+        // Deployed state predates the field; serde default must cover it.
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        db.put_doc(
+            DOC,
+            r#"{"last_poll":"2026-08-04T12:00:00Z","announced_issues":["owner/repo#1"]}"#,
+        )
+        .unwrap();
+
+        let loaded = load_state(&db);
+
+        assert!(loaded.announced_issues.contains("owner/repo#1"));
+        assert!(loaded.plan_comments.is_empty());
     }
 
     #[test]
@@ -766,7 +876,7 @@ mod tests {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let client = comment_client(vec![Ok(())], sent.clone());
 
-        dispatch(
+        let plan_id = dispatch(
             &client,
             &git,
             &handle,
@@ -783,5 +893,7 @@ mod tests {
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0], "a plan");
+        // The announcement reply is the plan; its id gets recorded.
+        assert_eq!(plan_id, Some(7));
     }
 }
