@@ -85,6 +85,11 @@ pub enum ProviderError {
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
 
+    /// A tool call whose name violates the API's own tool-name grammar,
+    /// `^[a-zA-Z0-9_-]+$`. Refused before it can enter history.
+    #[error("Provider returned a tool call with a malformed name: {name:?}")]
+    MalformedToolCall { name: String },
+
     /// Transport-level failure (connection, timeout, reading the body).
     #[error("Network error: {0}")]
     Network(String),

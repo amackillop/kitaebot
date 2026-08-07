@@ -11,7 +11,7 @@ use tracing::{debug, trace, warn};
 use crate::clients::chat_completion::{ApiToolCall, ChatResponse, CompletionsClient};
 use crate::config::{Api, ProviderConfig};
 use crate::error::ProviderError;
-use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
+use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction, is_valid_tool_name};
 
 use super::wire::WireMessage;
 
@@ -87,6 +87,19 @@ impl CompletionsProvider {
 
         match choice.message.tool_calls {
             Some(calls) if !calls.is_empty() => {
+                // A name the API's own grammar rejects would 400 on every
+                // later request that replays it, so it must never reach
+                // history — refuse the whole response instead.
+                if let Some(bad) = calls.iter().find(|c| !is_valid_tool_name(&c.function.name)) {
+                    warn!(
+                        name = %bad.function.name,
+                        arguments = %bad.function.arguments,
+                        "Provider returned a malformed tool name"
+                    );
+                    return Err(ProviderError::MalformedToolCall {
+                        name: bad.function.name.clone(),
+                    });
+                }
                 let calls = calls.into_iter().map(into_tool_call).collect();
                 Ok(Response::ToolCalls { content, calls })
             }
@@ -570,5 +583,72 @@ mod tests {
             reasoning: None,
         }));
         assert!(matches!(result, Ok(Response::Text(t)) if t == "done"));
+    }
+
+    /// The exact name Azure emitted for `openai/gpt-5.6-luna`: argument
+    /// markup spliced into the function name.
+    #[test]
+    fn tool_name_with_leaked_argument_markup_is_refused() {
+        let bad = "review_disposition</arg_key><arg_value>fixed</arg_value>";
+        let result = CompletionsProvider::parse_response(response(AssistantMessage {
+            content: Some("Now record the review dispositions:".to_string()),
+            tool_calls: Some(vec![ApiToolCall {
+                id: "call-1".to_string(),
+                function: ApiFunction {
+                    name: bad.to_string(),
+                    arguments: r#"{"finding_id": 11}"#.to_string(),
+                },
+            }]),
+            reasoning: None,
+        }));
+        assert!(matches!(
+            result,
+            Err(ProviderError::MalformedToolCall { name }) if name == bad
+        ));
+    }
+
+    /// One bad name condemns the batch: a partial push would leave the
+    /// good calls without results.
+    #[test]
+    fn one_malformed_name_refuses_the_whole_batch() {
+        let mut bad = tool_call();
+        bad.function.name = "exec ".to_string();
+        let result = CompletionsProvider::parse_response(response(AssistantMessage {
+            content: None,
+            tool_calls: Some(vec![tool_call(), bad]),
+            reasoning: None,
+        }));
+        assert!(matches!(
+            result,
+            Err(ProviderError::MalformedToolCall { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_tool_name_is_refused() {
+        let mut bad = tool_call();
+        bad.function.name = String::new();
+        let result = CompletionsProvider::parse_response(response(AssistantMessage {
+            content: None,
+            tool_calls: Some(vec![bad]),
+            reasoning: None,
+        }));
+        assert!(matches!(
+            result,
+            Err(ProviderError::MalformedToolCall { .. })
+        ));
+    }
+
+    /// Namespaced MCP tools carry `_` and `-`; both are legal.
+    #[test]
+    fn namespaced_mcp_tool_names_are_accepted() {
+        let mut ok = tool_call();
+        ok.function.name = "bkb_lookup-bip".to_string();
+        let result = CompletionsProvider::parse_response(response(AssistantMessage {
+            content: None,
+            tool_calls: Some(vec![ok]),
+            reasoning: None,
+        }));
+        assert!(matches!(result, Ok(Response::ToolCalls { .. })));
     }
 }

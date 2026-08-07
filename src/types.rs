@@ -57,6 +57,15 @@ pub struct ToolFunction {
     pub arguments: String,
 }
 
+/// True when `name` satisfies the tool-name grammar every OpenAI-shaped
+/// endpoint enforces: `^[a-zA-Z0-9_-]+$`.
+pub fn is_valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 impl Message {
     /// The text content common to every variant.
     pub fn content(&self) -> &str {
