@@ -115,10 +115,17 @@ pub enum ProviderError {
 
 impl ProviderError {
     /// True when the identical request may succeed if resent.
+    ///
+    /// `MalformedToolCall` qualifies because sampling is not
+    /// deterministic at our temperature: the request is fine, the draw
+    /// was not, and a fresh draw is the whole remedy.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
-            Self::Network(_) | Self::ServerError(_) | Self::RateLimited
+            Self::MalformedToolCall { .. }
+                | Self::Network(_)
+                | Self::RateLimited
+                | Self::ServerError(_)
         )
     }
 }

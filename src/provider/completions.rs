@@ -133,32 +133,14 @@ impl CompletionsProvider {
             _ => Ok(Response::Text(content)),
         }
     }
-}
 
-impl Provider for CompletionsProvider {
-    async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-    ) -> Result<ChatOutcome, ProviderError> {
-        let wire_messages: Vec<WireMessage> = messages.iter().map(WireMessage::from).collect();
-        let request = ChatRequest {
-            model: &self.model,
-            messages: wire_messages,
-            tools: if tools.is_empty() { None } else { Some(tools) },
-            max_tokens: self.max_tokens,
-            temperature: self.temperature,
-            usage: self.openrouter.then_some(UsageAccounting { include: true }),
-            provider: self.openrouter.then_some(ProviderPreferences {
-                data_collection: "deny",
-            }),
-        };
-
-        debug!(model = %self.model, message_count = messages.len(), "Sending chat request");
-        trace!(request = %serde_json::to_string(&request).unwrap_or_default(), "Request body");
-
-        let response =
-            crate::retry::retry(|| self.client.chat_completions(&request), retry_policy).await?;
+    /// One round trip: send, account for usage, parse.
+    ///
+    /// This is the unit the retry policy operates on. Parsing belongs
+    /// inside it because a response can be faulty in ways the request
+    /// is not to blame for, and only a fresh draw fixes those.
+    async fn attempt(&self, request: &ChatRequest<'_>) -> Result<ChatOutcome, ProviderError> {
+        let response = self.client.chat_completions(request).await?;
         if let Some(usage) = &response.usage {
             debug!(
                 model = %self.model,
@@ -183,6 +165,32 @@ impl Provider for CompletionsProvider {
             response: Self::parse_response(response)?,
             usage,
         })
+    }
+}
+
+impl Provider for CompletionsProvider {
+    async fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<ChatOutcome, ProviderError> {
+        let wire_messages: Vec<WireMessage> = messages.iter().map(WireMessage::from).collect();
+        let request = ChatRequest {
+            model: &self.model,
+            messages: wire_messages,
+            tools: if tools.is_empty() { None } else { Some(tools) },
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            usage: self.openrouter.then_some(UsageAccounting { include: true }),
+            provider: self.openrouter.then_some(ProviderPreferences {
+                data_collection: "deny",
+            }),
+        };
+
+        debug!(model = %self.model, message_count = messages.len(), "Sending chat request");
+        trace!(request = %serde_json::to_string(&request).unwrap_or_default(), "Request body");
+
+        crate::retry::retry(|| self.attempt(&request), retry_policy).await
     }
 
     fn model(&self) -> &str {
@@ -460,6 +468,84 @@ mod tests {
         let err = provider.chat(&[], &[]).await.unwrap_err();
         assert!(matches!(err, ProviderError::Network(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1 + MAX_RETRIES as usize);
+    }
+
+    /// A 200 whose tool name cannot be transmitted back.
+    const MALFORMED_NAME_BODY: &str = r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"c1","function":{"name":"review_disposition</arg_key>","arguments":"{}"}}]}}]}"#;
+
+    /// A 200 with nothing in it.
+    const EMPTY_CONTENT_BODY: &str = r#"{"choices":[{"message":{"content":""}}]}"#;
+
+    /// Provider whose client answers 200 with `faulty` for the first
+    /// `failures` calls and a usable text response after, counting
+    /// every request. Unlike `flaky_provider` the failures are valid
+    /// HTTP, so they surface from the parse rather than the transport.
+    fn faulty_body_provider(
+        failures: usize,
+        faulty: &'static str,
+    ) -> (
+        CompletionsProvider,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let client = CompletionsClient::from_fn(move |_body| {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(crate::clients::RawResponse {
+                    status: 200,
+                    body: if n < failures {
+                        faulty.as_bytes().to_vec()
+                    } else {
+                        br#"{"choices":[{"message":{"content":"hi"}}]}"#.to_vec()
+                    },
+                })
+            }
+        });
+        (
+            CompletionsProvider::new(client, &ProviderConfig::default()),
+            calls,
+        )
+    }
+
+    #[test]
+    fn policy_retries_a_malformed_tool_name() {
+        let e = ProviderError::MalformedToolCall {
+            name: "exec ".into(),
+        };
+        assert_eq!(retry_policy(&e, 0), Some(Duration::from_secs(1)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_redraws_after_a_malformed_tool_name() {
+        use std::sync::atomic::Ordering;
+        let (provider, calls) = faulty_body_provider(1, MALFORMED_NAME_BODY);
+        let outcome = provider.chat(&[], &[]).await.unwrap();
+        assert!(matches!(outcome.response, Response::Text(t) if t == "hi"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_gives_up_on_a_persistent_malformed_tool_name() {
+        use std::sync::atomic::Ordering;
+        let (provider, calls) = faulty_body_provider(usize::MAX, MALFORMED_NAME_BODY);
+        let err = provider.chat(&[], &[]).await.unwrap_err();
+        assert!(matches!(err, ProviderError::MalformedToolCall { .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 1 + MAX_RETRIES as usize);
+    }
+
+    /// Parsing moved inside the retry unit; that must not make every
+    /// parse failure retryable. Only the policy decides.
+    #[tokio::test(start_paused = true)]
+    async fn chat_does_not_redraw_an_empty_response() {
+        use std::sync::atomic::Ordering;
+        let (provider, calls) = faulty_body_provider(usize::MAX, EMPTY_CONTENT_BODY);
+        let err = provider.chat(&[], &[]).await.unwrap_err();
+        assert!(matches!(err, ProviderError::EmptyResponse));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]
