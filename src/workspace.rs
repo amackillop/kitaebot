@@ -78,6 +78,7 @@ impl Workspace {
         mk(&path.join("memory/topics"))?;
         mk(&path.join(PROJECTS_DIR))?;
         mk(&path.join(STATE_DIR))?;
+        seed_review_checklist(&path)?;
 
         let system_prompt = read_system_prompt(&path);
         Ok(Self {
@@ -137,6 +138,30 @@ impl Workspace {
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
     }
+}
+
+/// Header seeded into an absent review checklist.
+///
+/// The reviewer reads the checklist at every gate and the review gates
+/// append to it, so it exists from first boot rather than from the
+/// first escape. Present-and-empty says "no lessons yet"; absent said
+/// the same thing through a failed read.
+const REVIEW_CHECKLIST_HEADER: &str = "\
+# Review checklist
+
+One line per recurring failure class, stating what to check rather than
+what happened. Maintained by the review gates from escapes; read by the
+reviewer before judging.
+";
+
+/// Create the review checklist if it is missing, preserving whatever a
+/// previous run wrote.
+fn seed_review_checklist(root: &Path) -> Result<(), WorkspaceError> {
+    let path = root.join(STATE_DIR).join(REVIEW_CHECKLIST);
+    if path.exists() {
+        return Ok(());
+    }
+    fs::write(&path, REVIEW_CHECKLIST_HEADER).map_err(|e| WorkspaceError::Init(path, e))
 }
 
 /// Assemble the system prompt: the compiled-in persona plus the
@@ -230,6 +255,24 @@ mod tests {
         assert!(ws.path().join("memory/topics").is_dir());
         assert!(ws.path().join(PROJECTS_DIR).is_dir());
         assert!(ws.path().join("state").is_dir());
+        assert!(ws.path().join("state").join(REVIEW_CHECKLIST).is_file());
+    }
+
+    /// The gates append lessons to this file; re-initializing on every
+    /// daemon start must not wipe them.
+    #[test]
+    fn init_keeps_an_existing_review_checklist() {
+        let dir = tempfile::tempdir().unwrap();
+        Workspace::init_at(dir.path().to_path_buf()).unwrap();
+        let path = dir.path().join("state").join(REVIEW_CHECKLIST);
+        fs::write(&path, "- check that errors name the operation\n").unwrap();
+
+        Workspace::init_at(dir.path().to_path_buf()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "- check that errors name the operation\n"
+        );
     }
 
     #[test]
