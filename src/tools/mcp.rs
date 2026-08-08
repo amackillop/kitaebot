@@ -29,6 +29,7 @@ use tracing::{error, warn};
 use crate::config::McpConfig;
 use crate::error::ToolError;
 use crate::secrets::{Secret, load_secret};
+use crate::types::is_valid_tool_name;
 
 use super::{Tool, ToolCtx, Tools, safe_env};
 
@@ -457,16 +458,25 @@ impl McpTools {
 
 /// Spawn every configured server, handshake, list tools, and build
 /// the registrations. A server that fails to spawn, handshake, or
-/// list within the startup budget is logged and skipped; its tools
-/// are simply absent and the daemon runs on. Config errors — a
-/// missing credential or an allowlist naming an unadvertised tool —
-/// fail fast like every other startup config error.
+/// list within the startup budget is logged and skipped, as is one
+/// advertising a name the API's tool-name grammar rejects; those tools
+/// are simply absent and the daemon runs on. Config errors — a missing
+/// credential, an allowlist naming an unadvertised tool, or a server
+/// key that is not a legal tool-name prefix — fail fast like every
+/// other startup config error.
 pub(crate) async fn start(config: &McpConfig) -> McpTools {
     let startup_budget = Duration::from_secs(config.startup_timeout_secs);
     let call_timeout = Duration::from_secs(config.call_timeout_secs);
     let mut tools = McpTools::default();
 
     for (name, server_config) in &config.servers {
+        // The key prefixes every tool this server registers, so a key
+        // the tool-name grammar rejects makes all of them
+        // untransmittable. Operator error, so fail fast.
+        if !is_valid_tool_name(name) {
+            error!("mcp.servers.{name}: server name must match ^[a-zA-Z0-9_-]+$");
+            std::process::exit(1);
+        }
         let secret_env: Vec<(String, Secret)> = server_config
             .env_credentials
             .iter()
@@ -536,6 +546,18 @@ pub(crate) async fn start(config: &McpConfig) -> McpTools {
             } else {
                 format!("{name}_{}", tool.name)
             };
+            // Registered names ship in tools[] on every request, so one
+            // the API's grammar rejects would 400 every call the daemon
+            // makes, not just this tool's. The server chose the name, so
+            // drop the tool and keep running, same as a collision.
+            if !is_valid_tool_name(&registered_name) {
+                error!(
+                    tool = registered_name,
+                    server = name,
+                    "MCP tool name must match ^[a-zA-Z0-9_-]+$; skipped"
+                );
+                continue;
+            }
             let registered: Arc<dyn Tool> = Arc::new(McpTool {
                 server: Arc::clone(&server),
                 remote_name: tool.name.clone(),
@@ -872,6 +894,29 @@ while IFS= read -r line; do
   esac
 done
 "#;
+
+    /// Advertises one legal name and one carrying a dot, the way
+    /// servers that namespace with `group.tool` do.
+    const UNTRANSMITTABLE_NAME_SERVER: &str = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"v"}}\n' "$id" ;;
+    *tools/list*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"search","inputSchema":{}},{"name":"docs.config","inputSchema":{}}]}}\n' "$id" ;;
+  esac
+done
+"#;
+
+    /// The whole daemon 400s if an illegal name reaches tools[], so the
+    /// offending tool is dropped and the rest of the server survives.
+    #[tokio::test]
+    async fn tools_with_untransmittable_names_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(dir.path(), UNTRANSMITTABLE_NAME_SERVER);
+        let tools = start(&mcp_config("test", server_config(&script, BTreeMap::new()))).await;
+        assert_eq!(tools.all.len(), 1);
+        assert_eq!(tools.all[0].name(), "test_search");
+    }
 
     #[tokio::test]
     async fn already_prefixed_names_are_not_doubled() {
