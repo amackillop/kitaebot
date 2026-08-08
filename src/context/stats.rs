@@ -118,10 +118,10 @@ fn analyze(sessions: &[Vec<Message>]) -> Report {
                 Message::ToolCalls { calls, .. } => {
                     let is_exec = |name: &str| name == "exec";
                     let call_infos = calls.iter().map(|call| CallInfo {
-                        tool_name: call.function.name.clone(),
-                        exec_cmd: is_exec(&call.function.name)
+                        tool_name: call.function.name.to_string(),
+                        exec_cmd: is_exec(call.function.name.as_str())
                             .then(|| extract_exec_command(&call.function.arguments)),
-                        exec_full_cmd: is_exec(&call.function.name)
+                        exec_full_cmd: is_exec(call.function.name.as_str())
                             .then(|| extract_exec_full_command(&call.function.arguments)),
                     });
                     pending.extend(call_infos);
@@ -391,7 +391,7 @@ mod tests {
         ToolCall::new(
             id.to_string(),
             ToolFunction {
-                name: name.to_string(),
+                name: name.parse().unwrap(),
                 arguments: arguments.to_string(),
             },
         )

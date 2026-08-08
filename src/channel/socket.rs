@@ -463,7 +463,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "c1".to_string(),
                 ToolFunction {
-                    name: "echo".to_string(),
+                    name: "echo".parse().unwrap(),
                     arguments: "{}".to_string(),
                 },
             )],
@@ -532,7 +532,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "c1".to_string(),
                 ToolFunction {
-                    name: "slow".to_string(),
+                    name: "slow".parse().unwrap(),
                     arguments: "{}".to_string(),
                 },
             )],

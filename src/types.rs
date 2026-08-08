@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::InvalidToolName;
+
 /// Message in the conversation history.
 ///
 /// Represents one turn in the conversation between user, assistant, and tools.
@@ -51,7 +53,7 @@ impl ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolFunction {
     /// Name of the tool to execute
-    pub name: String,
+    pub name: ToolName,
 
     /// JSON string of arguments to pass to the tool
     pub arguments: String,
@@ -64,6 +66,66 @@ pub fn is_valid_tool_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// A tool name that the API will carry.
+///
+/// Every constructor validates against [`is_valid_tool_name`],
+/// including the `Deserialize` impl, so a name that would 400 the
+/// request cannot be built, parsed, or reloaded from a session file.
+/// The grammar is the API's, not ours: a violation is untransmittable
+/// rather than merely unknown, and one that reaches stored history
+/// poisons every later request that replays it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ToolName(String);
+
+impl ToolName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for ToolName {
+    type Err = InvalidToolName;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if is_valid_tool_name(s) {
+            Ok(Self(s.to_string()))
+        } else {
+            Err(InvalidToolName(s.to_string()))
+        }
+    }
+}
+
+impl TryFrom<String> for ToolName {
+    type Error = InvalidToolName;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        if is_valid_tool_name(&s) {
+            Ok(Self(s))
+        } else {
+            Err(InvalidToolName(s))
+        }
+    }
+}
+
+impl std::fmt::Display for ToolName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for ToolName {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ToolName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
 }
 
 impl Message {
@@ -88,7 +150,7 @@ impl Message {
                 let base = content.len();
                 let extra: usize = calls
                     .iter()
-                    .map(|tc| tc.function.name.len() + tc.function.arguments.len())
+                    .map(|tc| tc.function.name.as_str().len() + tc.function.arguments.len())
                     .sum();
                 base + extra
             }
@@ -228,7 +290,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "id".to_string(),
                 ToolFunction {
-                    name: "exec".to_string(),                 // 4
+                    name: "exec".parse().unwrap(),            // 4
                     arguments: r#"{"cmd":"ls"}"#.to_string(), // 12
                 },
             )],
@@ -243,5 +305,56 @@ mod tests {
             content: String::new(),
         };
         assert_eq!(msg.char_count(), 0);
+    }
+
+    #[test]
+    fn tool_name_accepts_the_grammar() {
+        // Namespaced MCP tools carry both `_` and `-`.
+        for ok in ["exec", "bkb_lookup-bip", "a", "A1_-"] {
+            assert!(ok.parse::<ToolName>().is_ok(), "{ok} should parse");
+        }
+    }
+
+    #[test]
+    fn tool_name_rejects_everything_else() {
+        // The middle entry is what Azure actually emitted.
+        for bad in [
+            "",
+            "exec ",
+            "group.tool",
+            "server:tool",
+            "review_disposition</arg_key><arg_value>fixed</arg_value>",
+        ] {
+            assert!(bad.parse::<ToolName>().is_err(), "{bad:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn invalid_tool_name_error_names_the_offender() {
+        let err = "a b".parse::<ToolName>().unwrap_err();
+        assert!(err.to_string().contains("a b"));
+    }
+
+    /// The flat engine reloads history straight from JSON, so this is
+    /// the only thing standing between a hand-edited or restored
+    /// session file and a request the API refuses.
+    #[test]
+    fn deserializing_rejects_a_malformed_name() {
+        let json = r#"{"name":"exec</arg_key>","arguments":"{}"}"#;
+        assert!(serde_json::from_str::<ToolFunction>(json).is_err());
+    }
+
+    #[test]
+    fn tool_function_round_trips_through_json() {
+        let original = ToolFunction {
+            name: "exec".parse().unwrap(),
+            arguments: r#"{"command":"ls"}"#.to_string(),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        // Serializes as a bare string, not a wrapper object: the stored
+        // shape is unchanged, so existing sessions still load.
+        assert!(json.contains(r#""name":"exec""#));
+        let back: ToolFunction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "exec");
     }
 }

@@ -285,8 +285,8 @@ impl Tools {
         let tool = self
             .0
             .iter()
-            .find(|t| t.name() == call.function.name)
-            .ok_or_else(|| ToolError::NotFound(call.function.name.clone()))?;
+            .find(|t| t.name() == call.function.name.as_str())
+            .ok_or_else(|| ToolError::NotFound(call.function.name.to_string()))?;
 
         let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
             .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
@@ -356,7 +356,7 @@ mod tests {
         ToolCall::new(
             id.to_string(),
             ToolFunction {
-                name: "mock".to_string(),
+                name: "mock".parse().unwrap(),
                 arguments: "{}".to_string(),
             },
         )
@@ -386,7 +386,7 @@ mod tests {
         let call = ToolCall::new(
             "test-123".to_string(),
             ToolFunction {
-                name: "nonexistent".to_string(),
+                name: "nonexistent".parse().unwrap(),
                 arguments: "{}".to_string(),
             },
         );
@@ -431,7 +431,7 @@ mod tests {
         let call = ToolCall::new(
             "test-123".to_string(),
             ToolFunction {
-                name: "mock".to_string(),
+                name: "mock".parse().unwrap(),
                 arguments: "invalid json".to_string(),
             },
         );

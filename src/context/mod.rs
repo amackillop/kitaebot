@@ -313,7 +313,7 @@ pub(crate) fn format_messages_for_summary(messages: &[Message]) -> String {
                 out.push_str(content);
                 for tc in calls {
                     out.push_str("\n  [tool_call] ");
-                    out.push_str(&tc.function.name);
+                    out.push_str(tc.function.name.as_str());
                     out.push('(');
                     out.push_str(&tc.function.arguments);
                     out.push(')');
@@ -421,7 +421,7 @@ mod tests {
                 calls: vec![crate::types::ToolCall::new(
                     "c1".to_string(),
                     crate::types::ToolFunction {
-                        name: "exec".to_string(),
+                        name: "exec".parse().unwrap(),
                         arguments: r#"{"cmd":"ls"}"#.to_string(),
                     },
                 )],

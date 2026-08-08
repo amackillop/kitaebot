@@ -11,7 +11,7 @@ use tracing::{debug, trace, warn};
 use crate::clients::chat_completion::{ApiToolCall, ChatResponse, CompletionsClient};
 use crate::config::{Api, ProviderConfig};
 use crate::error::ProviderError;
-use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction, is_valid_tool_name};
+use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
 use super::wire::WireMessage;
 
@@ -87,20 +87,14 @@ impl CompletionsProvider {
 
         match choice.message.tool_calls {
             Some(calls) if !calls.is_empty() => {
-                // A name the API's own grammar rejects would 400 on every
-                // later request that replays it, so it must never reach
-                // history — refuse the whole response instead.
-                if let Some(bad) = calls.iter().find(|c| !is_valid_tool_name(&c.function.name)) {
-                    warn!(
-                        name = %bad.function.name,
-                        arguments = %bad.function.arguments,
-                        "Provider returned a malformed tool name"
-                    );
-                    return Err(ProviderError::MalformedToolCall {
-                        name: bad.function.name.clone(),
-                    });
-                }
-                let calls = calls.into_iter().map(into_tool_call).collect();
+                // Parsing each name is what keeps an untransmittable one
+                // out of history. The first failure refuses the whole
+                // response: a partial push would leave the surviving
+                // calls without results.
+                let calls = calls
+                    .into_iter()
+                    .map(into_tool_call)
+                    .collect::<Result<_, _>>()?;
                 Ok(Response::ToolCalls { content, calls })
             }
             // A text response with nothing in it is a provider fault,
@@ -198,14 +192,27 @@ impl Provider for CompletionsProvider {
     }
 }
 
-fn into_tool_call(tc: ApiToolCall) -> ToolCall {
-    ToolCall::new(
+fn into_tool_call(tc: ApiToolCall) -> Result<ToolCall, ProviderError> {
+    let name = tc.function.name.parse().map_err(|_| {
+        // Log the arguments too: the mangling is usually argument markup
+        // that leaked into the name, and seeing both identifies the
+        // provider-side encoder bug that produced it.
+        warn!(
+            name = %tc.function.name,
+            arguments = %tc.function.arguments,
+            "Provider returned a malformed tool name"
+        );
+        ProviderError::MalformedToolCall {
+            name: tc.function.name.clone(),
+        }
+    })?;
+    Ok(ToolCall::new(
         tc.id,
         ToolFunction {
-            name: tc.function.name,
+            name,
             arguments: tc.function.arguments,
         },
-    )
+    ))
 }
 
 // --- Wire format (request only — response types are in chat_completion.rs) ---

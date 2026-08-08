@@ -37,7 +37,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use crate::config::ContextConfig;
-use crate::error::EngineError;
+use crate::error::{EngineError, InvalidToolName};
 use crate::tools::Tool;
 use crate::types::{Message, ToolCall, ToolFunction, estimate_tokens};
 
@@ -1102,16 +1102,25 @@ pub(super) fn reconstruct_message(
                 )
                 .map_err(|e| storage_err(&e))?;
 
-            let calls: Vec<ToolCall> = stmt
-                .query_map([message_id], |r| {
-                    let id: String = r.get(0)?;
-                    let name: String = r.get(1)?;
-                    let arguments: String = r.get(2)?;
-                    Ok(ToolCall::new(id, ToolFunction { name, arguments }))
-                })
+            let rows: Vec<(String, String, String)> = stmt
+                .query_map([message_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .map_err(|e| storage_err(&e))?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| storage_err(&e))?;
+
+            // Names are validated before they are ever written, so a
+            // stored one that no longer parses means the row came from
+            // somewhere other than ingest: the row is corrupt, and
+            // saying so beats replaying it into a request that 400s.
+            let calls = rows
+                .into_iter()
+                .map(|(id, name, arguments)| {
+                    let name = name.parse().map_err(|e: InvalidToolName| {
+                        EngineError::Storage(format!("message {message_id}: {e}"))
+                    })?;
+                    Ok(ToolCall::new(id, ToolFunction { name, arguments }))
+                })
+                .collect::<Result<Vec<_>, EngineError>>()?;
 
             if calls.is_empty() {
                 Ok(Message::Assistant { content })
@@ -1175,7 +1184,7 @@ fn insert_parts(
                         message_id,
                         ord,
                         tc.id,
-                        tc.function.name,
+                        tc.function.name.as_str(),
                         tc.function.arguments,
                     ],
                 )
@@ -1411,7 +1420,7 @@ mod tests {
                 calls: vec![ToolCall::new(
                     "c1".into(),
                     ToolFunction {
-                        name: "file_read".into(),
+                        name: "file_read".parse().unwrap(),
                         arguments: r#"{"path":"data/big.json"}"#.into(),
                     },
                 )],
@@ -1453,7 +1462,7 @@ mod tests {
                 calls: vec![ToolCall::new(
                     "c1".into(),
                     ToolFunction {
-                        name: "file_read".into(),
+                        name: "file_read".parse().unwrap(),
                         arguments: r#"{"path":"data/big.json"}"#.into(),
                     },
                 )],
@@ -1652,14 +1661,14 @@ mod tests {
                     ToolCall::new(
                         "c1".into(),
                         ToolFunction {
-                            name: "exec".into(),
+                            name: "exec".parse().unwrap(),
                             arguments: r#"{"cmd":"ls"}"#.into(),
                         },
                     ),
                     ToolCall::new(
                         "c2".into(),
                         ToolFunction {
-                            name: "read".into(),
+                            name: "read".parse().unwrap(),
                             arguments: r#"{"path":"a"}"#.into(),
                         },
                     ),
@@ -2028,14 +2037,14 @@ mod tests {
             ToolCall::new(
                 "c1".into(),
                 ToolFunction {
-                    name: "exec".into(),
+                    name: "exec".parse().unwrap(),
                     arguments: r#"{"cmd":"ls"}"#.into(),
                 },
             ),
             ToolCall::new(
                 "c2".into(),
                 ToolFunction {
-                    name: "read".into(),
+                    name: "read".parse().unwrap(),
                     arguments: r#"{"path":"a"}"#.into(),
                 },
             ),
@@ -2433,7 +2442,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 format!("c{i}"),
                 ToolFunction {
-                    name: "file_write".into(),
+                    name: "file_write".parse().unwrap(),
                     arguments: format!(r#"{{"path":"{path}","content":"data"}}"#),
                 },
             )],

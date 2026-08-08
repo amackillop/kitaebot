@@ -442,7 +442,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "c1".to_string(),
                 ToolFunction {
-                    name: "mock".to_string(),
+                    name: "mock".parse().unwrap(),
                     arguments: "{}".to_string(),
                 },
             )],

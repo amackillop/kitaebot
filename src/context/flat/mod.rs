@@ -1015,7 +1015,7 @@ mod tests {
                 calls: vec![ToolCall::new(
                     "c1".into(),
                     ToolFunction {
-                        name: "exec".into(),
+                        name: "exec".parse().unwrap(),
                         arguments: r#"{"command":"git status"}"#.into(),
                     },
                 )],
@@ -1039,7 +1039,7 @@ mod tests {
                 calls: vec![ToolCall::new(
                     "c2".into(),
                     ToolFunction {
-                        name: "file_read".into(),
+                        name: "file_read".parse().unwrap(),
                         arguments: r#"{"path":"f"}"#.into(),
                     },
                 )],

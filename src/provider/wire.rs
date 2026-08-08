@@ -78,7 +78,7 @@ impl<'a> From<&'a ToolCall> for WireToolCall<'a> {
 impl<'a> From<&'a ToolFunction> for WireFunction<'a> {
     fn from(f: &'a ToolFunction) -> Self {
         Self {
-            name: &f.name,
+            name: f.name.as_str(),
             arguments: &f.arguments,
         }
     }
@@ -145,7 +145,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "call_1".to_string(),
                 ToolFunction {
-                    name: "exec".to_string(),
+                    name: "exec".parse().unwrap(),
                     arguments: r#"{"command":"ls"}"#.to_string(),
                 },
             )],

@@ -130,6 +130,15 @@ impl ProviderError {
     }
 }
 
+/// A string that cannot be used as a tool name.
+///
+/// Carries the rejected string: knowing a name was invalid is useless
+/// without knowing which one, and the offender is often mangled in a
+/// way that identifies the provider bug that produced it.
+#[derive(Debug, Clone, Error)]
+#[error("tool name {0:?} must match ^[a-zA-Z0-9_-]+$")]
+pub struct InvalidToolName(pub String);
+
 /// Tool execution errors.
 #[derive(Debug, Error)]
 pub enum ToolError {

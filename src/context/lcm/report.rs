@@ -190,7 +190,7 @@ mod tests {
                 calls: vec![ToolCall::new(
                     "c1".into(),
                     ToolFunction {
-                        name: "exec".into(),
+                        name: "exec".parse().unwrap(),
                         arguments: r#"{"command":"git status"}"#.into(),
                     },
                 )],

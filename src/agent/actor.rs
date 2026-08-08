@@ -483,7 +483,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "n1".to_string(),
                 ToolFunction {
-                    name: "notify".to_string(),
+                    name: "notify".parse().unwrap(),
                     arguments: r#"{"message":"ping"}"#.to_string(),
                 },
             )],
@@ -565,7 +565,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "b1".to_string(),
                 ToolFunction {
-                    name: "mock_blocked".to_string(),
+                    name: "mock_blocked".parse().unwrap(),
                     arguments: "{}".to_string(),
                 },
             )],

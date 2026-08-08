@@ -496,7 +496,7 @@ async fn turn_loop(
                     activity::emit(
                         activity_tx,
                         Activity::ToolStart {
-                            tool: call.function.name.clone(),
+                            tool: call.function.name.to_string(),
                         },
                     );
                 }
@@ -633,7 +633,7 @@ impl RepeatDetector {
             .map(|c| {
                 let args = serde_json::from_str(&c.function.arguments)
                     .unwrap_or_else(|_| serde_json::Value::String(c.function.arguments.clone()));
-                (c.function.name.clone(), args)
+                (c.function.name.to_string(), args)
             })
             .collect();
 
@@ -676,7 +676,7 @@ async fn record_tool_results<E: ContextEngine>(
 ) {
     for (call, result) in calls.iter().zip(results) {
         let (content, err) = match result {
-            Ok(output) => match safety::check_tool_output(&call.function.name, &output) {
+            Ok(output) => match safety::check_tool_output(call.function.name.as_str(), &output) {
                 Ok(wrapped) => (wrapped, None),
                 Err(e) => {
                     warn!(tool = %call.function.name, "Tool output blocked: {e}");
@@ -693,7 +693,7 @@ async fn record_tool_results<E: ContextEngine>(
         activity::emit(
             activity_tx,
             Activity::ToolEnd {
-                tool: call.function.name.clone(),
+                tool: call.function.name.to_string(),
                 error: err,
             },
         );
@@ -769,7 +769,7 @@ mod tests {
         ToolCall::new(
             id.to_string(),
             ToolFunction {
-                name: "mock".to_string(),
+                name: "mock".parse().unwrap(),
                 arguments: "{}".to_string(),
             },
         )
@@ -784,7 +784,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 format!("call-{n}"),
                 ToolFunction {
-                    name: "mock".to_string(),
+                    name: "mock".parse().unwrap(),
                     arguments: format!("{{\"n\":{n}}}"),
                 },
             )],
@@ -1018,7 +1018,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "c1".to_string(),
                 ToolFunction {
-                    name: "mock".to_string(),
+                    name: "mock".parse().unwrap(),
                     arguments: r#"{"x":1}"#.to_string(),
                 },
             )],
@@ -1028,7 +1028,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "c2".to_string(),
                 ToolFunction {
-                    name: "mock".to_string(),
+                    name: "mock".parse().unwrap(),
                     arguments: r#"{"x":2}"#.to_string(),
                 },
             )],
@@ -1074,7 +1074,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "id".to_string(),
                 ToolFunction {
-                    name: "mock".to_string(),
+                    name: "mock".parse().unwrap(),
                     arguments: r#"{"v":"a"}"#.to_string(),
                 },
             )],
@@ -1084,7 +1084,7 @@ mod tests {
             calls: vec![ToolCall::new(
                 "id".to_string(),
                 ToolFunction {
-                    name: "mock".to_string(),
+                    name: "mock".parse().unwrap(),
                     arguments: r#"{"v":"b"}"#.to_string(),
                 },
             )],
@@ -1533,7 +1533,7 @@ mod tests {
         ToolCall::new(
             id.to_string(),
             ToolFunction {
-                name: "mock_blocked".to_string(),
+                name: "mock_blocked".parse().unwrap(),
                 arguments: "{}".to_string(),
             },
         )
@@ -1627,7 +1627,7 @@ mod tests {
             ToolCall::new(
                 id.to_string(),
                 ToolFunction {
-                    name: name.to_string(),
+                    name: name.parse().unwrap(),
                     arguments: "{}".to_string(),
                 },
             )
@@ -1676,7 +1676,7 @@ mod tests {
             ToolCall::new(
                 id.to_string(),
                 ToolFunction {
-                    name: name.to_string(),
+                    name: name.parse().unwrap(),
                     arguments: "{}".to_string(),
                 },
             )
