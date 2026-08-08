@@ -71,7 +71,7 @@ in
         co_authors = [ "Austin Mackillop <github.roundworm216@passmail.net>" ];
         repositories = {
           "amackillop/kitaebot" = {
-            check = "just check";
+            check = "just check; just warm";
             proposals = "github";
           };
           "CumuloGlobal/open-money".check = "just check";

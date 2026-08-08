@@ -27,6 +27,11 @@ check-nix:
 build:
     cargo build
 
+# Warm the shared cargo target dir and sweep stale artifacts (spec 03)
+warm:
+    cargo build --tests --features mock-network
+    cargo sweep --time 7
+
 # Run tests
 test:
     cargo test --features mock-network
