@@ -128,11 +128,13 @@ pub fn interpret_response<T: DeserializeOwned>(raw: &RawResponse) -> Result<T, T
         api_response.result.ok_or_else(|| TelegramError::Api {
             error_code: 0,
             description: "ok=true but missing result".into(),
+            retry_after: None,
         })
     } else {
         Err(TelegramError::Api {
             error_code: api_response.error_code.unwrap_or(0),
             description: api_response.description.unwrap_or_default(),
+            retry_after: api_response.parameters.as_ref().and_then(|p| p.retry_after),
         })
     }
 }
@@ -151,6 +153,16 @@ pub(crate) struct ApiResponse<T> {
     pub(crate) result: Option<T>,
     pub(crate) error_code: Option<i32>,
     pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) parameters: Option<ResponseParameters>,
+}
+
+/// `parameters` field Telegram includes in error responses.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ResponseParameters {
+    /// Seconds to wait before retrying (429 responses).
+    #[serde(default)]
+    pub(crate) retry_after: Option<u64>,
 }
 
 /// A single incoming update from `getUpdates`.
@@ -209,6 +221,7 @@ mod tests {
             result: Some(updates),
             error_code: None,
             description: None,
+            parameters: None,
         })
         .unwrap()
     }
@@ -223,6 +236,7 @@ mod tests {
             }),
             error_code: None,
             description: None,
+            parameters: None,
         })
         .unwrap()
     }
@@ -233,6 +247,7 @@ mod tests {
             result: None,
             error_code: Some(code),
             description: Some(desc.into()),
+            parameters: None,
         })
         .unwrap()
     }
@@ -302,6 +317,26 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn interpret_429_captures_retry_after() {
+        let json = serde_json::json!({
+            "ok": false,
+            "error_code": 429,
+            "description": "Too Many Requests: retry after 5",
+            "parameters": { "retry_after": 5 }
+        })
+        .to_string();
+        let err = interpret_response::<Vec<Update>>(&raw(&json)).unwrap_err();
+        assert_eq!(err.retry_after(), Some(5));
+    }
+
+    #[test]
+    fn interpret_429_without_retry_after_defaults_to_none() {
+        let json = api_error_json(429, "Too Many Requests");
+        let err = interpret_response::<Vec<Update>>(&raw(&json)).unwrap_err();
+        assert_eq!(err.retry_after(), None);
     }
 
     // -- Client integration tests via from_fn --

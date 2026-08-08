@@ -21,6 +21,9 @@ use crate::error::TelegramError;
 /// Maximum retries for `sendMessage` on transient failures.
 const SEND_RETRIES: u32 = 3;
 
+/// Cap for poll-loop exponential backoff (1s, 2s, 4s, ..., 60s).
+const MAX_POLL_BACKOFF_SECS: u64 = 60;
+
 /// Telegram Bot API channel.
 ///
 /// Wraps a [`TelegramClient`] and the chat routing configuration.
@@ -111,6 +114,19 @@ fn is_transient(err: &TelegramError) -> bool {
     }
 }
 
+/// Backoff delay for a transient poll-loop error.
+///
+/// Respects Telegram's `retry_after` when present (429 responses).
+/// Otherwise uses exponential backoff from `attempts`: 1s, 2s, 4s,
+/// capped at 60s.
+fn poll_backoff(err: &TelegramError, attempts: u32) -> Duration {
+    if let Some(secs) = err.retry_after() {
+        return Duration::from_secs(secs);
+    }
+    let secs = u64::from(1u32 << attempts.min(6));
+    Duration::from_secs(MAX_POLL_BACKOFF_SECS.min(secs))
+}
+
 // --- Poll loop ---
 
 /// Run the Telegram long-poll loop until cancelled.
@@ -122,6 +138,7 @@ pub async fn poll_loop(channel: &TelegramChannel, handle: &AgentHandle) -> ! {
     info!(chat_id = channel.chat_id(), "Telegram poller starting");
     let mut offset: i64 = 0;
     let mut verbose = false;
+    let mut backoff_attempts: u32 = 0;
 
     loop {
         let updates = match channel
@@ -135,11 +152,20 @@ pub async fn poll_loop(channel: &TelegramChannel, handle: &AgentHandle) -> ! {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
+            Err(e) if is_transient(&e) => {
+                let delay = poll_backoff(&e, backoff_attempts);
+                backoff_attempts = backoff_attempts.saturating_add(1);
+                error!("Telegram API error: {e}; retrying in {delay:?}");
+                tokio::time::sleep(delay).await;
+                continue;
+            }
             Err(e) => {
                 error!("Telegram API error: {e}");
                 continue;
             }
         };
+
+        backoff_attempts = 0;
 
         for update in updates {
             offset = update.update_id + 1;
@@ -240,7 +266,9 @@ mod tests {
 
     use super::*;
     use crate::clients::RawResponse;
-    use crate::clients::telegram::{ApiResponse, Chat, TelegramClient, TgMessage, Update};
+    use crate::clients::telegram::{
+        ApiResponse, Chat, ResponseParameters, TelegramClient, TgMessage, Update,
+    };
     use crate::provider::MockProvider;
     use crate::test_support::{TestAgent, workspace};
     use crate::types::Response as AgentResponse;
@@ -301,16 +329,20 @@ mod tests {
                 result: Some(result),
                 error_code: None,
                 description: None,
+                parameters: None,
             })
             .unwrap()
         }
 
-        fn error_json(error_code: i32, description: &str) -> Vec<u8> {
+        fn error_json(error_code: i32, description: &str, retry_after: Option<u64>) -> Vec<u8> {
             serde_json::to_vec(&ApiResponse::<serde_json::Value> {
                 ok: false,
                 result: None,
                 error_code: Some(error_code),
                 description: Some(description.into()),
+                parameters: retry_after.map(|secs| ResponseParameters {
+                    retry_after: Some(secs),
+                }),
             })
             .unwrap()
         }
@@ -358,9 +390,14 @@ mod tests {
                             Err(TelegramError::Api {
                                 error_code,
                                 description,
+                                retry_after,
                             }) => Ok(RawResponse {
                                 status: 200,
-                                body: FakeTelegram::error_json(*error_code, description),
+                                body: FakeTelegram::error_json(
+                                    *error_code,
+                                    description,
+                                    *retry_after,
+                                ),
                             }),
                             Err(TelegramError::Network(msg)) => {
                                 Err(TelegramError::Network(msg.clone()))
@@ -370,7 +407,7 @@ mod tests {
                             }
                             Err(TelegramError::Session(msg)) => Ok(RawResponse {
                                 status: 200,
-                                body: FakeTelegram::error_json(0, msg),
+                                body: FakeTelegram::error_json(0, msg, None),
                             }),
                         }
                     }
@@ -404,16 +441,42 @@ mod tests {
         assert!(is_transient(&TelegramError::Api {
             error_code: 500,
             description: "Internal Server Error".into(),
+            retry_after: None,
         }));
         assert!(is_transient(&TelegramError::Api {
             error_code: 429,
             description: "Too Many Requests".into(),
+            retry_after: None,
         }));
         assert!(!is_transient(&TelegramError::Api {
             error_code: 400,
             description: "Bad Request".into(),
+            retry_after: None,
         }));
         assert!(!is_transient(&TelegramError::Session("test".into())));
+    }
+
+    #[test]
+    fn poll_backoff_respects_retry_after() {
+        let err = TelegramError::Api {
+            error_code: 429,
+            description: "Too Many Requests".into(),
+            retry_after: Some(10),
+        };
+        assert_eq!(poll_backoff(&err, 0), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn poll_backoff_exponential_without_retry_after() {
+        let err = TelegramError::Api {
+            error_code: 500,
+            description: "Internal Server Error".into(),
+            retry_after: None,
+        };
+        assert_eq!(poll_backoff(&err, 0), Duration::from_secs(1));
+        assert_eq!(poll_backoff(&err, 1), Duration::from_secs(2));
+        assert_eq!(poll_backoff(&err, 2), Duration::from_secs(4));
+        assert_eq!(poll_backoff(&err, 6), Duration::from_mins(1));
     }
 
     #[test]
@@ -451,6 +514,7 @@ mod tests {
             Err(TelegramError::Api {
                 error_code: 429,
                 description: "Too Many Requests".into(),
+                retry_after: None,
             }),
             Ok(()),
         ]);
@@ -466,6 +530,7 @@ mod tests {
         let state = FakeTelegram::new(vec![Err(TelegramError::Api {
             error_code: 400,
             description: "Bad Request".into(),
+            retry_after: None,
         })]);
         let ch = channel(&state);
 

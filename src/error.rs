@@ -247,6 +247,8 @@ pub enum TelegramError {
     Api {
         error_code: i32,
         description: String,
+        /// Seconds Telegram asked us to wait before retrying (429 only).
+        retry_after: Option<u64>,
     },
 
     /// Failed to deserialize a Telegram API response body.
@@ -261,6 +263,18 @@ pub enum TelegramError {
     #[cfg(test)]
     #[error("Session error: {0}")]
     Session(String),
+}
+
+impl TelegramError {
+    /// Seconds to wait before retrying, when Telegram's 429 response
+    /// included `parameters.retry_after`. `None` for non-429 errors or
+    /// when the field was absent.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            Self::Api { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
 }
 
 /// GitHub REST API errors.
