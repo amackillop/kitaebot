@@ -512,6 +512,22 @@ Repos without one warm the devshell and nothing else.
 check = "just check"
 ```
 
+### Cargo Target Dir
+
+A shared `CARGO_TARGET_DIR` at `workspace/projects/target` replaces
+per-repo `target/` dirs. Set in the daemon's systemd environment
+(`vm/configuration.nix`) and added to `SAFE_ENV_VARS` so `safe_env()`
+lets it through to exec children, warm commands, and git hooks.
+Placed under `projects/` so the exec Landlock tier (which grants `all`
+on `projects/`) can write it; the workspace root is list-only.
+Survives `git clean -fdx` by construction — the clean runs inside
+individual repo dirs, and `projects/target` is a sibling, not a
+child. Per-repo `target/` is no longer in `KEPT_CACHES` and is swept
+on clean.
+
+The devShell does not set `CARGO_TARGET_DIR`, so the systemd
+environment is the sole source — direnv does not override it.
+
 ## Boundaries
 
 ### Owns

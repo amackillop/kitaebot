@@ -40,7 +40,7 @@ pub(super) async fn prepare(git: &GitCli, nwo: &str) -> Result<String, ToolError
 
 /// In-repo caches the per-turn clean must not touch: re-provisioning
 /// them costs far more than tolerating a stale entry.
-const KEPT_CACHES: &[&str] = &[".direnv", "node_modules", "target", ".venv"];
+const KEPT_CACHES: &[&str] = &[".direnv", "node_modules", ".venv"];
 
 /// URL-parametrized body of [`prepare`], so tests can use `file://`.
 async fn prepare_at(git: &GitCli, url: &str, rel: &str) -> Result<(), ToolError> {
@@ -210,8 +210,8 @@ mod tests {
             ".direnv must survive the clean"
         );
         assert!(
-            checkout.join("target/lib.rlib").exists(),
-            "target must survive the clean"
+            !checkout.join("target/lib.rlib").exists(),
+            "target must be swept — shared CARGO_TARGET_DIR replaces per-repo target"
         );
         assert!(
             !checkout.join("stale.log").exists(),
