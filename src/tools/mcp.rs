@@ -464,6 +464,27 @@ impl McpTools {
 /// credential, an allowlist naming an unadvertised tool, or a server
 /// key that is not a legal tool-name prefix — fail fast like every
 /// other startup config error.
+///
+/// # Call exactly once
+///
+/// [`Tool::name`] and [`Tool::description`] return `&'static str`,
+/// which is free for the built-ins (literals) and requires promoting a
+/// runtime `String` for MCP, so each registration leaks its name and
+/// description. That is sound only because this function runs once per
+/// process, from `main`, and the registrations then live until exit:
+/// bounded allocation with the program's lifetime, which is what
+/// [`Box::leak`] is for. Nothing in the type system enforces the
+/// once-ness. Calling this a second time — a config reload, a SIGHUP
+/// handler, a retry after a failed startup — leaks a full set of names
+/// and descriptions per call, unbounded over the daemon's life.
+///
+/// Respawning a dead server is not a second call: the call path in
+/// [`McpServer::call`] replaces the child process and reuses the
+/// existing registration, so it never re-lists or re-registers.
+///
+/// If a caller ever needs this more than once, give [`McpTool`] owned
+/// `String` fields first; do not add a second call site against the
+/// leak.
 pub(crate) async fn start(config: &McpConfig) -> McpTools {
     let startup_budget = Duration::from_secs(config.startup_timeout_secs);
     let call_timeout = Duration::from_secs(config.call_timeout_secs);
@@ -561,6 +582,8 @@ pub(crate) async fn start(config: &McpConfig) -> McpTools {
             let registered: Arc<dyn Tool> = Arc::new(McpTool {
                 server: Arc::clone(&server),
                 remote_name: tool.name.clone(),
+                // Bounded, not a leak: `start` runs once per process and
+                // these live until exit. See "Call exactly once" above.
                 name: Box::leak(registered_name.into_boxed_str()),
                 description: Box::leak(tool.description.into_boxed_str()),
                 parameters: tool.input_schema,

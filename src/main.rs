@@ -111,6 +111,8 @@ async fn daemon_main() {
     // children also spawn here: their credentials and binaries must
     // still be readable (spec 22).
     let rt = runtime::build(&config, &workspace);
+    // The only call: MCP registrations are leaked to `'static`, so a
+    // second one leaks a full set. See `mcp::start`.
     let mcp = tools::mcp::start(&config.mcp).await;
 
     let gnupg_home = std::env::var_os("GNUPGHOME").map(std::path::PathBuf::from);
