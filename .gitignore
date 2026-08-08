@@ -1,4 +1,5 @@
 .*
+!.cargo
 
 commit-message.txt
 kitaebot.qcow2

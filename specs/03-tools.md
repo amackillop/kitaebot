@@ -528,6 +528,16 @@ on clean.
 The devShell does not set `CARGO_TARGET_DIR`, so the systemd
 environment is the sole source — direnv does not override it.
 
+### Linker
+
+mold is the linker for both working-tree and nix store builds.
+Working-tree: `.cargo/config.toml` sets target rustflags to pass
+`-fuse-ld=mold` to gcc; mold is on the devShell PATH. Nix store:
+`commonArgs` in `flake.nix` sets `RUSTFLAGS` and `nativeBuildInputs`
+with mold, so crane checks link with mold in the sandbox. The final
+crate link is the dominant cost; build scripts and proc-macros link
+fast regardless of linker.
+
 ## Boundaries
 
 ### Owns
