@@ -214,6 +214,7 @@ in
         "pypi.org"
         "pythonhosted.org"
         "rubygems.org"
+        "doc.rust-lang.org"
       ];
       description = "Domains the kitaebot process may connect to. All others blocked.";
     };
