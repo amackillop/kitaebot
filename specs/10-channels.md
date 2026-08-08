@@ -36,7 +36,9 @@ messages (fire-and-forget, errors logged). Resets on daemon restart.
 (1s, 2s, 4s) for transient errors (network, 429, 5xx).
 
 **Error handling**: `getUpdates` network errors trigger a 5-second sleep then
-retry. Other API errors are logged and the loop continues.
+retry. Transient API errors (429, 5xx) use exponential backoff (1s, 2s, 4s,
+capped at 60s) and respect Telegram's `retry_after` when present. Other API
+errors are logged and the loop continues immediately.
 
 **Preformatted output**: replies with `preformatted: true` are HTML-escaped
 and wrapped in `<pre>` tags.
