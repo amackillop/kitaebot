@@ -592,7 +592,7 @@ where
         f(&mut guard)
     })
     .await
-    .map_err(|e| EngineError::Storage(format!("blocking task failed: {e}")))?
+    .map_err(EngineError::Join)?
 }
 
 // ── Internal helpers ────────────────────────────────────────────────

@@ -68,7 +68,7 @@ where
             f(&guard)
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("blocking task failed: {e}")))?
+        .map_err(ToolError::Join)?
     })
 }
 

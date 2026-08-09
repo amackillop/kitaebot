@@ -73,8 +73,14 @@ pub enum EngineError {
     #[error("Storage error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
-    /// Storage failure that is not a `SQLite` error (filesystem, task
-    /// join), with context written at the site.
+    /// A blocking-pool task died before returning: a panic in the
+    /// closure (the payload rides in the `JoinError`) or runtime
+    /// shutdown.
+    #[error("blocking task failed: {0}")]
+    Join(#[source] tokio::task::JoinError),
+
+    /// Storage failure that is not a `SQLite` error (filesystem),
+    /// with context written at the site.
     #[error("Storage error: {0}")]
     #[allow(dead_code)] // Used by the LCM engine.
     Storage(String),
@@ -228,6 +234,11 @@ pub enum ToolError {
     #[error("Invalid arguments: {0}")]
     InvalidArguments(String),
 
+    /// A blocking-pool task died before returning; see
+    /// [`EngineError::Join`].
+    #[error("blocking task failed: {0}")]
+    Join(#[source] tokio::task::JoinError),
+
     /// A filesystem operation failed on a named path.
     ///
     /// `operation` is a verb phrase describing what was attempted, and
@@ -359,6 +370,7 @@ impl ToolError {
             | Self::HttpStatus { .. }
             | Self::InvalidArguments(_)
             | Self::Io { .. }
+            | Self::Join(_)
             | Self::Linear(_)
             | Self::Mcp { .. }
             | Self::NotFound(_)

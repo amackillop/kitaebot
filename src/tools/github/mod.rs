@@ -89,10 +89,11 @@ async fn current_branch(cwd: &std::path::Path) -> Result<String, ToolError> {
     };
     let output = crate::tools::cli_runner::exec(&call).await?;
     if output.exit_code != 0 {
-        return Err(ToolError::ExecutionFailed(format!(
-            "failed to get current branch: {}",
-            output.stderr
-        )));
+        return Err(ToolError::CommandFailed {
+            command: "git rev-parse --abbrev-ref HEAD".to_string(),
+            exit_code: output.exit_code,
+            output: format!("failed to get current branch: {}", output.stderr),
+        });
     }
     Ok(output.stdout.trim().to_string())
 }

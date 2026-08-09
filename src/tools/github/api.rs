@@ -126,10 +126,10 @@ impl Api {
             .await?;
         let text = String::from_utf8_lossy(&raw.body);
         if !(200..=299).contains(&raw.status) {
-            return Err(ToolError::ExecutionFailed(format!(
-                "{}: {text}",
-                raw.status
-            )));
+            return Err(ToolError::Github(crate::error::GithubError::Api {
+                status: raw.status,
+                body: text.into_owned(),
+            }));
         }
         if text.trim().is_empty() {
             return Ok(format!("OK ({})", raw.status));
