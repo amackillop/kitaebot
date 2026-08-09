@@ -42,8 +42,11 @@ const MAX_EXPAND_TOKEN_CAP: u32 = 20_000;
 
 const SNIPPET_CHARS: usize = 200;
 
-fn exec_err(e: &rusqlite::Error) -> ToolError {
-    ToolError::ExecutionFailed(format!("lcm: {e}"))
+fn exec_err(e: rusqlite::Error) -> ToolError {
+    ToolError::Sqlite {
+        context: "lcm",
+        source: e,
+    }
 }
 
 /// Wrap a sync DB closure on Tokio's blocking pool.
@@ -185,7 +188,10 @@ fn fts_phrase(pattern: &str) -> String {
 }
 
 fn is_fts_syntax_error(e: &ToolError) -> bool {
-    matches!(e, ToolError::ExecutionFailed(msg) if msg.contains("fts5: syntax error"))
+    // SQLite reports it as a generic SQLITE_ERROR, so the fts5 detail
+    // only exists in the message; the variant match scopes the sniff
+    // to our own store's errors.
+    matches!(e, ToolError::Sqlite { source, .. } if source.to_string().contains("fts5: syntax error"))
 }
 
 fn run_grep(
@@ -247,7 +253,7 @@ fn grep_messages(
         }
         _ => unreachable!("mode validated upstream"),
     };
-    let mut stmt = conn.prepare(sql).map_err(|e| exec_err(&e))?;
+    let mut stmt = conn.prepare(sql).map_err(exec_err)?;
     let rows = stmt
         .query_map(params![pattern, conversation_id, limit], |r| {
             let id: i64 = r.get(0)?;
@@ -258,9 +264,8 @@ fn grep_messages(
                 snippet(&content)
             ))
         })
-        .map_err(|e| exec_err(&e))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| exec_err(&e))
+        .map_err(exec_err)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(exec_err)
 }
 
 fn grep_summaries(
@@ -286,7 +291,7 @@ fn grep_summaries(
         }
         _ => unreachable!("mode validated upstream"),
     };
-    let mut stmt = conn.prepare(sql).map_err(|e| exec_err(&e))?;
+    let mut stmt = conn.prepare(sql).map_err(exec_err)?;
     let rows = stmt
         .query_map(params![pattern, conversation_id, limit], |r| {
             let id: String = r.get(0)?;
@@ -298,9 +303,8 @@ fn grep_summaries(
                 snippet(&content)
             ))
         })
-        .map_err(|e| exec_err(&e))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| exec_err(&e))
+        .map_err(exec_err)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(exec_err)
 }
 
 // ── lcm_describe ────────────────────────────────────────────────────
@@ -527,12 +531,11 @@ fn collect_strings(
     sql: &str,
     p: impl rusqlite::Params,
 ) -> Result<Vec<String>, ToolError> {
-    let mut stmt = conn.prepare(sql).map_err(|e| exec_err(&e))?;
+    let mut stmt = conn.prepare(sql).map_err(exec_err)?;
     let rows = stmt
         .query_map(p, |r| r.get::<_, String>(0))
-        .map_err(|e| exec_err(&e))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| exec_err(&e))
+        .map_err(exec_err)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(exec_err)
 }
 
 fn collect_i64s(
@@ -540,12 +543,11 @@ fn collect_i64s(
     sql: &str,
     p: impl rusqlite::Params,
 ) -> Result<Vec<i64>, ToolError> {
-    let mut stmt = conn.prepare(sql).map_err(|e| exec_err(&e))?;
+    let mut stmt = conn.prepare(sql).map_err(exec_err)?;
     let rows = stmt
         .query_map(p, |r| r.get::<_, i64>(0))
-        .map_err(|e| exec_err(&e))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| exec_err(&e))
+        .map_err(exec_err)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(exec_err)
 }
 
 // ── lcm_expand ──────────────────────────────────────────────────────
@@ -696,7 +698,7 @@ fn expand(
                     ))
                 },
             )
-            .map_err(|e| exec_err(&e))?;
+            .map_err(exec_err)?;
         let (kind, node_depth, content, token_count) = info;
 
         let chunk =
@@ -726,7 +728,7 @@ fn expand(
                          WHERE sm.summary_id = ?1 \
                          ORDER BY m.seq",
                     )
-                    .map_err(|e| exec_err(&e))?;
+                    .map_err(exec_err)?;
                 let rows = stmt
                     .query_map(params![id.as_str()], |r| {
                         Ok((
@@ -735,9 +737,9 @@ fn expand(
                             r.get::<_, String>(2)?,
                         ))
                     })
-                    .map_err(|e| exec_err(&e))?;
+                    .map_err(exec_err)?;
                 for r in rows {
-                    let (mid, role, mc) = r.map_err(|e| exec_err(&e))?;
+                    let (mid, role, mc) = r.map_err(exec_err)?;
                     let block = format!("### message_id={mid} role={role}\n{mc}\n\n");
                     if tokens_used as usize + estimate_tokens(&block) > cap {
                         let _ = writeln!(out, "[truncated at token_cap={cap}]");
@@ -765,12 +767,12 @@ fn expand(
                      WHERE parent_summary_id = ?1 \
                      ORDER BY summary_id",
                 )
-                .map_err(|e| exec_err(&e))?;
+                .map_err(exec_err)?;
             let rows = stmt
                 .query_map(params![id.as_str()], |r| r.get::<_, String>(0))
-                .map_err(|e| exec_err(&e))?;
+                .map_err(exec_err)?;
             for r in rows {
-                let child = r.map_err(|e| exec_err(&e))?;
+                let child = r.map_err(exec_err)?;
                 if seen.insert(child.clone()) {
                     frontier.push((child, level + 1));
                 }

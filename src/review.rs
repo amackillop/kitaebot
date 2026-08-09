@@ -373,7 +373,10 @@ impl Tool for ReviewLogTool {
                     line: args.line,
                     note: &args.note,
                 })
-                .map_err(|e| ToolError::ExecutionFailed(format!("review_log: {e}")))?;
+                .map_err(|e| ToolError::Sqlite {
+                    context: "review_log",
+                    source: e,
+                })?;
             Ok(format!("Recorded finding #{id}."))
         })
     }
@@ -466,7 +469,10 @@ impl Tool for ReviewDispositionTool {
                     args.disposition.as_str(),
                     args.note.as_deref(),
                 )
-                .map_err(|e| ToolError::ExecutionFailed(format!("review_disposition: {e}")))?;
+                .map_err(|e| ToolError::Sqlite {
+                    context: "review_disposition",
+                    source: e,
+                })?;
             if !found {
                 return Err(ToolError::ExecutionFailed(format!(
                     "no finding with id {}",

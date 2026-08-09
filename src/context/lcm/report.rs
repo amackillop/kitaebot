@@ -15,7 +15,7 @@ use crate::error::EngineError;
 use crate::types::Message;
 
 use super::super::names::desanitize_name;
-use super::engine::{reconstruct_message, storage_err};
+use super::engine::reconstruct_message;
 
 /// Build the full `/stats` report: shared tool tables + health section.
 pub(super) fn report_sync(conn: &Connection) -> Result<String, EngineError> {
@@ -28,12 +28,9 @@ pub(super) fn report_sync(conn: &Connection) -> Result<String, EngineError> {
 /// Reconstruct the raw message history of every conversation.
 fn all_conversation_messages(conn: &Connection) -> Result<Vec<Vec<Message>>, EngineError> {
     let ids: Vec<i64> = conn
-        .prepare("SELECT conversation_id FROM conversations ORDER BY name")
-        .map_err(|e| storage_err(&e))?
-        .query_map([], |r| r.get(0))
-        .map_err(|e| storage_err(&e))?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(|e| storage_err(&e))?;
+        .prepare("SELECT conversation_id FROM conversations ORDER BY name")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
 
     let mut sessions = Vec::with_capacity(ids.len());
     for id in ids {
@@ -41,12 +38,9 @@ fn all_conversation_messages(conn: &Connection) -> Result<Vec<Vec<Message>>, Eng
             .prepare(
                 "SELECT message_id, role, content FROM messages \
                  WHERE conversation_id = ?1 ORDER BY seq",
-            )
-            .map_err(|e| storage_err(&e))?
-            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map_err(|e| storage_err(&e))?
-            .collect::<rusqlite::Result<_>>()
-            .map_err(|e| storage_err(&e))?;
+            )?
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
 
         let mut messages = Vec::with_capacity(rows.len());
         for (message_id, role, content) in rows {
@@ -63,12 +57,9 @@ fn health_section(conn: &Connection) -> Result<String, EngineError> {
 
     // Summary DAG shape.
     let depths: Vec<(i64, i64)> = conn
-        .prepare("SELECT depth, COUNT(*) FROM summaries GROUP BY depth ORDER BY depth")
-        .map_err(|e| storage_err(&e))?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .map_err(|e| storage_err(&e))?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(|e| storage_err(&e))?;
+        .prepare("SELECT depth, COUNT(*) FROM summaries GROUP BY depth ORDER BY depth")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
     if depths.is_empty() {
         out.push_str("Summaries: none\n");
     } else {
@@ -79,13 +70,11 @@ fn health_section(conn: &Connection) -> Result<String, EngineError> {
     }
 
     // Level-3 escalations store 'level3-truncate' in the model column.
-    let truncated: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM summaries WHERE model = 'level3-truncate'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| storage_err(&e))?;
+    let truncated: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM summaries WHERE model = 'level3-truncate'",
+        [],
+        |r| r.get(0),
+    )?;
     writeln!(out, "Failed summarizations (truncated): {truncated}").unwrap();
 
     // Raw stored tokens vs what assemble would send today.
@@ -101,12 +90,9 @@ fn health_section(conn: &Connection) -> Result<String, EngineError> {
                      LEFT JOIN summaries s ON ci.summary_id = s.summary_id \
                      WHERE ci.conversation_id = c.conversation_id) \
              FROM conversations c ORDER BY c.name",
-        )
-        .map_err(|e| storage_err(&e))?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .map_err(|e| storage_err(&e))?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(|e| storage_err(&e))?;
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
 
     writeln!(
         out,
@@ -132,13 +118,11 @@ fn health_section(conn: &Connection) -> Result<String, EngineError> {
     }
 
     // Externalized payloads.
-    let (file_count, file_bytes): (i64, i64) = conn
-        .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(byte_size), 0) FROM large_files",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .map_err(|e| storage_err(&e))?;
+    let (file_count, file_bytes): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(byte_size), 0) FROM large_files",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     let file_bytes = u64::try_from(file_bytes).unwrap_or(0);
     writeln!(
         out,

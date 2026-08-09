@@ -439,8 +439,7 @@ impl ContextEngine for LcmEngine {
             c.execute(
                 "DELETE FROM context_items WHERE conversation_id = ?1",
                 [conversation_id],
-            )
-            .map_err(|e| storage_err(&e))?;
+            )?;
             Ok(())
         })
         .await?;
@@ -612,24 +611,21 @@ fn push_message_sync(
     let content = msg.content().to_string();
     let token_count = i64::try_from(msg.token_estimate()).unwrap_or(i64::MAX);
 
-    let tx = conn.transaction().map_err(|e| storage_err(&e))?;
+    let tx = conn.transaction()?;
 
-    let seq: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages \
+    let seq: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages \
              WHERE conversation_id = ?1",
-            [conversation_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| storage_err(&e))?;
+        [conversation_id],
+        |row| row.get(0),
+    )?;
 
     tx.execute(
         "INSERT INTO messages \
              (conversation_id, seq, role, content, token_count, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
         params![conversation_id, seq, role, content, token_count],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
     let message_id = tx.last_insert_rowid();
 
     insert_parts(&tx, message_id, msg)?;
@@ -653,42 +649,36 @@ fn push_message_sync(
                 f.exploration_summary,
                 message_id,
             ],
-        )
-        .map_err(|e| storage_err(&e))?;
+        )?;
     }
 
-    let next_ord: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM context_items \
+    let next_ord: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM context_items \
              WHERE conversation_id = ?1",
-            [conversation_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| storage_err(&e))?;
+        [conversation_id],
+        |row| row.get(0),
+    )?;
     tx.execute(
         "INSERT INTO context_items \
              (conversation_id, ordinal, item_type, message_id) \
          VALUES (?1, ?2, 'message', ?3)",
         params![conversation_id, next_ord, message_id],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
 
     tx.execute(
         "UPDATE conversations SET updated_at = datetime('now') \
          WHERE conversation_id = ?1",
         [conversation_id],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
 
-    tx.commit().map_err(|e| storage_err(&e))?;
+    tx.commit()?;
     Ok(())
 }
 
 /// Enumerate every conversation with computed message + token totals.
 fn list_sessions_sync(conn: &mut Connection) -> Result<Vec<SessionInfo>, EngineError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.name, \
+    let mut stmt = conn.prepare(
+        "SELECT c.name, \
                     (SELECT COUNT(*) FROM context_items \
                      WHERE conversation_id = c.conversation_id), \
                     (SELECT COALESCE(SUM(m.token_count), 0) \
@@ -699,25 +689,22 @@ fn list_sessions_sync(conn: &mut Connection) -> Result<Vec<SessionInfo>, EngineE
                      WHERE ci.conversation_id = c.conversation_id) \
              FROM conversations c \
              ORDER BY c.name",
-        )
-        .map_err(|e| storage_err(&e))?;
+    )?;
 
-    let rows = stmt
-        .query_map([], |row| {
-            let stem: String = row.get(0)?;
-            let count: i64 = row.get(1)?;
-            let tokens: i64 = row.get(2)?;
-            Ok(SessionInfo {
-                name: desanitize_name(&stem),
-                message_count: usize::try_from(count).unwrap_or(0),
-                estimated_tokens: usize::try_from(tokens).unwrap_or(0),
-            })
+    let rows = stmt.query_map([], |row| {
+        let stem: String = row.get(0)?;
+        let count: i64 = row.get(1)?;
+        let tokens: i64 = row.get(2)?;
+        Ok(SessionInfo {
+            name: desanitize_name(&stem),
+            message_count: usize::try_from(count).unwrap_or(0),
+            estimated_tokens: usize::try_from(tokens).unwrap_or(0),
         })
-        .map_err(|e| storage_err(&e))?;
+    })?;
 
     let mut out = Vec::new();
     for r in rows {
-        out.push(r.map_err(|e| storage_err(&e))?);
+        out.push(r?);
     }
     Ok(out)
 }
@@ -726,18 +713,14 @@ fn list_sessions_sync(conn: &mut Connection) -> Result<Vec<SessionInfo>, EngineE
 /// fresh distillation state at the current tips. Conversations with
 /// no messages are omitted by the join.
 fn latest_positions_sync(conn: &Connection) -> Result<BTreeMap<String, u64>, EngineError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.name, MAX(m.seq) + 1 FROM conversations c \
+    let mut stmt = conn.prepare(
+        "SELECT c.name, MAX(m.seq) + 1 FROM conversations c \
              JOIN messages m ON m.conversation_id = c.conversation_id \
              GROUP BY c.conversation_id",
-        )
-        .map_err(|e| storage_err(&e))?;
+    )?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-        .map_err(|e| storage_err(&e))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| storage_err(&e))?;
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows
         .into_iter()
         .map(|(stem, tip)| (desanitize_name(&stem), tip.cast_unsigned()))
@@ -752,27 +735,21 @@ fn pending_distill_tokens_sync(
     since: &BTreeMap<String, u64>,
 ) -> Result<BTreeMap<String, u64>, EngineError> {
     let convs: Vec<(i64, String)> = {
-        let mut stmt = conn
-            .prepare("SELECT conversation_id, name FROM conversations")
-            .map_err(|e| storage_err(&e))?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(|e| storage_err(&e))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| storage_err(&e))?
+        let mut stmt = conn.prepare("SELECT conversation_id, name FROM conversations")?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
     };
 
     let mut out = BTreeMap::new();
     for (id, stem) in convs {
         let name = desanitize_name(&stem);
         let watermark = i64::try_from(since.get(&name).copied().unwrap_or(0)).unwrap_or(i64::MAX);
-        let sum: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(token_count), 0) FROM messages \
+        let sum: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(token_count), 0) FROM messages \
                  WHERE conversation_id = ?1 AND seq >= ?2",
-                params![id, watermark],
-                |r| r.get(0),
-            )
-            .map_err(|e| storage_err(&e))?;
+            params![id, watermark],
+            |r| r.get(0),
+        )?;
         if sum > 0 {
             out.insert(name, u64::try_from(sum).unwrap_or(u64::MAX));
         }
@@ -795,26 +772,21 @@ fn transcript_since_sync(
             [stem],
             |r| r.get(0),
         )
-        .optional()
-        .map_err(|e| storage_err(&e))?;
+        .optional()?;
     let Some(conversation_id) = conversation_id else {
         return Ok(Vec::new());
     };
     let after = i64::try_from(after).unwrap_or(i64::MAX);
 
     let rows: Vec<(i64, String, String, i64)> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT message_id, role, content, token_count FROM messages \
+        let mut stmt = conn.prepare(
+            "SELECT message_id, role, content, token_count FROM messages \
                  WHERE conversation_id = ?1 AND seq >= ?2 ORDER BY seq",
-            )
-            .map_err(|e| storage_err(&e))?;
+        )?;
         stmt.query_map(params![conversation_id, after], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })
-        .map_err(|e| storage_err(&e))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| storage_err(&e))?
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
     };
 
     let mut out = Vec::new();
@@ -871,9 +843,8 @@ fn assemble_sync(
     conversation_id: i64,
     system_prompt: &str,
 ) -> Result<AssembledContext, EngineError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT ci.item_type, \
+    let mut stmt = conn.prepare(
+        "SELECT ci.item_type, \
                     m.message_id, m.role, m.content, \
                     s.summary_id, s.kind, s.depth, s.content, \
                     s.earliest_at, s.latest_at \
@@ -882,8 +853,7 @@ fn assemble_sync(
              LEFT JOIN summaries s ON ci.summary_id = s.summary_id \
              WHERE ci.conversation_id = ?1 \
              ORDER BY ci.ordinal",
-        )
-        .map_err(|e| storage_err(&e))?;
+    )?;
 
     let entries: Vec<AssembleRow> = stmt
         .query_map([conversation_id], |r| {
@@ -904,10 +874,8 @@ fn assemble_sync(
                     latest_at: r.get(9)?,
                 })
             }
-        })
-        .map_err(|e| storage_err(&e))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| storage_err(&e))?;
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let has_summary = entries
         .iter()
@@ -971,21 +939,18 @@ fn written_files_segment(
     conn: &Connection,
     conversation_id: i64,
 ) -> Result<Option<String>, EngineError> {
-    let pinned_seq: Option<i64> = conn
-        .query_row(
-            "SELECT MAX(seq) FROM messages \
+    let pinned_seq: Option<i64> = conn.query_row(
+        "SELECT MAX(seq) FROM messages \
              WHERE conversation_id = ?1 AND role = 'user'",
-            [conversation_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| storage_err(&e))?;
+        [conversation_id],
+        |r| r.get(0),
+    )?;
     let Some(pinned_seq) = pinned_seq else {
         return Ok(None);
     };
 
-    let compacted_after_pin: bool = conn
-        .query_row(
-            "SELECT EXISTS( \
+    let compacted_after_pin: bool = conn.query_row(
+        "SELECT EXISTS( \
                 SELECT 1 FROM messages m \
                 WHERE m.conversation_id = ?1 AND m.seq > ?2 \
                   AND NOT EXISTS( \
@@ -993,29 +958,24 @@ fn written_files_segment(
                     WHERE ci.conversation_id = ?1 \
                       AND ci.item_type = 'message' \
                       AND ci.message_id = m.message_id))",
-            params![conversation_id, pinned_seq],
-            |r| r.get(0),
-        )
-        .map_err(|e| storage_err(&e))?;
+        params![conversation_id, pinned_seq],
+        |r| r.get(0),
+    )?;
     if !compacted_after_pin {
         return Ok(None);
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT mp.tool_input FROM message_parts mp \
+    let mut stmt = conn.prepare(
+        "SELECT mp.tool_input FROM message_parts mp \
              JOIN messages m ON mp.message_id = m.message_id \
              WHERE m.conversation_id = ?1 AND m.seq > ?2 \
                AND mp.part_type = 'tool_call' \
                AND mp.tool_name IN ('file_write', 'file_edit') \
              ORDER BY m.seq DESC, mp.ordinal DESC",
-        )
-        .map_err(|e| storage_err(&e))?;
+    )?;
     let inputs: Vec<String> = stmt
-        .query_map(params![conversation_id, pinned_seq], |r| r.get(0))
-        .map_err(|e| storage_err(&e))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| storage_err(&e))?;
+        .query_map(params![conversation_id, pinned_seq], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut paths: Vec<String> = Vec::new();
     for input in inputs {
@@ -1082,31 +1042,25 @@ pub(super) fn reconstruct_message(
         "user" => Ok(Message::User { content }),
         "system" => Ok(Message::System { content }),
         "tool" => {
-            let call_id: String = conn
-                .query_row(
-                    "SELECT tool_call_id FROM message_parts \
+            let call_id: String = conn.query_row(
+                "SELECT tool_call_id FROM message_parts \
                      WHERE message_id = ?1 AND part_type = 'tool_output'",
-                    [message_id],
-                    |r| r.get(0),
-                )
-                .map_err(|e| storage_err(&e))?;
+                [message_id],
+                |r| r.get(0),
+            )?;
             Ok(Message::Tool { call_id, content })
         }
         "assistant" => {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT tool_call_id, tool_name, tool_input \
+            let mut stmt = conn.prepare(
+                "SELECT tool_call_id, tool_name, tool_input \
                      FROM message_parts \
                      WHERE message_id = ?1 AND part_type = 'tool_call' \
                      ORDER BY ordinal",
-                )
-                .map_err(|e| storage_err(&e))?;
+            )?;
 
             let rows: Vec<(String, String, String)> = stmt
-                .query_map([message_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .map_err(|e| storage_err(&e))?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|e| storage_err(&e))?;
+                .query_map([message_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
 
             // Names are validated before they are ever written, so a
             // stored one that no longer parses means the row came from
@@ -1167,8 +1121,7 @@ fn insert_parts(
                       text_content, tool_call_id) \
                  VALUES (?1, ?2, 'tool_output', 0, ?3, ?4)",
                 params![part_id(message_id, 0), message_id, content, call_id],
-            )
-            .map_err(|e| storage_err(&e))?;
+            )?;
         }
         Message::ToolCalls { content, calls } => {
             insert_text_part(tx, message_id, 0, content)?;
@@ -1187,8 +1140,7 @@ fn insert_parts(
                         tc.function.name.as_str(),
                         tc.function.arguments,
                     ],
-                )
-                .map_err(|e| storage_err(&e))?;
+                )?;
             }
         }
     }
@@ -1206,8 +1158,7 @@ fn insert_text_part(
              (part_id, message_id, part_type, ordinal, text_content) \
          VALUES (?1, ?2, 'text', ?3, ?4)",
         params![part_id(message_id, ordinal), message_id, ordinal, content],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
     Ok(())
 }
 
@@ -1241,18 +1192,13 @@ fn ensure_conversation(conn: &Connection, name: &str) -> Result<i64, EngineError
         "INSERT OR IGNORE INTO conversations (name, created_at, updated_at) \
          VALUES (?1, datetime('now'), datetime('now'))",
         [name],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
     conn.query_row(
         "SELECT conversation_id FROM conversations WHERE name = ?1",
         [name],
         |row| row.get(0),
     )
-    .map_err(|e| storage_err(&e))
-}
-
-pub(super) fn storage_err(e: &rusqlite::Error) -> EngineError {
-    EngineError::Storage(e.to_string())
+    .map_err(EngineError::from)
 }
 
 // ── Active session persistence ──────────────────────────────────────

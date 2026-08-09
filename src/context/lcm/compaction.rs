@@ -15,7 +15,7 @@ use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
-use super::engine::{reconstruct_message, run_blocking, storage_err};
+use super::engine::{reconstruct_message, run_blocking};
 use super::explore::extract_file_ids;
 use super::summarize::{EscalationOutcome, summarize_with_escalation};
 use crate::config::LcmConfig;
@@ -65,16 +65,14 @@ pub(super) fn load_leaf_chunks(
 ) -> Result<Vec<LeafChunk>, EngineError> {
     let fresh_tail = cfg.fresh_tail_count as usize;
     let leaf_budget = i64::from(cfg.leaf_chunk_tokens);
-    let mut stmt = conn
-        .prepare(
-            "SELECT ci.ordinal, m.message_id, m.role, m.content, \
+    let mut stmt = conn.prepare(
+        "SELECT ci.ordinal, m.message_id, m.role, m.content, \
                     m.token_count, m.created_at \
              FROM context_items ci \
              JOIN messages m ON ci.message_id = m.message_id \
              WHERE ci.conversation_id = ?1 AND ci.item_type = 'message' \
              ORDER BY ci.ordinal",
-        )
-        .map_err(|e| storage_err(&e))?;
+    )?;
 
     let raw: Vec<(i64, i64, String, String, i64, String)> = stmt
         .query_map([conversation_id], |r| {
@@ -86,10 +84,8 @@ pub(super) fn load_leaf_chunks(
                 r.get(4)?,
                 r.get(5)?,
             ))
-        })
-        .map_err(|e| storage_err(&e))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| storage_err(&e))?;
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     if raw.len() <= fresh_tail {
         return Ok(Vec::new());
@@ -182,7 +178,7 @@ pub(super) fn write_leaf_summary(
     let last_ordinal = chunk.rows.last().map_or(0, |r| r.ordinal);
     let model = outcome.level.tag();
 
-    let tx = conn.transaction().map_err(|e| storage_err(&e))?;
+    let tx = conn.transaction()?;
 
     tx.execute(
         "INSERT INTO summaries \
@@ -202,16 +198,13 @@ pub(super) fn write_leaf_summary(
             source_tokens,
             model,
         ],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
 
     {
-        let mut ins = tx
-            .prepare("INSERT INTO summary_messages (summary_id, message_id) VALUES (?1, ?2)")
-            .map_err(|e| storage_err(&e))?;
+        let mut ins =
+            tx.prepare("INSERT INTO summary_messages (summary_id, message_id) VALUES (?1, ?2)")?;
         for row in &chunk.rows {
-            ins.execute(params![summary_id, row.message_id])
-                .map_err(|e| storage_err(&e))?;
+            ins.execute(params![summary_id, row.message_id])?;
         }
     }
 
@@ -222,16 +215,13 @@ pub(super) fn write_leaf_summary(
     // since content can mention file-shaped ids that were never
     // externalized and a bare INSERT would abort on the FK.
     {
-        let mut ins = tx
-            .prepare(
-                "INSERT OR IGNORE INTO summary_files (summary_id, file_id) \
+        let mut ins = tx.prepare(
+            "INSERT OR IGNORE INTO summary_files (summary_id, file_id) \
                  SELECT ?1, file_id FROM large_files WHERE file_id = ?2",
-            )
-            .map_err(|e| storage_err(&e))?;
+        )?;
         for row in &chunk.rows {
             for file_id in extract_file_ids(row.message.content()) {
-                ins.execute(params![summary_id, file_id])
-                    .map_err(|e| storage_err(&e))?;
+                ins.execute(params![summary_id, file_id])?;
             }
         }
     }
@@ -240,17 +230,15 @@ pub(super) fn write_leaf_summary(
         "DELETE FROM context_items \
          WHERE conversation_id = ?1 AND ordinal BETWEEN ?2 AND ?3",
         params![conversation_id, first_ordinal, last_ordinal],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
     tx.execute(
         "INSERT INTO context_items \
             (conversation_id, ordinal, item_type, summary_id) \
          VALUES (?1, ?2, 'summary', ?3)",
         params![conversation_id, first_ordinal, summary_id],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
 
-    tx.commit().map_err(|e| storage_err(&e))?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -310,9 +298,8 @@ pub(super) fn load_condensed_chunks(
 ) -> Result<Vec<CondensedChunk>, EngineError> {
     let min_fanout = cfg.min_condensed_fanout as usize;
     let leaf_budget = i64::from(cfg.leaf_chunk_tokens);
-    let mut stmt = conn
-        .prepare(
-            "SELECT ci.ordinal, ci.item_type, \
+    let mut stmt = conn.prepare(
+        "SELECT ci.ordinal, ci.item_type, \
                     s.summary_id, s.depth, s.content, s.token_count, \
                     s.earliest_at, s.latest_at, \
                     s.descendant_count, s.descendant_token_count, \
@@ -321,8 +308,7 @@ pub(super) fn load_condensed_chunks(
              LEFT JOIN summaries s ON ci.summary_id = s.summary_id \
              WHERE ci.conversation_id = ?1 \
              ORDER BY ci.ordinal",
-        )
-        .map_err(|e| storage_err(&e))?;
+    )?;
 
     // None marks a `'message'` item: terminates any in-flight run.
     let raw: Vec<Option<CondensedRow>> = stmt
@@ -345,10 +331,8 @@ pub(super) fn load_condensed_chunks(
                     source_message_token_count: r.get(10)?,
                 }))
             }
-        })
-        .map_err(|e| storage_err(&e))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| storage_err(&e))?;
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut chunks: Vec<CondensedChunk> = Vec::new();
     let mut current: Vec<CondensedRow> = Vec::new();
@@ -454,7 +438,7 @@ pub(super) fn write_condensed_summary(
     let new_depth = chunk.depth + 1;
     let model = outcome.level.tag();
 
-    let tx = conn.transaction().map_err(|e| storage_err(&e))?;
+    let tx = conn.transaction()?;
 
     tx.execute(
         "INSERT INTO summaries \
@@ -475,16 +459,14 @@ pub(super) fn write_condensed_summary(
             source_message_token_count,
             model,
         ],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
 
     {
-        let mut ins = tx
-            .prepare("INSERT INTO summary_parents (summary_id, parent_summary_id) VALUES (?1, ?2)")
-            .map_err(|e| storage_err(&e))?;
+        let mut ins = tx.prepare(
+            "INSERT INTO summary_parents (summary_id, parent_summary_id) VALUES (?1, ?2)",
+        )?;
         for row in &chunk.rows {
-            ins.execute(params![row.summary_id, summary_id])
-                .map_err(|e| storage_err(&e))?;
+            ins.execute(params![row.summary_id, summary_id])?;
         }
     }
 
@@ -493,15 +475,12 @@ pub(super) fn write_condensed_summary(
     // re-extracting ids from summary text) keeps the association
     // even if a lossy summarization pass dropped a `<file>` tag.
     {
-        let mut ins = tx
-            .prepare(
-                "INSERT OR IGNORE INTO summary_files (summary_id, file_id) \
+        let mut ins = tx.prepare(
+            "INSERT OR IGNORE INTO summary_files (summary_id, file_id) \
                  SELECT ?1, file_id FROM summary_files WHERE summary_id = ?2",
-            )
-            .map_err(|e| storage_err(&e))?;
+        )?;
         for row in &chunk.rows {
-            ins.execute(params![summary_id, row.summary_id])
-                .map_err(|e| storage_err(&e))?;
+            ins.execute(params![summary_id, row.summary_id])?;
         }
     }
 
@@ -509,17 +488,15 @@ pub(super) fn write_condensed_summary(
         "DELETE FROM context_items \
          WHERE conversation_id = ?1 AND ordinal BETWEEN ?2 AND ?3",
         params![conversation_id, first_ordinal, last_ordinal],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
     tx.execute(
         "INSERT INTO context_items \
             (conversation_id, ordinal, item_type, summary_id) \
          VALUES (?1, ?2, 'summary', ?3)",
         params![conversation_id, first_ordinal, summary_id],
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
 
-    tx.commit().map_err(|e| storage_err(&e))?;
+    tx.commit()?;
     Ok(())
 }
 

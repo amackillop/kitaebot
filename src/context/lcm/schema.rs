@@ -49,7 +49,7 @@ const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_baseline.sql")];
 /// Returns [`EngineError::Storage`] if the file cannot be opened, a
 /// migration fails, or the user function cannot be registered.
 pub fn open(path: &Path) -> Result<Connection, EngineError> {
-    let conn = Connection::open(path).map_err(|e| storage_err(&e))?;
+    let conn = Connection::open(path)?;
     init(&conn)?;
     Ok(conn)
 }
@@ -69,13 +69,12 @@ pub fn open(path: &Path) -> Result<Connection, EngineError> {
 /// the function cannot be registered.
 pub fn open_readonly(path: &Path) -> Result<Connection, EngineError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = Connection::open_with_flags(path, flags).map_err(|e| storage_err(&e))?;
+    let conn = Connection::open_with_flags(path, flags)?;
     conn.execute_batch(
         "PRAGMA busy_timeout = 30000;\
          PRAGMA cache_size = -65536;\
          PRAGMA temp_store = MEMORY;",
-    )
-    .map_err(|e| storage_err(&e))?;
+    )?;
     register_regexp(&conn)?;
     Ok(conn)
 }
@@ -89,8 +88,8 @@ pub fn open_readonly(path: &Path) -> Result<Connection, EngineError> {
 ///
 /// Returns [`EngineError::Storage`] on any underlying `SQLite` failure.
 pub fn init(conn: &Connection) -> Result<(), EngineError> {
-    conn.execute_batch(PRAGMAS).map_err(|e| storage_err(&e))?;
-    crate::sqlite::apply_migrations(conn, MIGRATIONS).map_err(|e| storage_err(&e))?;
+    conn.execute_batch(PRAGMAS)?;
+    crate::sqlite::apply_migrations(conn, MIGRATIONS)?;
     register_regexp(conn)?;
     Ok(())
 }
@@ -118,11 +117,7 @@ fn register_regexp(conn: &Connection) -> Result<(), EngineError> {
             Ok(re.is_match(&text))
         },
     )
-    .map_err(|e| storage_err(&e))
-}
-
-fn storage_err(e: &rusqlite::Error) -> EngineError {
-    EngineError::Storage(e.to_string())
+    .map_err(EngineError::from)
 }
 
 #[cfg(test)]

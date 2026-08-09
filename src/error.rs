@@ -66,7 +66,15 @@ pub enum EngineError {
     #[error("Session error: {0}")]
     Session(#[from] SessionError),
 
-    /// `SQLite` or other storage backend failure.
+    /// `SQLite` failure in the engine's store.
+    ///
+    /// `#[from]` is safe here where it is not on [`ToolError`]: within
+    /// this type a `rusqlite::Error` can only mean the store failed.
+    #[error("Storage error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
+    /// Storage failure that is not a `SQLite` error (filesystem, task
+    /// join), with context written at the site.
     #[error("Storage error: {0}")]
     #[allow(dead_code)] // Used by the LCM engine.
     Storage(String),
@@ -234,6 +242,20 @@ pub enum ToolError {
     #[error("Tool not found: {0}")]
     NotFound(String),
 
+    /// A `SQLite`-backed store a tool fronts failed.
+    ///
+    /// No `#[from]`: a `rusqlite::Error` inside `ToolError` is the LCM
+    /// query store in one place and the review ledger in another, so
+    /// each site names which through `context`.
+    #[error("{context}: {source}")]
+    Sqlite {
+        /// Which store, e.g. `lcm` or `review_log`.
+        context: &'static str,
+        /// The underlying `SQLite` failure.
+        #[source]
+        source: rusqlite::Error,
+    },
+
     /// A subprocess failed at the OS level before its output could be
     /// collected — an `execve`/`fork` failure (the usual case) or an
     /// I/O error while waiting on it. Distinct from a nonzero exit,
@@ -308,6 +330,7 @@ impl ToolError {
             | Self::Mcp { .. }
             | Self::NotFound(_)
             | Self::Spawn { .. }
+            | Self::Sqlite { .. }
             | Self::SubAgent { .. }
             | Self::Telegram(_)
             | Self::Timeout { .. } => self.to_string(),
