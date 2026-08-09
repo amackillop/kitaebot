@@ -347,8 +347,9 @@ impl<P: Provider> Tool for TaskTool<P> {
                     usage,
                 },
             );
-            let output =
-                result.map_err(|e| ToolError::ExecutionFailed(format!("sub-agent failed: {e}")))?;
+            let output = result.map_err(|e| ToolError::SubAgent {
+                source: Box::new(e),
+            })?;
             let mut text = output.into_text();
             if args.agent_type == AgentKind::Reviewer {
                 let ids = record_review(self.review_ledger.as_deref(), args.review.as_ref(), &text);
@@ -702,8 +703,10 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            ToolError::ExecutionFailed(msg) => assert!(msg.contains("sub-agent failed")),
-            other => panic!("expected ExecutionFailed, got {other:?}"),
+            ToolError::SubAgent { source } => {
+                assert!(matches!(*source, crate::error::Error::Cancelled));
+            }
+            other => panic!("expected SubAgent, got {other:?}"),
         }
         assert_eq!(provider.call_count(), 0);
     }
@@ -774,7 +777,12 @@ mod tests {
             .execute(serde_json::json!({"prompt": "x"}), ToolCtx::default())
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed(_)));
+        // The provider's own error must survive the sub-agent boundary.
+        assert!(matches!(
+            &err,
+            ToolError::SubAgent { source }
+                if matches!(**source, crate::error::Error::Provider(_))
+        ));
     }
 
     const REVIEW_RESPONSE: &str = "Looks broken.\n```findings\n\

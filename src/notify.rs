@@ -208,10 +208,7 @@ impl Tool for NotifyTool {
                     "notification rate limit reached ({MAX_PER_TURN} per turn)"
                 ))),
                 NotifyAction::SendNow(message) => {
-                    self.0
-                        .send(&message)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+                    self.0.send(&message).await?;
                     Ok("Notification sent.".into())
                 }
             }
@@ -421,7 +418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn telegram_failure_surfaces_execution_failed() {
+    async fn telegram_failure_surfaces_the_client_error() {
         let client = TelegramClient::from_fn(|_method, _body| async {
             Err(TelegramError::Network("boom".into()))
         });
@@ -434,7 +431,11 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed(_)));
+        // Transparent: the model reads the TelegramError itself.
+        assert!(matches!(
+            err,
+            ToolError::Telegram(TelegramError::Network(_))
+        ));
     }
 
     #[tokio::test]

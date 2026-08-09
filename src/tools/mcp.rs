@@ -416,11 +416,14 @@ impl Tool for McpTool {
             // is discarded by the stale-id check.
             let result = tokio::select! {
                 () = ctx.cancel.cancelled() => {
-                    return Err(ToolError::ExecutionFailed("cancelled".into()));
+                    return Err(ToolError::Cancelled);
                 }
                 result = self.server.call(&self.remote_name, args) => result,
             };
-            result.map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", self.name)))
+            result.map_err(|e| ToolError::Mcp {
+                tool: self.name.to_string(),
+                source: e,
+            })
         })
     }
 }

@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::tools::mcp::McpError;
+
 /// Top-level agent error.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -151,6 +153,13 @@ pub enum ToolError {
         guidance: String,
     },
 
+    /// The turn was cancelled while the tool was in flight.
+    ///
+    /// Not a failure: the caller went away. Distinct from
+    /// [`Self::Timeout`], which is the tool outrunning its budget.
+    #[error("cancelled")]
+    Cancelled,
+
     /// A subprocess ran to completion and exited non-zero.
     ///
     /// Distinct from [`Self::Spawn`], which never got that far. Carries
@@ -207,6 +216,20 @@ pub enum ToolError {
         source: std::io::Error,
     },
 
+    /// A call to an MCP server's tool failed.
+    ///
+    /// Not transparent: [`McpError`] names the protocol failure but not
+    /// which registered tool was being called, and one server can back
+    /// many of them.
+    #[error("{tool}: {source}")]
+    Mcp {
+        /// The registered (namespaced) tool name.
+        tool: String,
+        /// The protocol-level failure.
+        #[source]
+        source: McpError,
+    },
+
     /// Tool not found in registry.
     #[error("Tool not found: {0}")]
     NotFound(String),
@@ -227,6 +250,21 @@ pub enum ToolError {
         #[source]
         source: std::io::Error,
     },
+
+    /// A sub-agent's turn ended in error.
+    ///
+    /// Boxed because [`Error`] already contains a `ToolError`, so
+    /// storing one inline would make the type recursive.
+    #[error("sub-agent failed: {source}")]
+    SubAgent {
+        /// Whatever ended the sub-agent's turn.
+        #[source]
+        source: Box<Error>,
+    },
+
+    /// A Telegram API call made by a tool failed.
+    #[error(transparent)]
+    Telegram(#[from] TelegramError),
 
     /// Tool execution timed out. Names the command and the budget so a
     /// timeout is never a bare "timed out" with no way to tell what or
@@ -261,13 +299,17 @@ impl ToolError {
             // API error bodies are the diagnostic and are bounded by
             // what the service returns, so they log whole.
             Self::Blocked { .. }
+            | Self::Cancelled
             | Self::ExecutionFailed(_)
             | Self::Github(_)
             | Self::InvalidArguments(_)
             | Self::Io { .. }
             | Self::Linear(_)
+            | Self::Mcp { .. }
             | Self::NotFound(_)
             | Self::Spawn { .. }
+            | Self::SubAgent { .. }
+            | Self::Telegram(_)
             | Self::Timeout { .. } => self.to_string(),
         }
     }
