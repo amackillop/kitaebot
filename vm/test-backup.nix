@@ -63,9 +63,11 @@ pkgs.testers.nixosTest {
     with subtest("seed durable and derived state"):
         machine.succeed(f"mkdir -p {W}/context/lcm/payloads {W}/memory/topics {W}/projects/o/r")
         # The daemon owns kitaebot.db's schema (versioned migration);
-        # wait for it, then seed rows through the real table.
+        # wait for it, then seed rows through the real table. mode=ro:
+        # a plain open would create the file root-owned if the poll
+        # wins the race, locking the daemon out of its own database.
         machine.wait_until_succeeds(
-            f"sqlite3 {W}/state/kitaebot.db \"SELECT 1 FROM turns LIMIT 0;\""
+            f"sqlite3 \"file:{W}/state/kitaebot.db?mode=ro\" \"SELECT 1 FROM turns LIMIT 0;\""
         )
         machine.succeed(
             f"sqlite3 {W}/state/kitaebot.db "
