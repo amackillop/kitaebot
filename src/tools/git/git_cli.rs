@@ -214,15 +214,18 @@ impl GitCli {
         let call = self.prepare_git(&["ls-remote", &url, "HEAD"], &self.workspace_root);
         let out = self.exec_git(call, true).await?;
         if out.exit_code != 0 {
-            return Err(ToolError::ExecutionFailed(format!(
-                "ls-remote {nwo} exited {}: {}",
-                out.exit_code,
-                out.stderr.trim(),
-            )));
+            return Err(ToolError::CommandFailed {
+                command: format!("git ls-remote {nwo} HEAD"),
+                exit_code: out.exit_code,
+                output: format!(
+                    "ls-remote {nwo} exited {}: {}",
+                    out.exit_code,
+                    out.stderr.trim(),
+                ),
+            });
         }
-        parse_ls_remote_head(&out.stdout).ok_or_else(|| {
-            ToolError::ExecutionFailed(format!("ls-remote {nwo}: no HEAD in output"))
-        })
+        parse_ls_remote_head(&out.stdout)
+            .ok_or_else(|| ToolError::Precondition(format!("ls-remote {nwo}: no HEAD in output")))
     }
 
     /// Execute a [`SubprocessCall`] with optional credential injection.

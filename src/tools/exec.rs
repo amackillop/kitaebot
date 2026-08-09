@@ -615,7 +615,7 @@ impl Tool for Exec {
             let cwd = resolve_working_dir(&self.workspace_root, args.working_dir.as_deref())?;
 
             if !cwd.is_dir() {
-                return Err(ToolError::ExecutionFailed(format!(
+                return Err(ToolError::Precondition(format!(
                     "working directory does not exist: {}",
                     cwd.strip_prefix(&self.workspace_root)
                         .unwrap_or(&cwd)
@@ -1439,7 +1439,7 @@ mod tests {
         let args = serde_json::json!({"command": "pwd", "working_dir": "no_such_dir"});
         let result = tool.execute(args, ToolCtx::default()).await;
         assert!(
-            matches!(&result, Err(ToolError::ExecutionFailed(msg)) if msg.contains("does not exist")),
+            matches!(&result, Err(ToolError::Precondition(msg)) if msg.contains("does not exist")),
             "expected 'does not exist' error, got: {result:?}",
         );
     }

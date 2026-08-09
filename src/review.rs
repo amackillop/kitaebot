@@ -474,7 +474,7 @@ impl Tool for ReviewDispositionTool {
                     source: e,
                 })?;
             if !found {
-                return Err(ToolError::ExecutionFailed(format!(
+                return Err(ToolError::InvalidArguments(format!(
                     "no finding with id {}",
                     args.finding_id
                 )));
@@ -785,7 +785,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed(_)));
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
     }
 
     #[test]

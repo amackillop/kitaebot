@@ -64,11 +64,11 @@ impl Tool for Fixup {
 
 /// A failed step's message, carrying the git output.
 fn step_err(what: &str, out: &CmdOutput) -> ToolError {
-    ToolError::ExecutionFailed(format!(
-        "{what}: {}\n{}",
-        out.stdout.trim(),
-        out.stderr.trim()
-    ))
+    ToolError::CommandFailed {
+        command: what.to_string(),
+        exit_code: out.exit_code,
+        output: format!("{what}: {}\n{}", out.stdout.trim(), out.stderr.trim()),
+    }
 }
 
 impl Fixup {
@@ -178,13 +178,17 @@ impl Fixup {
             .await?;
         if rebase.exit_code != 0 {
             self.restore(&cwd, &fixup_head).await;
-            return Err(ToolError::ExecutionFailed(format!(
-                "autosquash hit conflicts; everything is restored and the \
-                 tweak is still staged — commit it normally with git_commit \
-                 instead.\n{}\n{}",
-                rebase.stdout.trim(),
-                rebase.stderr.trim(),
-            )));
+            return Err(ToolError::CommandFailed {
+                command: "git rebase --autosquash".to_string(),
+                exit_code: rebase.exit_code,
+                output: format!(
+                    "autosquash hit conflicts; everything is restored and the \
+                     tweak is still staged — commit it normally with git_commit \
+                     instead.\n{}\n{}",
+                    rebase.stdout.trim(),
+                    rebase.stderr.trim(),
+                ),
+            });
         }
 
         // Melding never changes the final tree; anything else means
@@ -194,7 +198,7 @@ impl Fixup {
             .await?;
         if tree_after != tree_before {
             self.restore(&cwd, &fixup_head).await;
-            return Err(ToolError::ExecutionFailed(
+            return Err(ToolError::Precondition(
                 "tree changed across the autosquash (invariant violation); \
                  everything is restored and the tweak is still staged"
                     .into(),
@@ -206,12 +210,16 @@ impl Fixup {
             .prepare_git(&["push", "--force-with-lease", "origin", &branch], &cwd);
         let push = self.0.exec_git(push_call, true).await?;
         if push.exit_code != 0 {
-            return Err(ToolError::ExecutionFailed(format!(
-                "history rewritten locally but the push was rejected — the \
-                 remote likely moved. Redo the PR from a fresh branch \
-                 instead of retrying.\n{}",
-                push.stderr.trim(),
-            )));
+            return Err(ToolError::CommandFailed {
+                command: format!("git push --force-with-lease origin {branch}"),
+                exit_code: push.exit_code,
+                output: format!(
+                    "history rewritten locally but the push was rejected — the \
+                     remote likely moved. Redo the PR from a fresh branch \
+                     instead of retrying.\n{}",
+                    push.stderr.trim(),
+                ),
+            });
         }
 
         Ok(format!(

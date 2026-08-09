@@ -1272,8 +1272,8 @@ mod tests {
                 Some(FailureKind::Blocked),
             ),
             (
-                Err(ToolError::ExecutionFailed("exit 1".into())),
-                Some(FailureKind::ExecutionFailed),
+                Err(ToolError::Precondition("exit 1".into())),
+                Some(FailureKind::Precondition),
             ),
             (
                 Err(ToolError::InvalidArguments("missing field".into())),

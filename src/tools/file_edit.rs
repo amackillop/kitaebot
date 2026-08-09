@@ -82,7 +82,7 @@ impl Tool for FileEdit {
             })?;
 
             let Some((rung, spans)) = find_matches(&content, &args.old_string) else {
-                return Err(ToolError::ExecutionFailed(format!(
+                return Err(ToolError::Precondition(format!(
                     "no match found for old_string in {path}; the file may have \
                      changed since you read it. Current content:\n{content}",
                     path = args.path,
@@ -101,7 +101,7 @@ impl Tool for FileEdit {
                     many.len(),
                 ),
                 many => {
-                    return Err(ToolError::ExecutionFailed(ambiguous_message(
+                    return Err(ToolError::Precondition(ambiguous_message(
                         rung, many, &content, &args.path,
                     )));
                 }
@@ -361,12 +361,12 @@ mod tests {
         let (_dir, tool) = setup("a\nb\na\nb\na\n");
         let result = edit(&tool, "a", "x").await;
         match result {
-            Err(ToolError::ExecutionFailed(msg)) => {
+            Err(ToolError::Precondition(msg)) => {
                 assert!(msg.contains("3 matches"), "{msg}");
                 assert!(msg.contains("lines 1, 3, 5"), "{msg}");
                 assert!(msg.contains("exact match"), "{msg}");
             }
-            other => panic!("expected ExecutionFailed, got {other:?}"),
+            other => panic!("expected Precondition, got {other:?}"),
         }
     }
 
@@ -375,11 +375,11 @@ mod tests {
         let (_dir, tool) = setup("hello world");
         let result = edit(&tool, "missing", "x").await;
         match result {
-            Err(ToolError::ExecutionFailed(msg)) => {
+            Err(ToolError::Precondition(msg)) => {
                 assert!(msg.contains("may have changed since you read it"), "{msg}");
                 assert!(msg.contains("hello world"), "{msg}");
             }
-            other => panic!("expected ExecutionFailed, got {other:?}"),
+            other => panic!("expected Precondition, got {other:?}"),
         }
     }
 
@@ -458,12 +458,12 @@ mod tests {
         let (_dir, tool) = setup("foo( 1 );\nfoo(  1 );\n");
         let result = edit(&tool, "foo(   1 );", "bar( 1 );").await;
         match result {
-            Err(ToolError::ExecutionFailed(msg)) => {
+            Err(ToolError::Precondition(msg)) => {
                 assert!(msg.contains("2 matches"), "{msg}");
                 assert!(msg.contains("whitespace-flexible match"), "{msg}");
                 assert!(msg.contains("lines 1, 2"), "{msg}");
             }
-            other => panic!("expected ExecutionFailed, got {other:?}"),
+            other => panic!("expected Precondition, got {other:?}"),
         }
     }
 
@@ -505,11 +505,11 @@ mod tests {
         let (_dir, tool) = setup("foo( 1 );\nfoo(  1 );\n");
         let result = edit_all(&tool, "foo(   1 );", "bar( 1 );").await;
         match result {
-            Err(ToolError::ExecutionFailed(msg)) => {
+            Err(ToolError::Precondition(msg)) => {
                 assert!(msg.contains("2 matches"), "{msg}");
                 assert!(!msg.contains("or set replace_all"), "{msg}");
             }
-            other => panic!("expected ExecutionFailed, got {other:?}"),
+            other => panic!("expected Precondition, got {other:?}"),
         }
     }
 
@@ -518,10 +518,10 @@ mod tests {
         let (_dir, tool) = setup("a\nb\na\n");
         let result = edit(&tool, "a", "x").await;
         match result {
-            Err(ToolError::ExecutionFailed(msg)) => {
+            Err(ToolError::Precondition(msg)) => {
                 assert!(msg.contains("or set replace_all"), "{msg}");
             }
-            other => panic!("expected ExecutionFailed, got {other:?}"),
+            other => panic!("expected Precondition, got {other:?}"),
         }
     }
 

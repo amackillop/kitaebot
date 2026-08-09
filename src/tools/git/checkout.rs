@@ -98,12 +98,16 @@ pub(crate) async fn run(
     let call = git.prepare_git(args, cwd);
     let out = git.exec_git(call, authenticated).await?;
     if out.exit_code != 0 {
-        return Err(ToolError::ExecutionFailed(format!(
-            "git {} exited {}: {}",
-            args.first().copied().unwrap_or(""),
-            out.exit_code,
-            out.stderr.trim(),
-        )));
+        return Err(ToolError::CommandFailed {
+            command: format!("git {}", args.join(" ")),
+            exit_code: out.exit_code,
+            output: format!(
+                "git {} exited {}: {}",
+                args.first().copied().unwrap_or(""),
+                out.exit_code,
+                out.stderr.trim(),
+            ),
+        });
     }
     Ok(())
 }
@@ -131,14 +135,14 @@ mod tests {
         // Not a repo: `git log` exits nonzero, which must be an error,
         // not silently discarded output.
         let err = run(&git, &["log", "-1"], dir.path(), false).await;
-        assert!(matches!(err, Err(ToolError::ExecutionFailed(_))));
+        assert!(matches!(err, Err(ToolError::CommandFailed { .. })));
     }
 
     #[tokio::test]
     async fn ensure_cloned_fails_loudly_and_leaves_no_partial_checkout() {
         let (git, dir) = workspace_git();
         let err = ensure_cloned(&git, "file:///nowhere-at-all", "projects/o/r").await;
-        assert!(matches!(err, Err(ToolError::ExecutionFailed(_))));
+        assert!(matches!(err, Err(ToolError::CommandFailed { .. })));
         assert!(
             !dir.path().join("projects/o/r").exists(),
             "a failed clone must not leave a directory that blocks retries"

@@ -191,10 +191,6 @@ pub enum ToolError {
         output: String,
     },
 
-    /// Tool execution failed.
-    #[error("Execution failed: {0}")]
-    ExecutionFailed(String),
-
     /// A GitHub API call made by a tool failed.
     ///
     /// Transparent: [`GithubError`] already distinguishes a non-2xx
@@ -274,6 +270,14 @@ pub enum ToolError {
     /// Tool not found in registry.
     #[error("Tool not found: {0}")]
     NotFound(String),
+
+    /// A precondition or invariant the tool checks itself did not
+    /// hold: an edit pattern that matches zero or many places, a
+    /// missing working directory, a rate limit, a rewrite that
+    /// changed the tree. The message is the whole story -- there is
+    /// no underlying error to keep.
+    #[error("precondition failed: {0}")]
+    Precondition(String),
 
     /// A `SQLite`-backed store a tool fronts failed.
     ///
@@ -364,7 +368,6 @@ impl ToolError {
             // what the service returns, so they log whole.
             Self::Blocked { .. }
             | Self::Cancelled
-            | Self::ExecutionFailed(_)
             | Self::Github(_)
             | Self::Http { .. }
             | Self::HttpStatus { .. }
@@ -374,6 +377,7 @@ impl ToolError {
             | Self::Linear(_)
             | Self::Mcp { .. }
             | Self::NotFound(_)
+            | Self::Precondition(_)
             | Self::Spawn { .. }
             | Self::Sqlite { .. }
             | Self::SubAgent { .. }

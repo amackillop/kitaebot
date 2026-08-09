@@ -30,9 +30,12 @@ struct ToolStats {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum FailureKind {
     Blocked,
-    ExecutionFailed,
+    /// `CommandFailed`'s rendering keeps the historical
+    /// "Execution failed:" prefix, so old sessions classify the same.
+    CommandFailed,
     InvalidArguments,
     NotFound,
+    Precondition,
     /// An `Error: ` result with no recognized prefix. The catch-all
     /// keeps unrecognized error variants from counting as successes.
     Other,
@@ -46,10 +49,11 @@ impl fmt::Display for FailureKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Blocked => write!(f, "Blocked"),
-            Self::ExecutionFailed => write!(f, "ExecutionFailed"),
+            Self::CommandFailed => write!(f, "CommandFailed"),
             Self::InvalidArguments => write!(f, "InvalidArguments"),
             Self::NotFound => write!(f, "NotFound"),
             Self::Other => write!(f, "Other"),
+            Self::Precondition => write!(f, "Precondition"),
             Self::Spawn => write!(f, "Spawn"),
             Self::Timeout => write!(f, "Timeout"),
             Self::SafetyBlock => write!(f, "SafetyBlock"),
@@ -211,7 +215,9 @@ pub(crate) fn classify_failure(content: &str) -> Option<FailureKind> {
     if content.starts_with("Error: Blocked: ") {
         Some(FailureKind::Blocked)
     } else if content.starts_with("Error: Execution failed: ") {
-        Some(FailureKind::ExecutionFailed)
+        Some(FailureKind::CommandFailed)
+    } else if content.starts_with("Error: precondition failed: ") {
+        Some(FailureKind::Precondition)
     } else if content.starts_with("Error: Invalid arguments: ") {
         Some(FailureKind::InvalidArguments)
     } else if content.starts_with("Error: Tool not found: ") {
@@ -670,10 +676,18 @@ mod tests {
     }
 
     #[test]
-    fn classify_execution_failed() {
+    fn classify_command_failed() {
         assert_eq!(
-            classify_failure("Error: Execution failed: No such file or directory"),
-            Some(FailureKind::ExecutionFailed),
+            classify_failure("Error: Execution failed: $ git push\nrejected\nExit code: 1"),
+            Some(FailureKind::CommandFailed),
+        );
+    }
+
+    #[test]
+    fn classify_precondition() {
+        assert_eq!(
+            classify_failure("Error: precondition failed: no match found for old_string"),
+            Some(FailureKind::Precondition),
         );
     }
 

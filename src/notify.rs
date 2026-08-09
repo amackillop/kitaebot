@@ -204,7 +204,7 @@ impl Tool for NotifyTool {
                 NotifyAction::Buffered => {
                     Ok("Notification queued for delivery after this turn.".into())
                 }
-                NotifyAction::RateLimited => Err(ToolError::ExecutionFailed(format!(
+                NotifyAction::RateLimited => Err(ToolError::Precondition(format!(
                     "notification rate limit reached ({MAX_PER_TURN} per turn)"
                 ))),
                 NotifyAction::SendNow(message) => {
@@ -458,7 +458,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed(_)));
+        assert!(matches!(err, ToolError::Precondition(_)));
         assert_eq!(sent.lock().unwrap().len(), 5);
     }
 

@@ -92,9 +92,7 @@ impl Tool for WebSearch {
                 .into_iter()
                 .next()
                 .and_then(|c| c.message.content)
-                .ok_or_else(|| {
-                    ToolError::ExecutionFailed("no content in search response".into())
-                })?;
+                .ok_or_else(|| ToolError::WebSearch(crate::error::ProviderError::EmptyResponse))?;
 
             if !response.citations.is_empty() {
                 answer.push_str("\n\nSources:\n");
