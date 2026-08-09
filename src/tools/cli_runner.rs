@@ -81,8 +81,8 @@ pub struct CmdOutput {
 impl CmdOutput {
     /// Format as `$ command\nstdout\nstderr\nExit code: N`.
     ///
-    /// On non-zero exit, returns `ToolError::ExecutionFailed` with the
-    /// formatted output so the LLM sees what went wrong.
+    /// On non-zero exit, returns `ToolError::CommandFailed` carrying
+    /// that same text, so the LLM sees what went wrong.
     pub fn format(&self) -> Result<String, ToolError> {
         let mut result = format!("$ {}\n", self.command);
 
@@ -105,7 +105,11 @@ impl CmdOutput {
         let _ = write!(result, "\nExit code: {}", self.exit_code);
 
         if self.exit_code != 0 {
-            return Err(ToolError::ExecutionFailed(result));
+            return Err(ToolError::CommandFailed {
+                command: self.command.clone(),
+                exit_code: self.exit_code,
+                output: result,
+            });
         }
 
         Ok(result)

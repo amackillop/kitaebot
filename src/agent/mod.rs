@@ -685,7 +685,7 @@ async fn record_tool_results<E: ContextEngine>(
                 }
             },
             Err(e) => {
-                error!(tool = %call.function.name, "Tool execution failed: {e}");
+                error!(tool = %call.function.name, "Tool execution failed: {}", e.log_summary());
                 (format!("Error: {e}"), Some(e.to_string()))
             }
         };

@@ -151,6 +151,23 @@ pub enum ToolError {
         guidance: String,
     },
 
+    /// A subprocess ran to completion and exited non-zero.
+    ///
+    /// Distinct from [`Self::Spawn`], which never got that far. Carries
+    /// the rendered output because the model reads it to decide what to
+    /// do next; the log takes only the summary, since a whole command's
+    /// stdout in the error tee evicts the rest of the duty's window
+    /// (spec 24).
+    #[error("Execution failed: {output}")]
+    CommandFailed {
+        /// The command as invoked.
+        command: String,
+        /// Its exit status.
+        exit_code: i32,
+        /// `$ command`, stdout, stderr, `Exit code: N`.
+        output: String,
+    },
+
     /// Tool execution failed.
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
@@ -190,6 +207,34 @@ pub enum ToolError {
         /// The budget, in seconds.
         secs: u64,
     },
+}
+
+impl ToolError {
+    /// Compact rendering for the log and, through it, the error tee.
+    ///
+    /// Distinct from [`Display`], which the model reads and must stay
+    /// complete. The tee has no per-entry cap and the self-analysis
+    /// duty truncates its whole errors section, so one entry carrying a
+    /// command's full output evicts every other incident in that window
+    /// (spec 24, "What belongs in the error tee").
+    ///
+    /// Matched exhaustively: whether a variant's payload is safe to log
+    /// whole is a question each new one has to answer.
+    pub fn log_summary(&self) -> String {
+        match self {
+            Self::CommandFailed {
+                command,
+                exit_code,
+                output: _,
+            } => format!("`{command}` exited {exit_code}"),
+            Self::Blocked { .. }
+            | Self::ExecutionFailed(_)
+            | Self::InvalidArguments(_)
+            | Self::NotFound(_)
+            | Self::Spawn { .. }
+            | Self::Timeout { .. } => self.to_string(),
+        }
+    }
 }
 
 /// Workspace initialization errors.
@@ -348,4 +393,43 @@ pub enum SessionError {
     /// Failed to serialize session to JSON.
     #[error("Failed to serialize session: {0}")]
     Serialize(#[source] serde_json::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command_failed() -> ToolError {
+        ToolError::CommandFailed {
+            command: "git push origin HEAD".to_string(),
+            exit_code: 1,
+            output: "$ git push origin HEAD\nrejected: non-fast-forward\nExit code: 1".to_string(),
+        }
+    }
+
+    /// The model reads Display and acts on it, so the whole rendered
+    /// output has to survive the split intact.
+    #[test]
+    fn display_carries_the_whole_output_to_the_model() {
+        assert_eq!(
+            command_failed().to_string(),
+            "Execution failed: $ git push origin HEAD\nrejected: non-fast-forward\nExit code: 1"
+        );
+    }
+
+    /// The tee has no per-entry cap and the duty truncates its whole
+    /// errors section, so an entry must not carry command output.
+    #[test]
+    fn log_summary_names_the_command_without_its_output() {
+        let summary = command_failed().log_summary();
+        assert_eq!(summary, "`git push origin HEAD` exited 1");
+        assert!(!summary.contains("non-fast-forward"));
+    }
+
+    /// Everything else is already compact, so the summary is Display.
+    #[test]
+    fn other_variants_summarize_as_themselves() {
+        let e = ToolError::NotFound("nosuchtool".to_string());
+        assert_eq!(e.log_summary(), e.to_string());
+    }
 }
