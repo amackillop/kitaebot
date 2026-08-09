@@ -7,7 +7,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{GithubApi, Tool, ToolCtx, api_err};
+use super::{GithubApi, Tool, ToolCtx};
 use crate::clients::github::{IssueComment, PrReview, RequestedReviewers};
 use crate::error::ToolError;
 
@@ -105,18 +105,9 @@ impl PrReviews {
         let client = self.0.client();
         let number = u32::try_from(pr_number)
             .map_err(|_| ToolError::InvalidArguments("PR number out of range".into()))?;
-        let reviews = client
-            .pull_reviews(&nwo, number)
-            .await
-            .map_err(|e| api_err(&e))?;
-        let pending = client
-            .requested_reviewers(&nwo, pr_number)
-            .await
-            .map_err(|e| api_err(&e))?;
-        let comments = client
-            .issue_comments(&nwo, number)
-            .await
-            .map_err(|e| api_err(&e))?;
+        let reviews = client.pull_reviews(&nwo, number).await?;
+        let pending = client.requested_reviewers(&nwo, pr_number).await?;
+        let comments = client.issue_comments(&nwo, number).await?;
         Ok(Self::format_output(
             &reviews, &pending, &comments, pr_number,
         ))

@@ -97,11 +97,6 @@ async fn current_branch(cwd: &std::path::Path) -> Result<String, ToolError> {
     Ok(output.stdout.trim().to_string())
 }
 
-/// Map a client error into the tool error surface.
-fn api_err(e: &crate::error::GithubError) -> ToolError {
-    ToolError::ExecutionFailed(e.to_string())
-}
-
 /// Build the GitHub tools. `repos` bounds where issues can be filed —
 /// the `[git.repositories]` keys.
 pub(crate) fn build(api: GithubApi, repos: Vec<String>) -> Vec<Arc<dyn Tool>> {

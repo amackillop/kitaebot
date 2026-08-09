@@ -10,7 +10,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{GithubApi, Tool, ToolCtx, api_err};
+use super::{GithubApi, Tool, ToolCtx};
 use crate::error::ToolError;
 use crate::tools::string_or_value;
 
@@ -123,8 +123,7 @@ impl Api {
                 format!("repos/{nwo}/{}", args.path),
                 body,
             )
-            .await
-            .map_err(|e| api_err(&e))?;
+            .await?;
         let text = String::from_utf8_lossy(&raw.body);
         if !(200..=299).contains(&raw.status) {
             return Err(ToolError::ExecutionFailed(format!(

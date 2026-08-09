@@ -6,7 +6,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{GithubApi, Tool, ToolCtx, api_err};
+use super::{GithubApi, Tool, ToolCtx};
 use crate::error::ToolError;
 
 /// Review verdict. `REQUEST_CHANGES` is deliberately unrepresentable:
@@ -90,8 +90,7 @@ impl PrReview {
             .0
             .client()
             .create_review(&nwo, args.pr_number, &Self::payload(args))
-            .await
-            .map_err(|e| api_err(&e))?;
+            .await?;
         Ok(format!(
             "Review submitted on {nwo}#{}: {} (id {})",
             args.pr_number, review.state, review.id

@@ -6,7 +6,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{GithubApi, Tool, ToolCtx, api_err};
+use super::{GithubApi, Tool, ToolCtx};
 use crate::clients::github::PullSummary;
 use crate::error::ToolError;
 
@@ -90,12 +90,7 @@ impl PrList {
     async fn run(&self, repo_dir: &str, state: Option<&str>) -> Result<String, ToolError> {
         let state = state.unwrap_or("open");
         let nwo = self.0.nwo(repo_dir).await?;
-        let prs = self
-            .0
-            .client()
-            .pulls(&nwo, rest_state(state)?)
-            .await
-            .map_err(|e| api_err(&e))?;
+        let prs = self.0.client().pulls(&nwo, rest_state(state)?).await?;
 
         let output = Self::format_output(&prs, state);
         if output.is_empty() {

@@ -172,6 +172,19 @@ pub enum ToolError {
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
+    /// A GitHub API call made by a tool failed.
+    ///
+    /// Transparent: [`GithubError`] already distinguishes a non-2xx
+    /// status (with its body) from a transport failure and from a
+    /// deserialize failure, and already names the service. Wrapping it
+    /// in another layer of prose would only bury what it says.
+    #[error(transparent)]
+    Github(#[from] GithubError),
+
+    /// A Linear API call made by a tool failed.
+    #[error(transparent)]
+    Linear(#[from] LinearError),
+
     /// Invalid arguments passed to tool.
     #[error("Invalid arguments: {0}")]
     InvalidArguments(String),
@@ -245,10 +258,14 @@ impl ToolError {
                 exit_code,
                 output: _,
             } => format!("`{command}` exited {exit_code}"),
+            // API error bodies are the diagnostic and are bounded by
+            // what the service returns, so they log whole.
             Self::Blocked { .. }
             | Self::ExecutionFailed(_)
+            | Self::Github(_)
             | Self::InvalidArguments(_)
             | Self::Io { .. }
+            | Self::Linear(_)
             | Self::NotFound(_)
             | Self::Spawn { .. }
             | Self::Timeout { .. } => self.to_string(),

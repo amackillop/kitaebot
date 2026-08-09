@@ -6,7 +6,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{GithubApi, Tool, ToolCtx, api_err};
+use super::{GithubApi, Tool, ToolCtx};
 use crate::clients::github::DiffComment;
 use crate::error::ToolError;
 
@@ -66,12 +66,7 @@ impl PrDiffComments {
         let nwo = self.0.nwo(repo_dir).await?;
         let number = u32::try_from(pr_number)
             .map_err(|_| ToolError::InvalidArguments("PR number out of range".into()))?;
-        let comments = self
-            .0
-            .client()
-            .pull_comments(&nwo, number)
-            .await
-            .map_err(|e| api_err(&e))?;
+        let comments = self.0.client().pull_comments(&nwo, number).await?;
 
         if comments.is_empty() {
             return Ok(format!("No inline comments on PR #{pr_number}."));

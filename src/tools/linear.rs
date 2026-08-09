@@ -49,11 +49,7 @@ impl Tool for LinearSetState {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-            let outcome = self
-                .0
-                .set_state(&args.issue, &args.state)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            let outcome = self.0.set_state(&args.issue, &args.state).await?;
             Ok(format_outcome(&args.issue, &args.state, &outcome))
         })
     }

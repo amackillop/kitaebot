@@ -12,7 +12,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{GithubApi, Tool, ToolCtx, api_err};
+use super::{GithubApi, Tool, ToolCtx};
 use crate::error::ToolError;
 
 #[derive(Deserialize, JsonSchema)]
@@ -76,11 +76,8 @@ impl CommentUpdate {
             });
         }
         let client = self.api.client();
-        let me = client.user().await.map_err(|e| api_err(&e))?.login;
-        let comment = client
-            .issue_comment(&args.repo, args.comment_id)
-            .await
-            .map_err(|e| api_err(&e))?;
+        let me = client.user().await?.login;
+        let comment = client.issue_comment(&args.repo, args.comment_id).await?;
         if comment.user.login != me {
             return Err(ToolError::Blocked {
                 operation: format!(
@@ -92,8 +89,7 @@ impl CommentUpdate {
         }
         let updated = client
             .update_issue_comment(&args.repo, args.comment_id, &args.body)
-            .await
-            .map_err(|e| api_err(&e))?;
+            .await?;
         Ok(format!(
             "Updated comment {}; the previous content stays visible in \
              its edit history. Edits send no notification — mention the \

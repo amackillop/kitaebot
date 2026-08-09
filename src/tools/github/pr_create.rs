@@ -6,7 +6,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{GithubApi, Tool, ToolCtx, api_err, current_branch};
+use super::{GithubApi, Tool, ToolCtx, current_branch};
 use crate::error::ToolError;
 
 #[derive(Deserialize, JsonSchema)]
@@ -72,21 +72,13 @@ impl PrCreate {
         let head = current_branch(&dir).await?;
         let base = match &args.base {
             Some(base) => base.clone(),
-            None => {
-                self.0
-                    .client()
-                    .repo(&nwo)
-                    .await
-                    .map_err(|e| api_err(&e))?
-                    .default_branch
-            }
+            None => self.0.client().repo(&nwo).await?.default_branch,
         };
         let pull = self
             .0
             .client()
             .create_pull(&nwo, &Self::payload(args, &head, &base))
-            .await
-            .map_err(|e| api_err(&e))?;
+            .await?;
         Ok(format!("Created PR #{}: {}", pull.number, pull.html_url))
     }
 }

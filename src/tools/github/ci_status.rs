@@ -7,7 +7,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{GithubApi, Tool, ToolCtx, api_err, current_branch};
+use super::{GithubApi, Tool, ToolCtx, current_branch};
 use crate::clients::github::WorkflowRun;
 use crate::error::ToolError;
 
@@ -72,27 +72,20 @@ impl CiStatus {
         let client = self.0.client();
         let run = client
             .latest_failed_run(&nwo, &branch_name)
-            .await
-            .map_err(|e| api_err(&e))?
+            .await?
             .ok_or_else(|| {
                 ToolError::ExecutionFailed(format!("no failed runs on branch `{branch_name}`"))
             })?;
 
         // Whole-job logs, not gh's failed-steps slice: the extra lines
         // carry the context around the failure anyway.
-        let jobs = client
-            .run_jobs(&nwo, run.id)
-            .await
-            .map_err(|e| api_err(&e))?;
+        let jobs = client.run_jobs(&nwo, run.id).await?;
         let mut logs = Vec::new();
         for job in jobs
             .iter()
             .filter(|j| j.conclusion.as_deref() == Some("failure"))
         {
-            let log = client
-                .job_logs(&nwo, job.id)
-                .await
-                .map_err(|e| api_err(&e))?;
+            let log = client.job_logs(&nwo, job.id).await?;
             logs.push((job.name.clone(), log));
         }
 

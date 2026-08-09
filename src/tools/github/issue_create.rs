@@ -11,7 +11,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{GithubApi, Tool, ToolCtx, api_err};
+use super::{GithubApi, Tool, ToolCtx};
 use crate::error::ToolError;
 
 #[derive(Deserialize, JsonSchema)]
@@ -77,8 +77,7 @@ impl IssueCreate {
             .api
             .client()
             .create_issue(&args.repo, &args.title, &args.body)
-            .await
-            .map_err(|e| api_err(&e))?;
+            .await?;
         Ok(format!(
             "Created issue #{}: {}",
             issue.number, issue.html_url

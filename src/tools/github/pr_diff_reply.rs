@@ -6,7 +6,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{GithubApi, Tool, ToolCtx, api_err};
+use super::{GithubApi, Tool, ToolCtx};
 use crate::error::ToolError;
 
 /// Reply to an inline review comment.
@@ -61,8 +61,7 @@ impl PrDiffReply {
             .0
             .client()
             .reply_to_diff_comment(&nwo, args.pr_number, args.comment_id, &args.body)
-            .await
-            .map_err(|e| api_err(&e))?;
+            .await?;
         Ok(format!(
             "Reply posted on {nwo}#{} in thread {} (id {})",
             args.pr_number, args.comment_id, reply.id
