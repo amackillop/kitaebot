@@ -105,9 +105,13 @@ async fn ensure_worktree(
         return Ok(());
     }
     if marker.is_dir() {
-        tokio::fs::remove_dir_all(worktree).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("remove {}: {e}", worktree.display()))
-        })?;
+        tokio::fs::remove_dir_all(worktree)
+            .await
+            .map_err(|e| ToolError::Io {
+                operation: "remove",
+                path: worktree.to_path_buf(),
+                source: e,
+            })?;
     }
     let path = worktree
         .to_str()

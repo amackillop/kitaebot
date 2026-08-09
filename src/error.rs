@@ -176,6 +176,24 @@ pub enum ToolError {
     #[error("Invalid arguments: {0}")]
     InvalidArguments(String),
 
+    /// A filesystem operation failed on a named path.
+    ///
+    /// `operation` is a verb phrase describing what was attempted, and
+    /// is `&'static str` rather than an enum on purpose: nothing
+    /// branches on it, so an enum would grow a variant per syscall to
+    /// buy nothing. Being compile-time constant keeps it from becoming
+    /// a runtime-formatted claim about what ran.
+    #[error("failed to {operation} {}: {source}", path.display())]
+    Io {
+        /// What was attempted, e.g. "read" or "create the askpass dir".
+        operation: &'static str,
+        /// The path acted on, as the caller named it.
+        path: PathBuf,
+        /// The underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// Tool not found in registry.
     #[error("Tool not found: {0}")]
     NotFound(String),
@@ -230,6 +248,7 @@ impl ToolError {
             Self::Blocked { .. }
             | Self::ExecutionFailed(_)
             | Self::InvalidArguments(_)
+            | Self::Io { .. }
             | Self::NotFound(_)
             | Self::Spawn { .. }
             | Self::Timeout { .. } => self.to_string(),

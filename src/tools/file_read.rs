@@ -67,8 +67,11 @@ impl Tool for FileRead {
             let resolved = self.guard.resolve(&args.path)?;
             debug!(path = %args.path, "Reading file");
 
-            let meta = std::fs::metadata(&resolved)
-                .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
+            let meta = std::fs::metadata(&resolved).map_err(|e| ToolError::Io {
+                operation: "read",
+                path: (&args.path).into(),
+                source: e,
+            })?;
 
             if meta.len() > MAX_FILE_SIZE {
                 warn!(path = %args.path, size = meta.len(), "File too large");
@@ -82,8 +85,11 @@ impl Tool for FileRead {
                 });
             }
 
-            let content = std::fs::read_to_string(&resolved)
-                .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
+            let content = std::fs::read_to_string(&resolved).map_err(|e| ToolError::Io {
+                operation: "read",
+                path: (&args.path).into(),
+                source: e,
+            })?;
 
             let total_lines = content.lines().count();
             let offset = args.offset.unwrap_or(1).max(1) as usize;
@@ -194,7 +200,12 @@ mod tests {
                 ToolCtx::default(),
             )
             .await;
-        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::Io { .. }));
+        // The model reads this: it must name the path and the reason.
+        let msg = err.to_string();
+        assert!(msg.contains("missing.txt"), "{msg}");
+        assert!(msg.contains("No such file"), "{msg}");
     }
 
     #[tokio::test]

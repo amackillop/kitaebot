@@ -64,12 +64,20 @@ pub(crate) async fn ensure_cloned(
         // git rejects; trusting is_dir() would wedge this repo forever.
         tokio::fs::remove_dir_all(&dir)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("remove {}: {e}", dir.display())))?;
+            .map_err(|e| ToolError::Io {
+                operation: "remove",
+                path: dir.clone(),
+                source: e,
+            })?;
     }
     let parent = dir.parent().expect("rel path has parent components");
     tokio::fs::create_dir_all(parent)
         .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("create {}: {e}", parent.display())))?;
+        .map_err(|e| ToolError::Io {
+            operation: "create",
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
     let name = rel.rsplit('/').next().expect("rsplit yields at least one");
     if let Err(e) = run(git, &["clone", url, name], parent, true).await {
         // A failed clone must not leave a partial .git either.

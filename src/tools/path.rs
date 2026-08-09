@@ -30,9 +30,11 @@ impl PathGuard {
     /// Resolve a relative path to an existing file within the workspace.
     pub fn resolve(&self, path: &str) -> Result<PathBuf, ToolError> {
         let candidate = self.validate_and_join(path)?;
-        let resolved = candidate
-            .canonicalize()
-            .map_err(|e| ToolError::ExecutionFailed(format!("{path}: {e}")))?;
+        let resolved = candidate.canonicalize().map_err(|e| ToolError::Io {
+            operation: "resolve",
+            path: path.into(),
+            source: e,
+        })?;
         self.ensure_under_root(&resolved, path)
     }
 
@@ -232,7 +234,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let guard = PathGuard::new(dir.path());
         let err = guard.resolve("missing.txt").unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed(_)));
+        assert!(matches!(err, ToolError::Io { .. }));
+        // Names the operation, not just the path: canonicalize failing
+        // here is what a missing file looks like to every file tool.
+        assert_eq!(
+            err.to_string(),
+            "failed to resolve missing.txt: No such file or directory (os error 2)"
+        );
     }
 
     #[test]

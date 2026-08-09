@@ -59,15 +59,20 @@ impl Tool for FileWrite {
             let resolved = self.guard.resolve_writable_new(&args.path)?;
 
             if let Some(parent) = resolved.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    ToolError::ExecutionFailed(format!("{}: {e}", parent.display()))
+                std::fs::create_dir_all(parent).map_err(|e| ToolError::Io {
+                    operation: "create",
+                    path: parent.into(),
+                    source: e,
                 })?;
             }
 
             let bytes = args.content.len();
             debug!(path = %args.path, bytes, "Writing file");
-            std::fs::write(&resolved, &args.content)
-                .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
+            std::fs::write(&resolved, &args.content).map_err(|e| ToolError::Io {
+                operation: "write",
+                path: (&args.path).into(),
+                source: e,
+            })?;
 
             Ok(format!("Wrote {bytes} bytes to {}", args.path))
         })

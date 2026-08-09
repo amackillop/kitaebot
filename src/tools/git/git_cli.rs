@@ -333,27 +333,39 @@ impl AskPass {
         use std::os::unix::fs::PermissionsExt;
 
         let parent = workspace_root.join(STATE_DIR).join(ASKPASS_DIR);
-        tokio::fs::create_dir_all(&parent).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("create askpass dir {}: {e}", parent.display()))
-        })?;
+        tokio::fs::create_dir_all(&parent)
+            .await
+            .map_err(|e| ToolError::Io {
+                operation: "create the askpass dir",
+                path: parent.clone(),
+                source: e,
+            })?;
         let dir = tempfile::Builder::new()
             .prefix("askpass-")
             .tempdir_in(&parent)
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("askpass tempdir in {}: {e}", parent.display()))
+            .map_err(|e| ToolError::Io {
+                operation: "create an askpass tempdir in",
+                path: parent.clone(),
+                source: e,
             })?;
 
         let path = dir.path().join("askpass");
         let script = format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", token.expose());
 
-        tokio::fs::write(&path, &script).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("write askpass {}: {e}", path.display()))
-        })?;
+        tokio::fs::write(&path, &script)
+            .await
+            .map_err(|e| ToolError::Io {
+                operation: "write the askpass helper",
+                path: path.clone(),
+                source: e,
+            })?;
 
         tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
             .await
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("chmod askpass {}: {e}", path.display()))
+            .map_err(|e| ToolError::Io {
+                operation: "set permissions on the askpass helper",
+                path: path.clone(),
+                source: e,
             })?;
 
         Ok(Self { path, _dir: dir })

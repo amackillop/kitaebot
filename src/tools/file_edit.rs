@@ -75,8 +75,11 @@ impl Tool for FileEdit {
 
             let resolved = self.guard.resolve_writable(&args.path)?;
             debug!(path = %args.path, "Editing file");
-            let content = std::fs::read_to_string(&resolved)
-                .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
+            let content = std::fs::read_to_string(&resolved).map_err(|e| ToolError::Io {
+                operation: "read",
+                path: (&args.path).into(),
+                source: e,
+            })?;
 
             let Some((rung, spans)) = find_matches(&content, &args.old_string) else {
                 return Err(ToolError::ExecutionFailed(format!(
@@ -104,8 +107,11 @@ impl Tool for FileEdit {
                 }
             };
 
-            std::fs::write(&resolved, &result)
-                .map_err(|e| ToolError::ExecutionFailed(format!("{}: {e}", args.path)))?;
+            std::fs::write(&resolved, &result).map_err(|e| ToolError::Io {
+                operation: "write",
+                path: (&args.path).into(),
+                source: e,
+            })?;
 
             let echo = echo_region(&result, edited_at, args.new_string.len());
             if replaced > 1 {
