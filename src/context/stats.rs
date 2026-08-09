@@ -33,6 +33,9 @@ pub(crate) enum FailureKind {
     ExecutionFailed,
     InvalidArguments,
     NotFound,
+    /// An `Error: ` result with no recognized prefix. The catch-all
+    /// keeps unrecognized error variants from counting as successes.
+    Other,
     Spawn,
     Timeout,
     SafetyBlock,
@@ -46,6 +49,7 @@ impl fmt::Display for FailureKind {
             Self::ExecutionFailed => write!(f, "ExecutionFailed"),
             Self::InvalidArguments => write!(f, "InvalidArguments"),
             Self::NotFound => write!(f, "NotFound"),
+            Self::Other => write!(f, "Other"),
             Self::Spawn => write!(f, "Spawn"),
             Self::Timeout => write!(f, "Timeout"),
             Self::SafetyBlock => write!(f, "SafetyBlock"),
@@ -220,6 +224,8 @@ pub(crate) fn classify_failure(content: &str) -> Option<FailureKind> {
         Some(FailureKind::SafetyBlock)
     } else if content.starts_with("ERROR: You have called this tool") {
         Some(FailureKind::RepeatBlock)
+    } else if content.starts_with("Error: ") {
+        Some(FailureKind::Other)
     } else {
         None
     }
@@ -704,6 +710,28 @@ mod tests {
             ),
             Some(FailureKind::Spawn),
         );
+    }
+
+    /// The variants added by the `ExecutionFailed` split (`Io`, `Github`,
+    /// `Sqlite`, `Http`, ...) have no recognized prefix; they must land in
+    /// Other rather than counting as successes.
+    #[test]
+    fn classify_unrecognized_error_is_other_not_success() {
+        assert_eq!(
+            classify_failure(
+                "Error: failed to resolve state/review-checklist.md:                  No such file or directory (os error 2)"
+            ),
+            Some(FailureKind::Other),
+        );
+        assert_eq!(
+            classify_failure("Error: GitHub API error (404): not found"),
+            Some(FailureKind::Other),
+        );
+    }
+
+    #[test]
+    fn classify_ordinary_output_is_success() {
+        assert_eq!(classify_failure("42 passed; 0 failed"), None);
     }
 
     #[test]
