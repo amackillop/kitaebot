@@ -247,7 +247,21 @@ async fn run(cmd: &mut Command, stdin: Option<&str>) -> std::io::Result<std::pro
         Some(_) => cmd.stdin(Stdio::piped()),
         None => cmd.stdin(Stdio::null()),
     };
-    let mut child = cmd.spawn()?;
+    // ETXTBSY: a concurrent fork inherited a still-open write fd to
+    // this binary and has not exec'd yet (O_CLOEXEC closes it only at
+    // exec). The window is microseconds; a bounded retry is the
+    // standard remedy (cf. cargo). process_group(0) forces fork+exec
+    // over posix_spawn, which is what opens the window here.
+    let mut attempts = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 3 => {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            result => break result?,
+        }
+    };
     let guard = GroupKillGuard::arm(&child);
     if let Some(input) = stdin {
         let mut pipe = child.stdin.take().expect("stdin was piped");

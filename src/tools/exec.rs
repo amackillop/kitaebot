@@ -653,11 +653,27 @@ impl Tool for Exec {
             // The wrapper prefix plus the command names exactly what was
             // launched, without dumping the child environment.
             let spawned = format!("{} {}", self.sandbox_prefix(), args.command);
-            let child = cmd.spawn().map_err(|source| ToolError::Spawn {
-                argv: spawned.clone(),
-                cwd: cwd.display().to_string(),
-                source,
-            })?;
+            // Bounded ETXTBSY retry, same reasoning as cli_runner::run:
+            // a concurrent fork holds a write fd to the binary for the
+            // microseconds until its exec.
+            let mut attempts = 0;
+            let child = loop {
+                match cmd.spawn() {
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 3 =>
+                    {
+                        attempts += 1;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    result => {
+                        break result.map_err(|source| ToolError::Spawn {
+                            argv: spawned.clone(),
+                            cwd: cwd.display().to_string(),
+                            source,
+                        })?;
+                    }
+                }
+            };
             let guard = GroupKillGuard::arm(&child);
             let output = timeout(self.timeout, child.wait_with_output())
                 .await
