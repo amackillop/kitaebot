@@ -54,6 +54,12 @@
         commonArgs = {
           inherit src;
           strictDeps = true;
+          # Link with mold in the nix sandbox.
+          RUSTFLAGS = [
+            "-C"
+            "link-arg=-fuse-ld=mold"
+          ];
+          nativeBuildInputs = [ pkgs.mold ];
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -124,6 +130,8 @@
             just
             jq
             rust-analyzer
+            # Linker
+            mold
             # Nix tooling
             nixfmt-rfc-style
             statix
