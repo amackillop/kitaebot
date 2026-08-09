@@ -70,12 +70,11 @@ impl CiStatus {
         };
 
         let client = self.0.client();
-        let run = client
-            .latest_failed_run(&nwo, &branch_name)
-            .await?
-            .ok_or_else(|| {
-                ToolError::ExecutionFailed(format!("no failed runs on branch `{branch_name}`"))
-            })?;
+        // No failed runs is the answer, not a failure: the model asked
+        // whether CI is red and it is not.
+        let Some(run) = client.latest_failed_run(&nwo, &branch_name).await? else {
+            return Ok(format!("No failed runs on branch `{branch_name}`."));
+        };
 
         // Whole-job logs, not gh's failed-steps slice: the extra lines
         // carry the context around the failure anyway.
@@ -149,5 +148,18 @@ Step failed"
         assert!(out.contains("--- job: build ---"));
         assert!(out.contains("boom at step 3"));
         assert!(!out.contains("lint"));
+    }
+
+    /// Green CI answers the question; it must not read as the tool
+    /// failing.
+    #[tokio::test]
+    async fn no_failed_runs_is_a_result_not_an_error() {
+        let api = stub_api_with_repo("owner/repo", |_method, path, _body| {
+            assert!(path.starts_with("repos/owner/repo/actions/runs?"));
+            br#"{"workflow_runs":[]}"#.to_vec()
+        });
+        let tool = CiStatus(api);
+        let out = tool.run("projects/r", None).await.unwrap();
+        assert_eq!(out, "No failed runs on branch `work`.");
     }
 }
