@@ -6,6 +6,13 @@
 //! read back. The tee makes them a durable, cursorable source for the
 //! self-analysis duty (spec 24 phase 2). Daily rolling files, bounded
 //! retention; `state/` staging carries them into backups.
+//!
+//! This is an evidence set, not a severity filter: WARN is only the
+//! mechanism that fills it. Emitting below WARN withholds the event
+//! from self-analysis permanently, and one oversized entry evicts
+//! every other incident in the duty's window. Spec 24, "What belongs
+//! in the error tee", states the selection rule; read it before
+//! choosing a level or a payload for anything the daemon logs.
 
 use std::path::Path;
 

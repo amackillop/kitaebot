@@ -180,6 +180,39 @@ self-analysis turns anomalies into tickets. Quality defects hiding in
 trusted and proposal-enabled), and `min_delta_tokens`. Runs on
 schedule only; `/duties` does not yet reach it.
 
+**What belongs in the error tee.** The tee is not a severity filter
+that happens to be readable. It is this duty's evidence set, and
+`LevelFilter::WARN` is only the mechanism that populates it. Two
+consequences, both of which have already been got wrong once:
+
+*Below WARN is not quieter, it is gone.* The duty's other source is
+`state/JOURNAL.md`, the bot's own topic-tagged record — not journald,
+which the daemon cannot read back at all. That unreadability is the
+entire reason the tee exists. So choosing `debug!` over `error!` at a
+call site is not a presentation decision, it is a decision to withhold
+that event from self-analysis permanently. Log level here is data
+retention.
+
+*Select on "could this indicate a fixable defect", not on "is the
+daemon at fault".* The two come apart precisely where the interesting
+defects live. A model repeatedly calling a tool that does not exist is
+not a daemon fault, and it is exactly the evidence that a prompt
+advertises a stale tool name. A reviewer failing to read a file that
+was never created is not a daemon fault either, and it is how the
+missing file got found. Faultless-but-recurring is the signal, so
+"the daemon behaved correctly" is not grounds for exclusion. What *is*
+grounds: outcomes that can never indicate a defect however often they
+repeat, such as a search command exiting non-zero because it matched
+nothing.
+
+*Entry size is a correctness concern, not tidiness.* The tee has no
+per-entry cap and the duty truncates the whole errors section at
+`SECTION_MAX_BYTES`. One oversized entry — a failed command logged
+with its entire stdout and stderr — therefore evicts every other
+incident in that window. Log a bounded, structured summary naming the
+operation, its inputs, and the outcome; the full payload belongs in
+the tool result the model reads, which is a separate path.
+
 **Planned next, same contract:**
 
 - **CI triage**: gate is a REST query for new failing default-branch
