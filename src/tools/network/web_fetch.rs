@@ -72,18 +72,24 @@ impl Tool for WebFetch {
                     command: format!("fetch {}", args.url),
                     secs: self.timeout.as_secs(),
                 })?
-                .map_err(|e| ToolError::ExecutionFailed(format!("fetch failed: {e}")))?;
+                .map_err(|e| ToolError::Http {
+                    url: args.url.clone(),
+                    source: e,
+                })?;
 
             let status = response.status();
             if !status.is_success() {
                 warn!(url = %args.url, %status, "Fetch failed");
-                return Err(ToolError::ExecutionFailed(format!("HTTP {status}")));
+                return Err(ToolError::HttpStatus {
+                    url: args.url,
+                    status: status.as_u16(),
+                });
             }
 
-            let body = response
-                .text()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed(format!("failed to read body: {e}")))?;
+            let body = response.text().await.map_err(|e| ToolError::Http {
+                url: args.url,
+                source: e,
+            })?;
 
             let text = strip_html(&body);
             Ok(super::truncate_output(&text, self.max_response_bytes).into_owned())

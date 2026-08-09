@@ -202,6 +202,28 @@ pub enum ToolError {
     #[error(transparent)]
     Linear(#[from] LinearError),
 
+    /// An HTTP request a tool made itself failed in transport: send,
+    /// connect, or reading the body. `reqwest`'s own error says which.
+    #[cfg_attr(feature = "mock-network", allow(dead_code))]
+    #[error("fetch {url}: {source}")]
+    Http {
+        /// The URL requested.
+        url: String,
+        /// The transport failure.
+        #[source]
+        source: reqwest::Error,
+    },
+
+    /// An HTTP request a tool made itself got a non-2xx response.
+    #[cfg_attr(feature = "mock-network", allow(dead_code))]
+    #[error("HTTP {status} from {url}")]
+    HttpStatus {
+        /// The URL requested.
+        url: String,
+        /// The response status code.
+        status: u16,
+    },
+
     /// Invalid arguments passed to tool.
     #[error("Invalid arguments: {0}")]
     InvalidArguments(String),
@@ -288,6 +310,15 @@ pub enum ToolError {
     #[error(transparent)]
     Telegram(#[from] TelegramError),
 
+    /// The web-search provider call failed.
+    ///
+    /// Not transparent: [`ProviderError`]'s own rendering says
+    /// "Provider", which the model would read as its main loop failing
+    /// rather than the search it just requested.
+    #[cfg_attr(feature = "mock-network", allow(dead_code))]
+    #[error("search request failed: {0}")]
+    WebSearch(#[source] ProviderError),
+
     /// Tool execution timed out. Names the command and the budget so a
     /// timeout is never a bare "timed out" with no way to tell what or
     /// how long.
@@ -324,6 +355,8 @@ impl ToolError {
             | Self::Cancelled
             | Self::ExecutionFailed(_)
             | Self::Github(_)
+            | Self::Http { .. }
+            | Self::HttpStatus { .. }
             | Self::InvalidArguments(_)
             | Self::Io { .. }
             | Self::Linear(_)
@@ -333,7 +366,8 @@ impl ToolError {
             | Self::Sqlite { .. }
             | Self::SubAgent { .. }
             | Self::Telegram(_)
-            | Self::Timeout { .. } => self.to_string(),
+            | Self::Timeout { .. }
+            | Self::WebSearch(_) => self.to_string(),
         }
     }
 }

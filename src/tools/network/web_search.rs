@@ -84,7 +84,7 @@ impl Tool for WebSearch {
                     })?
                     .map_err(|e| {
                         warn!("Search API error: {e}");
-                        ToolError::ExecutionFailed(format!("search request failed: {e}"))
+                        ToolError::WebSearch(e)
                     })?;
 
             let mut answer = response
