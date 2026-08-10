@@ -16,7 +16,7 @@ mod review_checkout;
 use crate::config::GithubConfig;
 use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::agent::AgentHandle;
 use crate::agent::envelope::{ChannelSource, GitHubRole};
@@ -218,6 +218,14 @@ async fn feedback_pass(
                 warn!(
                     author = %review.user.login,
                     "Skipping review from untrusted user"
+                );
+                continue;
+            }
+            if !review_is_actionable(review) {
+                debug!(
+                    number = pr.number,
+                    author = %review.user.login,
+                    "Skipping bodyless approval; nothing to act on"
                 );
                 continue;
             }
@@ -718,6 +726,16 @@ async fn fetch_tracked_pr(
 // Formatting
 // ---------------------------------------------------------------------------
 
+/// Whether a review demands a turn. A bodyless APPROVED does not: the
+/// bot never merges or closes (spec 20), its inline comments dispatch
+/// separately, and the only reply an empty approval invites is noise.
+/// Anything else — a body to read, or a state like `REQUEST_CHANGES`
+/// that itself is a demand — goes through.
+fn review_is_actionable(review: &PrReview) -> bool {
+    let bodyless = review.body.as_deref().is_none_or(|b| b.trim().is_empty());
+    !(review.state == "APPROVED" && bodyless)
+}
+
 fn format_review(pr: &SearchIssue, nwo: &str, review: &PrReview) -> String {
     let mut s = String::new();
     let _ = writeln!(
@@ -892,6 +910,41 @@ fn save_state(db: &StateDb, state: &PollState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn review(state: &str, body: Option<&str>) -> PrReview {
+        PrReview {
+            user: UserRef {
+                login: "human".to_string(),
+            },
+            body: body.map(str::to_string),
+            state: state.to_string(),
+            submitted_at: Some("2026-08-10T00:00:00Z".to_string()),
+        }
+    }
+
+    /// A plain approve-and-merge must not burn a turn on the repo
+    /// session; there is nothing in it for the author to do.
+    #[test]
+    fn bodyless_approval_is_not_actionable() {
+        assert!(!review_is_actionable(&review("APPROVED", None)));
+        assert!(!review_is_actionable(&review("APPROVED", Some(""))));
+        assert!(!review_is_actionable(&review("APPROVED", Some("  \n"))));
+    }
+
+    #[test]
+    fn approval_with_feedback_is_actionable() {
+        assert!(review_is_actionable(&review(
+            "APPROVED",
+            Some("LGTM, but rename the flag before merging")
+        )));
+    }
+
+    /// The state itself is a demand even when the detail lives in
+    /// inline comments that dispatch separately.
+    #[test]
+    fn bodyless_changes_requested_is_actionable() {
+        assert!(review_is_actionable(&review("CHANGES_REQUESTED", None)));
+    }
     use crate::clients::github::{CommitDetail, UserRef};
 
     fn user(login: &str) -> UserRef {
