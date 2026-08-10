@@ -33,7 +33,6 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, params};
-use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use crate::config::ContextConfig;
@@ -84,7 +83,6 @@ pub struct LcmEngine {
     /// Async compaction in flight (soft-threshold path). Set when a
     /// turn crosses the soft threshold without crossing the hard
     /// threshold; drained at the start of the next compaction call.
-    pending_compaction: Option<JoinHandle<Result<CompactionEvent, EngineError>>>,
     /// Summarizer for exploration summaries of externalized
     /// plain-text payloads. Injected at construction; compaction
     /// receives its own via method arguments.
@@ -132,7 +130,6 @@ impl LcmEngine {
             active_id: Arc::new(AtomicI64::new(conversation_id)),
             context_dir,
             ctx,
-            pending_compaction: None,
             summarize,
             observed_tokens: None,
         })
@@ -150,30 +147,6 @@ impl LcmEngine {
     /// engine must compact synchronously before the next provider call.
     fn hard_threshold(&self) -> usize {
         self.ctx.max_tokens as usize * self.ctx.lcm.hard_budget_percent as usize / 100
-    }
-
-    /// Drain any background compaction task and return its event.
-    /// Errors from the spawn are logged and swallowed so a failed
-    /// background pass does not poison the engine; the next
-    /// `compact_if_needed` call will see the same elevated state and
-    /// try again.
-    async fn drain_pending(&mut self) -> Option<CompactionEvent> {
-        let handle = self.pending_compaction.take()?;
-        match handle.await {
-            Ok(Ok(event)) => {
-                // The context shrank; the observation predates it.
-                self.observed_tokens = None;
-                Some(event)
-            }
-            Ok(Err(e)) => {
-                error!("background compaction failed: {e}");
-                None
-            }
-            Err(e) => {
-                error!("background compaction task panicked: {e}");
-                None
-            }
-        }
     }
 
     /// Count and summed token estimate of items in the active context.
@@ -376,59 +349,57 @@ impl ContextEngine for LcmEngine {
         self.observed_tokens = Some(prompt_tokens);
     }
 
-    async fn compact_if_needed(
+    async fn compact_if_urgent(
         &mut self,
         summarize: &SummarizeFn,
     ) -> Result<Option<CompactionEvent>, EngineError> {
-        // A background compaction kicked off on a previous turn may
-        // have completed in the meantime. Drain it first so its event
-        // is reported to the caller and so we do not double-spawn on
-        // top of a still-running task.
-        let drained = self.drain_pending().await;
-
+        // The hard threshold only: this runs before every completion,
+        // and compacting here cold-starts the prompt cache for the
+        // rest of the turn. Routine shrinking waits for the turn
+        // boundary (`compact_between_turns`).
         let tokens = self.stats().token_estimate;
-        if tokens >= self.hard_threshold() {
-            info!(
-                tokens,
-                "hard threshold reached; running blocking compaction"
-            );
-            let event = compaction::run_compaction(
-                Arc::clone(&self.conn),
-                self.conversation_id,
-                self.ctx.lcm,
-                summarize,
-            )
-            .await?;
-            self.observed_tokens = None;
-            return Ok(Some(event));
+        if tokens < self.hard_threshold() {
+            return Ok(None);
         }
+        info!(
+            tokens,
+            "hard threshold reached; running blocking compaction"
+        );
+        let event = compaction::run_compaction(
+            Arc::clone(&self.conn),
+            self.conversation_id,
+            self.ctx.lcm,
+            summarize,
+        )
+        .await?;
+        self.observed_tokens = None;
+        Ok(Some(event))
+    }
 
-        if tokens >= self.soft_threshold() {
-            info!(
-                tokens,
-                "soft threshold reached; spawning background compaction"
-            );
-            let db_path = self.db_path.clone();
-            let conversation_id = self.conversation_id;
-            let cfg = self.ctx.lcm;
-            let summarize = Arc::clone(summarize);
-            self.pending_compaction = Some(tokio::spawn(async move {
-                let conn = schema::open(&db_path)?;
-                let conn = Arc::new(Mutex::new(conn));
-                compaction::run_compaction(conn, conversation_id, cfg, &summarize).await
-            }));
+    async fn compact_between_turns(
+        &mut self,
+        summarize: &SummarizeFn,
+    ) -> Result<Option<CompactionEvent>, EngineError> {
+        let tokens = self.stats().token_estimate;
+        if tokens < self.soft_threshold() {
+            return Ok(None);
         }
-
-        Ok(drained)
+        info!(tokens, "soft threshold reached; compacting between turns");
+        let event = compaction::run_compaction(
+            Arc::clone(&self.conn),
+            self.conversation_id,
+            self.ctx.lcm,
+            summarize,
+        )
+        .await?;
+        self.observed_tokens = None;
+        Ok(Some(event))
     }
 
     async fn force_compact(
         &mut self,
         summarize: &SummarizeFn,
     ) -> Result<CompactionEvent, EngineError> {
-        // Drop a half-finished background pass before issuing fresh
-        // writes; otherwise the two would race for the same chunks.
-        let _ = self.drain_pending().await;
         let event = compaction::run_compaction(
             Arc::clone(&self.conn),
             self.conversation_id,
@@ -472,7 +443,7 @@ impl ContextEngine for LcmEngine {
             // provider-observed prompt size, whichever is larger.
             // Both undercount (estimates are char/4 and miss the
             // system prompt; the observation lags one turn).
-            // `compact_if_needed` reads this, so the observation
+            // `compact_if_urgent` reads this, so the observation
             // feeds the thresholds too.
             token_estimate: usize::try_from(tokens)
                 .unwrap_or(0)
@@ -2090,7 +2061,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_if_needed_no_op_below_soft_threshold() {
+    async fn compact_if_urgent_no_op_below_soft_threshold() {
         // max_tokens=1000 → soft=700, hard=900. A handful of tiny
         // messages stay well below 700.
         let (mut engine, _dir) = temp_engine_with_max_tokens(1000);
@@ -2103,15 +2074,14 @@ mod tests {
                 .unwrap();
         }
         let result = engine
-            .compact_if_needed(&canned_summarize("s"))
+            .compact_if_urgent(&canned_summarize("s"))
             .await
             .unwrap();
         assert!(result.is_none());
-        assert!(engine.pending_compaction.is_none());
     }
 
     #[tokio::test]
-    async fn compact_if_needed_blocks_above_hard_threshold() {
+    async fn compact_if_urgent_blocks_above_hard_threshold() {
         // max_tokens=1000 → hard=900. 35 messages × ~51 tokens =
         // ~1785, comfortably above hard.
         let (mut engine, _dir) = temp_engine_with_max_tokens(1000);
@@ -2125,7 +2095,7 @@ mod tests {
                 .unwrap();
         }
         let event = engine
-            .compact_if_needed(&canned_summarize(
+            .compact_if_urgent(&canned_summarize(
                 "compact summary that is long enough to pass the level-1 shrink test",
             ))
             .await
@@ -2133,8 +2103,6 @@ mod tests {
             .expect("hard threshold must produce an event");
         assert!(event.before > 0);
         assert!(event.after <= event.before);
-        // Hard path runs synchronously; nothing pending afterwards.
-        assert!(engine.pending_compaction.is_none());
         let summary_count: i64 = engine
             .conn
             .lock()
@@ -2144,8 +2112,11 @@ mod tests {
         assert!(summary_count >= 1);
     }
 
+    /// The soft band belongs to the turn boundary: mid-turn the urgent
+    /// check must leave it alone (compacting there cold-starts the
+    /// prompt cache), and the between-turns pass must take it.
     #[tokio::test]
-    async fn compact_if_needed_spawns_at_soft_threshold_then_drains() {
+    async fn soft_band_waits_for_the_turn_boundary() {
         // max_tokens=1000 → soft=700, hard=900. 35 messages × ~21
         // tokens = ~735, sits between the two.
         let (mut engine, _dir) = temp_engine_with_max_tokens(1000);
@@ -2161,21 +2132,20 @@ mod tests {
         let summarize =
             canned_summarize("compact summary that is long enough to pass the level-1 shrink test");
 
-        // First call: spawn background compaction, return None.
-        let first = engine.compact_if_needed(&summarize).await.unwrap();
-        assert!(first.is_none(), "soft path returns None on the spawn turn");
-        assert!(engine.pending_compaction.is_some());
+        let mid_turn = engine.compact_if_urgent(&summarize).await.unwrap();
+        assert!(mid_turn.is_none(), "soft band must not compact mid-turn");
 
-        // Second call: drain the completed handle and surface its
-        // event. Below-soft now, so no fresh spawn.
-        let second = engine
-            .compact_if_needed(&summarize)
+        let event = engine
+            .compact_between_turns(&summarize)
             .await
             .unwrap()
-            .expect("drained background event");
-        assert!(second.before > 0);
-        assert!(second.after <= second.before);
-        assert!(engine.pending_compaction.is_none());
+            .expect("between-turns pass must take the soft band");
+        assert!(event.before > 0);
+        assert!(event.after <= event.before);
+
+        // Once shrunk below soft, the boundary pass is a no-op too.
+        let again = engine.compact_between_turns(&summarize).await.unwrap();
+        assert!(again.is_none());
     }
 
     /// Build a `SummarizeFn` that always returns the given canned
@@ -2203,7 +2173,7 @@ mod tests {
             canned_summarize("compact summary that is long enough to pass the level-1 shrink test");
         assert!(
             engine
-                .compact_if_needed(&summarize)
+                .compact_if_urgent(&summarize)
                 .await
                 .unwrap()
                 .is_none()
@@ -2211,17 +2181,16 @@ mod tests {
 
         engine.observe_tokens(950);
         let event = engine
-            .compact_if_needed(&summarize)
+            .compact_if_urgent(&summarize)
             .await
             .unwrap()
             .expect("observation above hard threshold must block");
         assert!(event.before > 0);
-        assert!(engine.pending_compaction.is_none());
 
         // Cleared: the next check must not see the stale 950.
         assert!(
             engine
-                .compact_if_needed(&summarize)
+                .compact_if_urgent(&summarize)
                 .await
                 .unwrap()
                 .is_none()
@@ -2229,7 +2198,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observed_tokens_spawn_background_compaction() {
+    async fn observed_tokens_reach_the_between_turns_pass() {
         // max_tokens=1000 → soft=700, hard=900. Observation of 800
         // sits between the two; the stored estimate (~385) stays
         // below soft.
@@ -2247,18 +2216,20 @@ mod tests {
             canned_summarize("compact summary that is long enough to pass the level-1 shrink test");
 
         engine.observe_tokens(800);
-        let first = engine.compact_if_needed(&summarize).await.unwrap();
-        assert!(first.is_none(), "soft path returns None on the spawn turn");
-        assert!(engine.pending_compaction.is_some());
-
-        // Drain clears the observation, so no fresh spawn follows.
-        let second = engine
-            .compact_if_needed(&summarize)
+        assert!(
+            engine
+                .compact_if_urgent(&summarize)
+                .await
+                .unwrap()
+                .is_none(),
+            "800 observed is below hard; urgent must not fire"
+        );
+        let event = engine
+            .compact_between_turns(&summarize)
             .await
             .unwrap()
-            .expect("drained background event");
-        assert!(second.after <= second.before);
-        assert!(engine.pending_compaction.is_none());
+            .expect("800 observed is above soft; boundary pass must fire");
+        assert!(event.after <= event.before);
         assert!(engine.observed_tokens.is_none());
     }
 

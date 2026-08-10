@@ -118,12 +118,29 @@ pub trait ContextEngine: Send + Sync {
     /// describes a request that no longer reflects the session.
     fn observe_tokens(&mut self, prompt_tokens: usize);
 
-    /// Compact if estimated tokens exceed the budget. Returns `None` if no
-    /// compaction was needed.
-    fn compact_if_needed(
+    /// Blocking compaction when the context is too large to safely
+    /// take another completion. Called before every completion, so it
+    /// must be a cheap no-op below its threshold. Compacting here
+    /// invalidates the provider's prompt cache mid-turn; engines keep
+    /// the threshold high so it fires only as an emergency.
+    fn compact_if_urgent(
         &mut self,
         summarize: &SummarizeFn,
     ) -> impl Future<Output = Result<Option<CompactionEvent>, EngineError>> + Send;
+
+    /// Routine compaction between turns, after the reply is delivered.
+    /// This is the cache-friendly moment: rewriting history here can
+    /// cost at most the next turn's first completion a cache hit,
+    /// where the same rewrite mid-turn cold-starts every remaining
+    /// completion. Engines without a between-turns policy return
+    /// `None`.
+    fn compact_between_turns(
+        &mut self,
+        summarize: &SummarizeFn,
+    ) -> impl Future<Output = Result<Option<CompactionEvent>, EngineError>> + Send {
+        let _ = summarize;
+        async { Ok(None) }
+    }
 
     /// Unconditionally run one compaction cycle.
     fn force_compact(

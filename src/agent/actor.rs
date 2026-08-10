@@ -97,6 +97,20 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                     self.turn_seq += 1;
                     let result = self.handle(&input).instrument(span).await;
                     let _ = input.reply_tx.send(result);
+                    // The reply is out, so rewriting history now can
+                    // cost at most one cache hit (the next turn's first
+                    // completion); mid-turn it costs every remaining one.
+                    match self.engine.compact_between_turns(&self.summarize).await {
+                        Ok(Some(event)) => {
+                            tracing::info!(
+                                before = event.before,
+                                after = event.after,
+                                "compacted between turns"
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::error!("between-turns compaction failed: {e}"),
+                    }
                 }
                 Envelope::Greeting(reply_tx) => {
                     let _ = reply_tx.send(self.format_greeting());

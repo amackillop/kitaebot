@@ -69,7 +69,7 @@ impl ContextEngine for EphemeralSession {
         // Never compacts, so there is no trigger to inform.
     }
 
-    async fn compact_if_needed(
+    async fn compact_if_urgent(
         &mut self,
         _summarize: &SummarizeFn,
     ) -> Result<Option<CompactionEvent>, EngineError> {
@@ -238,7 +238,7 @@ mod tests {
             .await
             .unwrap();
 
-        let event = engine.compact_if_needed(&noop_summarize()).await.unwrap();
+        let event = engine.compact_if_urgent(&noop_summarize()).await.unwrap();
         assert!(event.is_none());
         assert_eq!(engine.stats().message_count, 1);
     }

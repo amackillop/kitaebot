@@ -540,8 +540,8 @@ Two token thresholds govern when compaction fires. Both compare against
 
 | Threshold | Default | Config | Behavior |
 |-----------|---------|--------|----------|
-| Soft (`tau_soft`) | `effective * 0.70` | `context.lcm.soft_budget_percent` (70) | Triggers async compaction between turns. Non-blocking. |
-| Hard (`tau_hard`) | `effective * 0.90` | `context.lcm.hard_budget_percent` (90) | Triggers synchronous compaction. Blocks the turn. |
+| Soft (`tau_soft`) | `effective * 0.70` | `context.lcm.soft_budget_percent` (70) | Synchronous compaction at the turn boundary, after the reply is delivered. |
+| Hard (`tau_hard`) | `effective * 0.90` | `context.lcm.hard_budget_percent` (90) | Emergency: synchronous compaction before the next completion, mid-turn if necessary. |
 
 `effective` is `context.max_tokens - provider.max_tokens`: the provider can
 generate up to its output budget on top of the prompt, so thresholds apply to
@@ -550,34 +550,49 @@ the window minus that reserve (computed once at startup via
 provider.max_tokens`). The same reserve applies to the flat engine's
 `budget_percent`.
 
-The control loop (per the paper's Figure 2):
+The control loop:
 
 ```
-1. push_message(msg) -> persist to store, append to context_items
-2. if tokens(context) > tau_soft:
-       spawn async compaction (does not block the turn)
-3. while tokens(context) > tau_hard:
-       compact synchronously (blocks until context fits)
-4. return updated context to agent loop
+1. before each completion:
+       if tokens(context) > tau_hard: compact synchronously (emergency)
+2. push_message(msg) -> persist to store, append to context_items
+3. after the reply is delivered (turn boundary):
+       if tokens(context) > tau_soft: compact synchronously
 ```
 
-**Async compaction**: the engine spawns compaction as a background task. On
-completion, the results are atomically swapped into `context_items` before the
-next `assemble()` call. The swap happens between LLM turns, so the user
-experiences no added latency unless an unusually rapid succession of prompts
-and tool calls exceeds the hard threshold during the compaction window.
+**Why the turn boundary, and not a background task.** Compaction rewrites
+`context_items`, and `assemble()` reads them fresh on every call, so any
+mid-turn rewrite changes the prompt prefix and cold-starts the provider's
+prompt cache for every remaining completion in the turn. An earlier design
+spawned soft-threshold compaction as a background task; its writes landed
+whenever it finished, which was mid-turn in practice, and one observed turn
+paid for three full cold re-reads of a ~90k-token session because of it
+(2026-08-10, the first `git_rebase` turn). At the turn boundary the
+damage is bounded at one call: only the next turn's first completion can
+lose a cache hit, and in this deployment it rarely had one — turns on a
+session are typically separated by longer than the implicit cache's TTL,
+and the prompt prefix mutates between turns anyway (the memory index is
+re-read fresh each root turn, and role segments differ per dispatch). The
+deployed model's window (1M) dwarfs `context.max_tokens` (200k), so letting
+a turn run past `tau_soft` costs cached-rate tokens only; the hard check
+before each completion remains as the emergency for a pathological turn —
+it pays the cache cold-start deliberately, because the alternative is an
+oversized request. Removing the background task also removed its
+concurrency: no half-finished pass to drain, no double-spawn guard, no
+task racing `force_compact` for the same chunks.
 
 **Overhead regimes**:
 
 | Context size | Overhead |
 |-------------|----------|
 | `< tau_soft` | None. Store acts as passive logger. |
-| `tau_soft <= size < tau_hard` | Async compaction between turns. |
-| `>= tau_hard` | Synchronous blocking compaction. |
+| `tau_soft <= size < tau_hard` | Synchronous compaction at the turn boundary; delays the next dispatch on the session, never the reply. |
+| `>= tau_hard` | Emergency synchronous compaction before the next completion; cold-starts the cache mid-turn. |
 
-This is the paper's "zero-cost continuity" property: below the soft threshold,
-the engine adds zero latency. The common case (short conversations, most turns
-in a long conversation) pays nothing.
+Below the soft threshold the engine adds zero latency; in the soft band the
+cost is between turns where the cache is already cold; only the hard band —
+reachable only by a single turn growing ~20% of the window past soft —
+touches a live turn.
 
 **Protected tail**: the most recent N messages (configurable, default 32) are
 never compacted. They remain as raw messages in the active context.

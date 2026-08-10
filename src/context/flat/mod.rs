@@ -187,7 +187,7 @@ impl ContextEngine for FlatSession {
         self.observed_tokens = Some(prompt_tokens);
     }
 
-    async fn compact_if_needed(
+    async fn compact_if_urgent(
         &mut self,
         summarize: &SummarizeFn,
     ) -> Result<Option<CompactionEvent>, EngineError> {
@@ -572,7 +572,7 @@ mod tests {
             .unwrap();
 
         let summarize = mock_summarize("unused");
-        let result = engine.compact_if_needed(&summarize).await.unwrap();
+        let result = engine.compact_if_urgent(&summarize).await.unwrap();
         assert!(result.is_none());
     }
 
@@ -587,7 +587,7 @@ mod tests {
             .unwrap();
 
         let summarize = mock_summarize("unused");
-        let result = engine.compact_if_needed(&summarize).await.unwrap();
+        let result = engine.compact_if_urgent(&summarize).await.unwrap();
         assert!(result.is_none());
     }
 
@@ -608,7 +608,7 @@ mod tests {
             .unwrap();
 
         let summarize = mock_summarize("Summary of conversation");
-        let event = engine.compact_if_needed(&summarize).await.unwrap().unwrap();
+        let event = engine.compact_if_urgent(&summarize).await.unwrap().unwrap();
 
         assert!(event.before > event.after);
         assert_eq!(engine.stats().message_count, 1);
@@ -636,14 +636,14 @@ mod tests {
         let summarize = mock_summarize("summary");
         assert!(
             engine
-                .compact_if_needed(&summarize)
+                .compact_if_urgent(&summarize)
                 .await
                 .unwrap()
                 .is_none()
         );
 
         engine.observe_tokens(100);
-        let event = engine.compact_if_needed(&summarize).await.unwrap().unwrap();
+        let event = engine.compact_if_urgent(&summarize).await.unwrap().unwrap();
         assert_eq!(event.before, 100);
         assert_eq!(engine.stats().message_count, 1);
     }
@@ -666,7 +666,7 @@ mod tests {
         engine.observe_tokens(100);
 
         let summarize = mock_summarize("summary");
-        engine.compact_if_needed(&summarize).await.unwrap().unwrap();
+        engine.compact_if_urgent(&summarize).await.unwrap().unwrap();
 
         // A stale observation would re-trigger here forever.
         engine
@@ -677,7 +677,7 @@ mod tests {
             .unwrap();
         assert!(
             engine
-                .compact_if_needed(&summarize)
+                .compact_if_urgent(&summarize)
                 .await
                 .unwrap()
                 .is_none()

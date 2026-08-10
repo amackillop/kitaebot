@@ -386,18 +386,6 @@ async fn turn_loop(
         return Err(Error::Cancelled);
     }
 
-    let before = engine.stats().token_estimate;
-    if let Some(event) = engine.compact_if_needed(summarize).await? {
-        activity::emit(
-            activity_tx,
-            Activity::Compaction {
-                before: event.before,
-                after: event.after,
-            },
-        );
-        let _ = before; // used only for the "did we compact?" check
-    }
-
     debug!(content = %truncate_output(user_message, LOG_CONTENT_MAX), "Turn started");
     engine
         .push_message(Message::User {
@@ -420,6 +408,21 @@ async fn turn_loop(
 
         stats.iterations = iteration + 1;
         debug!(iteration, "Agent loop iteration");
+
+        // Emergency only: firing here cold-starts the prompt cache
+        // for the rest of the turn. Routine compaction happens between
+        // turns (actor, post-reply), where the damage is bounded at
+        // one completion.
+        if let Some(event) = engine.compact_if_urgent(summarize).await? {
+            activity::emit(
+                activity_tx,
+                Activity::Compaction {
+                    before: event.before,
+                    after: event.after,
+                },
+            );
+        }
+
         let assembled = engine.assemble(system_prompt).await?;
 
         let outcome = cancellable(

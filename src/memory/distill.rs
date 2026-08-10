@@ -503,7 +503,7 @@ mod run_tests {
         fn observe_tokens(&mut self, _prompt_tokens: usize) {
             unimplemented!()
         }
-        async fn compact_if_needed(
+        async fn compact_if_urgent(
             &mut self,
             _summarize: &SummarizeFn,
         ) -> Result<Option<CompactionEvent>, EngineError> {
