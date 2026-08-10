@@ -167,6 +167,19 @@ impl Tools {
     /// Returns an error if `disabled` contains a name that doesn't
     /// match any tool — this catches typos in the config.
     pub fn new(tools: Vec<Arc<dyn Tool>>, disabled: &[String]) -> Result<Self, ConfigError> {
+        // Registered names ship in tools[] on every request; one the
+        // API's grammar rejects would 400 every call the daemon makes.
+        // Built-ins are literals and MCP names are checked at their own
+        // registration, so a failure here is a programming error caught
+        // at startup.
+        for tool in &tools {
+            if !crate::types::is_valid_tool_name(tool.name()) {
+                return Err(ConfigError::Invalid(format!(
+                    "tool name {:?} must match ^[a-zA-Z0-9_-]+$",
+                    tool.name()
+                )));
+            }
+        }
         if disabled.is_empty() {
             return Ok(Self(tools));
         }
@@ -191,6 +204,13 @@ impl Tools {
     /// startup than the static tool registry.
     pub fn extend_with(&mut self, more: Vec<Arc<dyn Tool>>, disabled: &[String]) {
         for tool in more {
+            // Engine tools are our own literals; a bad one is a typo
+            // no test suite should let boot.
+            assert!(
+                crate::types::is_valid_tool_name(tool.name()),
+                "tool name {:?} must match ^[a-zA-Z0-9_-]+$",
+                tool.name()
+            );
             if !disabled.iter().any(|d| d == tool.name()) {
                 self.0.push(tool);
             }
@@ -246,7 +266,9 @@ impl Tools {
             .iter()
             .map(|t| {
                 ToolDefinition::new(
-                    t.name().to_string(),
+                    t.name()
+                        .parse()
+                        .expect("registration checks the tool-name grammar"),
                     t.description().to_string(),
                     t.parameters(),
                 )
@@ -470,6 +492,17 @@ mod tests {
     fn disabled_tools_filtered() {
         let tools = Tools::new(vec![Arc::new(MockTool::new("ok"))], &["mock".to_string()]).unwrap();
         assert!(tools.definitions().is_empty());
+    }
+
+    /// The registry is what feeds tools[]; a name the API's grammar
+    /// rejects must fail at startup, not 400 every later request.
+    #[test]
+    fn invalid_tool_name_rejected_at_registration() {
+        let result = Tools::new(vec![Arc::new(MockBlockedTool::named("bad name", "g"))], &[]);
+        assert!(matches!(
+            result,
+            Err(crate::error::ConfigError::Invalid(msg)) if msg.contains("bad name")
+        ));
     }
 
     #[test]

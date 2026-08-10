@@ -130,7 +130,7 @@ impl Distiller {
         let names: Vec<String> = tools
             .definitions()
             .into_iter()
-            .map(|d| d.function.name)
+            .map(|d| d.function.name.to_string())
             .collect();
         let system_prompt = format!(
             "{}\n\n# Environment\nWorking directory: {}\nAvailable tools: {}",

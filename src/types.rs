@@ -218,7 +218,7 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDefinition {
     /// Name of the function (must match tool registry)
-    pub name: String,
+    pub name: ToolName,
 
     /// Human-readable description of what the tool does
     pub description: String,
@@ -231,10 +231,12 @@ impl ToolDefinition {
     /// Create a new tool definition.
     ///
     /// # Arguments
-    /// * `name` - Tool name (e.g., "exec")
+    /// * `name` - Tool name; the type is the proof it satisfies the
+    ///   API's grammar, so `tools[]` can never carry an
+    ///   untransmittable name
     /// * `description` - What the tool does (e.g., "Execute a shell command")
     /// * `parameters` - JSON Schema for arguments
-    pub fn new(name: String, description: String, parameters: serde_json::Value) -> Self {
+    pub fn new(name: ToolName, description: String, parameters: serde_json::Value) -> Self {
         Self {
             tool_type: "function".to_string(),
             function: FunctionDefinition {

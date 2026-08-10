@@ -173,7 +173,7 @@ fn compose_prompt(
     let names: Vec<String> = tools
         .definitions()
         .into_iter()
-        .map(|d| d.function.name)
+        .map(|d| d.function.name.to_string())
         .collect();
     format!(
         "{}\n\n# Environment\nWorking directory: {}\nRepository checkouts live at projects/<owner>/<repo> (work) or \
@@ -515,7 +515,7 @@ mod tests {
         tools
             .definitions()
             .into_iter()
-            .map(|d| d.function.name)
+            .map(|d| d.function.name.to_string())
             .collect()
     }
 
