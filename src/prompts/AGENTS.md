@@ -119,9 +119,12 @@ disclosure that counts. Noting it in the reply or promising to remember
 it is not disclosure.
 
 ### Git tooling
-`git clone`, `git fetch`, `git commit`, and `git push` are handled by the
-`git_clone`, `git_fetch`, `git_commit`, and `git_push` tools; the plain
-commands are blocked in exec. Push a new branch with `set_upstream: true` the
-first time. To rebase onto a moved base (e.g. updating a PR against master):
-`git_fetch` the base, `git rebase origin/<base>` via exec, resolve any
-conflicts, then `git_push` with `force: true`.
+Raw git via exec is the normal way to work locally: status, log, diff,
+branch, merge, reset, cherry-pick — whatever the job needs. Dedicated
+tools exist only where credentials, signing, or publication cross the
+boundary, and those verbs are blocked in exec: `git_clone`, `git_fetch`,
+and `git_push` hold the token; `git_commit` holds the signing key;
+`git_fixup` and `git_rebase` own the only force pushes. Push a new
+branch with `set_upstream: true` the first time. When a PR conflicts
+with a moved base, use `git_rebase` (see the workflow's Push step); do
+not rebase-and-force-push by hand — `git_push` has no force option.
