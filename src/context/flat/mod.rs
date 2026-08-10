@@ -71,8 +71,11 @@ impl FlatSession {
     pub fn new(context_dir: &Path, ctx: ContextConfig) -> Result<Self, EngineError> {
         let context_dir = context_dir.join("flat");
         let sessions_dir = context_dir.join("sessions");
-        std::fs::create_dir_all(&sessions_dir)
-            .map_err(|e| EngineError::Storage(format!("create {}: {e}", sessions_dir.display())))?;
+        std::fs::create_dir_all(&sessions_dir).map_err(|e| EngineError::Io {
+            operation: "create",
+            path: sessions_dir.clone(),
+            source: e,
+        })?;
         let active_name = read_active_session(&context_dir).unwrap_or_else(|| "general".into());
         let path = session_path(&sessions_dir, &active_name);
         let session = Session::load(&path)?;
@@ -244,11 +247,18 @@ impl ContextEngine for FlatSession {
         let mut sessions = Vec::new();
         let mut saw_active = false;
 
-        let entries = fs::read_dir(&self.sessions_dir)
-            .map_err(|e| EngineError::Storage(format!("read sessions dir: {e}")))?;
+        let entries = fs::read_dir(&self.sessions_dir).map_err(|e| EngineError::Io {
+            operation: "read",
+            path: self.sessions_dir.clone(),
+            source: e,
+        })?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| EngineError::Storage(format!("read dir entry: {e}")))?;
+            let entry = entry.map_err(|e| EngineError::Io {
+                operation: "read an entry of",
+                path: self.sessions_dir.clone(),
+                source: e,
+            })?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -302,11 +312,18 @@ impl ContextEngine for FlatSession {
     async fn list_sessions(&self) -> Result<Vec<SessionInfo>, EngineError> {
         let mut sessions = Vec::new();
 
-        let entries = fs::read_dir(&self.sessions_dir)
-            .map_err(|e| EngineError::Storage(format!("read sessions dir: {e}")))?;
+        let entries = fs::read_dir(&self.sessions_dir).map_err(|e| EngineError::Io {
+            operation: "read",
+            path: self.sessions_dir.clone(),
+            source: e,
+        })?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| EngineError::Storage(format!("read dir entry: {e}")))?;
+            let entry = entry.map_err(|e| EngineError::Io {
+                operation: "read an entry of",
+                path: self.sessions_dir.clone(),
+                source: e,
+            })?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -387,8 +404,11 @@ impl ContextEngine for FlatSession {
 
     fn backup(context_dir: &Path, dest: &Path) -> Result<(), EngineError> {
         // Sessions, cursor — plain files; the shared snapshot covers it.
-        crate::backup::snapshot_dir(context_dir, dest)
-            .map_err(|e| EngineError::Storage(format!("backup: {e}")))
+        crate::backup::snapshot_dir(context_dir, dest).map_err(|e| EngineError::Io {
+            operation: "snapshot",
+            path: context_dir.to_path_buf(),
+            source: e,
+        })
     }
 
     async fn transcript_since(

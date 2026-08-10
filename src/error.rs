@@ -79,10 +79,24 @@ pub enum EngineError {
     #[error("blocking task failed: {0}")]
     Join(#[source] tokio::task::JoinError),
 
-    /// Storage failure that is not a `SQLite` error (filesystem),
-    /// with context written at the site.
+    /// A filesystem operation on the engine's own files failed. Same
+    /// shape as [`ToolError::Io`]; see there for why `operation` is a
+    /// `&'static str`.
+    #[error("failed to {operation} {}: {source}", path.display())]
+    Io {
+        /// What was attempted, e.g. "create" or "snapshot".
+        operation: &'static str,
+        /// The path acted on.
+        path: PathBuf,
+        /// The underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Stored engine state that cannot be interpreted: a role column
+    /// with an unknown value, a tool name the grammar rejects. The row
+    /// is named; there is no underlying error to keep.
     #[error("Storage error: {0}")]
-    #[allow(dead_code)] // Used by the LCM engine.
     Storage(String),
 }
 

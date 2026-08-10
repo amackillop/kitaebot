@@ -115,8 +115,11 @@ impl LcmEngine {
         // Each engine namespaces its own subdirectory: switching
         // backends can never clobber another engine's files (spec 14).
         let context_dir = context_dir.join("lcm");
-        std::fs::create_dir_all(&context_dir)
-            .map_err(|e| EngineError::Storage(format!("create {}: {e}", context_dir.display())))?;
+        std::fs::create_dir_all(&context_dir).map_err(|e| EngineError::Io {
+            operation: "create",
+            path: context_dir.clone(),
+            source: e,
+        })?;
         let db_path = context_dir.join("lcm.db");
         let conn = schema::open(&db_path)?;
         let active_name = read_active_session(&context_dir).unwrap_or_else(|| "general".into());
@@ -270,11 +273,19 @@ impl LcmEngine {
         let payload_dir = self.payloads_dir();
         tokio::fs::create_dir_all(&payload_dir)
             .await
-            .map_err(|e| EngineError::Storage(format!("payload dir: {e}")))?;
+            .map_err(|e| EngineError::Io {
+                operation: "create",
+                path: payload_dir.clone(),
+                source: e,
+            })?;
         let payload_path = payload_dir.join(&file_id);
         tokio::fs::write(&payload_path, content)
             .await
-            .map_err(|e| EngineError::Storage(format!("payload write: {e}")))?;
+            .map_err(|e| EngineError::Io {
+                operation: "write",
+                path: payload_path.clone(),
+                source: e,
+            })?;
 
         // The payload on disk stays a verbatim copy of the tool
         // result, but detection and exploration see the underlying
@@ -552,8 +563,11 @@ impl ContextEngine for LcmEngine {
     fn backup(context_dir: &Path, dest: &Path) -> Result<(), EngineError> {
         // lcm.db via VACUUM INTO, payload blobs and the cursor as
         // plain files; the shared snapshot handles both.
-        crate::backup::snapshot_dir(context_dir, dest)
-            .map_err(|e| EngineError::Storage(format!("backup: {e}")))
+        crate::backup::snapshot_dir(context_dir, dest).map_err(|e| EngineError::Io {
+            operation: "snapshot",
+            path: context_dir.to_path_buf(),
+            source: e,
+        })
     }
 
     async fn latest_positions(&self) -> Result<BTreeMap<String, u64>, EngineError> {
