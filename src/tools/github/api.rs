@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use super::{GithubApi, Tool, ToolCtx, api_err};
 use crate::error::ToolError;
+use crate::tools::string_or_value;
 
 /// Resources the model may touch.
 const ALLOWED_RESOURCES: &[&str] = &["issues", "labels", "milestones", "pulls", "releases"];
@@ -47,6 +48,7 @@ struct Args {
     /// milestones, pulls, releases.
     path: String,
     /// JSON body for POST/PATCH.
+    #[serde(default, deserialize_with = "string_or_value")]
     body: Option<serde_json::Value>,
 }
 
@@ -192,5 +194,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, r#"{"id":1}"#);
+    }
+
+    #[tokio::test]
+    async fn stringified_body_delivered_as_object() {
+        let api = stub_api_with_repo("owner/repo", |method, _path, body| {
+            assert_eq!(method, "POST");
+            let raw = body.unwrap();
+            // The raw bytes must be a JSON object, not a JSON string.
+            assert_eq!(raw[0], b'{', "body must start with '{{', got: {raw:?}");
+            let payload: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            assert_eq!(payload["body"], "done");
+            br#"{"id":1}"#.to_vec()
+        });
+        let tool = Api(api);
+        // Simulate the LLM passing body as a stringified JSON string.
+        let args: Args = serde_json::from_value(serde_json::json!({
+            "repo_dir": "projects/r",
+            "method": "POST",
+            "path": "issues/42/comments",
+            "body": "{\"body\": \"done\"}"
+        }))
+        .unwrap();
+        let out = tool.run(&args).await.unwrap();
+        assert_eq!(out, r#"{"id":1}"#);
+    }
+
+    #[tokio::test]
+    async fn object_body_delivered_as_object() {
+        let api = stub_api_with_repo("owner/repo", |method, _path, body| {
+            assert_eq!(method, "POST");
+            let raw = body.unwrap();
+            assert_eq!(raw[0], b'{', "body must start with '{{', got: {raw:?}");
+            let payload: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            assert_eq!(payload["body"], "done");
+            br#"{"id":1}"#.to_vec()
+        });
+        let tool = Api(api);
+        let args: Args = serde_json::from_value(serde_json::json!({
+            "repo_dir": "projects/r",
+            "method": "POST",
+            "path": "issues/42/comments",
+            "body": {"body": "done"}
+        }))
+        .unwrap();
+        let out = tool.run(&args).await.unwrap();
+        assert_eq!(out, r#"{"id":1}"#);
+    }
+
+    #[tokio::test]
+    async fn absent_body_delivered_as_none() {
+        let api = stub_api_with_repo("owner/repo", |method, _path, body| {
+            assert_eq!(method, "GET");
+            assert!(body.is_none(), "GET should have no body");
+            br"[]".to_vec()
+        });
+        let tool = Api(api);
+        let args: Args = serde_json::from_value(serde_json::json!({
+            "repo_dir": "projects/r",
+            "method": "GET",
+            "path": "issues?state=open"
+        }))
+        .unwrap();
+        let out = tool.run(&args).await.unwrap();
+        assert_eq!(out, r"[]");
     }
 }

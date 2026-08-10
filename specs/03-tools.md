@@ -37,7 +37,8 @@ The LLM sometimes passes a structured field as a JSON string instead of a
 JSON object (e.g. `"review": "{\"repo\":\"...\"}"` instead of
 `"review": {"repo":"..."}`). Fields prone to this use the `string_or_value`
 deserializer, which parses the inner JSON string before deserializing into
-the target type. Applied to `task`'s `review` parameter.
+the target type. Applied to `task`'s `review` parameter and
+`github_api`'s `body` parameter.
 
 ### Per-Turn Context
 
