@@ -540,7 +540,7 @@ Two token thresholds govern when compaction fires. Both compare against
 
 | Threshold | Default | Config | Behavior |
 |-----------|---------|--------|----------|
-| Soft (`tau_soft`) | `effective * 0.70` | `context.lcm.soft_budget_percent` (70) | Synchronous compaction at the turn boundary, after the reply is delivered. |
+| Soft (`tau_soft`) | `effective * 0.70` | `context.lcm.soft_budget_percent` (70) | Synchronous compaction at the turn boundary, after the reply is delivered — and only when the actor's mailbox is empty, so a burst of queued turns keeps its warm cache and compaction lands at the end of the burst. |
 | Hard (`tau_hard`) | `effective * 0.90` | `context.lcm.hard_budget_percent` (90) | Emergency: synchronous compaction before the next completion, mid-turn if necessary. |
 
 `effective` is `context.max_tokens - provider.max_tokens`: the provider can

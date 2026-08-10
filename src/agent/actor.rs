@@ -99,17 +99,26 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                     let _ = input.reply_tx.send(result);
                     // The reply is out, so rewriting history now can
                     // cost at most one cache hit (the next turn's first
-                    // completion); mid-turn it costs every remaining one.
-                    match self.engine.compact_between_turns(&self.summarize).await {
-                        Ok(Some(event)) => {
-                            tracing::info!(
-                                before = event.before,
-                                after = event.after,
-                                "compacted between turns"
-                            );
+                    // completion); mid-turn it costs every remaining
+                    // one. A queued envelope makes even that one likely
+                    // real — the next turn arrives inside the provider
+                    // cache's TTL — so compaction waits for the mailbox
+                    // to drain. A session that never idles is bounded
+                    // by the hard threshold instead.
+                    if self.rx.is_empty() {
+                        match self.engine.compact_between_turns(&self.summarize).await {
+                            Ok(Some(event)) => {
+                                tracing::info!(
+                                    before = event.before,
+                                    after = event.after,
+                                    "compacted between turns"
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::error!("between-turns compaction failed: {e}"),
                         }
-                        Ok(None) => {}
-                        Err(e) => tracing::error!("between-turns compaction failed: {e}"),
+                    } else {
+                        tracing::debug!("mailbox non-empty; deferring between-turns compaction");
                     }
                 }
                 Envelope::Greeting(reply_tx) => {
