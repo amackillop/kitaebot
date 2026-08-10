@@ -40,6 +40,7 @@ impl MockProvider {
 impl Provider for MockProvider {
     async fn chat(
         &self,
+        _session: &str,
         _messages: &[Message],
         _tools: &[ToolDefinition],
     ) -> Result<ChatOutcome, ProviderError> {
@@ -63,7 +64,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_tokens_default_none() {
         let provider = MockProvider::new(vec![Ok(Response::Text("hi".to_string()))]);
-        let outcome = provider.chat(&[], &[]).await.unwrap();
+        let outcome = provider.chat("s", &[], &[]).await.unwrap();
         assert_eq!(outcome.usage.prompt_tokens, None);
     }
 
@@ -71,7 +72,7 @@ mod tests {
     async fn with_prompt_tokens_attaches_value() {
         let provider =
             MockProvider::new(vec![Ok(Response::Text("hi".to_string()))]).with_prompt_tokens(1234);
-        let outcome = provider.chat(&[], &[]).await.unwrap();
+        let outcome = provider.chat("s", &[], &[]).await.unwrap();
         assert_eq!(outcome.usage.prompt_tokens, Some(1234));
     }
 }

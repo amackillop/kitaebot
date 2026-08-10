@@ -47,6 +47,11 @@ pub trait Provider: Send + Sync {
     /// Send messages to the LLM and get a response.
     ///
     /// # Arguments
+    /// * `session` - Stable identity of the conversation this call
+    ///   belongs to. `OpenRouter` uses it as the sticky routing key
+    ///   (`session_id`), pinning a session's requests to one upstream
+    ///   replica so prompt-cache hits are deterministic rather than a
+    ///   property of account-level hashing.
     /// * `messages` - Conversation history (system, user, assistant, tool messages)
     /// * `tools` - Available tools the LLM can call
     ///
@@ -54,6 +59,7 @@ pub trait Provider: Send + Sync {
     /// Either a text response or tool call requests, with usage metadata.
     fn chat(
         &self,
+        session: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> impl Future<Output = Result<ChatOutcome, ProviderError>> + Send;

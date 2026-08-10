@@ -165,6 +165,7 @@ impl CompletionsProvider {
 impl Provider for CompletionsProvider {
     async fn chat(
         &self,
+        session: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<ChatOutcome, ProviderError> {
@@ -179,6 +180,9 @@ impl Provider for CompletionsProvider {
             provider: self.openrouter.then_some(ProviderPreferences {
                 data_collection: "deny",
             }),
+            // Sticky cache routing; OpenRouter-only, like the other
+            // extensions — strict endpoints reject unknown params.
+            session_id: self.openrouter.then_some(session),
         };
 
         debug!(model = %self.model, message_count = messages.len(), "Sending chat request");
@@ -231,6 +235,9 @@ struct ChatRequest<'a> {
     /// `OpenRouter` routing preferences; omitted for other APIs.
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<ProviderPreferences>,
+    /// `OpenRouter` sticky cache-routing key; omitted for other APIs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -292,7 +299,7 @@ mod tests {
 
     #[test]
     fn openrouter_extensions_serialized_only_when_set() {
-        let request = |usage, provider| ChatRequest {
+        let request = |usage, provider, session_id| ChatRequest {
             model: "m",
             messages: Vec::new(),
             tools: None,
@@ -300,19 +307,23 @@ mod tests {
             temperature: 0.0,
             usage,
             provider,
+            session_id,
         };
         let with = serde_json::to_string(&request(
             Some(UsageAccounting { include: true }),
             Some(ProviderPreferences {
                 data_collection: "deny",
             }),
+            Some("amackillop/kitaebot"),
         ))
         .unwrap();
         assert!(with.contains(r#""usage":{"include":true}"#));
         assert!(with.contains(r#""provider":{"data_collection":"deny"}"#));
-        let without = serde_json::to_string(&request(None, None)).unwrap();
+        assert!(with.contains(r#""session_id":"amackillop/kitaebot""#));
+        let without = serde_json::to_string(&request(None, None, None)).unwrap();
         assert!(!without.contains("usage"));
         assert!(!without.contains("provider"));
+        assert!(!without.contains("session_id"));
     }
 
     #[test]
@@ -349,7 +360,7 @@ mod tests {
             })
         });
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
-        provider.chat(&[], &[]).await.unwrap();
+        provider.chat("s", &[], &[]).await.unwrap();
     }
 
     #[tokio::test]
@@ -365,7 +376,7 @@ mod tests {
             })
         });
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
-        let outcome = provider.chat(&[], &[]).await.unwrap();
+        let outcome = provider.chat("s", &[], &[]).await.unwrap();
         assert_eq!(outcome.usage.prompt_tokens, Some(42));
         assert_eq!(outcome.usage.completion_tokens, 7);
         assert_eq!(outcome.usage.cost, Some(0.0013));
@@ -380,7 +391,7 @@ mod tests {
             })
         });
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
-        let outcome = provider.chat(&[], &[]).await.unwrap();
+        let outcome = provider.chat("s", &[], &[]).await.unwrap();
         assert_eq!(outcome.usage.prompt_tokens, None);
         assert_eq!(outcome.usage.cost, None);
     }
@@ -454,7 +465,7 @@ mod tests {
     async fn chat_retries_transient_errors_until_success() {
         use std::sync::atomic::Ordering;
         let (provider, calls) = flaky_provider(2, ProviderError::ServerError("503".into()));
-        let outcome = provider.chat(&[], &[]).await.unwrap();
+        let outcome = provider.chat("s", &[], &[]).await.unwrap();
         assert!(matches!(outcome.response, Response::Text(t) if t == "hi"));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
@@ -463,7 +474,7 @@ mod tests {
     async fn chat_does_not_retry_fatal_errors() {
         use std::sync::atomic::Ordering;
         let (provider, calls) = flaky_provider(usize::MAX, ProviderError::BadRequest("400".into()));
-        let err = provider.chat(&[], &[]).await.unwrap_err();
+        let err = provider.chat("s", &[], &[]).await.unwrap_err();
         assert!(matches!(err, ProviderError::BadRequest(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -472,7 +483,7 @@ mod tests {
     async fn chat_gives_up_after_max_retries() {
         use std::sync::atomic::Ordering;
         let (provider, calls) = flaky_provider(usize::MAX, ProviderError::Network("reset".into()));
-        let err = provider.chat(&[], &[]).await.unwrap_err();
+        let err = provider.chat("s", &[], &[]).await.unwrap_err();
         assert!(matches!(err, ProviderError::Network(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1 + MAX_RETRIES as usize);
     }
@@ -530,7 +541,7 @@ mod tests {
     async fn chat_redraws_after_a_malformed_tool_name() {
         use std::sync::atomic::Ordering;
         let (provider, calls) = faulty_body_provider(1, MALFORMED_NAME_BODY);
-        let outcome = provider.chat(&[], &[]).await.unwrap();
+        let outcome = provider.chat("s", &[], &[]).await.unwrap();
         assert!(matches!(outcome.response, Response::Text(t) if t == "hi"));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -539,7 +550,7 @@ mod tests {
     async fn chat_gives_up_on_a_persistent_malformed_tool_name() {
         use std::sync::atomic::Ordering;
         let (provider, calls) = faulty_body_provider(usize::MAX, MALFORMED_NAME_BODY);
-        let err = provider.chat(&[], &[]).await.unwrap_err();
+        let err = provider.chat("s", &[], &[]).await.unwrap_err();
         assert!(matches!(err, ProviderError::MalformedToolCall { .. }));
         assert_eq!(calls.load(Ordering::SeqCst), 1 + MAX_RETRIES as usize);
     }
@@ -550,7 +561,7 @@ mod tests {
     async fn chat_does_not_redraw_an_empty_response() {
         use std::sync::atomic::Ordering;
         let (provider, calls) = faulty_body_provider(usize::MAX, EMPTY_CONTENT_BODY);
-        let err = provider.chat(&[], &[]).await.unwrap_err();
+        let err = provider.chat("s", &[], &[]).await.unwrap_err();
         assert!(matches!(err, ProviderError::EmptyResponse));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -559,7 +570,7 @@ mod tests {
     async fn chat_rate_limit_waits_longer() {
         let start = tokio::time::Instant::now();
         let (provider, _) = flaky_provider(usize::MAX, ProviderError::RateLimited);
-        provider.chat(&[], &[]).await.unwrap_err();
+        provider.chat("s", &[], &[]).await.unwrap_err();
         // 5s + 10s + 20s across the three retries.
         assert_eq!(start.elapsed(), Duration::from_secs(35));
     }

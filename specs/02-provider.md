@@ -182,7 +182,12 @@ Other APIs skip the opt-in field (strict endpoints reject unknown
 params) but any standard `usage` object they return is still logged.
 Prompt caching itself is implicit on OpenRouter for providers that
 support it; no `cache_control` breakpoints are sent, so Anthropic and
-Qwen models do not get cached.
+Qwen models do not get cached. Every request carries the engine's
+session name as OpenRouter's `session_id` (summarization calls use the
+fixed key `summarizer`), which OpenRouter uses directly as the sticky
+routing key: a session's requests land on the same upstream replica,
+making cache hits deterministic instead of a property of account-level
+hashing. OpenRouter-only, like the other request extensions.
 
 The API key is loaded from the credentials directory as `provider-api-key`
 (see [spec 13](13-credentials.md)). It is not an environment variable.

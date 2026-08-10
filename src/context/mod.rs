@@ -268,7 +268,7 @@ pub fn make_summarize_fn<P: Provider + 'static>(provider: Arc<P>) -> SummarizeFn
         ];
 
         Box::pin(async move {
-            let outcome = provider.chat(&prompt_messages, &[]).await?;
+            let outcome = provider.chat("summarizer", &prompt_messages, &[]).await?;
             match outcome.response {
                 Response::Text(text) => Ok(text),
                 Response::ToolCalls { content, .. } => Ok(content),

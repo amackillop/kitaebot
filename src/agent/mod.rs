@@ -426,7 +426,11 @@ async fn turn_loop(
         let assembled = engine.assemble(system_prompt).await?;
 
         let outcome = cancellable(
-            provider.chat(&assembled.messages, &tool_definitions),
+            provider.chat(
+                engine.active_session(),
+                &assembled.messages,
+                &tool_definitions,
+            ),
             cancel,
             activity_tx,
         )
@@ -583,7 +587,7 @@ async fn final_answer(
         .await?;
     let assembled = engine.assemble(system_prompt).await?;
     let outcome = cancellable(
-        provider.chat(&assembled.messages, &[]),
+        provider.chat(engine.active_session(), &assembled.messages, &[]),
         &ctx.cancel,
         ctx.activity.as_ref(),
     )
