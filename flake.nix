@@ -132,6 +132,8 @@
             rust-analyzer
             # Linker
             mold
+            # Cache hygiene
+            cargo-sweep
             # Nix tooling
             nixfmt-rfc-style
             statix

@@ -538,6 +538,15 @@ with mold, so crane checks link with mold in the sandbox. The final
 crate link is the dominant cost; build scripts and proc-macros link
 fast regardless of linker.
 
+The warm command (`just warm`: `cargo build --tests --features
+mock-network && cargo sweep --time 7`) populates the shared dir
+and sweeps artifacts older than 7 days. Chained after `just check`
+in the repo's warm config (`deploy/configuration.nix`), so the
+daily warm covers the cycle. `cargo-sweep` runs on the shared dir;
+cross-repo collisions are a known cargo hazard (upstream #14135)
+accepted because the agent serializes turns. Disk budget: ~1-2 GB
+for the shared target dir against the ~19 GB VM disk.
+
 ## Boundaries
 
 ### Owns
@@ -595,13 +604,6 @@ and a valid GitHub PAT loaded from credentials.
   silently when a repo renames its check; a machine-readable convention
   in the repo would be self-service but needs every repo to adopt it.
   Configured while there are two repos.
-- **Rooting the warm**: nothing holds a gcroot on what a warm builds —
-  the command is opaque (`just check`, a package script), not a
-  `nix build` with an out-link — so GC can evict it. GC is
-  pressure-triggered only ([spec 09](09-vm.md#garbage-collection)), so
-  eviction takes disk pressure, not a timer. Whether rooting needs
-  solving beyond that needs the [spec 24](24-self-directed-work.md)
-  duties running first.
 - **Read-before-edit precondition**: opencode-style enforcement
   (reject edits to files not yet read this session) would prevent
   blind edits but needs per-session read tracking in the harness. The
