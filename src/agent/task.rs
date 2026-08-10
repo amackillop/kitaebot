@@ -24,7 +24,7 @@ use crate::error::ToolError;
 use crate::provider::Provider;
 use crate::review::{self, ReviewLedger};
 use crate::tools::mcp::McpTools;
-use crate::tools::{Tool, ToolCtx, Tools};
+use crate::tools::{Tool, ToolCtx, Tools, string_or_value};
 use crate::usage::{self, TurnRecord, UsageLedger};
 
 use super::{BudgetPolicy, run_turn_metered};
@@ -209,7 +209,7 @@ struct Args {
     agent_type: AgentKind,
     /// Reviewer calls only: ledger context for the gate invocation.
     /// Ignored for other agent types.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_value")]
     review: Option<ReviewMeta>,
 }
 
@@ -926,6 +926,52 @@ mod tests {
     fn agent_type_defaults_to_explore() {
         let args: Args = serde_json::from_value(serde_json::json!({"prompt": "x"})).unwrap();
         assert_eq!(args.agent_type, AgentKind::Explore);
+    }
+
+    #[test]
+    fn review_field_accepts_object() {
+        let args: Args = serde_json::from_value(serde_json::json!({
+            "prompt": "x",
+            "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+        }))
+        .unwrap();
+        let review = args.review.unwrap();
+        assert_eq!(review.repo, "o/r");
+        assert_eq!(review.gate, "commit");
+        assert_eq!(review.git_ref, "abc");
+    }
+
+    #[test]
+    fn review_field_accepts_stringified_json() {
+        let args: Args = serde_json::from_value(serde_json::json!({
+            "prompt": "x",
+            "review": "{\"repo\":\"o/r\",\"gate\":\"commit\",\"git_ref\":\"abc\"}"
+        }))
+        .unwrap();
+        let review = args.review.unwrap();
+        assert_eq!(review.repo, "o/r");
+        assert_eq!(review.gate, "commit");
+        assert_eq!(review.git_ref, "abc");
+    }
+
+    #[test]
+    fn review_field_accepts_null_string() {
+        let args: Args =
+            serde_json::from_value(serde_json::json!({"prompt": "x", "review": "null"})).unwrap();
+        assert!(args.review.is_none());
+    }
+
+    #[test]
+    fn review_field_accepts_null() {
+        let args: Args =
+            serde_json::from_value(serde_json::json!({"prompt": "x", "review": null})).unwrap();
+        assert!(args.review.is_none());
+    }
+
+    #[test]
+    fn review_field_absent_defaults_none() {
+        let args: Args = serde_json::from_value(serde_json::json!({"prompt": "x"})).unwrap();
+        assert!(args.review.is_none());
     }
 
     #[test]

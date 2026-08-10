@@ -303,6 +303,34 @@ impl Tools {
 /// long before it approaches this ceiling.
 pub(crate) const TOOL_OUTPUT_CEILING_BYTES: usize = 5 * 1024 * 1024;
 
+/// Deserialize `Option<T>` tolerating a JSON string where an
+/// object/null is expected (LLM double-encoding). Parses the inner
+/// JSON before deserializing into `T`.
+pub(crate) fn string_or_value<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::de::DeserializeOwned,
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&s).map_err(serde::de::Error::custom)?;
+            match parsed {
+                serde_json::Value::Null => Ok(None),
+                other => serde_json::from_value(other)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom),
+            }
+        }
+        Some(other) => serde_json::from_value(other)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
 /// Truncate string at byte boundary without splitting UTF-8.
 ///
 /// If `s` exceeds `max_bytes`, it is cut at the nearest character boundary
