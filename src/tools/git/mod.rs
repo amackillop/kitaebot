@@ -11,6 +11,7 @@ mod fixup;
 pub(crate) mod git_cli;
 mod git_clone;
 mod push;
+mod rebase;
 #[cfg(test)]
 pub(super) mod test_helpers;
 pub(crate) mod url;
@@ -21,6 +22,7 @@ pub use fixup::Fixup;
 pub use git_cli::GitCli;
 pub use git_clone::GitClone;
 pub use push::Push;
+pub use rebase::Rebase;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -126,6 +128,7 @@ pub(crate) fn build(
         Arc::new(Fixup(git.clone())),
         Arc::new(Push(git.clone())),
         Arc::new(Fetch(git.clone())),
+        Arc::new(Rebase(git.clone())),
         Arc::new(GitClone { git }),
     ]
 }

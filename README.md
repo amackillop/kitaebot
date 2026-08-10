@@ -56,7 +56,9 @@ Typed tools replace a generic shell. The LLM declares intent via parameters inst
 | `git_clone` | Clone a repository (auto-warms direnv cache) |
 | `git_commit` | Commit staged changes |
 | `git_fetch` | Fetch refs from a remote |
-| `git_push` | Push commits to a remote |
+| `git_push` | Push commits to a remote (fast-forward only) |
+| `git_fixup` | Meld staged changes into an earlier branch commit (tree-invariant force push) |
+| `git_rebase` | Rebase the branch onto the moved default branch, conflict-aware (lease-pinned force push) |
 | `github_pr_create` | Create a pull request |
 | `github_issue_create` | Open an issue in a configured repo (unassigned; assignment is the human gate) |
 | `github_pr_list` | List pull requests |
