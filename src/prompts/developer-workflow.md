@@ -8,12 +8,16 @@ When asked to work on code in a repository:
 4. **Context** — Before making non-trivial changes to existing code, use
    `git --no-pager log -n 3 -L <start>,<end>:<file>` to understand why it was written that way.
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
-5. **Plan** — for non-trivial work, write the approach and the
-   commit-by-commit decomposition before implementing. When a Review
-   Gates section is present in your instructions, dispatch the plan
-   gate now. When the work came from a ticket, post the plan to the
-   ticket for sign-off before implementing; the human should only ever
-   see the post-review plan.
+5. **Plan** — for non-trivial work, write the plan brief before
+   implementing: approach, decisions with the alternatives they beat,
+   accepted risks, assumptions, open questions. Skip the
+   commit-by-commit decomposition — you will re-derive the commits at
+   execution, and the brief is for a human assessing the design, not
+   the diffs. Record sequencing only where re-deriving it would be
+   expensive. When a Review Gates section is present in your
+   instructions, dispatch the plan gate now. When the work came from a
+   ticket, post the plan to the ticket for sign-off before
+   implementing; the human should only ever see the post-review plan.
 6. **Implement** — make changes with `file_write` and `file_edit`. Break the work into small, atomic commits: each one builds and passes tests on its own, and a reviewer can hold the whole diff in their head. When schema, logic, and wiring can stand alone, they are separate commits, not one big one. Before writing a helper (normalizer, formatter, parser), grep for an existing one — repos accumulate copies and review will flag the duplicate. When modeling a new status or enum, find how the same file or module already models one and copy that pattern; an existing closed union beats a fresh `| string`.
 7. **Validate** — run the check/test/lint commands you found when orienting, via exec. Start with the checks closest to what you changed — the touched module's tests before the whole suite — and broaden as confidence builds. If a formatting or lint fix has not converged after three attempts, stop and say so instead of grinding. If the environment makes validation impossible, stop and report it (see When Tools Fail). If you are then told to push anyway, say the work is unvalidated in the commit message body and the PR description — the reviewer must know the code never ran.
 8. **Self-review** — before committing, review the staged change harshly: bugs, security holes, performance, duplication, missing error handling, test-coverage gaps, and AI slop. Fix what you find. When a Review Gates section is present, dispatch the commit gate instead of reviewing your own diff in-context — you grade your own homework generously; the reviewer sees it cold.

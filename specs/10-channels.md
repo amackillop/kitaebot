@@ -153,10 +153,11 @@ bot's own PRs and review requests for others' PRs.
 ### GitHub issues
 
 Polls for open issues assigned to the bot account. Same choreography as
-Linear: an assigned issue becomes a work item, the bot posts an
-implementation plan as a comment, and a trusted user's comment approving
-the plan triggers end-to-end execution (branch, implement, test, push,
-PR). Shares the PR channel's REST client, identity, and trust model;
+Linear: an assigned issue becomes a work item, the bot posts a plan
+brief as a comment (format contract: `src/prompts/plan-format.md` —
+decision-led, risk-acceptance explicit, no commit-by-commit script),
+and a trusted user's comment approving the plan triggers end-to-end
+execution (branch, implement, test, push, PR). Shares the PR channel's REST client, identity, and trust model;
 runs as its own daemon loop with its own poll state.
 
 **Assignment is the human gate.** An issue nobody assigned to the bot

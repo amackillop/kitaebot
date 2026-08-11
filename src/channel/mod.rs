@@ -14,14 +14,7 @@ pub(crate) mod telegram;
 /// Plan instructions for a ticket announcement, shared by the ticket
 /// channels (GitHub issues, Linear). Channels append tracker-specific
 /// sentences after it.
-const PLAN_INSTRUCTIONS: &str = "Analyze the task and reply with a review-ready implementation plan \
-     in markdown, ordered for a human reviewer. Lead with a short prose \
-     summary of the approach and the key decisions and trade-offs, then \
-     the assumptions you made and the unresolved questions you need \
-     answered — a reviewer must be able to spot a bad assumption without \
-     reading the whole plan. End with the implementation broken into a \
-     sequence of small, atomic commits: each builds and passes tests on \
-     its own, and a reviewer can hold the whole diff in their head. \
-     Do not implement anything yet — your reply is posted verbatim as \
-     a comment on the ticket for approval, so start directly with the \
-     plan: no preamble, no narration.";
+/// The plan brief a `needs-plan` ticket asks for. A file, not a
+/// string: it is a document with structure, and prompts/*.md is where
+/// those live.
+const PLAN_INSTRUCTIONS: &str = include_str!("../prompts/plan-format.md");
