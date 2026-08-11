@@ -48,10 +48,47 @@ where
     Ok((layer, guard))
 }
 
+/// Mirror panics into the tee: they otherwise reach only stderr and
+/// journald, which the daemon cannot read back. Delegates to the
+/// previous hook, so the stderr backtrace survives.
+///
+/// Install after the subscriber is initialized or the event goes
+/// nowhere.
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map_or_else(|| "unknown".to_string(), ToString::to_string);
+        tracing::error!(%location, "panic: {info}");
+        previous(info);
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tracing_subscriber::layer::SubscriberExt;
+
+    /// A panic must leave evidence self-analysis can read.
+    #[test]
+    fn panic_reaches_the_tee() {
+        let dir = tempfile::tempdir().unwrap();
+        install_panic_hook();
+        let lines = emit_and_read(dir.path(), || {
+            let _ = std::panic::catch_unwind(|| panic!("boom for the tee"));
+        });
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["level"], "ERROR");
+        let msg = lines[0]["fields"]["message"].as_str().unwrap();
+        assert!(msg.contains("boom for the tee"), "{msg}");
+        assert!(
+            lines[0]["fields"]["location"]
+                .as_str()
+                .unwrap()
+                .contains("errlog.rs")
+        );
+    }
 
     /// One tee'd file's parsed JSON lines after emitting through a
     /// scoped subscriber.

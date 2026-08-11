@@ -166,7 +166,11 @@ showed four real defects visible in the operational record before any
 human looked. Sources are the error tee (`state/errors/`, spec 05)
 and the journal filtered to `[notify]` entries: the alert mirror
 already is the problems journal, so successful-run prose never enters
-the delta. The gate is `(file, byte offset)` cursors plus a low token
+the delta. Panics reach the tee through a hook installed with the
+subscriber — without it a crash was the one failure the duty could
+not see (stderr and journald only, unreadable by design), and with
+`Restart=on-failure` a crash loop stacks one entry per attempt for
+the next successful boot's run to read. The gate is `(file, byte offset)` cursors plus a low token
 threshold (`min_delta_tokens`, default 200) — the delta is
 incident-shaped, not volume-shaped like distillation's. First contact
 primes at end-of-sources; a failed turn re-reads the same delta next

@@ -72,6 +72,7 @@ fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
         .with(stderr)
         .with(tee_layer)
         .init();
+    errlog::install_panic_hook();
     guard
 }
 
