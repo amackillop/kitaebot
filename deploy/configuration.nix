@@ -97,6 +97,46 @@ in
         repo = "amackillop/kitaebot";
       };
 
+      # Workaround audit (weekly watch-task): self-analysis mines
+      # incidents, but a workaround is the incident that stops
+      # producing incidents — once distilled into memory as "X breaks,
+      # do Y instead", the bot routes around the defect silently and
+      # the error tee goes quiet. This duty mines the knowledge
+      # instead. Prompt duty rather than built-in machinery: memory is
+      # state, not delta, so the incident gates don't fit; graduate it
+      # to code only if it earns that (spec 24: with data, not in
+      # advance).
+      duties.prompt = [
+        {
+          name = "workaround-audit";
+          every = "7d";
+          repo = "amackillop/kitaebot";
+          prompt = ''
+            Audit your memory for workarounds of kitaebot's own defects.
+            Read memory/MEMORY.md and every file under memory/topics/,
+            looking for knowledge that teaches routing around this
+            repository's bad behavior: tool quirks with a "do this
+            instead", manual command sequences that exist because a tool
+            or config is missing or wrong, rules of the form "never do X,
+            it breaks". Knowledge about EXTERNAL systems' quirks is not a
+            finding; only kitaebot's own.
+
+            First list the open bot-authored issues on the repo so you do
+            not refile one. Then file at most ONE issue with
+            github_issue_create for the workaround whose underlying
+            defect is most worth fixing: name the memory entry (file and
+            section), the defect it papers over, and state as an
+            explicit acceptance criterion that the fix must delete or
+            update that memory entry — the workaround steers you away
+            from ever re-testing the broken path, so no automatic
+            process will prune it; the deletion has to be part of the
+            reviewed work. Leave the issue unassigned — assignment is
+            the human's decision. If nothing qualifies or everything is
+            already filed, reply with one line saying so.
+          '';
+        }
+      ];
+
       # MCP servers (spec 22). bkb is pure knowledge lookup: no side
       # effects, safe for the read-only sub-agent sets.
       mcp.servers.bkb = {
