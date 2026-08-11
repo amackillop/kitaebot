@@ -90,7 +90,10 @@ in
         trusted_users = [ "austin@moneydevkit.com" ];
       };
       duties.self_analysis = {
-        every = "24h";
+        # Hourly: the token gate makes quiet runs free, and a daily
+        # cadence meant deploy-induced incidents were analyzed long
+        # after the human had already found them.
+        every = "1h";
         repo = "amackillop/kitaebot";
       };
 
