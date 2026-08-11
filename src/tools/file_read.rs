@@ -12,7 +12,7 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 
 use super::path::PathGuard;
-use super::{Tool, ToolCtx};
+use super::{Tool, ToolCtx, string_or_value};
 use crate::error::ToolError;
 
 /// 10 MB — reject files larger than this to avoid flooding context.
@@ -26,8 +26,10 @@ struct Args {
     /// File path relative to the workspace.
     path: String,
     /// Start line (1-based). Defaults to 1.
+    #[serde(default, deserialize_with = "string_or_value")]
     offset: Option<u32>,
     /// Maximum number of lines to return. Defaults to 2000.
+    #[serde(default, deserialize_with = "string_or_value")]
     limit: Option<u32>,
 }
 
@@ -179,6 +181,23 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"path": "test.txt", "offset": 2, "limit": 2}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.contains("1\ta"));
+        assert!(result.contains("2\tb"));
+        assert!(result.contains("3\tc"));
+        assert!(!result.contains("4\td"));
+        assert!(result.contains("2 lines shown"));
+    }
+
+    #[tokio::test]
+    async fn read_with_string_encoded_offset_and_limit() {
+        let (_dir, tool) = setup("a\nb\nc\nd\ne\n");
+        let result = tool
+            .execute(
+                serde_json::json!({"path": "test.txt", "offset": "2", "limit": "2"}),
                 ToolCtx::default(),
             )
             .await
