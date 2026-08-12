@@ -58,8 +58,15 @@
           RUSTFLAGS = [
             "-C"
             "link-arg=-fuse-ld=mold"
+            "-C"
+            "link-arg=-Wl,-rpath,${pkgs.sqlite.out}/lib"
           ];
-          nativeBuildInputs = [ pkgs.mold ];
+          nativeBuildInputs = [
+            pkgs.mold
+            # libsqlite3-sys links the nixpkgs sqlite via pkg-config.
+            pkgs.pkg-config
+          ];
+          buildInputs = [ pkgs.sqlite ];
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -125,6 +132,11 @@
 
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};
+
+          # Host-linked binaries need the same explicit sqlite runpath
+          # as the sandbox builds; cargo's test runner won't cover for
+          # a missing one outside the sandbox either.
+          inherit (commonArgs) RUSTFLAGS;
 
           packages = with pkgs; [
             just

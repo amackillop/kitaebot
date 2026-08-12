@@ -51,7 +51,7 @@ landlock = "0.4"
 grep = "0.4.1"
 ignore = "0.4"
 regex = "1"
-rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+rusqlite = { version = "0.40", features = ["functions"] }
 sha2 = "0.11"
 shlex = "2"
 toml = "1.1.4"
