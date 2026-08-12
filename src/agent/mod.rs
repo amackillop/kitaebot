@@ -14,7 +14,7 @@ pub use handle::AgentHandle;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
-use futures::future::join_all;
+use futures_util::future::join_all;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
