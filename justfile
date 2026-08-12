@@ -105,7 +105,7 @@ SSH_OPTS := "-F /dev/null -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev
 # current working tree.
 vm-build:
     nix flake update kitaebot --flake ./deploy
-    nix build ./deploy --option extra-substituters https://install.determinate.systems --option extra-trusted-public-keys cache.flakehub.com-3:hJuILl5sVK4iKm86JzgdXW12Y2Hwd5G07qKtHTOcDCM=
+    nix build ./deploy
 
 # Build and start the VM if not already running, wait for SSH
 # (--rebuild: rebuild image and restart, --fresh: wipe qcow2 state; combinable)
