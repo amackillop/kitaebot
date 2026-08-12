@@ -12,6 +12,11 @@ check:
 audit:
     cargo deny check
 
+# Benchmark cold and link-heavy builds with hyperfine; pass a rev to
+# compare against it in a throwaway worktree (current devshell for both)
+bench-build rev="":
+    scripts/bench-build.sh {{rev}}
+
 # Fast inner-loop check on the working tree (incremental cargo).
 # Mirrors the flake's fmt/clippy/test checks but is NOT the commit
 # gate: `just check` stays authoritative (and in the pre-commit hook).

@@ -148,6 +148,8 @@
             cargo-sweep
             # Supply chain: advisories, sources, bans, licenses
             cargo-deny
+            # Build benchmarking (just bench-build)
+            hyperfine
             # Nix tooling
             nixfmt-rfc-style
             statix

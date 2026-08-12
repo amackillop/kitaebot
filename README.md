@@ -106,6 +106,7 @@ nix develop              # Enter dev shell
 just check               # Full validation: nix flake check, nix lint/fmt, clippy, tests, audit
 just rust-check          # Fast inner loop: cargo fmt-check + clippy + tests (not the commit gate)
 just audit               # Supply-chain audit: RustSec advisories, sources, bans, licenses (deny.toml)
+just bench-build [rev]   # Benchmark cold/link-heavy builds; optional rev to compare against
 just build               # Compile
 just warm                # Warm the shared cargo target dir and sweep stale artifacts
 just test                # Run tests (mock-network feature)
