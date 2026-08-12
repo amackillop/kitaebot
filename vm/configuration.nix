@@ -313,6 +313,11 @@ in
       ++ lib.optional signingEnabled "d /var/lib/kitaebot-gnupg 0700 kitaebot kitaebot -";
 
       services = {
+        # Devshell realization runs in this cgroup, not kitaebot's;
+        # throttle only — killing the daemon mid-build corrupts nothing
+        # but wastes the whole build.
+        nix-daemon.serviceConfig.MemoryHigh = "5G";
+
         # Kitaebot daemon
         kitaebot = {
           description = "Kitaebot daemon";
@@ -416,12 +421,18 @@ in
             # by exec children and cannot be relaxed per-child, so it is all
             # or nothing for the unit.
             MemoryDenyWriteExecute = false;
+            # Bound warm-pass builds so an OOM kills a compiler child
+            # inside this cgroup, never journald or oomd.
+            MemoryHigh = "5G";
+            MemoryMax = "6G";
           };
           environment = {
             KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
             # Shared cargo target dir (spec 03 Build Warm). Under
             # projects/ so the exec Landlock tier can write it.
             CARGO_TARGET_DIR = "/var/lib/kitaebot/projects/target";
+            # cores × rustc does not fit in memorySize; cap the fan-out.
+            CARGO_BUILD_JOBS = "4";
             RUST_LOG = cfg.logLevel;
             PATH = lib.mkForce toolPath;
             # All egress via the allowlisting forward proxy. Both cases
@@ -500,12 +511,17 @@ in
       };
     };
 
-    # GC only under disk pressure: a scheduled GC would evict warm
-    # build caches, which nothing roots (spec 03). Bytes.
+    # GC only under disk pressure: devshell profiles are rooted
+    # (.direnv flake-profile links) but eval/fetcher caches are not,
+    # and a scheduled GC would churn them cold. Bytes.
     nix.settings = {
       min-free = 3 * 1024 * 1024 * 1024; # 3 GiB
       max-free = 10 * 1024 * 1024 * 1024; # 10 GiB
     };
+
+    # No swap means no pressure gradient: oomd is blind (PSI degraded)
+    # and the first shortfall is an RCU-stall thrash, not a slowdown.
+    zramSwap.enable = true;
 
     virtualisation = {
       inherit (cfg.vm) memorySize cores diskSize;
