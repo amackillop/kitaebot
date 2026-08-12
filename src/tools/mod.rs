@@ -325,8 +325,8 @@ impl Tools {
 /// long before it approaches this ceiling.
 pub(crate) const TOOL_OUTPUT_CEILING_BYTES: usize = 5 * 1024 * 1024;
 
-/// Deserialize `Option<T>` tolerating a JSON string where an
-/// object/null is expected (LLM double-encoding).
+/// Deserialize `Option<T>` tolerating a JSON string where a
+/// value/null is expected (LLM double-encoding).
 pub(crate) fn string_or_value<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     T: serde::de::DeserializeOwned,
