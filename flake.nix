@@ -54,18 +54,14 @@
         commonArgs = {
           inherit src;
           strictDeps = true;
-          # Link with mold in the nix sandbox.
+          # libsqlite3-sys links the nixpkgs sqlite via pkg-config.
+          # The runpath must be stated explicitly: cargo test masks a
+          # missing one via LD_LIBRARY_PATH, systemd exec does not.
           RUSTFLAGS = [
-            "-C"
-            "link-arg=-fuse-ld=mold"
             "-C"
             "link-arg=-Wl,-rpath,${pkgs.sqlite.out}/lib"
           ];
-          nativeBuildInputs = [
-            pkgs.mold
-            # libsqlite3-sys links the nixpkgs sqlite via pkg-config.
-            pkgs.pkg-config
-          ];
+          nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.sqlite ];
         };
 
@@ -142,8 +138,6 @@
             just
             jq
             rust-analyzer
-            # Linker
-            mold
             # Cache hygiene
             cargo-sweep
             # Supply chain: advisories, sources, bans, licenses
