@@ -1,0 +1,33 @@
+# Version updates for the two ecosystems Dependabot understands here.
+# Nix flake inputs are not one of them; the fleet-alignment flow owns
+# flake.lock (see justfile vm-build and the deploy README notes).
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Never install a release in its discovery window: malicious crate
+    # versions are usually yanked within days of publication. Security
+    # updates ignore cooldown, so known-CVE fixes still land same-day.
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    # One PR for all semver-compatible bumps; majors stay separate so
+    # a breaking bump never hides inside routine noise.
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"
