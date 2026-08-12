@@ -352,6 +352,26 @@ where
     }
 }
 
+/// Required-field counterpart of [`string_or_value`]. Only for
+/// non-string targets: a string target would round-trip through the
+/// JSON parser and reject unquoted content.
+pub(crate) fn string_or_value_required<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: serde::de::DeserializeOwned,
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&s).map_err(serde::de::Error::custom)?;
+            serde_json::from_value(parsed).map_err(serde::de::Error::custom)
+        }
+        other => serde_json::from_value(other).map_err(serde::de::Error::custom),
+    }
+}
+
 /// Truncate string at byte boundary without splitting UTF-8.
 ///
 /// If `s` exceeds `max_bytes`, it is cut at the nearest character boundary
@@ -382,6 +402,30 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         )
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RequiredInt {
+        #[serde(deserialize_with = "string_or_value_required")]
+        n: u64,
+    }
+
+    #[test]
+    fn string_or_value_required_accepts_native_int() {
+        let v: RequiredInt = serde_json::from_str(r#"{"n": 30}"#).unwrap();
+        assert_eq!(v.n, 30);
+    }
+
+    #[test]
+    fn string_or_value_required_accepts_string_encoded_int() {
+        let v: RequiredInt = serde_json::from_str(r#"{"n": "30"}"#).unwrap();
+        assert_eq!(v.n, 30);
+    }
+
+    #[test]
+    fn string_or_value_required_rejects_garbage() {
+        assert!(serde_json::from_str::<RequiredInt>(r#"{"n": "thirty"}"#).is_err());
+        assert!(serde_json::from_str::<RequiredInt>(r#"{"n": null}"#).is_err());
     }
 
     #[test]

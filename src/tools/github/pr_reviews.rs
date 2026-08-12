@@ -10,6 +10,7 @@ use serde::Deserialize;
 use super::{GithubApi, Tool, ToolCtx};
 use crate::clients::github::{IssueComment, PrReview, RequestedReviewers};
 use crate::error::ToolError;
+use crate::tools::string_or_value_required;
 
 /// Fetch top-level review verdicts and PR conversation comments.
 ///
@@ -21,6 +22,7 @@ struct Args {
     /// Repository directory relative to workspace root.
     repo_dir: String,
     /// PR number.
+    #[serde(deserialize_with = "string_or_value_required")]
     pr_number: u64,
 }
 

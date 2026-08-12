@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{GithubApi, Tool, ToolCtx};
 use crate::error::ToolError;
+use crate::tools::string_or_value_required;
 
 /// Review verdict. `REQUEST_CHANGES` is deliberately unrepresentable:
 /// blocking judgments stay with humans.
@@ -26,6 +27,7 @@ struct InlineComment {
     /// File path relative to the repo root.
     path: String,
     /// Line number in the diff (right side).
+    #[serde(deserialize_with = "string_or_value_required")]
     line: u64,
     /// Comment body (Markdown).
     body: String,
@@ -36,6 +38,7 @@ struct Args {
     /// Repository directory relative to workspace root.
     repo_dir: String,
     /// PR number.
+    #[serde(deserialize_with = "string_or_value_required")]
     pr_number: u64,
     /// Review summary and verdict (Markdown).
     body: String,

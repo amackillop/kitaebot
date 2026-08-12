@@ -18,7 +18,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::tools::{Tool, ToolCtx};
+use crate::tools::{Tool, ToolCtx, string_or_value_required};
 
 /// The parsed findings block from a reviewer response.
 #[derive(Debug, Deserialize, PartialEq)]
@@ -405,6 +405,7 @@ impl Disposition {
 #[derive(Deserialize, JsonSchema)]
 struct DispositionArgs {
     /// Ledger id of the finding, as surfaced when it was recorded.
+    #[serde(deserialize_with = "string_or_value_required")]
     finding_id: i64,
     /// "fixed": code changed. "disputed": contested, note required.
     /// "no-action": uncontested but no change warranted (an ignored

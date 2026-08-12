@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use super::{GithubApi, Tool, ToolCtx};
 use crate::error::ToolError;
+use crate::tools::string_or_value_required;
 
 /// Reply to an inline review comment.
 ///
@@ -19,8 +20,10 @@ struct Args {
     /// Repository directory relative to workspace root.
     repo_dir: String,
     /// PR number.
+    #[serde(deserialize_with = "string_or_value_required")]
     pr_number: u64,
     /// ID of the review comment to reply to (from `pr_diff_comments`).
+    #[serde(deserialize_with = "string_or_value_required")]
     comment_id: u64,
     /// Reply body (Markdown).
     body: String,

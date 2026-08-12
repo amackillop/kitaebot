@@ -14,12 +14,14 @@ use serde::Deserialize;
 
 use super::{GithubApi, Tool, ToolCtx};
 use crate::error::ToolError;
+use crate::tools::string_or_value_required;
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
     /// Repository as `owner/repo`. Must be a configured repository.
     repo: String,
     /// Id of the comment to edit. Must be a comment the bot authored.
+    #[serde(deserialize_with = "string_or_value_required")]
     comment_id: u64,
     /// The full replacement body.
     body: String,
