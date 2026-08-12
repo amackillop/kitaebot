@@ -1,10 +1,16 @@
 default:
     @just --list
 
-# Run all checks (flake, nix lint/fmt, clippy, fmt, tests)
+# Run all checks (flake, nix lint/fmt, clippy, fmt, tests, audit)
 check:
     nix flake check
     @just check-nix
+    @just audit
+
+# Supply-chain audit: RustSec advisories, yanked crates, dep sources,
+# licenses (policy in deny.toml)
+audit:
+    cargo deny check
 
 # Fast inner-loop check on the working tree (incremental cargo).
 # Mirrors the flake's fmt/clippy/test checks but is NOT the commit

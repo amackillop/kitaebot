@@ -134,6 +134,8 @@
             mold
             # Cache hygiene
             cargo-sweep
+            # Supply chain: advisories, sources, bans, licenses
+            cargo-deny
             # Nix tooling
             nixfmt-rfc-style
             statix
