@@ -69,13 +69,36 @@ in
       git = {
         enabled = true;
         co_authors = [ "Austin Mackillop <github.roundworm216@passmail.net>" ];
+        # Listing = trust grant (direnv allow on clone).
         repositories = {
           "amackillop/kitaebot" = {
             check = "just check; just warm";
             proposals = "github";
           };
-          "CumuloGlobal/open-money".check = "just check";
-          "CumuloGlobal/unhuman".check = "just check";
+          "CumuloGlobal/lightning-node" = {
+            check = "just check";
+          };
+          "CumuloGlobal/open-money" = {
+            check = "just check";
+          };
+          "CumuloGlobal/unhuman" = {
+            check = "just check";
+          };
+          "moneydevkit/ldk-node" = {
+            check = "just check";
+          };
+          "moneydevkit/lightning-js" = {
+            check = "just check";
+          };
+          "moneydevkit/mdk-recovery" = {
+            check = "just check";
+          };
+          "moneydevkit/mdkd" = {
+            check = "just check";
+          };
+          "moneydevkit/rust-lightning" = {
+            check = "just check";
+          };
         };
       };
       github = {
