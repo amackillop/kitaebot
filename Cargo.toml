@@ -45,7 +45,7 @@ schemars = "1.2"
 thiserror = "2.0"
 tempfile = "3.27.0"
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "process", "signal", "sync", "time", "fs"] }
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "system-proxy"] }
 glob = "0.3"
 landlock = "0.4"
 grep = "0.4.1"
