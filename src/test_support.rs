@@ -12,6 +12,7 @@ use crate::agent::AgentHandle;
 use crate::config::ContextConfig;
 use crate::context::flat::FlatSession;
 use crate::context::make_summarize_fn;
+use crate::duty::TriggerHandle;
 use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::MockProvider;
@@ -36,6 +37,7 @@ pub(crate) struct TestAgent {
     tools: Tools,
     notifier: Option<Arc<Notifier>>,
     max_iterations: usize,
+    duty_trigger: Option<TriggerHandle>,
 }
 
 impl TestAgent {
@@ -49,6 +51,7 @@ impl TestAgent {
             tools: Tools::default(),
             notifier: None,
             max_iterations: 1,
+            duty_trigger: None,
         }
     }
 
@@ -64,6 +67,11 @@ impl TestAgent {
 
     pub(crate) fn max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
+        self
+    }
+
+    pub(crate) fn duty_trigger(mut self, handle: TriggerHandle) -> Self {
+        self.duty_trigger = Some(handle);
         self
     }
 
@@ -95,6 +103,7 @@ impl TestAgent {
             self.notifier,
             None,
             None,
+            self.duty_trigger,
         )
     }
 }

@@ -128,60 +128,25 @@ async fn daemon_main() {
             info!(telegram = config.telegram.enabled, "Daemon starting");
 
             let state_db = open_state_db(&workspace);
-
             let duties = build_duties(&config);
-
+            let (duty_trigger, trigger_rx) = duty_trigger_channel(&duties);
             let workspace = Arc::new(workspace);
             let provider = Arc::new(rt.provider);
             let tools = rt.tools;
             let summarizer = config.provider.model_overrides.summarizer.as_deref();
             let summarize = context::make_summarize_fn(role_provider(&provider, summarizer));
 
-            // Thresholds apply to the window minus the output reserve;
-            // see Config::effective_context.
-            let context = config.effective_context();
-            let handle = match context.engine {
-                EngineKind::Flat => {
-                    let engine = context::flat::FlatSession::new(&workspace.context_dir(), context)
-                        .unwrap_or_else(|e| {
-                            error!("Failed to initialize flat session: {e}");
-                            std::process::exit(1);
-                        });
-                    spawn_with_engine(
-                        workspace.clone(),
-                        &state_db,
-                        provider,
-                        tools,
-                        mcp,
-                        &config,
-                        engine,
-                        summarize,
-                        rt.notifier.clone(),
-                    )
-                }
-                EngineKind::Lcm => {
-                    let engine = context::lcm::LcmEngine::new(
-                        &workspace.context_dir(),
-                        context,
-                        summarize.clone(),
-                    )
-                    .unwrap_or_else(|e| {
-                        error!("Failed to initialize LCM engine: {e}");
-                        std::process::exit(1);
-                    });
-                    spawn_with_engine(
-                        workspace.clone(),
-                        &state_db,
-                        provider,
-                        tools,
-                        mcp,
-                        &config,
-                        engine,
-                        summarize,
-                        rt.notifier.clone(),
-                    )
-                }
-            };
+            let handle = build_handle(
+                workspace.clone(),
+                &state_db,
+                provider,
+                tools,
+                mcp,
+                &config,
+                summarize,
+                rt.notifier.clone(),
+                duty_trigger,
+            );
 
             Box::pin(daemon::run(
                 &workspace,
@@ -195,6 +160,7 @@ async fn daemon_main() {
                 &config.git.trusted_repos(),
                 rt.linear.as_ref(),
                 &config.socket,
+                trigger_rx,
             ))
             .await;
         }
@@ -241,6 +207,81 @@ fn open_state_db(workspace: &Workspace) -> state_db::StateDb {
         error!("Failed to open state database: {e}");
         std::process::exit(1);
     })
+}
+
+/// Construct the agent handle for the configured context engine.
+/// Thresholds apply to the window minus the output reserve; see
+/// `Config::effective_context`.
+#[allow(clippy::too_many_arguments)]
+fn build_handle(
+    workspace: Arc<Workspace>,
+    state_db: &state_db::StateDb,
+    provider: Arc<provider::CompletionsProvider>,
+    tools: tools::Tools,
+    mcp: tools::mcp::McpTools,
+    config: &Config,
+    summarize: context::SummarizeFn,
+    notifier: Option<Arc<notify::Notifier>>,
+    duty_trigger: duty::TriggerHandle,
+) -> agent::AgentHandle {
+    let context = config.effective_context();
+    match context.engine {
+        EngineKind::Flat => {
+            let engine = context::flat::FlatSession::new(&workspace.context_dir(), context)
+                .unwrap_or_else(|e| {
+                    error!("Failed to initialize flat session: {e}");
+                    std::process::exit(1);
+                });
+            spawn_with_engine(
+                workspace,
+                state_db,
+                provider,
+                tools,
+                mcp,
+                config,
+                engine,
+                summarize,
+                notifier,
+                Some(duty_trigger),
+            )
+        }
+        EngineKind::Lcm => {
+            let engine =
+                context::lcm::LcmEngine::new(&workspace.context_dir(), context, summarize.clone())
+                    .unwrap_or_else(|e| {
+                        error!("Failed to initialize LCM engine: {e}");
+                        std::process::exit(1);
+                    });
+            spawn_with_engine(
+                workspace,
+                state_db,
+                provider,
+                tools,
+                mcp,
+                config,
+                engine,
+                summarize,
+                notifier,
+                Some(duty_trigger),
+            )
+        }
+    }
+}
+
+/// Operator run-now channel: the actor validates and queues, the
+/// scheduler executes on its shared path (spec 24).
+fn duty_trigger_channel(
+    duties: &[duty::Duty],
+) -> (
+    duty::TriggerHandle,
+    tokio::sync::mpsc::Receiver<duty::Trigger>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    let handle = duty::TriggerHandle {
+        names: duties.iter().map(|d| d.name.clone()).collect(),
+        tx,
+    };
+    (handle, rx)
 }
 
 /// Built-in and operator-defined duties, scheduled from config
@@ -322,6 +363,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     engine: E,
     summarize: context::SummarizeFn,
     notifier: Option<Arc<notify::Notifier>>,
+    duty_trigger: Option<duty::TriggerHandle>,
 ) -> agent::AgentHandle {
     // Namespacing makes collisions unlikely; if one happens anyway,
     // the built-in wins and the MCP tool is dropped everywhere.
@@ -392,5 +434,6 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         notifier,
         usage_ledger,
         review_ledger,
+        duty_trigger,
     )
 }

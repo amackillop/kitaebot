@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use crate::state_db::StateDb;
 
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -51,6 +52,21 @@ pub enum Action {
     /// Prepare and warm every repo with a configured warm command, in
     /// the scheduler with no LLM turn (spec 24 self-maintenance).
     Warm,
+}
+
+/// An operator run-now request (`/duty <name>`, `/duties`): run one
+/// duty or all of them immediately, gates respected, schedules not.
+pub struct Trigger {
+    /// A single duty, or `None` for every duty.
+    pub name: Option<String>,
+}
+
+/// The actor's end of the trigger channel: the duty names for local
+/// validation and the sender the scheduler listens on.
+#[derive(Clone)]
+pub struct TriggerHandle {
+    pub names: Vec<String>,
+    pub tx: mpsc::Sender<Trigger>,
 }
 
 /// A mechanical pre-dispatch check: decides whether a due duty gets a
@@ -94,6 +110,22 @@ fn record(journal_path: &std::path::Path, name: &str, outcome: &str) {
 /// bounds the divergence without ever dispatching early.
 const MAX_SLEEP_SECS: u64 = 600;
 
+/// Duties a trigger names: all of them, or one by name. The unknown
+/// name is a caller bug — the actor validates against the same list.
+fn resolve<'a>(duties: &'a [Duty], name: Option<&str>) -> Result<Vec<&'a Duty>, String> {
+    match name {
+        None => Ok(duties.iter().collect()),
+        Some(n) => duties
+            .iter()
+            .find(|d| d.name == n)
+            .map(|d| vec![d])
+            .ok_or_else(|| {
+                let known: Vec<&str> = duties.iter().map(|d| d.name.as_str()).collect();
+                format!("unknown duty {n:?}; known: {}", known.join(", "))
+            }),
+    }
+}
+
 /// Duties due at `now`, in declaration order.
 fn due<'a>(duties: &'a [Duty], state: &DutyState, now: u64) -> Vec<&'a Duty> {
     duties
@@ -130,63 +162,102 @@ pub async fn run_loop(
     handle: &AgentHandle,
     git: Option<GitCli>,
     github: Option<GithubClient>,
+    mut triggers: mpsc::Receiver<Trigger>,
 ) -> ! {
-    let sources = self_analysis::Sources {
-        journal: journal_path.clone(),
-        errors_dir,
+    let ctx = RunCtx {
+        sources: self_analysis::Sources {
+            journal: journal_path.clone(),
+            errors_dir,
+        },
+        state_db,
+        journal_path,
+        handle,
+        git,
+        github,
     };
-    let mut state = DutyState::load(&state_db);
+    let mut state = DutyState::load(&ctx.state_db);
     loop {
         let now = crate::time::now_epoch();
         for duty in due(&duties, &state, now) {
-            match &duty.action {
-                Action::Dispatch {
-                    input,
-                    session_hint,
-                } => {
-                    dispatch(
-                        duty,
-                        input,
-                        session_hint.clone(),
-                        handle,
-                        git.as_ref(),
-                        &mut state,
-                    )
-                    .await;
-                }
-                Action::SelfAnalysis {
-                    repo,
-                    min_delta_tokens,
-                } => {
-                    run_self_analysis(
-                        duty,
-                        repo,
-                        *min_delta_tokens,
-                        &sources,
-                        handle,
-                        github.as_ref(),
-                        &journal_path,
-                        &mut state,
-                    )
-                    .await;
-                }
-                Action::Warm => {
-                    let outcome = match git.as_ref() {
-                        Some(git) => git.warm_configured_repos().await,
-                        None => "skipped: no GitCli".into(),
-                    };
-                    info!(duty = %duty.name, "Duty run: {outcome}");
-                    record(&journal_path, &duty.name, &outcome);
-                }
-            }
-            // last_run advances even on error or closed gate: retry
-            // next period, not in a tight loop (spec 24 failure modes).
-            state.record_run(&duty.name, crate::time::now_epoch());
-            state.save(&state_db);
+            run_one(duty, &ctx, &mut state).await;
         }
         let now = crate::time::now_epoch();
-        tokio::time::sleep(Duration::from_secs(next_wake(&duties, &state, now))).await;
+        let wake = Duration::from_secs(next_wake(&duties, &state, now));
+        tokio::select! {
+            () = tokio::time::sleep(wake) => {}
+            Some(trigger) = triggers.recv() => {
+                match resolve(&duties, trigger.name.as_deref()) {
+                    Ok(named) => {
+                        for duty in named {
+                            info!(duty = %duty.name, "Duty triggered by operator");
+                            run_one(duty, &ctx, &mut state).await;
+                        }
+                    }
+                    Err(e) => warn!("duty trigger: {e}"),
+                }
+            }
+        }
     }
+}
+
+/// Everything a duty run borrows besides the mutable state.
+struct RunCtx<'a> {
+    sources: self_analysis::Sources,
+    state_db: StateDb,
+    journal_path: PathBuf,
+    handle: &'a AgentHandle,
+    git: Option<GitCli>,
+    github: Option<GithubClient>,
+}
+
+/// One duty run — the shared execution path for scheduled and
+/// triggered runs alike: same gates, same journaling, and `last_run`
+/// advances either way, so a manual run defers the next tick.
+async fn run_one(duty: &Duty, ctx: &RunCtx<'_>, state: &mut DutyState) {
+    match &duty.action {
+        Action::Dispatch {
+            input,
+            session_hint,
+        } => {
+            dispatch(
+                duty,
+                input,
+                session_hint.clone(),
+                ctx.handle,
+                ctx.git.as_ref(),
+                state,
+            )
+            .await;
+        }
+        Action::SelfAnalysis {
+            repo,
+            min_delta_tokens,
+        } => {
+            run_self_analysis(
+                duty,
+                repo,
+                *min_delta_tokens,
+                &ctx.sources,
+                ctx.handle,
+                ctx.github.as_ref(),
+                &ctx.journal_path,
+                state,
+            )
+            .await;
+        }
+        Action::Warm => {
+            let outcome = match ctx.git.as_ref() {
+                Some(git) => git.warm_configured_repos().await,
+                None => "skipped: no GitCli".into(),
+            };
+            info!(duty = %duty.name, "Duty run: {outcome}");
+            record(&ctx.journal_path, &duty.name, &outcome);
+        }
+    }
+    // last_run advances even on error or closed gate: retry
+    // next period, not in a tight loop (spec 24 failure modes).
+    state.record_run(&duty.name, crate::time::now_epoch());
+    state.save(&ctx.state_db);
 }
 
 /// Gate-check and send one dispatch duty through the actor. The
@@ -381,6 +452,21 @@ mod tests {
             schedule,
             gate: None,
         }
+    }
+
+    #[test]
+    fn resolve_all_one_and_unknown() {
+        let duties = duties();
+        let all = resolve(&duties, None).unwrap();
+        assert_eq!(all.len(), 2);
+        let one = resolve(&duties, Some("second")).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].name, "second");
+        let Err(err) = resolve(&duties, Some("nope")) else {
+            panic!("unknown name must be rejected");
+        };
+        assert!(err.contains("unknown duty \"nope\""), "{err}");
+        assert!(err.contains("first, second"), "{err}");
     }
 
     #[test]

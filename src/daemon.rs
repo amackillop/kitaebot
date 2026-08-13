@@ -17,6 +17,7 @@
 use std::future::Future;
 use std::path::Path;
 
+use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::agent::AgentHandle;
@@ -45,6 +46,7 @@ pub async fn run(
     repos: &[String],
     linear: Option<&LinearChannel>,
     socket_cfg: &SocketConfig,
+    duty_triggers: mpsc::Receiver<duty::Trigger>,
 ) {
     Box::pin(run_with_shutdown(
         workspace,
@@ -59,6 +61,7 @@ pub async fn run(
         linear,
         socket_cfg,
         shutdown_signal(),
+        duty_triggers,
     ))
     .await;
 }
@@ -79,6 +82,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     linear: Option<&LinearChannel>,
     socket_cfg: &SocketConfig,
     shutdown: S,
+    duty_triggers: mpsc::Receiver<duty::Trigger>,
 ) {
     let duty_loop = duty::run_loop(
         duties,
@@ -88,6 +92,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         handle,
         git_cli.cloned(),
         github_client.cloned(),
+        duty_triggers,
     );
 
     let telegram_loop = async {
@@ -215,6 +220,7 @@ mod tests {
             None, // linear
             &sock,
             tokio::time::sleep(Duration::from_millis(50)),
+            tokio::sync::mpsc::channel(1).1,
         ))
         .await;
 
@@ -242,6 +248,7 @@ mod tests {
             None, // linear
             &sock,
             tokio::time::sleep(Duration::from_millis(50)),
+            tokio::sync::mpsc::channel(1).1,
         ))
         .await;
 
@@ -281,6 +288,7 @@ mod tests {
             None, // linear
             &sock,
             tokio::time::sleep(Duration::from_millis(50)),
+            tokio::sync::mpsc::channel(1).1,
         ))
         .await;
 

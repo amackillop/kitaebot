@@ -13,6 +13,7 @@ use tracing::{Instrument, error, field, info_span};
 use crate::commands;
 use crate::context::{ContextEngine, SummarizeFn};
 use crate::dispatch::{Input, Reply};
+use crate::duty::TriggerHandle;
 use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;
@@ -23,7 +24,7 @@ use crate::workspace::Workspace;
 use tokio::sync::mpsc;
 
 use super::PromptConfig;
-use super::envelope::{Envelope, InputEnvelope};
+use super::envelope::{ChannelSource, Envelope, InputEnvelope};
 
 /// The actor that processes envelopes sequentially.
 ///
@@ -42,6 +43,7 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     notifier: Option<Arc<Notifier>>,
     usage_ledger: Option<Arc<UsageLedger>>,
     review_ledger: Option<Arc<ReviewLedger>>,
+    duty_trigger: Option<TriggerHandle>,
     /// Monotonic turn counter, the `id` field of the per-turn log span.
     turn_seq: u64,
 }
@@ -62,6 +64,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         notifier: Option<Arc<Notifier>>,
         usage_ledger: Option<Arc<UsageLedger>>,
         review_ledger: Option<Arc<ReviewLedger>>,
+        duty_trigger: Option<TriggerHandle>,
     ) -> Self {
         Self {
             rx,
@@ -77,6 +80,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             notifier,
             usage_ledger,
             review_ledger,
+            duty_trigger,
             turn_seq: 0,
         }
     }
@@ -139,20 +143,67 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         }
     }
 
+    /// Route `/duty <name>` and `/duties` from operator sources to the
+    /// scheduler's trigger channel — the shared execution path (spec
+    /// 24). Duty-source commands fall through: the scheduler itself
+    /// dispatches `/duty distill` into the actor, and forwarding those
+    /// would loop. Returns `None` when the command is not duty-shaped
+    /// or no trigger channel is wired.
+    fn forward_duty(
+        &self,
+        cmd: &commands::SlashCommand,
+        source: &ChannelSource,
+    ) -> Option<Result<Reply, String>> {
+        use commands::SlashCommand;
+        if matches!(source, ChannelSource::Duty) {
+            return None;
+        }
+        let trigger = self.duty_trigger.as_ref()?;
+        let name = match cmd {
+            SlashCommand::Duties => None,
+            SlashCommand::Duty { name } => {
+                if !trigger.names.iter().any(|n| n == name) {
+                    return Some(Ok(Reply::text(format!(
+                        "Unknown duty {name:?}; known: {}",
+                        trigger.names.join(", "),
+                    ))));
+                }
+                Some(name.clone())
+            }
+            _ => return None,
+        };
+        let described = name.as_deref().unwrap_or("all duties");
+        Some(
+            match trigger
+                .tx
+                .try_send(crate::duty::Trigger { name: name.clone() })
+            {
+                Ok(()) => Ok(Reply::text(format!(
+                    "Queued: {described} — gates respected, outcomes land in the journal.",
+                ))),
+                Err(e) => Err(format!("duty trigger queue unavailable: {e}")),
+            },
+        )
+    }
+
     async fn handle(&mut self, envelope: &InputEnvelope) -> Result<Reply, String> {
         let result = match Input::parse(&envelope.input) {
             Ok(Input::Command(cmd)) => {
-                commands::execute(
-                    cmd,
-                    &mut self.engine,
-                    &self.summarize,
-                    &self.workspace,
-                    &*self.memory_provider,
-                    &self.distiller,
-                    self.usage_ledger.as_deref(),
-                    self.review_ledger.as_deref(),
-                )
-                .await
+                if let Some(reply) = self.forward_duty(&cmd, &envelope.source) {
+                    reply
+                } else {
+                    commands::execute(
+                        cmd,
+                        &mut self.engine,
+                        &self.summarize,
+                        &self.workspace,
+                        &*self.memory_provider,
+                        &self.distiller,
+                        self.usage_ledger.as_deref(),
+                        self.review_ledger.as_deref(),
+                    )
+                    .await
+                }
             }
             Ok(Input::Message(text)) => self.handle_message(envelope, text).await,
             Err(_) => Err(format!("Unknown command: {}", envelope.input)),
@@ -816,5 +867,48 @@ mod tests {
 
         let handle = spawn_agent(ws, provider);
         drop(handle);
+    }
+    #[tokio::test]
+    async fn duty_commands_route_to_trigger_channel() {
+        let (_dir, ws) = crate::test_support::workspace();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let handle = TestAgent::new(ws, Arc::new(MockProvider::new(vec![])))
+            .duty_trigger(crate::duty::TriggerHandle {
+                names: vec!["warm".into()],
+                tx,
+            })
+            .spawn();
+
+        let send = |input: &str| {
+            handle.send_message(
+                ChannelSource::Socket,
+                input.into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+        };
+
+        let reply = send("/duty warm").await.unwrap();
+        assert!(reply.content.contains("Queued: warm"), "{}", reply.content);
+        let t = rx.try_recv().unwrap();
+        assert_eq!(t.name.as_deref(), Some("warm"));
+
+        let reply = send("/duties").await.unwrap();
+        assert!(
+            reply.content.contains("Queued: all duties"),
+            "{}",
+            reply.content
+        );
+        let t = rx.try_recv().unwrap();
+        assert_eq!(t.name, None);
+
+        let reply = send("/duty nope").await.unwrap();
+        assert!(
+            reply.content.contains("Unknown duty \"nope\""),
+            "{}",
+            reply.content
+        );
+        assert!(rx.try_recv().is_err(), "unknown names must not queue");
     }
 }

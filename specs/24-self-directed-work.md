@@ -72,7 +72,15 @@ unattended-outcome journaling, mechanical duties from the scheduler
 itself. Routine no-ops (a closed gate) stay out — they are tracing,
 not work. The `/heartbeat` command becomes `/duties`: run
 every duty whose gate is open, ignoring schedules — the operator's
-"run it now".
+"run it now". `/duty <name>` runs one. Both route from the actor to
+the scheduler over a trigger channel and execute on the scheduler's
+own path: same gates, same journaling, and `last_run` advances, so a
+manual run defers the next scheduled tick rather than duplicating
+it. The actor validates names against the duty list and replies
+"queued" immediately — a triggered run can take as long as any turn,
+and the chat socket must not block on it. Duty-sourced commands are
+not forwarded: the scheduler dispatches `/duty distill` through the
+actor, and forwarding it back would loop.
 
 **Operator-defined prompt duties.** Recurring watch-tasks the
 operator authors in config: a name, a schedule, a prompt, and an
@@ -181,8 +189,8 @@ with distillation: distill turns experience into knowledge (memory);
 self-analysis turns anomalies into tickets. Quality defects hiding in
 *successful* outputs are out of scope. Config:
 `[duties.self_analysis]` with a schedule, the target `repo` (must be
-trusted and proposal-enabled), and `min_delta_tokens`. Runs on
-schedule only; `/duties` does not yet reach it.
+trusted and proposal-enabled), and `min_delta_tokens`. `/duties` reaches it like every duty, via the
+scheduler's trigger channel.
 
 **What belongs in the error tee.** The tee is not a severity filter
 that happens to be readable. It is this duty's evidence set, and
@@ -352,9 +360,6 @@ complete scope statement for discovery and prompt duties, and its
   (propose, count open) or stays a second match arm is decided when a
   Linear-tracked repo actually wants proposals; GitHub shipped as
   plain functions on purpose.
-- **`/duties` and self-analysis**: the operator run-now command only
-  reaches distillation; scheduler-side actions (warm, self-analysis)
-  need a shared execution path before `/duties` can force them.
 - **Gate vocabulary for prompt duties**: `new-commits` is the only
   gate v1 needs; new-issues, new-releases, or an RSS cursor follow
   the same cursor shape when a real watch-task wants them. A

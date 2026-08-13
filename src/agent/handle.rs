@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::activity::Activity;
 use crate::context::{ContextEngine, SummarizeFn};
 use crate::dispatch::Reply;
+use crate::duty::TriggerHandle;
 use crate::memory::distill::Distiller;
 use crate::notify::Notifier;
 use crate::provider::Provider;
@@ -51,6 +52,7 @@ impl AgentHandle {
         notifier: Option<Arc<Notifier>>,
         usage_ledger: Option<Arc<UsageLedger>>,
         review_ledger: Option<Arc<ReviewLedger>>,
+        duty_trigger: Option<TriggerHandle>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(32);
         let actor = Agent::new(
@@ -67,6 +69,7 @@ impl AgentHandle {
             notifier,
             usage_ledger,
             review_ledger,
+            duty_trigger,
         );
         tokio::spawn(actor.run());
         Self { tx }
