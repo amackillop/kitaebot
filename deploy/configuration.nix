@@ -62,6 +62,11 @@ in
 
       context.engine = "lcm";
 
+      # WORKAROUND (kitaebot#47): 30 was too small for distillation to
+      # clear a 110k-token failure-day backlog, and the retry math
+      # diverges. Revert when chunked distillation lands.
+      sub_agents.max_iterations = 60;
+
       telegram = {
         enabled = true;
         chat_id = 7658696350;
