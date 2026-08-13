@@ -142,13 +142,17 @@ in
           # Dependabot PRs repaired with fix-deps. Both procedures
           # live in lightning-node's AGENTS.md (its PR #891).
           {
-            name = "dependency-remediation";
+            name = "lightning-node-dep-queues";
             every = "1d";
             repo = "CumuloGlobal/lightning-node";
             prompt = ''
-              Work this repository's dependency queues. Both procedures
-              are in the "Vulnerability & Dependency Remediation"
-              section of this repo's AGENTS.md; follow them exactly.
+              Work the dependency queues of CumuloGlobal/lightning-node.
+              First ensure a checkout exists: run git_clone for
+              CumuloGlobal/lightning-node (idempotent if present) and
+              do all work in projects/CumuloGlobal/lightning-node.
+              Read the "Vulnerability & Dependency Remediation"
+              section of that checkout's AGENTS.md; both procedures
+              below live there — follow them exactly.
 
               Freshness first: if an open Dependabot version-update PR
               has failing checks, apply the freshness-lane procedure
