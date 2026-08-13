@@ -62,6 +62,7 @@ let
     lib.concatMapStrings (
       d: "^(.*\\.)?${lib.replaceStrings [ "." ] [ "\\." ] d}$\n"
     ) cfg.egressAllowlist
+    + lib.concatMapStrings (p: p + "\n") cfg.egressAllowlistPatterns
   );
 
   gitEnabled = cfg.settings.git.enabled or false;
@@ -217,6 +218,19 @@ in
         "doc.rust-lang.org"
       ];
       description = "Domains the kitaebot process may connect to. All others blocked.";
+    };
+
+    egressAllowlistPatterns = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [
+        # GitHub Actions log/artifact downloads: api.github.com 302s to
+        # numbered Azure storage accounts. The pattern stays this
+        # narrow on purpose — allowlisting blob.core.windows.net
+        # wholesale would open every rentable Azure bucket as an
+        # exfiltration channel.
+        "^productionresultssa[0-9]+\\.blob\\.core\\.windows\\.net$"
+      ];
+      description = "Anchored EREs appended verbatim to the egress filter, for hosts a plain domain entry cannot express narrowly.";
     };
   };
 
