@@ -4,7 +4,7 @@
 //! Telegram bot, and the GitHub and Linear pollers. The daemon drives
 //! their loops; `dispatch` holds the shared input/reply vocabulary.
 
-mod execution_checkout;
+pub(crate) mod execution_checkout;
 pub(crate) mod github;
 pub(crate) mod github_issues;
 pub(crate) mod linear;
