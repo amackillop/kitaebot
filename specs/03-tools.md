@@ -496,8 +496,12 @@ visible rather than inside a tool call.
 3. **Two triggers** — the self-maintenance duty
    ([spec 24](24-self-directed-work.md)) for configured repos, and
    checkout preparation for repos cloned on demand
-4. **Unconditional** — a warm-store run costs seconds; no bookkeeping
-   about whether it already happened
+4. **Unconditional per invocation** — a warm-store run itself costs
+   seconds and needs no bookkeeping about whether it already happened
+   (the `Warmer`'s `Notify` dedup handles concurrent callers). The
+   duty's *scheduling* is gated per-repo on new commits
+   ([spec 24](24-self-directed-work.md) warm duty), but each warm
+   invocation that the gate lets through runs unconditionally
 5. **Background** — never blocks the turn that triggered it
 6. **Readers wait, one runner** — a `Notify` per repo, as the direnv
    cache does. Nix serialises same-derivation builds anyway, but a

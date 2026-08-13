@@ -141,24 +141,22 @@ impl GitCli {
         Ok(warm_command(&self.warm_commands, &nwo).map(str::to_string))
     }
 
-    /// Prepare and warm every repo in `warm_commands` — the spec 24
-    /// warm duty. Clones missing checkouts. Sequential and awaited on
-    /// purpose: two cold builds would contend for the same cores.
-    /// Returns a per-repo summary for the duty history log.
-    pub async fn warm_configured_repos(&self) -> String {
-        let nwos: Vec<String> = self.warm_commands.keys().cloned().collect();
-        if nwos.is_empty() {
-            return "no warm commands configured".into();
-        }
-        let mut lines = Vec::with_capacity(nwos.len());
-        for nwo in nwos {
-            let status = self.prepare_and_warm(&nwo).await;
-            lines.push(format!("{nwo}: {status}"));
-        }
-        lines.join("; ")
+    /// Repo keys (`owner/repo`) with a configured warm command.
+    pub fn warm_repos(&self) -> Vec<String> {
+        self.warm_commands.keys().cloned().collect()
     }
 
-    async fn prepare_and_warm(&self, nwo: &str) -> String {
+    /// Whether the checkout exists under `projects/<nwo>`.
+    pub fn checkout_exists(&self, nwo: &str) -> bool {
+        super::checkout::rel_path("projects", nwo)
+            .is_ok_and(|rel| self.workspace_root.join(rel).join(".git").exists())
+    }
+
+    /// Prepare and warm a single repo — clone if absent, provision the
+    /// devshell, run the configured warm command. Sequential and
+    /// awaited on purpose: two cold builds would contend for the same
+    /// cores. Returns a status string for the duty summary.
+    pub async fn prepare_and_warm(&self, nwo: &str) -> String {
         let rel = match super::checkout::rel_path("projects", nwo) {
             Ok(rel) => rel,
             Err(e) => return format!("bad repo path: {e}"),
@@ -425,13 +423,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn warm_configured_repos_warms_an_existing_checkout() {
+    async fn prepare_and_warm_warms_an_existing_checkout() {
         let fake = FakeDirenv::install("echo '{}'");
         let (git, dir) = workspace_with_checkout(fake.cache(), "touch .warmed");
 
-        let summary = git.warm_configured_repos().await;
+        let summary = git.prepare_and_warm("o/r").await;
 
-        assert_eq!(summary, "o/r: warm");
+        assert_eq!(summary, "warm");
         assert!(dir.join(".warmed").exists(), "warm command must have run");
         assert_eq!(
             git.warmer().ready(&dir).await,
@@ -440,11 +438,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn warm_configured_repos_reports_a_failing_command() {
+    async fn prepare_and_warm_reports_a_failing_command() {
         let fake = FakeDirenv::install("echo '{}'");
         let (git, dir) = workspace_with_checkout(fake.cache(), "exit 1");
 
-        assert_eq!(git.warm_configured_repos().await, "o/r: failed");
+        assert_eq!(git.prepare_and_warm("o/r").await, "failed");
         assert_eq!(
             git.warmer().ready(&dir).await,
             Some(crate::tools::warm::WarmOutcome::Failed)

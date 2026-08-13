@@ -216,7 +216,7 @@ kitaebot = {
     };
     duties = {                                   # Duty scheduler (spec 24)
       distill = { every = "1h"; };                # Token gate still applies
-      warm = { every = "24h"; };                  # Build-warm duty; runs only when some repo sets check
+      warm = { every = "24h"; };                  # Build-warm duty; warms repos whose HEAD moved (spec 24)
       self_analysis = {                           # Mine own errors/journal, propose fixes as issues
         every = "24h";
         repo = "owner/repo";                      # Must be trusted and proposal-enabled
