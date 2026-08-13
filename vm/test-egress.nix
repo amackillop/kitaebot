@@ -4,7 +4,7 @@
 #   - tinyproxy allows CONNECT to allowlisted domains
 #   - tinyproxy refuses (and logs) CONNECT to anything else,
 #     including allowlisted names used as a spoofed suffix
-#   - nftables drops (and logs) direct egress from the kitaebot uid
+#   - nftables rejects (and logs) direct egress from the kitaebot uid
 #   - root (non-kitaebot uid) is unrestricted
 #
 # Test topology:
@@ -123,10 +123,19 @@ pkgs.testers.nixosTest {
             "sudo -u kitaebot curl -sk --max-time 3 --connect-timeout 2 https://192.168.1.2/"
         )
 
-    with subtest("nftables drop counter increments and drops are logged"):
+    with subtest("nftables reject counter increments and rejects are logged"):
         out = kitaebot.succeed("nft list chain inet kitaebot-egress output")
-        assert "counter packets 0" not in out, f"Expected drop counter > 0, got: {out}"
-        kitaebot.succeed("journalctl -k --no-pager | grep 'kitaebot-egress-drop'")
+        assert "counter packets 0" not in out, f"Expected reject counter > 0, got: {out}"
+        kitaebot.succeed("journalctl -k --no-pager | grep 'kitaebot-egress-reject'")
+
+    with subtest("blocked direct egress fails fast, not by timeout"):
+        # Reject (not drop) is the contract: a silent drop once turned
+        # an ssh fetch under nix evaluation into 900s direnv hangs.
+        kitaebot.succeed(
+            "start=$(date +%s); "
+            "sudo -u kitaebot curl -sk --connect-timeout 30 https://192.168.1.2/ || true; "
+            "elapsed=$(( $(date +%s) - start )); test $elapsed -lt 5"
+        )
 
     # ── Root is unrestricted ──────────────────────────────────────────
     with subtest("root can connect to the server directly"):
