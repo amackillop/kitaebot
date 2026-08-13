@@ -453,7 +453,12 @@ parallel tool calls each trigger a full `nix print-dev-env` evaluation.
    regardless of concurrent exec calls
 2. **Invalidate on change** — modified `.envrc` or `flake.lock` triggers
    re-evaluation on the next exec call
-3. **Don't cache failures** — transient direnv errors don't poison the cache
+3. **Don't cache fast failures** — transient direnv errors (blocked,
+   parse error) don't poison the cache; the next caller retries.
+   Timeouts are the exception: a 900s evaluation timeout is cached
+   with a short TTL (60s) so repeated operations during a hang degrade
+   to no-devshell immediately instead of each blocking for the full
+   timeout
 4. **Graceful degradation** — if direnv fails, exec runs without the devshell
 5. **Warm on clone** — `git_clone` pre-populates the cache in the background
 6. **Trust before evaluate** — `git_clone` runs `direnv allow` synchronously
