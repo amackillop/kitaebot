@@ -272,8 +272,12 @@ in
               # establish a non-loopback flow (the SYN is dropped).
               ct state established,related accept
 
-              # Everything else from kitaebot uid is dropped
-              log prefix "kitaebot-egress-drop: " counter drop
+              # Everything else from kitaebot uid is rejected, not
+              # dropped: a silent drop turns misdirected clients into
+              # 900s hangs (ssh SYN retries under nix eval, 2026-08-13);
+              # reject fails them in milliseconds. Nothing is hidden
+              # from anyone — this filter polices our own process.
+              log prefix "kitaebot-egress-reject: " counter reject
             }
           '';
         };

@@ -24,7 +24,7 @@ IP sets, no staleness. CONNECT is allowed only to allowlisted domains on port
 
 **Layer 2 — uid lockdown (nftables).** Output chain matches `meta skuid 900`
 (static UID) and permits loopback only. Any attempt to bypass the proxy —
-direct TCP, DNS (a tunneling vector), anything — is dropped and logged.
+direct TCP, DNS (a tunneling vector), anything — is rejected and logged.
 
 Together: the proxy decides what is reachable, nftables guarantees the proxy
 is the only path out.
@@ -68,7 +68,7 @@ table inet kitaebot-egress {
     meta skuid != 900 accept              # only restrict kitaebot uid
     oifname "lo" accept                   # Unix sockets, forward proxy
     ct state established,related accept   # socketless kernel packets
-    log prefix "kitaebot-egress-drop: " counter drop  # everything else
+    log prefix "kitaebot-egress-reject: " counter reject  # everything else
   }
 }
 ```
@@ -76,12 +76,17 @@ table inet kitaebot-egress {
 The `ct state` rule exists because `meta skuid` is undefined for packets
 with no owning socket (kernel-generated RSTs for closed sockets, TIME_WAIT
 ACKs): the `skuid != 900` match cannot exclude them, so without it they
-fall through to the drop rule and spam the log. It opens nothing — the
+fall through to the reject rule and spam the log. It opens nothing — the
 kitaebot uid can never establish a non-loopback flow, since the initial
-SYN is dropped.
+SYN is rejected.
 
-Dropped packets appear in the kernel log (`journalctl -k`) with the
-`kitaebot-egress-drop:` prefix, so surprising failures are always visible.
+Rejected packets appear in the kernel log (`journalctl -k`) with the
+`kitaebot-egress-reject:` prefix, so surprising failures are always
+visible. Reject rather than drop: a silent drop turns a misdirected
+client into a connect-timeout hang (an ssh fetch under nix evaluation
+once rode one to direnv's 900s ceiling, twice in a turn); reject fails
+it in milliseconds with a diagnosable error. This filter polices our
+own process, so there is nothing to be stealthy about.
 
 ### IPv6
 
@@ -108,7 +113,7 @@ The proxy must accept connections before the daemon starts.
 - **`web_fetch` tool**: restricted to allowlisted domains only
 - **DNS**: the kitaebot uid has no DNS at all. Proxy-aware clients don't
   need it (the hostname travels in CONNECT); anything that resolves first
-  fails fast and the drop is logged
+  fails fast and the reject is logged
 - **Nix operations**: nix-daemon (root) is unaffected. Client-side fetches
   (flake inputs) run as the kitaebot uid and honor `https_proxy`
 - **Git**: HTTPS clone/push works via the proxy. SSH git (port 22) is not
@@ -141,7 +146,7 @@ The proxy must accept connections before the daemon starts.
 | nftables fails to load | Firewall inactive; proxy still filters by domain |
 | tinyproxy fails to start | kitaebot starts but every request fails (connection refused to 127.0.0.1:8888); nftables still blocks direct egress |
 | Blocked domain requested | HTTP 403 from proxy, refusal logged in tinyproxy journal |
-| Direct egress attempted | Packet dropped, logged in kernel journal |
+| Direct egress attempted | Packet rejected, logged in kernel journal |
 | Allowlisted domain unreachable | Normal upstream connection failure, surfaced through the proxy |
 
 ## Constraints
