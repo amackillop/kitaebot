@@ -126,8 +126,13 @@ Recurring mechanical work on the bot's own machine rather than on a
 repository. No LLM turn: the outcome is a log line, not a reply.
 
 - **Warm** — build each configured repo's checks, cloning the checkout
-  first if absent, so the commit gate never meets a cold store. Repos
-  warm sequentially: two cold builds would contend for the same cores.
+  first if absent, so the commit gate never meets a cold store. The
+  duty is gated per-repo on new commits: each tick probes the remote
+  HEAD via `ls-remote` and warms only repos whose HEAD moved past a
+  per-repo cursor (`warm/<nwo>` in the state DB), or that have no
+  cursor (enrollment) or no checkout. The cursor advances only on a
+  successful warm, so a failed warm retries next tick. Repos warm
+  sequentially: two cold builds would contend for the same cores.
   Contract and consumer: [spec 03](03-tools.md#build-warm).
 - **Workspace hygiene** (not built) — remove finished checkouts and
   the `.direnv` gcroots pinning their devShell closures. Review
@@ -323,6 +328,10 @@ complete scope statement for discovery and prompt duties, and its
   delta next period. No queue, no retry loop inside the turn.
 - **Symptom probe fails** (unreadable journal or error files): logged,
   duty retries next period; the cursor stays put.
+- **Warm ls-remote fails**: the repo is skipped with cursor untouched;
+  it retries next tick.
+- **Warm command fails**: cursor does not advance, so the repo retries
+  next tick.
 - **Proposal flood attempt** (a broken gate matching everything): the
   per-repo cap bounds damage to 3 open issues, and one filing per run
   bounds the rate; the injected open list bounds repeat noise.

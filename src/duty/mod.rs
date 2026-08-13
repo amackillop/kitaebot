@@ -49,7 +49,7 @@ pub enum Action {
         repo: String,
         min_delta_tokens: usize,
     },
-    /// Prepare and warm every repo with a configured warm command, in
+    /// Probe and warm configured repos whose remote HEAD moved, in
     /// the scheduler with no LLM turn (spec 24 self-maintenance).
     Warm,
 }
@@ -247,7 +247,7 @@ async fn run_one(duty: &Duty, ctx: &RunCtx<'_>, state: &mut DutyState) {
         }
         Action::Warm => {
             let outcome = match ctx.git.as_ref() {
-                Some(git) => git.warm_configured_repos().await,
+                Some(git) => run_warm(git, state).await,
                 None => "skipped: no GitCli".into(),
             };
             info!(duty = %duty.name, "Duty run: {outcome}");
@@ -438,6 +438,52 @@ async fn probe_new_commits(
     }
 }
 
+/// Per-repo cursor key for the warm gate: `warm/<nwo>`.
+fn warm_cursor_key(nwo: &str) -> String {
+    format!("warm/{nwo}")
+}
+
+/// Run the warm duty with per-repo new-commits gating (spec 24).
+///
+/// Each configured repo is probed via `ls-remote`; only repos whose
+/// remote HEAD moved past the cursor (or that have no cursor or no
+/// checkout) are warmed. The cursor advances only on a successful
+/// warm, so a failed warm retries next tick. Returns a per-repo
+/// summary for the duty history log.
+async fn run_warm(git: &GitCli, state: &mut DutyState) -> String {
+    let repos = git.warm_repos();
+    if repos.is_empty() {
+        return "no warm commands configured".into();
+    }
+    let mut lines = Vec::with_capacity(repos.len());
+    for nwo in &repos {
+        let key = warm_cursor_key(nwo);
+        let cursor = state.cursor(&key);
+        // Fetch the remote HEAD once: the gate decision and the
+        // cursor advance both need it.
+        let head = match git.remote_head(nwo).await {
+            Ok(h) => h,
+            Err(e) => {
+                error!(repo = %nwo, "warm gate ls-remote failed: {e}");
+                lines.push(format!("{nwo}: skipped (ls-remote failed)"));
+                continue;
+            }
+        };
+        // Due when: no cursor (enrollment), no checkout, or HEAD moved.
+        let due = cursor.is_none() || !git.checkout_exists(nwo) || cursor != Some(head.as_str());
+        if !due {
+            lines.push(format!("{nwo}: skipped (no new commits)"));
+            continue;
+        }
+        let status = git.prepare_and_warm(nwo).await;
+        if status == "warm" {
+            state.set_cursor(&key, &head);
+        }
+        lines.push(format!("{nwo}: {status}"));
+    }
+    lines.join("; ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,5 +567,208 @@ mod tests {
         let state = DutyState::default();
         // Everything due now: still sleeps at least a second.
         assert_eq!(next_wake(&duties(), &state, 1_000), 1);
+    }
+
+    // --- warm gate tests ---
+
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use crate::secrets::Secret;
+    use crate::test_support::FakeDirenv;
+    use crate::tools::Warmer;
+
+    /// Run a git command in `cwd`, asserting success, returning stdout.
+    fn git_cmd(args: &[&str], cwd: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} in {} failed: {}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// A bare repo at `<workspace>/o/r.git` with one commit, and an
+    /// existing checkout at `<workspace>/projects/o/r` with `.envrc`,
+    /// so `ls-remote` returns a real HEAD SHA and `prepare_and_warm`
+    /// can provision the devshell. The `GitCli` uses `with_clone_base`
+    /// pointing at the workspace root via `file://` so `repo_url("o/r")`
+    /// resolves to the bare repo.
+    fn warm_test_setup(warm_command: &str) -> (GitCli, std::path::PathBuf, String) {
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path().to_path_buf();
+
+        // Create a non-bare repo with one commit, then clone --bare.
+        // This avoids cross-device link errors from pushing to a
+        // bare repo that was cloned empty.
+        let src = ws.join("o/r-src");
+        std::fs::create_dir_all(&src).unwrap();
+        git_cmd(&["init", src.to_str().unwrap()], &ws);
+        for (k, v) in [
+            ("user.email", "t@t"),
+            ("user.name", "t"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git_cmd(&["config", k, v], &src);
+        }
+        std::fs::write(src.join("README"), "init").unwrap();
+        std::fs::write(src.join(".envrc"), "use flake").unwrap();
+        git_cmd(&["add", "."], &src);
+        git_cmd(&["commit", "-m", "init"], &src);
+
+        // Clone to bare — same filesystem, no cross-device issue.
+        let bare = ws.join("o/r.git");
+        git_cmd(
+            &[
+                "clone",
+                "--bare",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            &ws,
+        );
+
+        // Create the checkout that `prepare_and_warm` expects.
+        let checkout = ws.join("projects/o/r");
+        git_cmd(
+            &["clone", bare.to_str().unwrap(), checkout.to_str().unwrap()],
+            &ws,
+        );
+        // Set origin to a GitHub URL so `origin_nwo` resolves.
+        git_cmd(
+            &["remote", "set-url", "origin", "https://github.com/o/r.git"],
+            &checkout,
+        );
+
+        // Get the HEAD sha from the bare repo.
+        let head = git_cmd(&["rev-parse", "HEAD"], &bare);
+        let head = head.trim().to_string();
+
+        // Leak the workspace and direnv tempdir so they outlive this
+        // helper (same pattern as workspace_with_checkout in git_cli).
+        let ws = workspace.keep();
+        let direnv = FakeDirenv::install("echo '{}'");
+        let direnv_cache = direnv.cache();
+        std::mem::forget(direnv);
+        let commands: BTreeMap<String, String> =
+            [("o/r".to_string(), warm_command.to_string())].into();
+        let git = GitCli::new(
+            Secret::test("fake"),
+            ws.clone(),
+            direnv_cache.clone(),
+            vec!["o/r".into()],
+        )
+        .with_clone_base(&format!("file://{}", ws.to_str().unwrap()))
+        .with_warm(Warmer::new(direnv_cache), Arc::new(commands));
+
+        (git, ws, head)
+    }
+
+    #[tokio::test]
+    async fn warm_gate_skips_when_cursor_matches_head() {
+        let (git, _ws, head) = warm_test_setup("touch .warmed");
+        let mut state = DutyState::default();
+        state.set_cursor(&warm_cursor_key("o/r"), &head);
+
+        let summary = run_warm(&git, &mut state).await;
+
+        assert!(
+            summary.contains("skipped (no new commits)"),
+            "unchanged cursor must skip: {summary}"
+        );
+        assert_eq!(state.cursor(&warm_cursor_key("o/r")), Some(head.as_str()));
+    }
+
+    #[tokio::test]
+    async fn warm_gate_warms_when_head_moved() {
+        let (git, ws, head) = warm_test_setup("touch .warmed");
+        let mut state = DutyState::default();
+        state.set_cursor(&warm_cursor_key("o/r"), "stale-sha");
+
+        let summary = run_warm(&git, &mut state).await;
+
+        assert!(
+            summary.contains("o/r: warm"),
+            "moved HEAD must warm: {summary}"
+        );
+        assert_eq!(state.cursor(&warm_cursor_key("o/r")), Some(head.as_str()));
+        let warmed = ws.join("projects/o/r/.warmed");
+        assert!(warmed.exists(), "warm command must have run");
+    }
+
+    #[tokio::test]
+    async fn warm_gate_warms_enrollment_no_cursor() {
+        let (git, ws, head) = warm_test_setup("touch .warmed");
+        let mut state = DutyState::default();
+
+        let summary = run_warm(&git, &mut state).await;
+
+        assert!(
+            summary.contains("o/r: warm"),
+            "no cursor must warm (enrollment): {summary}"
+        );
+        assert_eq!(state.cursor(&warm_cursor_key("o/r")), Some(head.as_str()));
+        let warmed = ws.join("projects/o/r/.warmed");
+        assert!(warmed.exists(), "warm command must have run");
+    }
+
+    #[tokio::test]
+    async fn warm_gate_warms_when_checkout_missing() {
+        let (git, ws, head) = warm_test_setup("touch .warmed");
+        let mut state = DutyState::default();
+        state.set_cursor(&warm_cursor_key("o/r"), &head);
+
+        // Remove the checkout so the gate sees it as missing.
+        std::fs::remove_dir_all(ws.join("projects/o/r")).unwrap();
+
+        // The gate sees no checkout and marks the repo due. The warm
+        // clones from the file:// bare repo, but origin_nwo won't
+        // resolve for a file:// clone, so prepare_and_warm returns a
+        // skip status — the gate decision is what we test here.
+        let summary = run_warm(&git, &mut state).await;
+
+        assert!(
+            !summary.contains("skipped (no new commits)"),
+            "missing checkout must not be skipped: {summary}"
+        );
+        assert_eq!(state.cursor(&warm_cursor_key("o/r")), Some(head.as_str()));
+    }
+
+    #[tokio::test]
+    async fn warm_gate_does_not_advance_cursor_on_failure() {
+        let (git, _ws, _head) = warm_test_setup("exit 1");
+        let mut state = DutyState::default();
+
+        let summary = run_warm(&git, &mut state).await;
+
+        assert!(
+            summary.contains("o/r: failed"),
+            "failing command must report failed: {summary}"
+        );
+        assert_eq!(state.cursor(&warm_cursor_key("o/r")), None);
+    }
+
+    #[tokio::test]
+    async fn warm_gate_empty_repos() {
+        let workspace = tempfile::tempdir().unwrap();
+        let direnv = FakeDirenv::install("echo '{}'").cache();
+        let git = GitCli::new(
+            Secret::test("fake"),
+            workspace.path().to_path_buf(),
+            direnv,
+            vec![],
+        );
+        let mut state = DutyState::default();
+
+        let summary = run_warm(&git, &mut state).await;
+
+        assert_eq!(summary, "no warm commands configured");
     }
 }
