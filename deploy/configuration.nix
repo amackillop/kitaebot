@@ -167,9 +167,6 @@ in
             repo = "CumuloGlobal/lightning-node";
             prompt = ''
               Work the dependency queues of CumuloGlobal/lightning-node.
-              First ensure a checkout exists: run git_clone for
-              CumuloGlobal/lightning-node (idempotent if present) and
-              do all work in projects/CumuloGlobal/lightning-node.
               Read the "Vulnerability & Dependency Remediation"
               section of that checkout's AGENTS.md; both procedures
               below live there — follow them exactly.

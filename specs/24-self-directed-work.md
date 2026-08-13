@@ -100,11 +100,15 @@ the same `state/` file as `last_run`: a cheap fetch-and-compare
 decides whether a turn runs, and each run sees only the delta — an
 idle repo costs two git commands. Without a gate the prompt runs
 unconditionally on schedule. The repo must be listed in `git.repositories`;
-the turn runs on the repo's work session; anything the prompt wants
-to raise goes through the proposal contract below, same caps. This
-stays inside the trust model because the operator authors the prompt
-and the schedule in config — it is operator-defined work on a timer,
-not model-created work.
+the turn runs on the repo's work session; the scheduler prepares a fresh
+checkout (clone, fetch, detach at origin/HEAD, clean, devshell) before
+the turn starts, same `execution_checkout::prepare` flow the issue
+channel uses, so the agent finds a working base and injected conventions.
+A clone failure falls back to a manual-clone note rather than leaving the
+turn to improvise. Anything the prompt wants to raise goes through the
+proposal contract below, same caps. This stays inside the trust model
+because the operator authors the prompt and the schedule in config — it
+is operator-defined work on a timer, not model-created work.
 
 **Built-in vs operator-defined — the line.** Code owns contracts,
 config owns intent. A duty is built-in when its gate or mechanical
