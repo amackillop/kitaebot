@@ -104,13 +104,28 @@ in
       github = {
         enabled = true;
         owner = "amackillop";
-        trusted_users = [ "npslaney" ];
+        # Humans only: agent accounts (cursoragent) and bots stay out —
+        # another AI driving this one's turns is a decision, not a default.
+        trusted_users = [
+          "ezefrd-mdk"
+          "martinsaposnic"
+          "NatElkins"
+          "npslaney"
+          "sbddesign"
+        ];
         trusted_bots = [ "chatgpt-codex-connector" ];
         issues.enabled = true;
       };
       linear = {
         enabled = true;
-        trusted_users = [ "austin@moneydevkit.com" ];
+        trusted_users = [
+          "austin@moneydevkit.com"
+          "eze@moneydevkit.com"
+          "martin@moneydevkit.com"
+          "nat@moneydevkit.com"
+          "nick@moneydevkit.com"
+          "stephen@moneydevkit.com"
+        ];
       };
       duties = {
         # Weekly: the shared cargo target dir persists and devshell
