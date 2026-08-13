@@ -6,8 +6,11 @@
 //! # Cache invalidation
 //!
 //! Two `stat()` calls per lookup: `.envrc` mtime and `flake.lock` mtime.
-//! A changed mtime triggers re-evaluation. Failures are never cached — the
-//! next caller retries.
+//! A changed mtime triggers re-evaluation. Fast failures (blocked, parse
+//! error) are never cached — the next caller retries. Timeouts are cached
+//! with a short TTL so repeated operations during a hang degrade to
+//! no-devshell immediately instead of each blocking for the full 900s
+//! evaluation timeout.
 //!
 //! # Concurrency
 //!
@@ -18,7 +21,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{Notify, RwLock};
 use tracing::debug;
@@ -29,7 +32,7 @@ use super::cli_runner::{self, SubprocessCall};
 pub type DirenvEnv = Arc<HashMap<String, String>>;
 
 /// Why a direnv evaluation did not yield an environment.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum DirenvError {
     /// `.envrc` exists but is not allowed: never allowed, or its content
     /// changed since it was, so direnv revoked trust. Recoverable by
@@ -39,6 +42,14 @@ pub enum DirenvError {
     /// direnv failed for some other reason.
     #[error("{0}")]
     Failed(String),
+    /// `direnv export json` exceeded its time budget. Cached with a short
+    /// TTL so repeated operations during a hang degrade to no-devshell
+    /// immediately instead of each blocking for the full timeout.
+    #[error("direnv export json timed out after {secs}s")]
+    Timeout {
+        /// The budget that was exceeded, in seconds.
+        secs: u64,
+    },
 }
 
 /// Filesystem fingerprint for cache invalidation.
@@ -61,6 +72,12 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// How long a cached timeout persists before the next caller retries.
+/// Short enough that a genuinely transient hang clears quickly, long
+/// enough to prevent the cascade where every operation blocks for the
+/// full 900s evaluation timeout.
+const TIMEOUT_TTL: Duration = Duration::from_mins(1);
+
 enum CacheEntry {
     /// An evaluation is in progress. Waiters clone the `Notify` and await it.
     Resolving(Arc<Notify>),
@@ -68,6 +85,14 @@ enum CacheEntry {
     Ready {
         env: DirenvEnv,
         fingerprint: Fingerprint,
+    },
+    /// A timeout cached until `expires_at` or a fingerprint change.
+    /// Subsequent callers within the TTL and matching fingerprint get
+    /// the cached error without re-running the 900s evaluation.
+    Failed {
+        error: DirenvError,
+        fingerprint: Fingerprint,
+        expires_at: Instant,
     },
 }
 
@@ -78,6 +103,10 @@ pub struct DirenvCache {
     /// The direnv executable. Tests substitute a fake script so no
     /// test mutates the process PATH.
     binary: &'static str,
+    /// Time budget for `direnv export json`. High (900s) in production
+    /// because first-time nix devshell evaluation can take minutes.
+    /// Tests use a short value so timeout behavior is exercisable.
+    eval_timeout_secs: u64,
 }
 
 impl DirenvCache {
@@ -85,6 +114,7 @@ impl DirenvCache {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
             binary: "direnv",
+            eval_timeout_secs: 900,
         }
     }
 
@@ -94,7 +124,16 @@ impl DirenvCache {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
             binary,
+            eval_timeout_secs: 900,
         }
+    }
+
+    /// A cache with a short evaluation timeout — for testing timeout
+    /// caching without waiting 900s.
+    #[cfg(test)]
+    pub(crate) fn with_eval_timeout(mut self, secs: u64) -> Self {
+        self.eval_timeout_secs = secs;
+        self
     }
 
     /// Run `direnv allow` for a directory, trusting its current
@@ -121,7 +160,8 @@ impl DirenvCache {
     ///
     /// Returns `Ok(None)` if no `.envrc` exists (one `stat` call).
     /// Returns [`DirenvError::Blocked`] when the `.envrc` is not allowed,
-    /// [`DirenvError::Failed`] on any other error.
+    /// [`DirenvError::Timeout`] when the evaluation exceeded its time
+    /// budget, [`DirenvError::Failed`] on any other error.
     pub async fn get(&self, dir: &Path) -> Result<Option<DirenvEnv>, DirenvError> {
         // Fast path: no .envrc means no direnv to evaluate.
         if !dir.join(".envrc").exists() {
@@ -141,6 +181,13 @@ impl DirenvCache {
                     }) if *cached_fp == fingerprint => {
                         return Ok(Some(Arc::clone(env)));
                     }
+                    Some(CacheEntry::Failed {
+                        error,
+                        fingerprint: cached_fp,
+                        expires_at,
+                    }) if *cached_fp == fingerprint && *expires_at > Instant::now() => {
+                        return Err(error.clone());
+                    }
                     Some(CacheEntry::Resolving(notify)) => {
                         let notify = Arc::clone(notify);
                         drop(cache);
@@ -149,7 +196,7 @@ impl DirenvCache {
                         continue;
                     }
                     _ => {
-                        // Miss or stale — fall through to write lock.
+                        // Miss, stale, or expired failure — fall through.
                     }
                 }
             }
@@ -164,6 +211,13 @@ impl DirenvCache {
                         fingerprint: cached_fp,
                     }) if *cached_fp == fingerprint => {
                         return Ok(Some(Arc::clone(env)));
+                    }
+                    Some(CacheEntry::Failed {
+                        error,
+                        fingerprint: cached_fp,
+                        expires_at,
+                    }) if *cached_fp == fingerprint && *expires_at > Instant::now() => {
+                        return Err(error.clone());
                     }
                     Some(CacheEntry::Resolving(notify)) => {
                         let notify = Arc::clone(notify);
@@ -182,9 +236,9 @@ impl DirenvCache {
             };
 
             // --- No lock held: run direnv ---
-            let result = evaluate_direnv(self.binary, dir).await;
+            let result = evaluate_direnv(self.binary, self.eval_timeout_secs, dir).await;
 
-            // --- Write lock: store result or remove on failure ---
+            // --- Write lock: store result, cache timeout, or drop failure ---
             let mut cache = self.inner.write().await;
             match result {
                 Ok(env) => {
@@ -200,8 +254,26 @@ impl DirenvCache {
                     return Ok(Some(env));
                 }
                 Err(e) => {
-                    // Don't cache failures — next caller retries.
-                    cache.remove(dir);
+                    match e {
+                        DirenvError::Timeout { .. } => {
+                            // Cache timeouts with a short TTL so repeated
+                            // operations during a hang don't each block
+                            // for the full evaluation timeout.
+                            cache.insert(
+                                dir.to_path_buf(),
+                                CacheEntry::Failed {
+                                    error: e.clone(),
+                                    fingerprint,
+                                    expires_at: Instant::now() + TIMEOUT_TTL,
+                                },
+                            );
+                        }
+                        _ => {
+                            // Fast failures (blocked, parse error, etc.)
+                            // are not cached — next caller retries.
+                            cache.remove(dir);
+                        }
+                    }
                     notify.notify_waiters();
                     return Err(e);
                 }
@@ -213,6 +285,7 @@ impl DirenvCache {
 /// Run `direnv export json` and parse the result.
 async fn evaluate_direnv(
     binary: &'static str,
+    timeout_secs: u64,
     dir: &Path,
 ) -> Result<HashMap<String, String>, DirenvError> {
     debug!(dir = %dir.display(), "Evaluating direnv");
@@ -222,7 +295,7 @@ async fn evaluate_direnv(
         args: vec!["export".into(), "json".into()],
         cwd: dir.to_path_buf(),
         env: crate::tools::safe_env().collect(),
-        timeout_secs: Some(900),
+        timeout_secs: Some(timeout_secs),
         stdin: None,
         // Evaluates the flake devshell -- repo-controlled code under
         // the daemon grant. Confining it needs tier plumbing through
@@ -230,9 +303,10 @@ async fn evaluate_direnv(
         confine: None,
     };
 
-    let output = cli_runner::exec(&call)
-        .await
-        .map_err(|e| DirenvError::Failed(format!("direnv exec failed: {e}")))?;
+    let output = cli_runner::exec(&call).await.map_err(|e| match e {
+        crate::error::ToolError::Timeout { secs, .. } => DirenvError::Timeout { secs },
+        other => DirenvError::Failed(format!("direnv exec failed: {other}")),
+    })?;
 
     if output.exit_code != 0 {
         let stderr = output.stderr.trim();
@@ -444,6 +518,89 @@ mod tests {
         assert!(
             matches!(err, DirenvError::Blocked),
             "a blocked .envrc must report Blocked, not Failed: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_is_cached_within_ttl() {
+        // Sleep longer than the 1s eval timeout so direnv times out.
+        let fake =
+            FakeDirenv::install("echo 1 >> \"$PWD/.call-count\"\nsleep 2\necho '{\"X\": \"1\"}'");
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
+
+        let cache = fake.cache().with_eval_timeout(1);
+
+        // First call times out (waits 1s).
+        let err = cache.get(dir.path()).await.unwrap_err();
+        assert!(
+            matches!(err, DirenvError::Timeout { secs: 1 }),
+            "first call should time out: {err}"
+        );
+
+        // Second call within TTL returns cached timeout without
+        // re-invoking direnv — it must return immediately.
+        let start = std::time::Instant::now();
+        let err2 = cache.get(dir.path()).await.unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(err2, DirenvError::Timeout { secs: 1 }),
+            "second call should return cached timeout: {err2}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "cached timeout must return in milliseconds, took {elapsed:?}"
+        );
+
+        // Only one direnv invocation: the second call hit the cache.
+        let count = std::fs::read_to_string(dir.path().join(".call-count")).unwrap();
+        assert_eq!(
+            count.lines().count(),
+            1,
+            "cached timeout must not re-invoke direnv",
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_cache_invalidated_by_fingerprint_change() {
+        let fake =
+            FakeDirenv::install("echo 1 >> \"$PWD/.call-count\"\nsleep 2\necho '{\"X\": \"1\"}'");
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
+
+        let cache = fake.cache().with_eval_timeout(1);
+
+        // First call times out.
+        let err = cache.get(dir.path()).await.unwrap_err();
+        assert!(matches!(err, DirenvError::Timeout { secs: 1 }));
+
+        // Second call within TTL returns cached timeout.
+        let err2 = cache.get(dir.path()).await.unwrap_err();
+        assert!(matches!(err2, DirenvError::Timeout { secs: 1 }));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".call-count"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+        );
+
+        // Fix the .envrc — fingerprint change must invalidate the
+        // cached timeout and trigger a re-evaluation.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(dir.path().join(".envrc"), "use flake .").unwrap();
+
+        let err3 = cache.get(dir.path()).await.unwrap_err();
+        assert!(matches!(err3, DirenvError::Timeout { secs: 1 }));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".call-count"))
+                .unwrap()
+                .lines()
+                .count(),
+            2,
+            "fingerprint change must re-evaluate despite cached timeout",
         );
     }
 }
