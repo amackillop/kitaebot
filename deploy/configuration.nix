@@ -137,6 +137,43 @@ in
         # to code only if it earns that (spec 24: with data, not in
         # advance).
         prompt = [
+          # Two-lane dependency duty: security fixes authored natively
+          # from the alert queue, freshness via weekly cooled-down
+          # Dependabot PRs repaired with fix-deps. Both procedures
+          # live in lightning-node's AGENTS.md (its PR #891).
+          {
+            name = "dependency-remediation";
+            every = "1d";
+            repo = "CumuloGlobal/lightning-node";
+            prompt = ''
+              Work this repository's dependency queues. Both procedures
+              are in the "Vulnerability & Dependency Remediation"
+              section of this repo's AGENTS.md; follow them exactly.
+
+              Freshness first: if an open Dependabot version-update PR
+              has failing checks, apply the freshness-lane procedure
+              to the oldest one (fix-deps rung, rebase-comment only if
+              stale and carrying no fix commits, superseding PR for
+              real breakage), then stop.
+
+              Otherwise security: fetch this repository's open
+              Dependabot alerts via the GitHub API. If none are open,
+              reply with one line and stop. Group alerts by manifest
+              directory, pick the directory containing the highest
+              severity alert, and apply the security-lane procedure:
+              fix every alert in that directory with native pnpm or
+              cargo bumps, run just fix-deps and just check, and open
+              ONE pull request for the directory listing the alert
+              numbers it fixes. Push nothing that fails just check
+              locally. End your reply with the number of alerts still
+              open repo-wide.
+
+              Hard rules: one PR or one directory per run. Never touch
+              anything under .github/workflows. Never force-push.
+              Never dismiss alerts. Never regenerate a lockfile whose
+              manifest you did not just author.
+            '';
+          }
           {
             name = "workaround-audit";
             every = "7d";
