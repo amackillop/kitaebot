@@ -397,7 +397,7 @@ directory, never a repo.
 
 | Tool | Description |
 |------|-------------|
-| `github_api` | Generic REST escape hatch. Paths are forced under `repos/<owner>/<repo>/` and the first segment must be one of `issues`, `labels`, `milestones`, `pulls`, `releases`. |
+| `github_api` | Generic REST escape hatch. Paths are forced under `repos/<owner>/<repo>/` and the first segment must be one of `dependabot` (GET only — writing dismisses alerts, a human decision), `issues`, `labels`, `milestones`, `pulls`, `releases`. |
 | `github_ci_status` | Check CI status for a git ref. |
 | `github_pr_create` | Create a pull request. |
 | `github_pr_list` | List pull requests (open/closed/all). |

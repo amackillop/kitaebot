@@ -15,7 +15,18 @@ use crate::error::ToolError;
 use crate::tools::string_or_value;
 
 /// Resources the model may touch.
-const ALLOWED_RESOURCES: &[&str] = &["issues", "labels", "milestones", "pulls", "releases"];
+const ALLOWED_RESOURCES: &[&str] = &[
+    "dependabot",
+    "issues",
+    "labels",
+    "milestones",
+    "pulls",
+    "releases",
+];
+
+/// Resources limited to GET: writing `dependabot/alerts` dismisses
+/// alerts, and dismissal is a human decision.
+const READONLY_RESOURCES: &[&str] = &["dependabot"];
 
 #[derive(Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
@@ -44,8 +55,8 @@ struct Args {
     /// HTTP method.
     method: Method,
     /// Path under `repos/<owner>/<repo>/`, e.g. `issues/42/comments`
-    /// or `pulls?state=open`. Must start with one of: issues, labels,
-    /// milestones, pulls, releases.
+    /// or `pulls?state=open`. Must start with one of: dependabot
+    /// (GET only), issues, labels, milestones, pulls, releases.
     path: String,
     /// JSON body for POST/PATCH.
     #[serde(default, deserialize_with = "string_or_value")]
@@ -80,9 +91,9 @@ impl Tool for Api {
     }
 }
 
-/// Reject paths that could escape the repo prefix or name a resource
-/// outside the allowlist.
-fn validate_path(path: &str) -> Result<(), ToolError> {
+/// Reject paths that could escape the repo prefix, name a resource
+/// outside the allowlist, or write to a read-only resource.
+fn validate_path(path: &str, method: Method) -> Result<(), ToolError> {
     let resource = path.split(['/', '?']).next().unwrap_or("");
     if !ALLOWED_RESOURCES.contains(&resource) {
         return Err(ToolError::Blocked {
@@ -91,6 +102,12 @@ fn validate_path(path: &str) -> Result<(), ToolError> {
                 "the path must start with one of: {}",
                 ALLOWED_RESOURCES.join(", ")
             ),
+        });
+    }
+    if READONLY_RESOURCES.contains(&resource) && !matches!(method, Method::Get) {
+        return Err(ToolError::Blocked {
+            operation: format!("github_api {} {path}", method.as_str()),
+            guidance: format!("{resource} is read-only through this tool: use GET"),
         });
     }
     // '%' is blocked wholesale: percent-encoding can smuggle a '/'
@@ -106,7 +123,7 @@ fn validate_path(path: &str) -> Result<(), ToolError> {
 
 impl Api {
     async fn run(&self, args: &Args) -> Result<String, ToolError> {
-        validate_path(&args.path)?;
+        validate_path(&args.path, args.method)?;
         let nwo = self.0.nwo(&args.repo_dir).await?;
         let body = args
             .body
@@ -147,7 +164,10 @@ mod tests {
     fn rejects_resources_outside_the_allowlist() {
         for path in ["", "collaborators", "hooks/1", "../other/pulls", "keys?x=1"] {
             assert!(
-                matches!(validate_path(path), Err(ToolError::Blocked { .. })),
+                matches!(
+                    validate_path(path, Method::Get),
+                    Err(ToolError::Blocked { .. })
+                ),
                 "{path} should be blocked",
             );
         }
@@ -156,20 +176,41 @@ mod tests {
     #[test]
     fn rejects_traversal_and_fragments() {
         for path in ["issues/../../other", "pulls/1#frag", "issues?q=..%2f.."] {
-            assert!(validate_path(path).is_err(), "{path} should be rejected");
+            assert!(
+                validate_path(path, Method::Get).is_err(),
+                "{path} should be rejected"
+            );
         }
     }
 
     #[test]
     fn accepts_allowed_resources() {
         for path in [
+            "dependabot/alerts?state=open",
             "issues/42/comments",
             "pulls?state=open",
             "releases/latest",
             "labels",
             "milestones/3",
         ] {
-            assert!(validate_path(path).is_ok(), "{path} should be allowed");
+            assert!(
+                validate_path(path, Method::Get).is_ok(),
+                "{path} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_resources_reject_writes() {
+        for method in [Method::Delete, Method::Patch, Method::Post] {
+            assert!(
+                matches!(
+                    validate_path("dependabot/alerts/4", method),
+                    Err(ToolError::Blocked { .. })
+                ),
+                "{} should be blocked on dependabot",
+                method.as_str(),
+            );
         }
     }
 
