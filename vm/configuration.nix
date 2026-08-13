@@ -334,7 +334,7 @@ in
         # Devshell realization runs in this cgroup, not kitaebot's;
         # throttle only — killing the daemon mid-build corrupts nothing
         # but wastes the whole build.
-        nix-daemon.serviceConfig.MemoryHigh = "5G";
+        nix-daemon.serviceConfig.MemoryHigh = "6G";
 
         # Kitaebot daemon
         kitaebot = {
@@ -441,16 +441,19 @@ in
             MemoryDenyWriteExecute = false;
             # Bound warm-pass builds so an OOM kills a compiler child
             # inside this cgroup, never journald or oomd.
-            MemoryHigh = "5G";
-            MemoryMax = "6G";
+            MemoryHigh = "8G";
+            MemoryMax = "9G";
           };
           environment = {
             KITAEBOT_WORKSPACE = "/var/lib/kitaebot";
             # Shared cargo target dir (spec 03 Build Warm). Under
             # projects/ so the exec Landlock tier can write it.
             CARGO_TARGET_DIR = "/var/lib/kitaebot/projects/target";
-            # cores × rustc does not fit in memorySize; cap the fan-out.
-            CARGO_BUILD_JOBS = "4";
+            # Six jobs fit a 12G budget; eight did not fit the old 8G.
+            # The binding constraint is the commit hook's 900s window:
+            # kitaebot's own gate must rebuild the crate fresh on every
+            # bot commit, and starving it of cores breaks the hook.
+            CARGO_BUILD_JOBS = "6";
             RUST_LOG = cfg.logLevel;
             PATH = lib.mkForce toolPath;
             # All egress via the allowlisting forward proxy. Both cases
@@ -529,9 +532,18 @@ in
       };
     };
 
-    # GC only under disk pressure: devshell profiles are rooted
-    # (.direnv flake-profile links) but eval/fetcher caches are not,
-    # and a scheduled GC would churn them cold. Bytes.
+    # Weekly scheduled GC plus disk-pressure backstop. Scheduled GC is
+    # safe now that devshell profiles are rooted (.direnv
+    # flake-profile links): it collects orphaned closures and build
+    # debris calmly, instead of a pressure-triggered GC storm arriving
+    # in the middle of the build that caused the pressure. Eval and
+    # fetcher caches churn, and re-warming them is cheaper than the
+    # mid-build stall (40G filled within days of fleet onboarding).
+    nix.gc = {
+      automatic = true;
+      dates = "weekly";
+      options = "--delete-older-than 7d";
+    };
     nix.settings = {
       min-free = 3 * 1024 * 1024 * 1024; # 3 GiB
       max-free = 10 * 1024 * 1024 * 1024; # 10 GiB

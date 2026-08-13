@@ -18,6 +18,14 @@ in
 {
   kitaebot = {
     dev = true;
+    # 40G filled within days of fleet onboarding (devshell closures,
+    # eval caches, the shared cargo target). qcow2 is sparse; the host
+    # pays only for actual use.
+    vm.diskSize = 65536;
+    # 8G forced CARGO_BUILD_JOBS=4 + tight cgroup caps, and kitaebot's
+    # own commit hook stopped fitting the git tool's 900s budget.
+    # loupe's retirement freed 16G on the host; spend some here.
+    vm.memorySize = 12288;
     sshKeys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKj473/+eAlgy1rQwuO+nCRrqhiPAWEgYPIn5j/NdN1Q desktop"
     ];
