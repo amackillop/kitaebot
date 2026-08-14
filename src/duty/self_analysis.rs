@@ -198,8 +198,8 @@ fn error_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// The dispatch prompt: symptoms, already-filed proposals, and the
-/// one-proposal contract.
+/// The dispatch prompt: symptoms, open issues on the repo for
+/// dedup, and the one-proposal contract.
 pub fn format_prompt(repo: &str, delta: &Delta, open_proposals: &[String]) -> String {
     use std::fmt::Write;
     let mut s = String::from(
@@ -224,8 +224,8 @@ pub fn format_prompt(repo: &str, delta: &Delta, open_proposals: &[String]) -> St
     if !open_proposals.is_empty() {
         let _ = write!(
             s,
-            "\nProposals you already filed, still open — do not re-file \
-             these or variants of them:\n",
+            "\nOpen issues on this repo — if your symptom matches one \
+             (yours or human-filed), do not file; cite it instead:\n",
         );
         for title in open_proposals {
             let _ = writeln!(s, "- {title}");
