@@ -7,6 +7,7 @@
 //! `commands::execute` drives it.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,9 @@ pub struct Distiller {
     tools: Tools,
     threshold: u64,
     max_iterations: usize,
+    /// The injection cap for memory/MEMORY.md: the index is truncated
+    /// past this at prompt time, so the distiller must keep it under.
+    index_cap_bytes: usize,
     /// Owns the watermark document: the distiller is the only reader
     /// and writer of distillation progress.
     state_db: StateDb,
@@ -125,6 +129,7 @@ impl Distiller {
         state_db: StateDb,
         threshold: u64,
         max_iterations: usize,
+        index_cap_bytes: usize,
     ) -> Self {
         let tools = base.filtered(DISTILL_TOOLS);
         let names: Vec<String> = tools
@@ -143,6 +148,7 @@ impl Distiller {
             tools,
             threshold,
             max_iterations,
+            index_cap_bytes,
             state_db,
         }
     }
@@ -220,7 +226,17 @@ pub async fn run<P: Provider, E: ContextEngine>(
         return Ok(None);
     }
 
-    let user_message = build_user_message(workspace, &gathered.spans);
+    let mut user_message = build_user_message(workspace, &gathered.spans);
+    if let Some(directive) = index_over_cap(workspace, distiller.index_cap_bytes) {
+        let _ = write!(
+            user_message,
+            "\n\n# REQUIRED FIRST: compact the index\n\
+             memory/MEMORY.md is {directive} — everything past the cap is \
+             invisible at injection time. Before folding new facts, move \
+             detailed sections into memory/topics/*.md and leave one-line \
+             pointers, oldest finished-ticket sections first.\n"
+        );
+    }
     let mut ephemeral = EphemeralSession::new(DISTILL_TOOL_OUTPUT_TOKENS);
     // Fail, not FinalAnswer: a half-distilled memory write is worse
     // than retrying on the next cycle with the backlog carried.
@@ -246,7 +262,15 @@ pub async fn run<P: Provider, E: ContextEngine>(
         sessions = gathered.spans.len(),
         "Distillation pass complete"
     );
-    Ok(Some((output.into_text(), usage)))
+    let mut summary = output.into_text();
+    if let Some(over) = index_over_cap(workspace, distiller.index_cap_bytes) {
+        warn!("memory index still over cap after distillation: {over}");
+        let _ = write!(
+            summary,
+            "\n[memory index still over cap: {over} — compaction required next pass]"
+        );
+    }
+    Ok(Some((summary, usage)))
 }
 
 /// The spans a single pass will fold, plus the shared token budget and
@@ -289,6 +313,13 @@ impl Gathered {
 /// Compose the distiller's user turn: the current memory index, the
 /// topic-file listing, and the labeled transcript spans (flagged as
 /// data, not instructions).
+/// `Some("<size>B against a <cap>B cap")` when the index exceeds the
+/// injection cap, `None` otherwise (including when the file is absent).
+fn index_over_cap(workspace: &Workspace, cap_bytes: usize) -> Option<String> {
+    let size = std::fs::metadata(workspace.path().join("memory/MEMORY.md")).map_or(0, |m| m.len());
+    (size > cap_bytes as u64).then(|| format!("{size}B against a {cap_bytes}B cap"))
+}
+
 fn build_user_message(workspace: &Workspace, spans: &[(String, Vec<Message>)]) -> String {
     use std::fmt::Write;
 
@@ -557,7 +588,7 @@ mod run_tests {
         };
         let provider = Arc::new(MockProvider::new(vec![]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
         let mut state = DistillState::default();
 
         let out = run(
@@ -594,7 +625,7 @@ mod run_tests {
             "forced pass".into(),
         ))]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
         let mut state = DistillState::default();
 
         let out = run(
@@ -616,6 +647,66 @@ mod run_tests {
     }
 
     #[tokio::test]
+    async fn oversized_index_directs_compaction_and_flags_summary() {
+        let (_dir, ws) = workspace();
+        std::fs::create_dir_all(ws.path().join("memory")).unwrap();
+        std::fs::write(ws.path().join("memory/MEMORY.md"), "x".repeat(9000)).unwrap();
+        let engine = FakeEngine {
+            pending: BTreeMap::from([("general".into(), 10)]),
+            transcripts: BTreeMap::from([(
+                "general".into(),
+                vec![Message::User {
+                    content: "small backlog".into(),
+                }],
+            )]),
+        };
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            "did not compact".into(),
+        ))]));
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
+        let mut state = DistillState::default();
+
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Bypass,
+        )
+        .await
+        .unwrap();
+
+        // Pre-pass: the user message carries the compaction directive.
+        let sent = provider.last_request().expect("one call");
+        let directive_sent = sent.iter().any(|m| {
+            matches!(m, Message::User { content }
+                if content.contains("REQUIRED FIRST: compact the index"))
+        });
+        assert!(directive_sent, "compaction directive missing from request");
+        // Post-pass: the index is still over cap, so the summary says so.
+        let (summary, _usage) = out.expect("pass ran");
+        assert!(
+            summary.contains("still over cap"),
+            "summary should flag the oversized index: {summary}"
+        );
+    }
+
+    #[test]
+    fn index_over_cap_boundary() {
+        let (_dir, ws) = workspace();
+        std::fs::create_dir_all(ws.path().join("memory")).unwrap();
+        assert!(index_over_cap(&ws, 8192).is_none(), "absent file is fine");
+        std::fs::write(ws.path().join("memory/MEMORY.md"), "x".repeat(8192)).unwrap();
+        assert!(index_over_cap(&ws, 8192).is_none(), "at cap is fine");
+        std::fs::write(ws.path().join("memory/MEMORY.md"), "x".repeat(8193)).unwrap();
+        let over = index_over_cap(&ws, 8192).expect("over cap");
+        assert!(over.contains("8193B"), "{over}");
+    }
+
+    #[tokio::test]
     async fn bypass_with_empty_backlog_makes_no_call() {
         let (_dir, ws) = workspace();
         let engine = FakeEngine {
@@ -624,7 +715,7 @@ mod run_tests {
         };
         let provider = Arc::new(MockProvider::new(vec![]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
         let mut state = DistillState::default();
 
         let out = run(
@@ -662,7 +753,7 @@ mod run_tests {
             "wrote canary fact".into(),
         ))]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
         let mut state = DistillState::default();
 
         let out = run(
@@ -707,7 +798,7 @@ mod run_tests {
         };
         let provider = Arc::new(MockProvider::new(vec![]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
 
         let state = distiller.load_state(&engine).await.unwrap();
 
@@ -736,7 +827,7 @@ mod run_tests {
             )]),
         };
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
 
         let first = distiller.load_state(&engine).await.unwrap();
         // New history arrives after priming; a reload must keep the
@@ -759,7 +850,7 @@ mod run_tests {
         };
         let provider = Arc::new(MockProvider::new(vec![Err(ProviderError::RateLimited)]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
         let mut state = DistillState::default();
 
         let result = run(

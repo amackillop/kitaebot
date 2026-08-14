@@ -384,6 +384,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         state_db.clone(),
         config.memory.distill_threshold_tokens,
         config.sub_agents.max_iterations,
+        config.memory.index_cap_bytes,
     ));
     // Telemetry: an open failure is logged and the daemon runs
     // unmetered and unrecorded. Opened before the task tool so

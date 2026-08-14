@@ -3,8 +3,8 @@
 //! Returns pre-configured responses in order, tracking call count.
 //! Shared across the agent, command, and channel test modules.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::error::ProviderError;
 use crate::provider::{CallUsage, ChatOutcome, Provider};
@@ -15,6 +15,8 @@ pub struct MockProvider {
     responses: Vec<Result<Response, ProviderError>>,
     usage: CallUsage,
     call_count: Arc<AtomicUsize>,
+    /// Messages of the most recent `chat` call, for request assertions.
+    last_messages: Arc<Mutex<Vec<Message>>>,
 }
 
 impl MockProvider {
@@ -23,6 +25,7 @@ impl MockProvider {
             responses,
             usage: CallUsage::default(),
             call_count: Arc::new(AtomicUsize::new(0)),
+            last_messages: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -35,16 +38,24 @@ impl MockProvider {
     pub fn call_count(&self) -> usize {
         self.call_count.load(Ordering::SeqCst)
     }
+
+    /// The messages sent to the most recent `chat` call, or `None`
+    /// before the first call.
+    pub fn last_request(&self) -> Option<Vec<Message>> {
+        let held = self.last_messages.lock().unwrap();
+        (!held.is_empty()).then(|| held.clone())
+    }
 }
 
 impl Provider for MockProvider {
     async fn chat(
         &self,
         _session: &str,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: &[ToolDefinition],
     ) -> Result<ChatOutcome, ProviderError> {
         let index = self.call_count.fetch_add(1, Ordering::SeqCst);
+        *self.last_messages.lock().unwrap() = messages.to_vec();
         self.responses[index].clone().map(|response| ChatOutcome {
             response,
             usage: self.usage,

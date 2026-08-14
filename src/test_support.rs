@@ -86,6 +86,7 @@ impl TestAgent {
             crate::state_db::StateDb::open_in_memory().unwrap(),
             40_000,
             1,
+            8192,
         ));
         AgentHandle::spawn(
             self.ws,
