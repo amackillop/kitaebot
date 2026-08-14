@@ -22,7 +22,14 @@ where
         vec!["commit", "--allow-empty", "-m", "seed"],
     ] {
         let out = std::process::Command::new("git")
-            .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
+            .args([
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(&args)
             .current_dir(&repo)
             .output()

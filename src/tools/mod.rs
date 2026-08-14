@@ -389,6 +389,23 @@ pub(crate) fn truncate_output(s: &str, max_bytes: usize) -> Cow<'_, str> {
     }
 }
 
+/// Tail-keeping truncation for log-shaped output, where the diagnosis
+/// concentrates at the end. Keeps the last `max_bytes` and prepends a
+/// header naming the dropped leading byte count.
+pub(crate) fn truncate_tail(s: &str, max_bytes: usize) -> Cow<'_, str> {
+    if s.len() <= max_bytes {
+        Cow::Borrowed(s)
+    } else {
+        let start = s.len() - max_bytes;
+        let start = s.ceil_char_boundary(start);
+        Cow::Owned(format!(
+            "[truncated {} leading bytes]\n{}",
+            start,
+            &s[start..]
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +506,39 @@ mod tests {
         // '€' is 3 bytes. Truncating at byte 2 should cut back to 0.
         let result = truncate_output("€", 2);
         assert!(result.starts_with("...\n[truncated 3 bytes]"));
+    }
+
+    #[test]
+    fn truncate_tail_short_string_borrowed() {
+        assert!(matches!(
+            truncate_tail("hello", 100),
+            Cow::Borrowed("hello")
+        ));
+    }
+
+    #[test]
+    fn truncate_tail_exact_length_borrowed() {
+        assert!(matches!(truncate_tail("hello", 5), Cow::Borrowed("hello")));
+    }
+
+    #[test]
+    fn truncate_tail_keeps_end() {
+        let long = "header_".to_string() + &"a".repeat(100);
+        let result = truncate_tail(&long, 10);
+        assert!(result.starts_with("[truncated "));
+        assert!(result.contains(" leading bytes]"));
+        // The tail is the last 10 bytes of the string.
+        assert!(result.ends_with(&long[long.len() - 10..]));
+    }
+
+    #[test]
+    fn truncate_tail_utf8_boundary() {
+        // "€€" is 6 bytes. Keeping 4 bytes means start=2, which is
+        // mid-character. ceil_char_boundary rounds to 3, so we keep
+        // the second '€' (3 bytes) instead of splitting the first.
+        let result = truncate_tail("€€", 4);
+        assert!(result.starts_with("[truncated 3 leading bytes]"));
+        assert!(result.contains('€'));
     }
 
     #[tokio::test]

@@ -162,4 +162,43 @@ Step failed"
         let out = tool.run("projects/r", None).await.unwrap();
         assert_eq!(out, "No failed runs on branch `work`.");
     }
+
+    /// A log exceeding the ceiling is tail-truncated: the output ends
+    /// with the log's final lines (the diagnosis), not its first ones.
+    #[tokio::test]
+    async fn oversized_log_keeps_tail() {
+        let ceiling = crate::tools::TOOL_OUTPUT_CEILING_BYTES;
+        let setup = "x".repeat(ceiling * 2);
+        let diagnosis = "error: the diagnosis is at the end\n";
+        let full_log = format!("{setup}{diagnosis}");
+        let api = stub_api_with_repo("owner/repo", move |_method, path, _body| {
+            if path.starts_with("repos/owner/repo/actions/runs?") {
+                return br#"{"workflow_runs":[{"id":7,"display_title":"CI",
+                    "name":"test","created_at":"2025-01-15T10:00:00Z",
+                    "html_url":"https://example.invalid/7"}]}"#
+                    .to_vec();
+            }
+            if path.ends_with("/jobs?per_page=100") {
+                return br#"{"jobs":[
+                    {"id":1,"name":"build","conclusion":"failure"}]}"#
+                    .to_vec();
+            }
+            assert!(path.ends_with("/logs"));
+            full_log.as_bytes().to_vec()
+        });
+        let tool = CiStatus(api);
+        let out = tool.run("projects/r", None).await.unwrap();
+        // The output ends with the diagnosis (tail kept).
+        assert!(
+            out.ends_with(diagnosis),
+            "output should end with the diagnosis"
+        );
+        // The output starts with the truncation header (head dropped).
+        assert!(out.contains("[truncated "), "truncation header missing");
+        // The very first bytes of the log are gone (head was dropped).
+        assert!(
+            !out.starts_with('x'),
+            "head of the log should have been truncated"
+        );
+    }
 }
