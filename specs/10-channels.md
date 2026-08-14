@@ -185,9 +185,11 @@ Each tick:
 7. Save the poll state
 
 **Events** mirror Linear's: *new issue* (not in the announced set)
-dispatches an announcement carrying title, body, and existing
-comments; *new comment* (`created_at > last_poll`, not the bot, from a
-trusted login) dispatches an execution/revision turn.
+dispatches an announcement carrying title, body, and existing comments
+from trusted users (and the bot's own plan posts); untrusted comments
+are filtered out at the same trust boundary as the post-assignment
+comment pass; *new comment* (`created_at > last_poll`, not the bot,
+from a trusted login) dispatches an execution/revision turn.
 
 **The plan label chooses the choreography.** An issue assigned with
 the `github.issues.plan_label` label (default `needs-plan`, matched
