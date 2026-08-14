@@ -151,7 +151,10 @@ impl Api {
         if text.trim().is_empty() {
             return Ok(format!("OK ({})", raw.status));
         }
-        Ok(text.into_owned())
+        Ok(
+            crate::tools::truncate_output(&text, crate::tools::TOOL_OUTPUT_CEILING_BYTES)
+                .into_owned(),
+        )
     }
 }
 
