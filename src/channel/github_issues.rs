@@ -352,9 +352,9 @@ pub fn decide_events(
                 nwo: view.nwo.clone(),
                 number: view.issue.number,
                 message: if plan_first {
-                    format_new_issue(view)
+                    format_new_issue(view, trust, bot_login)
                 } else {
-                    format_new_issue_execute(view)
+                    format_new_issue_execute(view, trust, bot_login)
                 },
                 needs_checkout: !plan_first,
             });
@@ -413,7 +413,37 @@ pub fn decide_events(
 // Message formatting
 // ---------------------------------------------------------------------------
 
-fn format_new_issue(view: &IssueView) -> String {
+/// Filter comments to those from trusted users or the bot itself,
+/// logging skips at the same level as the post-assignment filter so
+/// dropped context is visible in the journal. The bot's own comments
+/// (plan posts) are kept so the announcement carries the bot's prior
+/// work in the thread.
+fn trusted_comments<'a>(
+    comments: &'a [IssueComment],
+    trust: &Trust,
+    bot_login: &str,
+    key: &str,
+) -> Vec<&'a IssueComment> {
+    comments
+        .iter()
+        .filter(|c| {
+            if c.user.login == bot_login {
+                return true;
+            }
+            if !trust.allows(&c.user.login) {
+                warn!(
+                    issue = %key,
+                    author = %c.user.login,
+                    "Skipping comment from untrusted user in announcement"
+                );
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
+fn format_new_issue(view: &IssueView, trust: &Trust, bot_login: &str) -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
@@ -424,9 +454,10 @@ fn format_new_issue(view: &IssueView) -> String {
     if let Some(body) = view.issue.body.as_deref().filter(|b| !b.is_empty()) {
         let _ = writeln!(s, "\nDescription:\n{body}");
     }
-    if !view.comments.is_empty() {
+    let trusted = trusted_comments(&view.comments, trust, bot_login, &view.key());
+    if !trusted.is_empty() {
         let _ = writeln!(s, "\nExisting comments:");
-        for comment in &view.comments {
+        for comment in &trusted {
             let _ = writeln!(s, "[{}] {}", comment.user.login, comment.body);
         }
     }
@@ -436,7 +467,7 @@ fn format_new_issue(view: &IssueView) -> String {
 
 /// The direct-execution announcement, for issues assigned without
 /// the plan label.
-fn format_new_issue_execute(view: &IssueView) -> String {
+fn format_new_issue_execute(view: &IssueView, trust: &Trust, bot_login: &str) -> String {
     let branch = format!("kitaebot_issue-{}_<short-summary>", view.issue.number);
     let number = view.issue.number;
     let mut s = String::new();
@@ -450,9 +481,10 @@ fn format_new_issue_execute(view: &IssueView) -> String {
     if let Some(body) = view.issue.body.as_deref().filter(|b| !b.is_empty()) {
         let _ = writeln!(s, "\nDescription:\n{body}");
     }
-    if !view.comments.is_empty() {
+    let trusted = trusted_comments(&view.comments, trust, bot_login, &view.key());
+    if !trusted.is_empty() {
         let _ = writeln!(s, "\nExisting comments:");
-        for comment in &view.comments {
+        for comment in &trusted {
             let _ = writeln!(s, "[{}] {}", comment.user.login, comment.body);
         }
     }
@@ -634,6 +666,68 @@ mod tests {
         assert!(msg.contains("[alice] please prioritize"));
         assert!(msg.contains("Do not implement anything yet"));
         assert!(msg.contains("posted verbatim"));
+    }
+
+    #[test]
+    fn announcement_filters_untrusted_comments() {
+        let views = [view(
+            1,
+            "2026-08-04T12:30:00Z",
+            vec![
+                comment("2026-08-04T11:00:00Z", "alice", "trusted guidance"),
+                comment("2026-08-04T11:30:00Z", "mallory", "untrusted noise"),
+                comment("2026-08-04T11:45:00Z", BOT, "my own plan post"),
+            ],
+        )];
+        let st = state("2026-08-04T12:00:00Z", &[]);
+
+        let (dispatches, _) = decide(&views, &st);
+        assert_eq!(dispatches.len(), 1);
+        let msg = &dispatches[0].message;
+        // Trusted user's comment is embedded.
+        assert!(msg.contains("[alice] trusted guidance"));
+        // Bot's own comment is embedded (plan posts carry forward).
+        assert!(msg.contains("[kitaebot] my own plan post"));
+        // Untrusted user's comment is absent.
+        assert!(!msg.contains("mallory"));
+        assert!(!msg.contains("untrusted noise"));
+    }
+
+    #[test]
+    fn announcement_filters_untrusted_comments_execute() {
+        let views = [labeled_view(
+            1,
+            "2026-08-04T12:30:00Z",
+            vec![
+                comment("2026-08-04T11:00:00Z", "boss", "owner says go"),
+                comment("2026-08-04T11:30:00Z", "mallory", "inject this"),
+            ],
+            &["bug"],
+        )];
+        let st = state("2026-08-04T12:00:00Z", &[]);
+
+        let (dispatches, _) = decide(&views, &st);
+        assert_eq!(dispatches.len(), 1);
+        let msg = &dispatches[0].message;
+        assert!(msg.contains("[boss] owner says go"));
+        assert!(!msg.contains("mallory"));
+        assert!(!msg.contains("inject this"));
+    }
+
+    #[test]
+    fn announcement_with_only_untrusted_comments_omits_section() {
+        let views = [view(
+            1,
+            "2026-08-04T12:30:00Z",
+            vec![comment("2026-08-04T11:00:00Z", "mallory", "evil")],
+        )];
+        let st = state("2026-08-04T12:00:00Z", &[]);
+
+        let (dispatches, _) = decide(&views, &st);
+        assert_eq!(dispatches.len(), 1);
+        let msg = &dispatches[0].message;
+        assert!(!msg.contains("Existing comments"));
+        assert!(!msg.contains("mallory"));
     }
 
     #[test]
