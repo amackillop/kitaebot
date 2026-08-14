@@ -13,7 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::agent::{BudgetPolicy, TurnUsage, run_turn_metered};
+use crate::agent::{BudgetPolicy, ReplyPolicy, TurnUsage, run_turn_metered};
 use crate::context::ephemeral::EphemeralSession;
 use crate::context::{ContextEngine, SummarizeFn, format_messages_for_summary};
 use crate::error::Error;
@@ -249,6 +249,7 @@ pub async fn run<P: Provider, E: ContextEngine>(
         &distiller.tools,
         distiller.max_iterations,
         BudgetPolicy::Fail,
+        ReplyPolicy::Accept,
         &ToolCtx::default(),
     )
     .await;

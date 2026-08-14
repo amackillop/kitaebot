@@ -21,7 +21,9 @@ A turn proceeds in this order:
    c. Feed the response's `prompt_tokens` (when the API reports usage)
       into the engine via `observe_tokens` — ground truth for the next
       compaction check (see [spec 14](14-context-engine.md))
-   d. If `Response::Text` — store assistant message, return text, exit loop
+   d. If `Response::Text` — store assistant message, then exit with the
+      text — except once per turn under `ReplyPolicy::Confirm` (see
+      Reply Confirmation), where the loop continues instead
    e. If `Response::ToolCalls` — store assistant message, run safety gates,
       execute calls in parallel, record results, continue loop
 
@@ -110,6 +112,28 @@ Strike counters reset per turn. The turn's success type is an ADT
 (`Text` or `PolicyHalt`), so callers can tell a halted turn from a normal
 reply without string-sniffing — the hook for notifying on unattended
 failures.
+
+### Reply Confirmation
+
+A text response with no tool calls ends the turn — the right contract
+for attended chat, where a human reads the text as conversation. Some
+channels post the turn's text verbatim to an external medium (GitHub
+issue and PR comments, Linear), and there the model occasionally ends a
+work turn with mid-reasoning narration instead of a deliberate report;
+a live issue turn published its internal monologue about a borrow-checker
+fight as a public comment.
+
+`ReplyPolicy` names the two contracts:
+
+| Policy | On `Response::Text` |
+|--------|---------------------|
+| `Accept` | First text ends the turn (attended chat, duties, sub-agents). |
+| `Confirm` | First text is held: the assistant message is stored, a system directive states that the next text reply publishes verbatim — continue with tool calls if unfinished, otherwise reply with the comment to publish. The next text ends the turn. |
+
+The nudge fires at most once per turn and never on the last iteration:
+under `BudgetPolicy::Fail` a nudge into the cap loses the turn, which is
+worse than publishing possible narration. The turn summary logs `nudged`
+so leak frequency is measurable.
 
 ### Cancellation
 

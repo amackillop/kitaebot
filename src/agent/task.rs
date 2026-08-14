@@ -27,7 +27,7 @@ use crate::tools::mcp::McpTools;
 use crate::tools::{Tool, ToolCtx, Tools, string_or_value};
 use crate::usage::{self, TurnRecord, UsageLedger};
 
-use super::{BudgetPolicy, run_turn_metered};
+use super::{BudgetPolicy, ReplyPolicy, run_turn_metered};
 
 /// Allowlist for the `explore` type: read-only research.
 ///
@@ -331,6 +331,7 @@ impl<P: Provider> Tool for TaskTool<P> {
                 &agent.tools,
                 self.max_iterations,
                 BudgetPolicy::FinalAnswer,
+                ReplyPolicy::Accept,
                 &child_ctx,
             )
             .instrument(tracing::info_span!("subagent", agent = label))

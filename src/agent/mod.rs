@@ -187,6 +187,7 @@ pub(crate) async fn process_message_metered(
         tools,
         max_iterations,
         BudgetPolicy::Fail,
+        ReplyPolicy::Accept,
         ctx,
     )
     .await
@@ -201,6 +202,17 @@ pub(crate) enum BudgetPolicy {
     FinalAnswer,
 }
 
+/// What the turn loop does with a text response (no tool calls).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplyPolicy {
+    /// First text ends the turn; a human reads it as conversation.
+    Accept,
+    /// Text is held once: the loop pushes [`CONFIRM_REPLY_DIRECTIVE`]
+    /// and continues, because the reply publishes verbatim to an
+    /// external medium. The next text ends the turn.
+    Confirm,
+}
+
 /// Counters for the end-of-turn summary line.
 #[derive(Default)]
 struct TurnStats {
@@ -213,6 +225,8 @@ struct TurnStats {
     /// The iteration cap was hit and the answer came from the
     /// final-answer squeeze.
     squeezed: bool,
+    /// A text response was held for the [`ReplyPolicy::Confirm`] round.
+    nudged: bool,
 }
 
 /// Billed usage for one turn, summed across its provider calls.
@@ -269,6 +283,7 @@ pub(crate) async fn run_turn(
         tools,
         max_iterations,
         BudgetPolicy::Fail,
+        ReplyPolicy::Accept,
         ctx,
     )
     .await
@@ -310,6 +325,7 @@ pub(crate) async fn run_turn_metered(
     tools: &Tools,
     max_iterations: usize,
     budget: BudgetPolicy,
+    reply: ReplyPolicy,
     ctx: &ToolCtx,
 ) -> (Result<TurnOutput, Error>, TurnUsage) {
     let started = std::time::Instant::now();
@@ -323,6 +339,7 @@ pub(crate) async fn run_turn_metered(
         tools,
         max_iterations,
         budget,
+        reply,
         ctx,
         &mut stats,
     )
@@ -346,6 +363,7 @@ pub(crate) async fn run_turn_metered(
             completion_tokens = stats.usage.completion_tokens,
             cost = stats.usage.cost,
             squeezed = stats.squeezed,
+            nudged = stats.nudged,
             ?elapsed,
             "Turn summary"
         ),
@@ -359,6 +377,7 @@ pub(crate) async fn run_turn_metered(
             completion_tokens = stats.usage.completion_tokens,
             cost = stats.usage.cost,
             squeezed = stats.squeezed,
+            nudged = stats.nudged,
             ?elapsed,
             "Turn summary"
         ),
@@ -376,6 +395,7 @@ async fn turn_loop(
     tools: &Tools,
     max_iterations: usize,
     budget: BudgetPolicy,
+    reply: ReplyPolicy,
     ctx: &ToolCtx,
     stats: &mut TurnStats,
 ) -> Result<TurnOutput, Error> {
@@ -446,12 +466,28 @@ async fn turn_loop(
 
         match outcome.response {
             Response::Text(content) => {
-                debug!(content = %truncate_output(&content, LOG_CONTENT_MAX), "Turn finished");
                 engine
                     .push_message(Message::Assistant {
                         content: content.clone(),
                     })
                     .await?;
+                // Never nudge into the cap: publishing possible
+                // narration beats losing the turn to `BudgetPolicy::Fail`.
+                if reply == ReplyPolicy::Confirm && !stats.nudged && iteration + 1 < max_iterations
+                {
+                    stats.nudged = true;
+                    debug!(
+                        content = %truncate_output(&content, LOG_CONTENT_MAX),
+                        "Text held for publish confirmation"
+                    );
+                    engine
+                        .push_message(Message::System {
+                            content: CONFIRM_REPLY_DIRECTIVE.to_string(),
+                        })
+                        .await?;
+                    continue;
+                }
+                debug!(content = %truncate_output(&content, LOG_CONTENT_MAX), "Turn finished");
                 return Ok(TurnOutput::Text(content));
             }
             Response::ToolCalls { content, calls } => {
@@ -563,6 +599,15 @@ async fn turn_loop(
         }
     }
 }
+
+/// The held-reply directive for the confirmation round under
+/// [`ReplyPolicy::Confirm`].
+const CONFIRM_REPLY_DIRECTIVE: &str = "Your previous message was not \
+    published. You are working unattended; your next text reply will be \
+    posted verbatim as a public comment. If the work is unfinished, \
+    continue with tool calls. Otherwise reply with exactly the comment \
+    to publish: what was done, what remains, and any branch or PR \
+    created.";
 
 /// The budget-exhausted directive for the final-answer squeeze.
 const FINAL_ANSWER_DIRECTIVE: &str = "Your tool-call budget for this task is \
@@ -846,6 +891,100 @@ mod tests {
         assert_eq!(engine.stats().message_count, 2);
     }
 
+    /// Mid-work narration without tool calls used to end the turn and
+    /// get posted verbatim as a public comment (issue #45). Under
+    /// `Confirm` the first text is held and the second one publishes.
+    #[tokio::test]
+    async fn confirm_holds_first_text_and_publishes_the_second() {
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(text("I see the issue: let me think...")),
+            Ok(text("Status: fix pushed on branch xyz.")),
+        ]));
+        let tools = Tools::default();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let (result, _) = run_turn_metered(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Fix the bug",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            BudgetPolicy::Fail,
+            ReplyPolicy::Confirm,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap().into_text(),
+            "Status: fix pushed on branch xyz."
+        );
+        assert_eq!(provider.call_count(), 2);
+        // User, held Assistant, System directive, final Assistant.
+        assert_eq!(engine.stats().message_count, 4);
+    }
+
+    /// The nudge is a resume point, not a forced answer: a model that
+    /// leaked narration mid-work picks its tools back up.
+    #[tokio::test]
+    async fn confirm_lets_the_model_resume_tool_work() {
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(text("hmm, the borrow checker...")),
+            Ok(mock_tool_calls(&["c1"])),
+            Ok(text("Done: edit applied.")),
+        ]));
+        let tools = mock_tools("mock output");
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let (result, _) = run_turn_metered(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Fix the bug",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            BudgetPolicy::Fail,
+            ReplyPolicy::Confirm,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap().into_text(), "Done: edit applied.");
+        assert_eq!(provider.call_count(), 3);
+    }
+
+    /// A nudge on the last iteration would push the turn past the cap
+    /// and lose it under `BudgetPolicy::Fail`; the text is accepted.
+    #[tokio::test]
+    async fn confirm_never_nudges_into_the_iteration_cap() {
+        let provider = Arc::new(MockProvider::new(vec![Ok(text("only response"))]));
+        let tools = Tools::default();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let (result, _) = run_turn_metered(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Fix the bug",
+            &*provider,
+            &tools,
+            1,
+            BudgetPolicy::Fail,
+            ReplyPolicy::Confirm,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap().into_text(), "only response");
+        assert_eq!(provider.call_count(), 1);
+    }
+
     #[tokio::test]
     async fn test_tool_call_execution() {
         let provider = Arc::new(MockProvider::new(vec![
@@ -892,6 +1031,7 @@ mod tests {
             &tools,
             MAX_ITER,
             BudgetPolicy::Fail,
+            ReplyPolicy::Accept,
             &ToolCtx::default(),
         )
         .await;
@@ -946,6 +1086,7 @@ mod tests {
             &tools,
             MAX_ITER,
             BudgetPolicy::Fail,
+            ReplyPolicy::Accept,
             &ToolCtx::default(),
         )
         .await;
