@@ -92,11 +92,11 @@ hardcoded, so typos are caught by tests instead.
   Context-size limits live in the engines (`context.tool_output_tokens`,
   spec 14), which externalize or truncate tool results long before the
   ceiling matters.
-- **`truncate_tail`** — Tail-keeping variant for log-shaped output where
-  the diagnosis concentrates at the end. Keeps the last `max_bytes` and
-  prepends `[truncated N leading bytes]`. Used by `job_logs` (CI logs);
-  `github_api`'s raw path uses head-keeping `truncate_output` (generic
-  API responses are not tail-weighted).
+- **`truncate_head`** — Head-truncating variant for log-shaped output where
+  the diagnosis concentrates at the end. Drops leading bytes and keeps
+  the last `max_bytes`, prepending `[truncated N leading bytes]`. Used
+  by `job_logs` (CI logs); `github_api`'s raw path uses head-keeping
+  `truncate_output` (generic API responses are not tail-weighted).
 - **`PathGuard`** — workspace-confined path resolution. Rejects null bytes,
   `../`, and absolute paths. Canonicalizes and verifies the result is under the
   workspace root. Provides `resolve()` for existing files and `resolve_new()`

@@ -389,10 +389,10 @@ pub(crate) fn truncate_output(s: &str, max_bytes: usize) -> Cow<'_, str> {
     }
 }
 
-/// Tail-keeping truncation for log-shaped output, where the diagnosis
-/// concentrates at the end. Keeps the last `max_bytes` and prepends a
-/// header naming the dropped leading byte count.
-pub(crate) fn truncate_tail(s: &str, max_bytes: usize) -> Cow<'_, str> {
+/// Head-truncating variant for log-shaped output, where the diagnosis
+/// concentrates at the end. Drops leading bytes and keeps the last
+/// `max_bytes`, prepending a header naming the dropped count.
+pub(crate) fn truncate_head(s: &str, max_bytes: usize) -> Cow<'_, str> {
     if s.len() <= max_bytes {
         Cow::Borrowed(s)
     } else {
@@ -509,22 +509,22 @@ mod tests {
     }
 
     #[test]
-    fn truncate_tail_short_string_borrowed() {
+    fn truncate_head_short_string_borrowed() {
         assert!(matches!(
-            truncate_tail("hello", 100),
+            truncate_head("hello", 100),
             Cow::Borrowed("hello")
         ));
     }
 
     #[test]
-    fn truncate_tail_exact_length_borrowed() {
-        assert!(matches!(truncate_tail("hello", 5), Cow::Borrowed("hello")));
+    fn truncate_head_exact_length_borrowed() {
+        assert!(matches!(truncate_head("hello", 5), Cow::Borrowed("hello")));
     }
 
     #[test]
-    fn truncate_tail_keeps_end() {
+    fn truncate_head_keeps_end() {
         let long = "header_".to_string() + &"a".repeat(100);
-        let result = truncate_tail(&long, 10);
+        let result = truncate_head(&long, 10);
         assert!(result.starts_with("[truncated "));
         assert!(result.contains(" leading bytes]"));
         // The tail is the last 10 bytes of the string.
@@ -532,11 +532,11 @@ mod tests {
     }
 
     #[test]
-    fn truncate_tail_utf8_boundary() {
+    fn truncate_head_utf8_boundary() {
         // "€€" is 6 bytes. Keeping 4 bytes means start=2, which is
         // mid-character. ceil_char_boundary rounds to 3, so we keep
         // the second '€' (3 bytes) instead of splitting the first.
-        let result = truncate_tail("€€", 4);
+        let result = truncate_head("€€", 4);
         assert!(result.starts_with("[truncated 3 leading bytes]"));
         assert!(result.contains('€'));
     }

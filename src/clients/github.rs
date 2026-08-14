@@ -321,7 +321,7 @@ impl GithubClient {
     }
 
     /// Raw log text of a job. GitHub answers with a redirect to a
-    /// blob URL, which reqwest follows. Tail-truncated to the
+    /// blob URL, which reqwest follows. Head-truncated to the
     /// tool-output ceiling before returning (CI logs are tail-weighted).
     pub async fn job_logs(&self, nwo: &str, job_id: u64) -> Result<String, GithubError> {
         let raw = (self.request)(
@@ -338,7 +338,7 @@ impl GithubClient {
         }
         let text = String::from_utf8_lossy(&raw.body);
         Ok(
-            crate::tools::truncate_tail(&text, crate::tools::TOOL_OUTPUT_CEILING_BYTES)
+            crate::tools::truncate_head(&text, crate::tools::TOOL_OUTPUT_CEILING_BYTES)
                 .into_owned(),
         )
     }
