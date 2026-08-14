@@ -256,10 +256,10 @@ the tool result the model reads, which is a separate path.
   before dispatch (the bot is a normal account, so its filings are
   author-searchable — no marker label). At the cap the duty skips and
   journals the skip; triage frees the cap.
-- Duplicate suppression: the open bot-authored issues are injected
-  into the dispatch prompt (in-context dedup); duties with natural
-  evidence keys (CI triage) additionally embed them for mechanical
-  suppression.
+- Duplicate suppression: all open issues on the repo (regardless of
+  author) are injected into the dispatch prompt (in-context dedup), so
+  human-filed duplicates are caught too; duties with natural evidence
+  keys (CI triage) additionally embed them for mechanical suppression.
 - One filing per run, stated in the turn contract: a daily duty files
   at most ~7 a week against a cap of 3, so triage binds quickly.
 - No per-day token budget yet, deliberately: the schedule is the cost
