@@ -21,6 +21,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::AgentHandle;
 use crate::agent::envelope::ChannelSource;
+use crate::channel::execution_checkout;
 use crate::clients::github::GithubClient;
 use crate::tools::git::GitCli;
 use schedule::Schedule;
@@ -260,6 +261,23 @@ async fn run_one(duty: &Duty, ctx: &RunCtx<'_>, state: &mut DutyState) {
     state.save(&ctx.state_db);
 }
 
+/// Prepare a fresh checkout for a prompt-duty turn, or advise a
+/// manual clone on failure. Mirrors `checkout_note` in
+/// `src/channel/github_issues.rs`.
+async fn checkout_note(duty: &Duty, git: Option<&GitCli>, repo: &str) -> String {
+    let Some(git) = git else {
+        warn!(duty = %duty.name, "no GitCli for prompt duty; agent must clone");
+        return execution_checkout::CLONE_YOURSELF.into();
+    };
+    match execution_checkout::prepare(git, repo).await {
+        Ok(rel) => execution_checkout::ready_note(&rel),
+        Err(e) => {
+            warn!(duty = %duty.name, "duty checkout prep failed: {e}");
+            execution_checkout::CLONE_YOURSELF.into()
+        }
+    }
+}
+
 /// Gate-check and send one dispatch duty through the actor. The
 /// outcome is journaled by the actor (unattended turn), not here.
 async fn dispatch(
@@ -277,6 +295,15 @@ async fn dispatch(
     };
     let Some((input, new_cursor)) = dispatch else {
         return;
+    };
+    // Prepare the repo checkout before the turn starts, so the agent
+    // finds a fresh base and injected conventions. Only prompt duties
+    // reach dispatch with session_hint = Some(repo); distill has None.
+    // Self-analysis has its own dispatch path (run_self_analysis) and
+    // targets the bot's own repo, which is always checked out.
+    let input = match session_hint.as_deref() {
+        Some(repo) => format!("{}\n\n{}", input, checkout_note(duty, git, repo).await),
+        None => input,
     };
     let cancel = CancellationToken::new();
     match handle
@@ -770,5 +797,107 @@ mod tests {
         let summary = run_warm(&git, &mut state).await;
 
         assert_eq!(summary, "no warm commands configured");
+    }
+
+    // --- checkout_note tests ---
+
+    /// A bare repo at `<workspace>/o/r.git` with one commit, and a
+    /// `GitCli` whose `clone_base` points at the workspace root via
+    /// `file://` so `repo_url("o/r")` resolves to the bare repo. No
+    /// pre-existing checkout — `prepare` clones from scratch.
+    fn checkout_test_setup() -> (GitCli, std::path::PathBuf) {
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path().to_path_buf();
+
+        let src = ws.join("o/r-src");
+        std::fs::create_dir_all(&src).unwrap();
+        git_cmd(&["init", src.to_str().unwrap()], &ws);
+        for (k, v) in [
+            ("user.email", "t@t"),
+            ("user.name", "t"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git_cmd(&["config", k, v], &src);
+        }
+        std::fs::write(src.join("README"), "init").unwrap();
+        git_cmd(&["add", "."], &src);
+        git_cmd(&["commit", "-m", "init"], &src);
+
+        let bare = ws.join("o/r.git");
+        git_cmd(
+            &[
+                "clone",
+                "--bare",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            &ws,
+        );
+
+        let direnv = FakeDirenv::install("echo '{}'");
+        let direnv_cache = direnv.cache();
+        std::mem::forget(direnv);
+        let git = GitCli::new(
+            Secret::test("fake"),
+            ws.clone(),
+            direnv_cache,
+            vec!["o/r".into()],
+        )
+        .with_clone_base(&format!("file://{}", ws.to_str().unwrap()));
+
+        let ws = workspace.keep();
+        (git, ws)
+    }
+
+    #[tokio::test]
+    async fn checkout_note_prepares_checkout() {
+        let (git, ws) = checkout_test_setup();
+        let duty = duty("test", Schedule::Every(3_600));
+
+        let note = checkout_note(&duty, Some(&git), "o/r").await;
+
+        assert!(
+            note.contains("A fresh checkout at the default branch is ready"),
+            "success must produce ready_note: {note}"
+        );
+        assert!(
+            ws.join("projects/o/r/.git").is_dir(),
+            "checkout must exist after prepare"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkout_note_returns_clone_yourself_without_git() {
+        let duty = duty("test", Schedule::Every(3_600));
+
+        let note = checkout_note(&duty, None, "o/r").await;
+
+        assert_eq!(
+            note,
+            execution_checkout::CLONE_YOURSELF,
+            "no GitCli must fall back to CLONE_YOURSELF"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkout_note_returns_clone_yourself_on_failure() {
+        let workspace = tempfile::tempdir().unwrap();
+        let direnv = FakeDirenv::install("echo '{}'").cache();
+        let git = GitCli::new(
+            Secret::test("fake"),
+            workspace.path().to_path_buf(),
+            direnv,
+            vec!["o/r".into()],
+        )
+        .with_clone_base("file:///nonexistent");
+        let duty = duty("test", Schedule::Every(3_600));
+
+        let note = checkout_note(&duty, Some(&git), "o/r").await;
+
+        assert_eq!(
+            note,
+            execution_checkout::CLONE_YOURSELF,
+            "clone failure must fall back to CLONE_YOURSELF: {note}"
+        );
     }
 }
