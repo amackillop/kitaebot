@@ -459,14 +459,21 @@ parallel tool calls each trigger a full `nix print-dev-env` evaluation.
    with a short TTL (60s) so repeated operations during a hang degrade
    to no-devshell immediately instead of each blocking for the full
    timeout
-4. **Graceful degradation** — if direnv fails, exec runs without the devshell
-5. **Warm on clone** — `git_clone` pre-populates the cache in the background
-6. **Trust before evaluate** — `git_clone` runs `direnv allow` synchronously
+4. **Detect silent flake failures** — `direnv export json` exits 0
+   even when `use flake` fails, printing the nix error to stderr and
+   exporting a bare environment. The cache checks stderr for nix's
+   `error:` marker (after stripping ANSI color codes) and treats a
+   match as a failure carrying the stderr, so the real error surfaces
+   in the duty outcome rather than as a `command not found` from bare
+   PATH.
+5. **Graceful degradation** — if direnv fails, exec runs without the devshell
+6. **Warm on clone** — `git_clone` pre-populates the cache in the background
+7. **Trust before evaluate** — `git_clone` runs `direnv allow` synchronously
    before returning, and only for repos listed in `git.repositories`. An
    `.envrc` is arbitrary shell executing at clone time, before anyone has
    read the repo; the allowlist is the only gate on that. Unlisted repos
-   clone normally and degrade to no-devshell (requirement 4).
-7. **Shared across tools** — single cache instance shared between exec and
+   clone normally and degrade to no-devshell (requirement 5).
+8. **Shared across tools** — single cache instance shared between exec and
    git_clone
 
 ### Invalidation
@@ -488,8 +495,8 @@ visible rather than inside a tool call.
 ### Requirements
 
 1. **Warm after the devshell** — the check command resolves from the
-   devshell, so it runs after [Direnv Cache](#direnv-cache) requirement 5
-   completes for that checkout
+   devshell, so it runs after [Direnv Cache](#direnv-cache) "Warm on
+   clone" completes for that checkout
 2. **Declared, not guessed** — command configured per repo (the repo's
    `AGENTS.md` states it in prose, not machine-readably). Unconfigured
    repos warm the devshell only

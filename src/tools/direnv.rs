@@ -282,6 +282,49 @@ impl DirenvCache {
     }
 }
 
+/// Check whether stderr contains a nix error marker. Nix prints errors
+/// as lines starting with `error:`; ANSI color codes are stripped first
+/// so colored output does not defeat the match. Direnv's own log
+/// messages start with `direnv:` and never trigger this.
+fn has_nix_error(stderr: &str) -> bool {
+    stderr.lines().any(line_starts_with_error)
+}
+
+/// Whether a line, after stripping ANSI escape sequences and leading
+/// whitespace, starts with `error:`. Nix's error marker is `error:` at
+/// the start of a line; direnv's log messages start with `direnv:`.
+fn line_starts_with_error(line: &str) -> bool {
+    let target = b"error:";
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut ti = 0;
+    while i < bytes.len() && ti < target.len() {
+        // Skip ANSI CSI sequences: ESC [ ... (0x40..=0x7e).
+        if i + 1 < bytes.len() && bytes[i] == 0x1b && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        // Skip leading whitespace before the target.
+        if ti == 0 && bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if bytes[i] == target[ti] {
+            i += 1;
+            ti += 1;
+        } else {
+            return false;
+        }
+    }
+    ti == target.len()
+}
+
 /// Run `direnv export json` and parse the result.
 async fn evaluate_direnv(
     binary: &'static str,
@@ -317,6 +360,18 @@ async fn evaluate_direnv(
         return Err(DirenvError::Failed(format!(
             "direnv export json exited {}: {stderr}",
             output.exit_code,
+        )));
+    }
+
+    // direnv swallows `use flake` failures: it exits 0, prints the nix
+    // error to stderr, and exports a bare environment. Detect this by
+    // checking for nix's `error:` marker on stderr (after stripping ANSI
+    // color codes). On success stderr carries only direnv log messages
+    // (prefixed `direnv:`), which never start with `error:`.
+    let stderr = output.stderr.trim();
+    if has_nix_error(stderr) {
+        return Err(DirenvError::Failed(format!(
+            "direnv export json reported an error: {stderr}"
         )));
     }
 
@@ -601,6 +656,96 @@ mod tests {
                 .count(),
             2,
             "fingerprint change must re-evaluate despite cached timeout",
+        );
+    }
+
+    // ── Silent failure detection ───────────────────────────────────
+
+    #[test]
+    fn line_starts_with_error_plain() {
+        assert!(line_starts_with_error("error: Failed to fetch"));
+    }
+
+    #[test]
+    fn line_starts_with_error_ansi_colored() {
+        assert!(line_starts_with_error(
+            "\x1b[31;1merror:\x1b[0m Failed to fetch"
+        ));
+    }
+
+    #[test]
+    fn line_starts_with_error_leading_whitespace() {
+        assert!(line_starts_with_error("  error: something"));
+    }
+
+    #[test]
+    fn line_starts_with_error_ansi_then_whitespace() {
+        assert!(line_starts_with_error("\x1b[0m  error: something"));
+    }
+
+    #[test]
+    fn line_does_not_match_direnv_log() {
+        assert!(!line_starts_with_error("direnv: loading flake"));
+        assert!(!line_starts_with_error("direnv: export GEM_HOME"));
+    }
+
+    #[test]
+    fn line_does_not_match_indented_error() {
+        assert!(!line_starts_with_error("  some context: error: nested"));
+    }
+
+    #[test]
+    fn line_does_not_match_empty() {
+        assert!(!line_starts_with_error(""));
+    }
+
+    #[test]
+    fn has_nix_error_detects_in_multiline_stderr() {
+        let stderr = "direnv: loading flake\nerror: Failed to fetch git repository\n";
+        assert!(has_nix_error(stderr));
+    }
+
+    #[test]
+    fn has_nix_error_false_on_direnv_logs_only() {
+        let stderr = "direnv: loading flake\ndirenv: export PATH\n";
+        assert!(!has_nix_error(stderr));
+    }
+
+    #[tokio::test]
+    async fn cache_detects_silent_flake_failure() {
+        // Simulate direnv exit 0 with a nix error on stderr and an
+        // empty JSON export — the real-world `use flake` failure.
+        let fake =
+            FakeDirenv::install("echo 'error: Failed to fetch git repository' >&2\necho '{}'");
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
+
+        let cache = fake.cache();
+        let err = cache.get(dir.path()).await.unwrap_err();
+        assert!(
+            matches!(&err, DirenvError::Failed(m) if m.contains("Failed to fetch")),
+            "silent flake failure must surface as Failed with stderr: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_succeeds_with_direnv_logs_on_stderr() {
+        // Simulate direnv exit 0 with log messages on stderr and a
+        // valid JSON export — normal successful operation.
+        let fake = FakeDirenv::install(
+            "echo 'direnv: loading flake' >&2\necho 'direnv: export PATH' >&2\necho '{\"PATH\": \"/nix/store/bin\"}'",
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
+
+        let cache = fake.cache();
+        let env = cache.get(dir.path()).await.unwrap().unwrap();
+        assert_eq!(
+            env.get("PATH").map(String::as_str),
+            Some("/nix/store/bin"),
+            "direnv log messages on stderr must not cause a false failure"
         );
     }
 }
