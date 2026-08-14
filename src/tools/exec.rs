@@ -75,16 +75,20 @@ const DENY_RULES: &[DenyRule] = &[
         pattern: r"\bfind\b.*-exec\s+rm\b",
         guidance: BLOCKED,
     },
+    // Bare-name commands are anchored to command position (start or
+    // after a separator): \b alone matches the same names as English
+    // prose inside quoted arguments — a self-analysis turn was once
+    // halted for echoing "not at workspace root".
     DenyRule {
-        pattern: r"\bshred\b",
+        pattern: r"(^|[|;&\n])\s*shred\b",
         guidance: BLOCKED,
     },
     DenyRule {
-        pattern: r"\bwipe\b",
+        pattern: r"(^|[|;&\n])\s*wipe\b",
         guidance: BLOCKED,
     },
     DenyRule {
-        pattern: r"\btruncate\b",
+        pattern: r"(^|[|;&\n])\s*truncate\b",
         guidance: BLOCKED,
     },
     // Disk / filesystem
@@ -105,11 +109,11 @@ const DENY_RULES: &[DenyRule] = &[
         guidance: BLOCKED,
     },
     DenyRule {
-        pattern: r"\bmount\b",
+        pattern: r"(^|[|;&\n])\s*mount\b",
         guidance: BLOCKED,
     },
     DenyRule {
-        pattern: r"\bumount\b",
+        pattern: r"(^|[|;&\n])\s*umount\b",
         guidance: BLOCKED,
     },
     DenyRule {
@@ -118,19 +122,19 @@ const DENY_RULES: &[DenyRule] = &[
     },
     // System power
     DenyRule {
-        pattern: r"\bshutdown\b",
+        pattern: r"(^|[|;&\n])\s*shutdown\b",
         guidance: BLOCKED,
     },
     DenyRule {
-        pattern: r"\breboot\b",
+        pattern: r"(^|[|;&\n])\s*reboot\b",
         guidance: BLOCKED,
     },
     DenyRule {
-        pattern: r"\bpoweroff\b",
+        pattern: r"(^|[|;&\n])\s*poweroff\b",
         guidance: BLOCKED,
     },
     DenyRule {
-        pattern: r"\bhalt\b",
+        pattern: r"(^|[|;&\n])\s*halt\b",
         guidance: BLOCKED,
     },
     DenyRule {
@@ -147,7 +151,7 @@ const DENY_RULES: &[DenyRule] = &[
         guidance: BLOCKED,
     },
     DenyRule {
-        pattern: r"\bsu\s",
+        pattern: r"(^|[|;&\n])\s*su\s",
         guidance: BLOCKED,
     },
     DenyRule {
@@ -329,7 +333,7 @@ const DENY_RULES: &[DenyRule] = &[
         guidance: BLOCKED,
     },
     DenyRule {
-        pattern: r"\bat\b\s",
+        pattern: r"(^|[|;&\n])\s*at\s",
         guidance: BLOCKED,
     },
     // Git operations that must go through their dedicated tools
@@ -1026,6 +1030,25 @@ mod tests {
     }
 
     #[test]
+    fn prose_never_trips_command_rules() {
+        // The 2026-08-13 incident: blocked for the preposition "at".
+        assert_allowed("wc -c ../../memory/MEMORY.md || echo \"not at workspace root\"");
+        assert_allowed("echo \"turn was halted at strike 3\"");
+        assert_allowed("echo \"truncate suspected\" && wc -c FILE.md");
+        assert_allowed("grep \"reboot the VM\" notes.txt");
+        assert_allowed("echo \"mount point is full\"");
+        assert_allowed("echo \"graceful shutdown observed\"");
+        // Command position still blocks, including after separators.
+        assert_blocked("at 15:00");
+        assert_blocked("echo x | at now");
+        assert_blocked("true && reboot");
+        assert_blocked("foo; halt");
+        assert_blocked("truncate -s 0 file");
+        assert_blocked("mount /dev/vda /mnt");
+        assert_blocked("su root");
+    }
+
+    #[test]
     fn test_deny_user_management() {
         assert_blocked("passwd root");
         assert_blocked("useradd hacker");
@@ -1272,10 +1295,14 @@ mod tests {
     #[tokio::test]
     async fn test_exec_blocked_command() {
         let tool = Exec::new(".", &test_config(), DirenvCache::new(), Vec::new());
-        // "echo shutdown" is harmless if executed but matches the deny pattern.
-        // Never use a genuinely destructive command here — if the deny list has
-        // a bug, execute() will run it for real.
-        let args = serde_json::json!({"command": "echo shutdown"});
+        // "shutdown --help" is harmless if executed (prints usage, and
+        // needs root regardless) but sits in command position, so it
+        // matches the anchored deny pattern. Never use a genuinely
+        // destructive command here — if the deny list has a bug,
+        // execute() will run it for real. (The previous vehicle,
+        // "echo shutdown", relied on the prose false positive this
+        // suite now forbids.)
+        let args = serde_json::json!({"command": "shutdown --help"});
         let result = tool.execute(args, ToolCtx::default()).await;
         assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
