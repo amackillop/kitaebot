@@ -172,7 +172,7 @@ analysis. Routing is an explicit per-repo config mapping:
 so a Linear write path can join later; a repo without the field gets
 discovery observation but never filings. For GitHub the write path is
 `github_issue_create`: the issue files unassigned, a human triages by
-assigning it to the bot, and the issues channel (spec 10) picks it up
+assigning it to the bot, and the issues channel (spec 25) picks it up
 like any other ticket. The bot never executes work it proposed
 without that transition; proposal and authorization are separated by
 an existing human gate.

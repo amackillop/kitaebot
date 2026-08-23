@@ -81,7 +81,7 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [07](07-heartbeat.md) | Heartbeat | Periodic awareness checks |
 | [08](08-binaries.md) | Binaries | Daemon lifecycle and socket client |
 | [09](09-vm.md) | NixOS VM | Deployment and system configuration |
-| [10](10-channels.md) | Channels | External messaging interfaces (Telegram, Unix socket, Linear) |
+| [10](10-channels.md) | Channels | Shared channel contract, Telegram, Unix socket |
 | [11](11-safety.md) | Safety | Leak detection and output wrapping |
 | 12 | Context | Folded into [spec 14](14-context-engine.md) (flat engine compaction) |
 | [13](13-credentials.md) | Credentials | Secret loading and isolation |
@@ -94,6 +94,10 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [20](20-github.md) | GitHub Channel | PR feedback polling and review requests |
 | [21](21-memory.md) | Memory | Durable cross-session knowledge: index, topics, distillation |
 | [22](22-mcp.md) | MCP Client | External MCP stdio servers as tools (bkb, Grafana) |
+| [23](23-self-review.md) | Self-Review | Review pipeline: gates, reviewer sub-agent, findings ledger |
+| [24](24-self-directed-work.md) | Self-Directed Work | Duty scheduler and built-in duties |
+| [25](25-github-issues.md) | GitHub Issues Channel | Assigned-issue polling, plan-then-execute flow |
+| [26](26-linear.md) | Linear Channel | Assigned-issue polling, plan-then-execute flow |
 
 ## Data Flow
 

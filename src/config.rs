@@ -502,7 +502,7 @@ pub struct RepoConfig {
 #[serde(rename_all = "lowercase")]
 pub enum ProposalTracker {
     /// GitHub issues via `github_issue_create`; assignment is the
-    /// human gate (spec 10).
+    /// human gate (spec 25).
     Github,
 }
 

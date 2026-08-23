@@ -22,8 +22,8 @@ Both directions share one poll loop, one identity, one trust list, and one
 state file. The GitHub *tools* (PR creation, issue creation, CI status, the
 `github_api` escape hatch) are part of the tool registry and stay in spec 03;
 this spec owns the PR channel. Issue polling is a separate channel with its
-own loop and state, documented in [spec 10](10-channels.md); it shares this
-channel's REST client, identity, and trust model.
+own loop and state, documented in [spec 25](25-github-issues.md); it shares
+this channel's REST client, identity, and trust model.
 
 ## Behavior
 
