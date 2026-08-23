@@ -9,11 +9,12 @@
 //! caller and never fails the turn.
 
 use std::cmp::Ordering;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 
+use crate::agent::envelope::ChannelSource;
 use crate::state_db::StateDb;
 use tracing::warn;
 
@@ -23,12 +24,52 @@ use crate::agent::TurnUsage;
 /// `None` in plain `cargo` dev builds, where the env var is unset.
 const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
 
+/// The ledger's grouping identity for a unit of work (spec 27): the
+/// issue, PR, duty, or chat surface a turn belongs to. Deliberately
+/// decoupled from [`ChannelSource`]'s Display strings, which feed the
+/// model-visible input tag, journal, and alerts — rewording those must
+/// not split ledger history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskKey(String);
+
+impl TaskKey {
+    /// Derive the key from a dispatch's source. PR roles fold: the
+    /// feedback, contributor, and reviewer turns on one PR are one
+    /// task. Interactive channels aggregate under one key each.
+    pub fn for_source(source: &ChannelSource) -> Self {
+        let key = match source {
+            ChannelSource::Duty { duty } => format!("duty:{duty}"),
+            ChannelSource::GitHub {
+                pr_number, repo, ..
+            } => format!("pr:{repo}#{pr_number}"),
+            ChannelSource::GitHubIssue { issue } => format!("issue:{issue}"),
+            ChannelSource::Linear { issue } => format!("linear:{issue}"),
+            ChannelSource::Socket => "chat:socket".to_string(),
+            ChannelSource::Telegram => "chat:telegram".to_string(),
+        };
+        Self(key)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TaskKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// One turn's context, paired with its billed [`TurnUsage`] at write
 /// time. Borrowed — nothing is retained past the insert.
 pub struct TurnRecord<'a> {
     pub session: &'a str,
     pub source: &'a str,
     pub model: &'a str,
+    /// `None` only where no task exists: legacy rows and turns with no
+    /// dispatch identity (tests, the distiller's ephemeral engine).
+    pub task: Option<&'a TaskKey>,
     pub usage: TurnUsage,
 }
 
@@ -73,14 +114,15 @@ impl UsageLedger {
         let conn = self.conn.lock().expect("usage ledger mutex poisoned");
         conn.execute(
             "INSERT INTO turns
-                 (git_sha, session, source, model,
+                 (git_sha, session, source, model, task,
                   calls, prompt_tokens, completion_tokens, cost)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 GIT_SHA,
                 turn.session,
                 turn.source,
                 turn.model,
+                turn.task.map(TaskKey::as_str),
                 turn.usage.calls,
                 turn.usage.prompt_tokens.cast_signed(),
                 turn.usage.completion_tokens.cast_signed(),
@@ -288,6 +330,7 @@ mod tests {
                 session: "general",
                 source: "socket",
                 model: "z-ai/glm-5.2",
+                task: None,
                 usage: TurnUsage {
                     calls: 3,
                     prompt_tokens: 1500,
@@ -334,6 +377,82 @@ mod tests {
     }
 
     #[test]
+    fn task_key_covers_every_source() {
+        use crate::agent::envelope::GitHubRole;
+        let cases = [
+            (
+                ChannelSource::Duty {
+                    duty: "self-analysis".into(),
+                },
+                "duty:self-analysis",
+            ),
+            (
+                ChannelSource::GitHub {
+                    pr_number: 42,
+                    repo: "owner/repo".into(),
+                    role: GitHubRole::Reviewer,
+                },
+                "pr:owner/repo#42",
+            ),
+            (
+                ChannelSource::GitHubIssue {
+                    issue: "owner/repo#7".into(),
+                },
+                "issue:owner/repo#7",
+            ),
+            (
+                ChannelSource::Linear {
+                    issue: "MDK-123".into(),
+                },
+                "linear:MDK-123",
+            ),
+            (ChannelSource::Socket, "chat:socket"),
+            (ChannelSource::Telegram, "chat:telegram"),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(TaskKey::for_source(&source).as_str(), expected);
+        }
+    }
+
+    /// PR roles fold into one task: review and feedback turns on the
+    /// same PR must not split the ledger.
+    #[test]
+    fn task_key_folds_pr_roles() {
+        use crate::agent::envelope::GitHubRole;
+        let key = |role| {
+            TaskKey::for_source(&ChannelSource::GitHub {
+                pr_number: 5,
+                repo: "o/r".into(),
+                role,
+            })
+        };
+        assert_eq!(key(GitHubRole::Author), key(GitHubRole::Reviewer));
+        assert_eq!(key(GitHubRole::Author), key(GitHubRole::Contributor));
+    }
+
+    #[test]
+    fn task_round_trips_through_the_ledger() {
+        let (_dir, ledger) = open_temp();
+        let task = TaskKey::for_source(&ChannelSource::GitHubIssue {
+            issue: "owner/repo#62".into(),
+        });
+        ledger
+            .record(&TurnRecord {
+                session: "owner/repo",
+                source: "GitHub issue owner/repo#62",
+                model: "m",
+                task: Some(&task),
+                usage: TurnUsage::default(),
+            })
+            .unwrap();
+        let conn = ledger.conn.lock().unwrap();
+        let stored: Option<String> = conn
+            .query_row("SELECT task FROM turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("issue:owner/repo#62"));
+    }
+
+    #[test]
     fn null_cost_when_provider_reports_none() {
         let (_dir, ledger) = open_temp();
         ledger
@@ -341,6 +460,7 @@ mod tests {
                 session: "s",
                 source: "telegram",
                 model: "m",
+                task: None,
                 usage: TurnUsage {
                     calls: 1,
                     prompt_tokens: 10,
@@ -365,6 +485,7 @@ mod tests {
                     session: "s",
                     source: "socket",
                     model: "m",
+                    task: None,
                     usage: TurnUsage::default(),
                 })
                 .unwrap();
@@ -440,6 +561,7 @@ mod tests {
                 session: "s",
                 source: "socket",
                 model: "m",
+                task: None,
                 usage: TurnUsage {
                     calls: 1,
                     prompt_tokens: 42,

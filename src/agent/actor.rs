@@ -155,7 +155,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         source: &ChannelSource,
     ) -> Option<Result<Reply, String>> {
         use commands::SlashCommand;
-        if matches!(source, ChannelSource::Duty) {
+        if matches!(source, ChannelSource::Duty { .. }) {
             return None;
         }
         let trigger = self.duty_trigger.as_ref()?;
@@ -201,6 +201,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                         &self.distiller,
                         self.usage_ledger.as_deref(),
                         self.review_ledger.as_deref(),
+                        &usage::TaskKey::for_source(&envelope.source),
                     )
                     .await
                 }
@@ -295,12 +296,14 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         // Bill the turn whatever its outcome: the calls were made.
         let (result, usage) = metered;
         let source = envelope.source.to_string();
+        let task = usage::TaskKey::for_source(&envelope.source);
         usage::record_turn(
             self.usage_ledger.as_deref(),
             &TurnRecord {
                 session: target,
                 source: &source,
                 model: self.provider.model(),
+                task: Some(&task),
                 usage,
             },
         );
@@ -789,7 +792,9 @@ mod tests {
         // duty turn.
         let reply = handle
             .send_message(
-                ChannelSource::Duty,
+                ChannelSource::Duty {
+                    duty: "distill".into(),
+                },
                 "/duty distill".into(),
                 None,
                 None,
@@ -868,7 +873,9 @@ mod tests {
         let handle = spawn_agent_with(ws, root.clone(), Tools::default(), None, 1);
         let result = handle
             .send_message(
-                ChannelSource::Duty,
+                ChannelSource::Duty {
+                    duty: "distill".into(),
+                },
                 "/duty distill".into(),
                 None,
                 None,

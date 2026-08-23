@@ -342,6 +342,9 @@ impl<P: Provider> Tool for TaskTool<P> {
             usage::record_turn(
                 self.usage_ledger.as_deref(),
                 &TurnRecord {
+                    // Parent-task inheritance lands with the ToolCtx
+                    // threading (spec 27); until then children are untracked.
+                    task: None,
                     session: "subagent",
                     source: label,
                     model: provider.model(),

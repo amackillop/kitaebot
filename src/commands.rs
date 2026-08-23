@@ -14,7 +14,7 @@ use crate::dispatch::Reply;
 use crate::memory::distill::{self, Distiller};
 use crate::provider::Provider;
 use crate::review::ReviewLedger;
-use crate::usage::{self, TurnRecord, UsageLedger};
+use crate::usage::{self, TaskKey, TurnRecord, UsageLedger};
 use crate::workspace::Workspace;
 
 /// A recognized slash command.
@@ -93,6 +93,7 @@ pub async fn execute(
     distiller: &Distiller,
     usage_ledger: Option<&UsageLedger>,
     review_ledger: Option<&ReviewLedger>,
+    task: &TaskKey,
 ) -> Result<Reply, String> {
     match cmd {
         SlashCommand::Compact => match engine.force_compact(summarize).await {
@@ -120,6 +121,7 @@ pub async fn execute(
                 memory_provider,
                 distiller,
                 usage_ledger,
+                task,
                 distill::Gate::Bypass,
                 "Nothing to distill.",
             )
@@ -134,6 +136,7 @@ pub async fn execute(
                 memory_provider,
                 distiller,
                 usage_ledger,
+                task,
             )
             .await
         }
@@ -147,6 +150,7 @@ pub async fn execute(
                 memory_provider,
                 distiller,
                 usage_ledger,
+                task,
                 distill::Gate::Enforce,
                 "Distillation gate closed.",
             )
@@ -184,6 +188,7 @@ pub async fn execute(
 
 /// Dispatch one named duty, gate respected (the scheduler's entry
 /// point, `/duty <name>`).
+#[allow(clippy::too_many_arguments)]
 async fn run_duty(
     name: &str,
     engine: &mut impl ContextEngine,
@@ -192,6 +197,7 @@ async fn run_duty(
     memory_provider: &impl Provider,
     distiller: &Distiller,
     usage_ledger: Option<&UsageLedger>,
+    task: &TaskKey,
 ) -> Result<Reply, String> {
     match name {
         "distill" => {
@@ -202,6 +208,7 @@ async fn run_duty(
                 memory_provider,
                 distiller,
                 usage_ledger,
+                task,
                 distill::Gate::Enforce,
                 "Distillation gate closed.",
             )
@@ -238,6 +245,7 @@ async fn distill_reply(
     memory_provider: &impl Provider,
     distiller: &Distiller,
     usage_ledger: Option<&UsageLedger>,
+    task: &TaskKey,
     gate: distill::Gate,
     idle: &str,
 ) -> Result<Reply, String> {
@@ -249,6 +257,7 @@ async fn distill_reply(
         memory_provider,
         distiller,
         usage_ledger,
+        task,
         &session,
         gate,
     )
@@ -273,6 +282,7 @@ async fn distill_pass(
     memory_provider: &impl Provider,
     distiller: &Distiller,
     usage_ledger: Option<&UsageLedger>,
+    task: &TaskKey,
     session: &str,
     gate: distill::Gate,
 ) -> Result<Option<String>, String> {
@@ -298,6 +308,7 @@ async fn distill_pass(
                 session,
                 source: "distill",
                 model: memory_provider.model(),
+                task: Some(task),
                 usage,
             },
         );

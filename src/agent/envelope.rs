@@ -36,11 +36,13 @@ pub enum GitHubRole {
 /// human reviewing logs) can tell where input came from.
 #[derive(Debug, Clone)]
 pub enum ChannelSource {
-    /// The duty scheduler (spec 24).
-    Duty,
+    /// The duty scheduler (spec 24). Carries the duty name for task
+    /// attribution (spec 27); Display stays "Duty".
+    Duty {
+        duty: String,
+    },
     GitHub {
         pr_number: u32,
-        #[allow(dead_code)] // Routed via session_hint, not consumed by actor.
         repo: String,
         role: GitHubRole,
     },
@@ -65,7 +67,7 @@ impl ChannelSource {
     /// Journal topic for unattended outcomes (spec 05).
     pub fn topic(&self) -> &'static str {
         match self {
-            Self::Duty => "duty",
+            Self::Duty { .. } => "duty",
             Self::GitHub { .. } | Self::GitHubIssue { .. } => "github",
             Self::Linear { .. } => "linear",
             Self::Socket => "socket",
@@ -77,7 +79,7 @@ impl ChannelSource {
 impl fmt::Display for ChannelSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Duty => write!(f, "Duty"),
+            Self::Duty { .. } => write!(f, "Duty"),
             Self::GitHub { pr_number, .. } => write!(f, "GitHub PR #{pr_number}"),
             Self::GitHubIssue { issue } => write!(f, "GitHub issue {issue}"),
             Self::Linear { issue } => write!(f, "Linear {issue}"),
@@ -113,11 +115,17 @@ pub(super) struct InputEnvelope {
 mod tests {
     use super::*;
 
+    fn duty() -> ChannelSource {
+        ChannelSource::Duty {
+            duty: "distill".into(),
+        }
+    }
+
     #[test]
     fn only_socket_and_telegram_are_attended() {
         assert!(ChannelSource::Socket.is_attended());
         assert!(ChannelSource::Telegram.is_attended());
-        assert!(!ChannelSource::Duty.is_attended());
+        assert!(!duty().is_attended());
         assert!(
             !ChannelSource::GitHub {
                 pr_number: 1,
@@ -142,7 +150,7 @@ mod tests {
 
     #[test]
     fn display_duty() {
-        assert_eq!(ChannelSource::Duty.to_string(), "Duty");
+        assert_eq!(duty().to_string(), "Duty");
     }
 
     #[test]

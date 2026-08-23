@@ -30,7 +30,10 @@ PRAGMA synchronous = NORMAL;
 
 /// Ordered list of schema migrations. Entry `i` brings the database
 /// from version `i` to `i + 1`. Append-only; never reorder or edit.
-const MIGRATIONS: &[&str] = &[include_str!("state_db/migrations/0001_baseline.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("state_db/migrations/0001_baseline.sql"),
+    include_str!("state_db/migrations/0002_task.sql"),
+];
 
 /// Shared handle to the operational state database.
 #[derive(Clone)]
@@ -131,15 +134,35 @@ impl StateDb {
 mod tests {
     use super::*;
 
+    /// A live database predates the task column; its rows must survive
+    /// the ladder and read back with a NULL task.
     #[test]
-    fn open_creates_schema_at_version_one() {
+    fn legacy_rows_survive_the_task_migration() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::sqlite::apply_migrations(&conn, &MIGRATIONS[..1]).unwrap();
+        conn.execute(
+            "INSERT INTO turns (session, source, model, calls,
+                                prompt_tokens, completion_tokens)
+             VALUES ('s', 'Socket', 'm', 1, 10, 5)",
+            [],
+        )
+        .unwrap();
+        crate::sqlite::apply_migrations(&conn, MIGRATIONS).unwrap();
+        let task: Option<String> = conn
+            .query_row("SELECT task FROM turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(task, None);
+    }
+
+    #[test]
+    fn open_migrates_to_current_version() {
         let db = StateDb::open_in_memory().unwrap();
         let conn = db.connection();
         let conn = conn.lock().unwrap();
-        let version: i32 = conn
+        let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, i64::try_from(MIGRATIONS.len()).unwrap());
         for table in ["turns", "reviews", "findings", "docs"] {
             let count: i64 = conn
                 .query_row(

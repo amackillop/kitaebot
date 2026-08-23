@@ -307,7 +307,15 @@ async fn dispatch(
     };
     let cancel = CancellationToken::new();
     match handle
-        .send_message(ChannelSource::Duty, input, session_hint, None, cancel)
+        .send_message(
+            ChannelSource::Duty {
+                duty: duty.name.clone(),
+            },
+            input,
+            session_hint,
+            None,
+            cancel,
+        )
         .await
     {
         Ok(reply) => {
@@ -394,7 +402,9 @@ async fn run_self_analysis(
     let cancel = CancellationToken::new();
     match handle
         .send_message(
-            ChannelSource::Duty,
+            ChannelSource::Duty {
+                duty: duty.name.clone(),
+            },
             prompt,
             Some(repo.to_string()),
             None,

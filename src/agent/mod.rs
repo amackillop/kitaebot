@@ -1984,7 +1984,9 @@ mod tests {
         for source in [
             github(GitHubRole::Author),
             github(GitHubRole::Contributor),
-            ChannelSource::Duty,
+            ChannelSource::Duty {
+                duty: "distill".into(),
+            },
             ChannelSource::Socket,
             ChannelSource::Telegram,
         ] {
