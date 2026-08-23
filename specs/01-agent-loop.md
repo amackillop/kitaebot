@@ -109,9 +109,43 @@ learn independently; a turn that keeps finding new walls is probing the
 guardrails, not learning them.
 
 Strike counters reset per turn. The turn's success type is an ADT
-(`Text` or `PolicyHalt`), so callers can tell a halted turn from a normal
-reply without string-sniffing — the hook for notifying on unattended
-failures.
+(`Text`, `PolicyHalt`, or `ToolHalt`), so callers can tell a halted turn
+from a normal reply without string-sniffing — the hook for notifying on
+unattended failures.
+
+### Tool Strike Escalation
+
+The repeat detector only fires on *consecutive* identical calls. A
+model that interleaves other tool calls between retries of the same
+failing call escapes it, and a deterministic environment failure
+(egress-blocked URL, missing binary) can burn most of the iteration
+budget before the turn grinds to `MaxIterationsReached` with no
+deliverable. A live duty turn spent 30 calls on `github_ci_status`
+across eight iterations, every one failing on the same egress-blocked
+/logs redirect.
+
+The tool strike tracker counts failures keyed on
+`(tool name, canonical args, error class)` across the whole turn,
+surviving interleaving. `ToolError::Blocked` is excluded — the
+policy strike system already handles it.
+
+| Identical failures | Behavior |
+|-------------------|----------|
+| 1-2 | Error text returned to LLM as normal. |
+| 3   | Error text augmented: "this exact call has failed N times this turn; the failure is deterministic — stop retrying and adapt or report." |
+| 5   | Turn halts with `ToolHalt { tool, args, error_class, count }`. |
+
+Timeouts are a distinct retry class: build artifacts persist in the
+target dir / nix store, so a retry resumes further along. The timeout
+error text says so: "Partial progress persists — a retry resumes where
+this stopped." At the notice threshold it adds a caveat: if the
+store/target mtimes have not advanced, the failure is deterministic.
+
+The strike signature uses `error_class`, a coarse classification of
+the `ToolError` variant (e.g. `http_status:502`, `command_failed:1`,
+`timeout`). Two calls with the same tool and args but different error
+classes strike independently — only an identical failure mode is
+deterministic.
 
 ### Reply Confirmation
 
@@ -236,6 +270,7 @@ The actor prepends `[ChannelSource]` to each user message.
 | Provider API error | Return error to caller. Session (including partial state) is saved. |
 | Tool execution error | Error text returned to LLM as tool result. Turn continues. |
 | Tool blocked (policy) | Strike counter incremented. At 2 strikes, turn halts with guidance message. |
+| Identical tool failure | Strike counter incremented. At 3, error text names the repetition. At 5, turn halts with `ToolHalt`. |
 | Safety violation | Tool output replaced with error. Original output never stored. Turn continues. |
 | Max iterations | Return `Error::MaxIterationsReached`. Session saved. |
 | Cancellation | Return `Error::Cancelled`. Session saved. |
