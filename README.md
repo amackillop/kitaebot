@@ -345,7 +345,11 @@ src/
 ├── notify.rs            notify tool + Telegram push batching
 ├── daemon.rs            Event loop (select over enabled channels)
 ├── dispatch.rs          Input classification and Reply type
-├── commands.rs          Slash commands (/new, /context, /compact, /duties, /distill, /stats)
+├── commands.rs          Slash commands (/new, /project, /context, /compact, /duties, /duty, /distill, /stats, /usage, /findings)
+├── usage.rs             Usage ledger: per-task cost, turns, wall time (spec 27)
+├── review.rs            Review ledger: verdicts and findings (spec 23)
+├── state_db.rs          Operational DB handle + migrations (ledgers, cursor docs)
+├── sqlite.rs            Shared migration ladder mechanics
 ├── duty/                Duty scheduler (mod, schedule, state)
 ├── runtime.rs           Provider/tools/channels assembly
 ├── activity.rs          Structured turn events for observability

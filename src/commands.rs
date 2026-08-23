@@ -36,7 +36,7 @@ pub enum SlashCommand {
     Project { name: Option<String> },
     /// Show session tool usage statistics.
     Stats,
-    /// Show recorded turn cost, broken down by build and model.
+    /// Show recorded cost, broken down by task, build, and model.
     Usage,
     /// Show review verdicts and finding counts (spec 23).
     Findings,

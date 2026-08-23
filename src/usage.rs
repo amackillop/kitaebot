@@ -88,11 +88,14 @@ impl UsageLedger {
     }
 
     /// Read every recorded turn, projected to the columns the report
-    /// aggregates. The ledger is prunable, so an unbounded read is fine.
+    /// aggregates (`outcome` deliberately stays unread until a view
+    /// consumes it). The ledger is prunable, so an unbounded read is
+    /// fine.
     pub fn rows(&self) -> rusqlite::Result<Vec<TurnRow>> {
         let conn = self.conn.lock().expect("usage ledger mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT git_sha, model, prompt_tokens, completion_tokens, cost
+            "SELECT git_sha, model, prompt_tokens, completion_tokens, cost,
+                    task, started_at, duration_ms
                  FROM turns ORDER BY id",
         )?;
         let rows = stmt
@@ -103,6 +106,9 @@ impl UsageLedger {
                     prompt_tokens: r.get::<_, i64>(2)?.cast_unsigned(),
                     completion_tokens: r.get::<_, i64>(3)?.cast_unsigned(),
                     cost: r.get(4)?,
+                    task: r.get(5)?,
+                    started_at: r.get::<_, Option<i64>>(6)?.map(i64::cast_unsigned),
+                    duration_ms: r.get::<_, Option<i64>>(7)?.map(i64::cast_unsigned),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -151,12 +157,17 @@ pub fn record_turn(ledger: Option<&UsageLedger>, record: &TurnRecord) {
 }
 
 /// One ledger row projected to the columns [`report`] aggregates.
+/// The Options mark era boundaries: rows predating a migration carry
+/// NULLs, and the report renders absence, never zero.
 pub struct TurnRow {
     pub git_sha: Option<String>,
     pub model: String,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cost: Option<f64>,
+    pub task: Option<String>,
+    pub started_at: Option<u64>,
+    pub duration_ms: Option<u64>,
 }
 
 /// Running totals over a group of turns.
@@ -198,9 +209,105 @@ fn group_by(rows: &[TurnRow], key: impl Fn(&TurnRow) -> String) -> Vec<(String, 
     groups
 }
 
-/// Render the `/usage` report: totals, then a per-build and per-model
-/// breakdown. The per-build view is the point — it attributes a cost
-/// shift to the change that shipped it.
+/// Per-task totals: cost, turn count, and the two wall times (spec 27).
+#[derive(Default)]
+struct TaskAgg {
+    turns: u64,
+    cost: f64,
+    metered: bool,
+    /// Σ duration over the rows that carry timing.
+    active_ms: u64,
+    /// Span endpoints over timed rows, in ms since the epoch.
+    start_min_ms: Option<u64>,
+    end_max_ms: Option<u64>,
+    /// Insertion index of the group's newest row — the recency key.
+    last_seen: usize,
+}
+
+impl TaskAgg {
+    fn add(&mut self, row: &TurnRow, index: usize) {
+        self.turns += 1;
+        if let Some(cost) = row.cost {
+            self.cost += cost;
+            self.metered = true;
+        }
+        if let (Some(started), Some(duration)) = (row.started_at, row.duration_ms) {
+            let start_ms = started.saturating_mul(1000);
+            self.active_ms += duration;
+            self.start_min_ms = Some(self.start_min_ms.map_or(start_ms, |m| m.min(start_ms)));
+            let end_ms = start_ms.saturating_add(duration);
+            self.end_max_ms = Some(self.end_max_ms.map_or(end_ms, |m| m.max(end_ms)));
+        }
+        self.last_seen = index;
+    }
+
+    /// First start to last end; `None` until a timed row arrives.
+    fn span_ms(&self) -> Option<u64> {
+        Some(self.end_max_ms?.saturating_sub(self.start_min_ms?))
+    }
+}
+
+/// Task groups by the report's cap. `(untracked)` collects NULL-task
+/// rows (pre-spec-27 history); tracked groups order newest-activity
+/// first, untracked always last.
+const TASK_GROUP_CAP: usize = 20;
+const UNTRACKED: &str = "(untracked)";
+
+fn group_by_task(rows: &[TurnRow]) -> Vec<(String, TaskAgg)> {
+    let mut groups: Vec<(String, TaskAgg)> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let key = row.task.as_deref().unwrap_or(UNTRACKED);
+        if let Some((_, agg)) = groups.iter_mut().find(|(name, _)| name == key) {
+            agg.add(row, index);
+        } else {
+            let mut agg = TaskAgg::default();
+            agg.add(row, index);
+            groups.push((key.to_string(), agg));
+        }
+    }
+    groups.sort_by(|a, b| {
+        let untracked = |name: &str| name == UNTRACKED;
+        untracked(&a.0)
+            .cmp(&untracked(&b.0))
+            .then(b.1.last_seen.cmp(&a.1.last_seen))
+    });
+    groups
+}
+
+/// The By Task table: cost and wall time per unit of work. Tokens stay
+/// in the build/model tables — the task view is what the work cost and
+/// how long it took.
+fn write_task_table(out: &mut String, groups: &[(String, TaskAgg)]) {
+    let _ = writeln!(out, "By Task\n");
+    let _ = writeln!(
+        out,
+        "{:<38} {:>6} {:>12} {:>9} {:>9}",
+        "Task", "Turns", "Cost", "Active", "Span"
+    );
+    for (name, agg) in groups.iter().take(TASK_GROUP_CAP) {
+        let cost = fmt_cost(agg.cost, agg.metered);
+        let active = if agg.start_min_ms.is_some() {
+            fmt_duration(agg.active_ms)
+        } else {
+            "-".to_string()
+        };
+        let span = agg.span_ms().map_or("-".to_string(), fmt_duration);
+        let _ = writeln!(
+            out,
+            "{name:<38} {:>6} {cost:>12} {active:>9} {span:>9}",
+            agg.turns,
+        );
+    }
+    if groups.len() > TASK_GROUP_CAP {
+        let _ = writeln!(out, "(+{} more tasks)", groups.len() - TASK_GROUP_CAP);
+    }
+    out.push('\n');
+}
+
+/// Render the `/usage` report: totals, the per-task headline, then the
+/// per-build and per-model breakdowns. By Task answers what a unit of
+/// work cost; By Build attributes a cost shift to the change that
+/// shipped it.
 pub fn report(rows: &[TurnRow]) -> String {
     if rows.is_empty() {
         return "No usage recorded yet.".to_string();
@@ -218,6 +325,8 @@ pub fn report(rows: &[TurnRow]) -> String {
         total.turns,
         fmt_cost(total.cost, total.metered),
     );
+
+    write_task_table(&mut out, &group_by_task(rows));
 
     // Chronological: a cost shift reads as a timeline of deploys.
     let build = group_by(rows, |r| {
@@ -301,6 +410,20 @@ fn fmt_cost(cost: f64, metered: bool) -> String {
         format!("${cost:.4}")
     } else {
         "-".to_string()
+    }
+}
+
+/// Compact wall time: `800ms`, `12.5s`, `4m02s`, `1h05m`.
+fn fmt_duration(ms: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else if ms < 3_600_000 {
+        format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1_000)
+    } else {
+        format!("{}h{:02}m", ms / 3_600_000, (ms % 3_600_000) / 60_000)
     }
 }
 
@@ -552,7 +675,97 @@ mod tests {
             prompt_tokens: tokens,
             completion_tokens: 0,
             cost,
+            task: None,
+            started_at: None,
+            duration_ms: None,
         }
+    }
+
+    /// A task-attributed row with timing, the post-spec-27 shape.
+    fn task_row(task: &str, cost: f64, started_at: u64, duration_ms: u64) -> TurnRow {
+        TurnRow {
+            task: Some(task.to_string()),
+            cost: Some(cost),
+            started_at: Some(started_at),
+            duration_ms: Some(duration_ms),
+            ..row(Some("abcdef1234"), "glm", 100, None)
+        }
+    }
+
+    #[test]
+    fn by_task_is_the_headline() {
+        let out = report(&[task_row("issue:o/r#1", 0.01, 100, 1_000)]);
+        let task = out.find("By Task").unwrap();
+        let build = out.find("By Build").unwrap();
+        assert!(task < build);
+        assert!(out.contains("issue:o/r#1"));
+    }
+
+    /// Active sums durations; span runs first start to last end, so a
+    /// gap between turns counts toward span but not active.
+    #[test]
+    fn task_active_and_span_arithmetic() {
+        let rows = vec![
+            task_row("issue:o/r#1", 0.01, 100, 60_000),
+            task_row("issue:o/r#1", 0.02, 400, 120_000),
+        ];
+        let out = report(&rows);
+        // Active: 1m + 2m; span: 100s..(400s + 120s) = 420s.
+        assert!(out.contains("3m00s"), "active missing: {out}");
+        assert!(out.contains("7m00s"), "span missing: {out}");
+        // One group, two turns, summed cost.
+        assert!(out.contains("issue:o/r#1"));
+        assert!(out.contains("$0.0300"));
+    }
+
+    /// Legacy rows have no task and no timing: one (untracked) bucket,
+    /// dashes for time, always after the tracked groups.
+    #[test]
+    fn untracked_bucket_renders_last_with_dashes() {
+        let rows = vec![
+            row(Some("abcdef1234"), "glm", 100, Some(0.01)),
+            task_row("duty:distill", 0.02, 100, 1_000),
+        ];
+        let out = report(&rows);
+        let tracked = out.find("duty:distill").unwrap();
+        let untracked = out.find("(untracked)").unwrap();
+        assert!(tracked < untracked);
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("(untracked)"))
+            .unwrap()
+            .to_string();
+        assert!(
+            line.contains('-'),
+            "untracked timing must be absent: {line}"
+        );
+    }
+
+    #[test]
+    fn tasks_ordered_by_recency_and_capped() {
+        let mut rows: Vec<TurnRow> = (0..TASK_GROUP_CAP + 2)
+            .map(|n| task_row(&format!("issue:o/r#{n}"), 0.01, 100, 1_000))
+            .collect();
+        // Re-touch the oldest task so recency puts it first.
+        rows.push(task_row("issue:o/r#0", 0.01, 200, 1_000));
+        let out = report(&rows);
+        let first = out.find("issue:o/r#0 ").unwrap();
+        let second = out
+            .find(&format!("issue:o/r#{} ", TASK_GROUP_CAP + 1))
+            .unwrap();
+        assert!(first < second, "recency must order the table");
+        assert!(
+            out.contains("(+2 more tasks)"),
+            "cap trailer missing: {out}"
+        );
+    }
+
+    #[test]
+    fn fmt_duration_units() {
+        assert_eq!(fmt_duration(800), "800ms");
+        assert_eq!(fmt_duration(12_500), "12.5s");
+        assert_eq!(fmt_duration(242_000), "4m02s");
+        assert_eq!(fmt_duration(3_900_000), "1h05m");
     }
 
     #[test]

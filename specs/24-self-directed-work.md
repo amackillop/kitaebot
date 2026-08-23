@@ -264,9 +264,11 @@ the tool result the model reads, which is a separate path.
   at most ~7 a week against a cap of 3, so triage binds quickly.
 - No per-day token budget yet, deliberately: the schedule is the cost
   ceiling (one turn per period, bounded by `max_iterations`), and the
-  usage ledger already records what a future cap would need. Add the
-  budget when duty count or cadence makes the schedule an insufficient
-  bound — with data, not in advance.
+  usage ledger already records what a future cap would need — since
+  spec 27, attributably per duty via the `task` column (`duty:<name>`),
+  with outcome labels distinguishing productive spend from
+  `max_iterations` grinding. Add the budget when duty count or cadence
+  makes the schedule an insufficient bound — with data, not in advance.
 
 ### Phase 3: commitments
 
