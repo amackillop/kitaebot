@@ -372,16 +372,20 @@ async fn run_self_analysis(
             return;
         }
     };
-    if proposals.len() >= self_analysis::PROPOSAL_CAP {
+    let bot_count = match bot_proposal_count(client, repo).await {
+        Ok(n) => n,
+        Err(e) => {
+            error!(duty = %duty.name, "bot-proposal count failed (will retry next period): {e}");
+            return;
+        }
+    };
+    if bot_count >= self_analysis::PROPOSAL_CAP {
         // The delta stays unconsumed: triage frees the cap, and the
         // next run sees the accumulated material.
         record(
             journal_path,
             &duty.name,
-            &format!(
-                "skipped: proposal cap reached ({} open on {repo})",
-                proposals.len(),
-            ),
+            &format!("skipped: proposal cap reached ({bot_count} bot-authored on {repo})"),
         );
         return;
     }
@@ -408,20 +412,34 @@ async fn run_self_analysis(
     }
 }
 
-/// Titles of open issues the bot already filed on `repo`, `#N title`
-/// formatted for prompt injection.
+/// Titles of all open issues on `repo`, `#N title` formatted for
+/// prompt injection. Includes issues filed by anyone so the dedup
+/// set catches human-filed duplicates too.
 async fn open_proposals(
     client: &GithubClient,
     repo: &str,
 ) -> Result<Vec<String>, crate::error::GithubError> {
-    let login = client.user().await?.login;
     let issues = client
-        .search_issues(&format!("is:issue is:open author:{login} repo:{repo}"))
+        .search_issues(&format!("is:issue is:open repo:{repo}"))
         .await?;
     Ok(issues
         .iter()
         .map(|i| format!("#{} {}", i.number, i.title))
         .collect())
+}
+
+/// Count of open issues the bot itself authored on `repo`. The
+/// proposal cap counts only bot-authored filings, not every open
+/// issue on the repo.
+async fn bot_proposal_count(
+    client: &GithubClient,
+    repo: &str,
+) -> Result<usize, crate::error::GithubError> {
+    let login = client.user().await?.login;
+    let issues = client
+        .search_issues(&format!("is:issue is:open author:{login} repo:{repo}"))
+        .await?;
+    Ok(issues.len())
 }
 
 /// Probe the new-commits gate. Returns the dispatch input and the
@@ -514,6 +532,7 @@ async fn run_warm(git: &GitCli, state: &mut DutyState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::RawResponse;
 
     fn duty(name: &str, schedule: Schedule) -> Duty {
         Duty {
@@ -899,5 +918,67 @@ mod tests {
             execution_checkout::CLONE_YOURSELF,
             "clone failure must fall back to CLONE_YOURSELF: {note}"
         );
+    }
+
+    #[tokio::test]
+    async fn open_proposals_queries_all_open_issues_not_bot_authored_only() {
+        let client = GithubClient::from_fn(|method, path, _body| async move {
+            assert_eq!(method, "GET");
+            // No author: qualifier — dedup must see human-filed issues too.
+            assert!(
+                !path.contains("author:"),
+                "query must not filter by author: {path}"
+            );
+            assert!(path.contains("is:issue+is:open+repo:owner/repo"));
+            Ok(RawResponse {
+                status: 200,
+                body: br#"{"items":[
+                    {"number":49,"title":"file_edit no-match error dumps entire file content unbounded",
+                     "user":{"login":"amackillop"},
+                     "repository_url":"https://api.github.com/repos/owner/repo",
+                     "updated_at":"2026-08-14T10:00:00Z","labels":[]},
+                    {"number":60,"title":"file_edit no-match error dumps entire file content unbounded",
+                     "user":{"login":"kitaebot"},
+                     "repository_url":"https://api.github.com/repos/owner/repo",
+                     "updated_at":"2026-08-14T11:00:00Z","labels":[]}
+                ]}"#
+                .to_vec(),
+            })
+        });
+        let proposals = open_proposals(&client, "owner/repo").await.unwrap();
+        assert_eq!(proposals.len(), 2);
+        assert!(proposals[0].contains("#49"));
+        assert!(proposals[1].contains("#60"));
+    }
+
+    #[tokio::test]
+    async fn bot_proposal_count_filters_by_bot_author() {
+        let client = GithubClient::from_fn(|method, path, _body| async move {
+            assert_eq!(method, "GET");
+            if path == "user" {
+                return Ok(RawResponse {
+                    status: 200,
+                    body: br#"{"login":"kitaebot"}"#.to_vec(),
+                });
+            }
+            // Must filter by author: — the cap counts only bot-authored.
+            assert!(
+                path.contains("author:"),
+                "cap query must filter by author: {path}"
+            );
+            assert!(path.contains("is:issue+is:open+author:kitaebot+repo:owner/repo"));
+            Ok(RawResponse {
+                status: 200,
+                body: br#"{"items":[
+                    {"number":60,"title":"file_edit no-match error dumps entire file content unbounded",
+                     "user":{"login":"kitaebot"},
+                     "repository_url":"https://api.github.com/repos/owner/repo",
+                     "updated_at":"2026-08-14T11:00:00Z","labels":[]}
+                ]}"#
+                .to_vec(),
+            })
+        });
+        let count = bot_proposal_count(&client, "owner/repo").await.unwrap();
+        assert_eq!(count, 1);
     }
 }
