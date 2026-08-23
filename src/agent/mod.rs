@@ -227,7 +227,9 @@ pub(crate) async fn process_message_metered(
 /// What the turn loop does when the iteration cap is hit.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BudgetPolicy {
-    /// Return [`Error::MaxIterationsReached`]; the turn is lost.
+    /// Squeeze a state report for a successor, then return
+    /// [`Error::MaxIterationsReached`] carrying it: the turn fails
+    /// (unattended alerts must fire) but its state survives.
     Fail,
     /// Take one final no-tools completion as a degraded answer.
     FinalAnswer,
@@ -381,7 +383,7 @@ pub(crate) async fn run_turn_metered(
         Ok(TurnOutput::PolicyHalt { .. }) => "policy_halt",
         Ok(TurnOutput::ToolHalt { .. }) => "tool_halt",
         Err(Error::Cancelled) => "cancelled",
-        Err(Error::MaxIterationsReached) => "max_iterations",
+        Err(Error::MaxIterationsReached { .. }) => "max_iterations",
         Err(Error::NoProgress) => "no_progress",
         Err(_) => "error",
     };
@@ -639,7 +641,7 @@ async fn turn_loop(
 
     activity::emit(activity_tx, Activity::MaxIterations);
     match budget {
-        BudgetPolicy::Fail => Err(Error::MaxIterationsReached),
+        BudgetPolicy::Fail => Err(state_report(engine, system_prompt, provider, ctx, stats).await),
         BudgetPolicy::FinalAnswer => {
             final_answer(engine, system_prompt, provider, ctx, stats).await
         }
@@ -661,6 +663,19 @@ const FINAL_ANSWER_DIRECTIVE: &str = "Your tool-call budget for this task is \
     final answer from the evidence gathered so far, and state what remains \
     unverified.";
 
+/// The successor-report directive for capped turns under
+/// [`BudgetPolicy::Fail`].
+const STATE_REPORT_DIRECTIVE: &str = "Your iteration budget is exhausted and \
+    this turn is about to be reported as failed. No further tool calls will \
+    be executed. Reply now with a state report for a successor: what you \
+    were doing, what is complete (branch names and commits pushed or left \
+    in the working tree), what remains, and the specific obstacle if you \
+    were stuck. Concrete paths and refs over prose.";
+
+/// Bytes of state report carried in the error; Telegram's message cap
+/// is the binding consumer (spec 17).
+const STATE_REPORT_MAX: usize = 3000;
+
 /// One last no-tools completion after the iteration cap: a degraded
 /// answer beats a lost turn.
 async fn final_answer(
@@ -670,10 +685,64 @@ async fn final_answer(
     ctx: &ToolCtx,
     stats: &mut TurnStats,
 ) -> Result<TurnOutput, Error> {
+    let content = squeeze(
+        engine,
+        system_prompt,
+        provider,
+        ctx,
+        stats,
+        FINAL_ANSWER_DIRECTIVE,
+    )
+    .await?;
+    Ok(TurnOutput::Text(content))
+}
+
+/// The state-at-exit squeeze for [`BudgetPolicy::Fail`]: always yields
+/// `MaxIterationsReached` (a failed squeeze must not mask the cap, and
+/// a successful one must not look like success — unattended alerts
+/// fire on the error), except for cancellation, which stays its own
+/// outcome.
+async fn state_report(
+    engine: &mut impl ContextEngine,
+    system_prompt: &str,
+    provider: &impl Provider,
+    ctx: &ToolCtx,
+    stats: &mut TurnStats,
+) -> Error {
+    match squeeze(
+        engine,
+        system_prompt,
+        provider,
+        ctx,
+        stats,
+        STATE_REPORT_DIRECTIVE,
+    )
+    .await
+    {
+        Ok(report) => Error::MaxIterationsReached {
+            report: truncate_output(&report, STATE_REPORT_MAX).into_owned(),
+        },
+        Err(Error::Cancelled) => Error::Cancelled,
+        Err(e) => Error::MaxIterationsReached {
+            report: format!("(state report unavailable: {e})"),
+        },
+    }
+}
+
+/// One no-tools completion under `directive`, billed to the turn and
+/// recorded in the session so a successor turn can see it.
+async fn squeeze(
+    engine: &mut impl ContextEngine,
+    system_prompt: &str,
+    provider: &impl Provider,
+    ctx: &ToolCtx,
+    stats: &mut TurnStats,
+    directive: &str,
+) -> Result<String, Error> {
     stats.squeezed = true;
     engine
         .push_message(Message::System {
-            content: FINAL_ANSWER_DIRECTIVE.to_string(),
+            content: directive.to_string(),
         })
         .await?;
     let assembled = engine.assemble(system_prompt).await?;
@@ -705,7 +774,7 @@ async fn final_answer(
             content: content.clone(),
         })
         .await?;
-    Ok(TurnOutput::Text(content))
+    Ok(content)
 }
 
 // ── Private helpers ─────────────────────────────────────────────────
@@ -1252,9 +1321,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_iterations() {
-        let provider = Arc::new(MockProvider::new(
-            (0..MAX_ITER).map(|n| Ok(mock_distinct_call(n))).collect(),
-        ));
+        let responses = (0..MAX_ITER)
+            .map(|n| Ok(mock_distinct_call(n)))
+            // The state-report squeeze after the cap.
+            .chain([Ok(text("was rewiring the frobnicator on branch kb-62"))])
+            .collect();
+        let provider = Arc::new(MockProvider::new(responses));
         let tools = mock_tools("mock output");
         let mut engine = test_engine();
         let summarize = test_summarize(&provider);
@@ -1270,7 +1342,70 @@ mod tests {
             &ToolCtx::default(),
         )
         .await;
-        assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::MaxIterationsReached { .. }));
+        let text = err.to_string();
+        assert!(text.contains("Maximum iterations reached"));
+        assert!(text.contains("State at exit:"));
+        assert!(text.contains("frobnicator on branch kb-62"));
+    }
+
+    /// A provider failure on the report squeeze must not mask the cap:
+    /// the turn still reports `max_iterations`, just without state.
+    #[tokio::test]
+    async fn cap_report_falls_back_when_squeeze_fails() {
+        let responses = (0..MAX_ITER)
+            .map(|n| Ok(mock_distinct_call(n)))
+            .chain([Err(ProviderError::Network("connection reset".into()))])
+            .collect();
+        let provider = Arc::new(MockProvider::new(responses));
+        let tools = mock_tools("mock output");
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let result = run_turn(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Infinite loop",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            &ToolCtx::default(),
+        )
+        .await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::MaxIterationsReached { .. }));
+        assert!(err.to_string().contains("state report unavailable"));
+    }
+
+    /// The report rides in comments and Telegram pushes; it must be
+    /// bounded no matter what the model produces.
+    #[tokio::test]
+    async fn cap_report_is_truncated() {
+        let responses = (0..MAX_ITER)
+            .map(|n| Ok(mock_distinct_call(n)))
+            .chain([Ok(text(&"x".repeat(10_000)))])
+            .collect();
+        let provider = Arc::new(MockProvider::new(responses));
+        let tools = mock_tools("mock output");
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let result = run_turn(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Infinite loop",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            &ToolCtx::default(),
+        )
+        .await;
+        let text = result.unwrap_err().to_string();
+        assert!(text.contains("[truncated"));
+        assert!(text.len() < 4000, "report must stay Telegram-sized");
     }
 
     /// Grinding to the iteration cap is the most expensive way for a turn
@@ -1278,9 +1413,11 @@ mod tests {
     /// ride inside the `Ok`, which meant this path recorded nothing.
     #[tokio::test]
     async fn a_capped_turn_still_reports_its_usage() {
-        let provider = Arc::new(MockProvider::new(
-            (0..MAX_ITER).map(|n| Ok(mock_distinct_call(n))).collect(),
-        ));
+        let responses = (0..MAX_ITER)
+            .map(|n| Ok(mock_distinct_call(n)))
+            .chain([Ok(text("state report"))])
+            .collect();
+        let provider = Arc::new(MockProvider::new(responses));
         let tools = mock_tools("mock output");
         let mut engine = test_engine();
         let summarize = test_summarize(&provider);
@@ -1299,10 +1436,14 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result.unwrap_err(), Error::MaxIterationsReached));
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MaxIterationsReached { .. }
+        ));
+        // The report squeeze is one extra call, billed like the rest.
         assert_eq!(
             usage.calls,
-            u32::try_from(MAX_ITER).unwrap(),
+            u32::try_from(MAX_ITER + 1).unwrap(),
             "every call the turn made should be billed"
         );
     }
@@ -1723,9 +1864,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_activity_max_iterations() {
-        let provider = Arc::new(MockProvider::new(
-            (0..MAX_ITER).map(|n| Ok(mock_distinct_call(n))).collect(),
-        ));
+        let responses = (0..MAX_ITER)
+            .map(|n| Ok(mock_distinct_call(n)))
+            .chain([Ok(text("state report"))])
+            .collect();
+        let provider = Arc::new(MockProvider::new(responses));
         let tools = mock_tools("mock output");
         let mut engine = test_engine();
         let summarize = test_summarize(&provider);

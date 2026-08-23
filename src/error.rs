@@ -23,9 +23,12 @@ pub enum Error {
     /// Maximum iterations reached without completion.
     ///
     /// The agent loop stopped after hitting the iteration limit to prevent
-    /// infinite loops and runaway API costs.
-    #[error("Maximum iterations reached without completion")]
-    MaxIterationsReached,
+    /// infinite loops and runaway API costs. `report` carries the model's
+    /// own state-at-exit summary from the final no-tools squeeze — what
+    /// was attempted, what blocks, and any branch or commits left behind —
+    /// so the failure a channel posts is recoverable by a successor.
+    #[error("Maximum iterations reached without completion. State at exit:\n{report}")]
+    MaxIterationsReached { report: String },
 
     /// The model re-emitted the same tool call after being told it was
     /// no longer being executed.

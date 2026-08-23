@@ -68,9 +68,11 @@ asking. A live turn spent 76 of its 100 iterations re-sending one
 refused call, each a full provider call, so refusal needs a limit behind
 it. `NoProgress` is distinct from `MaxIterationsReached` because the
 budget was not the problem: the turn had rounds left and was spending
-them on a result it already had. It stays an error rather than the
-final-answer squeeze so unattended turns still raise an alert, which a
-successful-looking degraded reply would not.
+them on a result it already had. It stays an error so unattended turns
+still raise an alert, which a successful-looking degraded reply would
+not — the same constraint that shapes budget exhaustion (below). It
+gets no state-report squeeze either: a model livelocked on one refused
+call has no progress to report.
 
 The refusal is injected even on the round that ends the turn: every
 `tool_call` needs a matching result before the next completion, so
@@ -169,7 +171,34 @@ under `BudgetPolicy::Fail` a nudge into the cap loses the turn, which is
 worse than publishing possible narration. The turn summary logs `nudged`
 so leak frequency is measurable.
 
-### Cancellation
+### Budget Exhaustion
+
+Hitting `agent.max_iterations` emits `Activity::MaxIterations`, then
+spends **one extra no-tools completion** (a squeeze: inject a system
+directive, call the provider with an empty tool slice, record the
+assistant reply in the session and bill the call). What the squeeze
+yields depends on `BudgetPolicy`:
+
+| Policy | Directive | Outcome |
+|--------|-----------|---------|
+| `FinalAnswer` (sub-agents, spec 19) | Reply with your final answer from the evidence so far; state what remains unverified. | `Ok(TurnOutput::Text)` — a degraded answer beats a lost verdict. |
+| `Fail` (root turns, the distiller) | Report state for a successor: what you were doing, what is complete (branches, commits pushed or in the tree), what remains, the obstacle. | `Err(MaxIterationsReached { report })` — the report rides in the error's Display. |
+
+The `Fail` path stays an error on principle: cursors must not advance
+and unattended alerts must fire. But the fixed string it used to return
+violated errors-never-discard-information at the turn level — the turn
+died holding branch names, attempted approaches, and the blocking
+obstacle, and returned none of it (issue #62; a $1.86 turn's only
+artifact was "Maximum iterations reached without completion"). The
+report flows to every consumer for free because channels, the notifier
+alert, and the journal all render the error via `Display`.
+
+The report is truncated to a fixed byte cap (Telegram's message limit
+is the binding consumer, spec 17) and recorded in the session, so a
+successor turn in the same session starts from it. A squeeze that
+itself fails must not mask the cap: the error carries a
+"state report unavailable" note instead. Cancellation during the
+squeeze stays `Error::Cancelled`.
 
 The turn accepts a cancellation token. Cancellation is checked:
 
@@ -271,8 +300,8 @@ The actor prepends `[ChannelSource]` to each user message.
 | Tool execution error | Error text returned to LLM as tool result. Turn continues. |
 | Tool blocked (policy) | Strike counter incremented. At 2 strikes, turn halts with guidance message. |
 | Identical tool failure | Strike counter incremented. At 3, error text names the repetition. At 5, turn halts with `ToolHalt`. |
-| Safety violation | Tool output replaced with error. Original output never stored. Turn continues. |
-| Max iterations | Return `Error::MaxIterationsReached`. Session saved. |
+| Safety violation | Secret-shaped spans redacted in place (spec 11). Turn continues. |
+| Max iterations | One no-tools state-report call, then `Error::MaxIterationsReached` carrying the report (see Budget Exhaustion). Session saved. |
 | Cancellation | Return `Error::Cancelled`. Session saved. |
 | Session save failure | Save error propagated to caller. Turn result is lost. |
 
