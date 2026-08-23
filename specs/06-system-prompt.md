@@ -68,7 +68,9 @@ one agent holding both sets.
 Only the reviewer mode is detectable: the GitHub channel knows which
 poll pass raised an item. Nothing declares a turn to be build work, so
 builder is the default rather than a detected mode, and every dispatch
-that is not a reviewer dispatch gets it.
+that is not a reviewer dispatch gets it — including contributor
+dispatches (spec 20, contributed PRs), which are build work on a
+third-party branch.
 
 The workflow was in `AGENTS.md` until it became a segment, over half
 that file by size. Keeping it there meant a turn reviewing somebody

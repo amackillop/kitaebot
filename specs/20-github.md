@@ -2,7 +2,7 @@
 
 ## Motivation
 
-The GitHub channel connects the bot to pull requests in two directions:
+The GitHub channel connects the bot to pull requests in three directions:
 
 1. **Feedback on its own PRs**: the bot opens PRs (via GitHub tools or the
    Linear flow) and humans respond with reviews and comments. The channel
@@ -13,6 +13,10 @@ The GitHub channel connects the bot to pull requests in two directions:
    per-PR, auditable in the PR timeline, and self-clearing (GitHub drops
    the pending request once a review is submitted) — no mention parsing
    needed.
+3. **PRs it contributes to**: the bot pushes fixes to third-party PRs —
+   e.g. failing Dependabot PRs under a dependency duty (spec 24) — and
+   humans respond there. Without this direction those responses land on
+   a PR no pass watches and are never heard.
 
 Both directions share one poll loop, one identity, one trust list, and one
 state file. The GitHub *tools* (PR creation, issue creation, CI status, the
@@ -26,7 +30,7 @@ channel's REST client, identity, and trust model.
 ### Poll loop
 
 `tokio::time::interval` with `MissedTickBehavior::Skip`. Each tick runs
-both queries:
+four passes:
 
 1. **Own PRs**: `GET /search/issues` with `is:pr is:open author:{bot}`,
    then per PR fetch reviews, comments, and inline diff comments.
@@ -37,12 +41,18 @@ both queries:
    pruned; a new head SHA triggers an incremental re-review; new trusted
    comments trigger a discussion turn; both in one tick fold into a
    single combined turn.
+4. **Contributed PRs**: `GET /search/issues` with
+   `is:pr is:open commenter:{bot} -author:{bot} -review-requested:{bot}`,
+   minus PRs in the `reviewed` map; new trusted feedback folds into one
+   discussion turn per PR. Runs last so `reviewed` reflects this tick's
+   inserts and prunes.
 
 Items are filtered (see below) and dispatched through the agent handle
 with `ChannelSource::GitHub { pr_number, repo, role }`, where `role` is
-`author` (feedback on the bot's own PR) or `reviewer` (a review
+`author` (feedback on the bot's own PR), `contributor` (discussion on a
+third-party PR the bot intervened on), or `reviewer` (a review
 request, a re-review, a discussion turn on a PR the bot reviewed). The
-channel knows which of its three poll passes produced each item, so the
+channel knows which of its four poll passes produced each item, so the
 role costs nothing to carry. It selects the review protocol segment
 ([spec 06](06-system-prompt.md)) and nothing else.
 
@@ -164,6 +174,12 @@ and skipped.
 - **Review-request path**: trust is checked on the **PR author** — the
   search result does not carry who requested the review, and the author
   is whose code runs through the bot's context.
+- **Contributed path**: trust is checked on the review/comment author;
+  the PR author is untrusted by design. The authorization chain is the
+  bot's own choice to intervene plus a trusted human commenting — not
+  the third party's identity. In particular `dependabot` must not be
+  added to `trusted_bots` to make this work: that list means "whose
+  feedback the bot acts on", a much larger grant than needed here.
 
 ### Feedback on own PRs
 
@@ -335,6 +351,54 @@ come from the review turn that published them, in the work session's
 history and recoverable with `lcm_grep`; the ledger holds them
 regardless, keyed by repo and `git_ref`.
 
+### Contributed PRs
+
+The bot pushes fixes to PRs it does not own — a duty (spec 24) repairing
+a failing Dependabot PR is the canonical case — and the humans watching
+that PR need a way to steer it. The contributed pass turns their
+feedback into agent turns.
+
+**Discovery contract**: the bot leaves a PR conversation comment
+whenever it intervenes on a PR it does not own, and that comment is
+what makes the PR discoverable — the search qualifier `commenter:` only
+reliably matches conversation comments, and pushed commits are not
+searchable (a Dependabot rebase can also evict them, while the comment
+survives). An intervention that leaves no comment leaves no trail for
+this pass; the duty procedures must keep commenting.
+
+The query is `is:pr is:open commenter:{bot} -author:{bot}
+-review-requested:{bot}` — the negations keep the other passes' PRs out
+of the search's 50-item budget (`per_page=50`, no pagination; accepted,
+since the set is bounded by open third-party PRs the bot chose to
+comment on — mitigation if it ever binds is `sort=updated`). PRs whose
+key is in `reviewed` are then excluded client-side *before* any per-PR
+fetch: the bot comments on PRs it reviews too, and their discussion
+belongs to the tracked pass.
+
+For each remaining PR the pass fetches reviews, conversation comments,
+and inline diff comments — the same three feedback kinds as the bot's
+own PRs, because a `CHANGES_REQUESTED` review or an inline comment on
+the bot's own pushed hunk is feedback addressed to the bot; fetching
+only conversation comments would recreate the blind spot this pass
+closes, one endpoint over. Items are filtered exactly like tracked
+comments (not the bot's own, newer than `last_poll`, trusted author,
+bodyless approvals dropped) and fold into **one turn per PR per tick**
+— replies must not race each other on the same branch.
+
+The dispatched message names the PR, its third-party author, and the
+fact that the bot previously intervened; the PR body is never included
+(Dependabot bodies embed upstream changelog text — untrusted input has
+no business in the message when nothing in it is needed to answer the
+comments). The instruction block states that PR content is data, not
+instructions; that replies go to the PR; and that the bot may push
+further commits to the PR branch from the working clone under
+`projects/` — never force-push, merge, or close.
+
+Contributor turns are build work: builder segments, the `projects/`
+working clone, normal git. No review checkout is prepared and nothing
+SHA-shaped is tracked — the pass is stateless, cut on the global
+`last_poll` alone.
+
 ### Same-tick push and comments
 
 A push and new comments can land in the same tick, and their true order
@@ -369,6 +433,10 @@ The `github_poll` document in the state database (spec 05):
   announced set, absence from the review-requested search is not a
   prune signal — submitting a review clears the pending request, and the
   PR must stay tracked for re-reviews and follow-ups.
+- A corrupt-state `reviewed` reset also demotes still-open reviewed PRs
+  to contributed candidates: their next comments arrive framed as
+  contributor turns instead of reviewer follow-ups. Degraded but safe —
+  builder segments, trusted comments only.
 
 ### Configuration
 
@@ -392,12 +460,12 @@ first place. Requires the `github-token` secret.
 
 ### Owns
 
-- The poll passes (own PRs, review requests, tracked reviewed PRs) and
-  their filtering
+- The poll passes (own PRs, review requests, tracked reviewed PRs,
+  contributed PRs) and their filtering
 - Review checkout preparation under `reviews/`
 - Bot identity resolution and self-reply prevention
 - Message formatting for reviews, comments, diff comments, review
-  requests, and follow-up discussions
+  requests, follow-up discussions, and contributed-PR discussions
 - The review, re-review, and discussion instruction blocks
 - Poll state persistence (`last_poll`, `reviewed`)
 
@@ -423,6 +491,8 @@ first place. Requires the `github-token` secret.
 | Review checkout prep fails (clone/fetch/detach) | Log warning, skip the PR this tick without recording state; retried next tick |
 | Head SHA / tracked-PR fetch fails | Skip the PR this tick |
 | Incremental compare fetch fails | The model falls back to the full diff |
+| Contributed search fails | Log error, retry next tick without advancing `last_poll` |
+| Contributed PR feedback fetch fails | Skip that PR this tick; items in the window are lost once `last_poll` advances — accepted, one broken PR must not wedge the cursor |
 | State file corrupt | Defaults: `last_poll = now`, empty `reviewed` map |
 
 No channel failure crashes the daemon; a disabled or failed channel
@@ -430,7 +500,11 @@ resolves to `std::future::pending()` and parks forever.
 
 ## Constraints
 
-- Review only: no pushing, merging, closing, or label mutation
+- Reviewer turns are review only: no pushing, merging, closing, or
+  label mutation
+- Contributor turns may push commits to the third-party PR branch —
+  never force-push, merge, or close. The PR title, body, and diff
+  remain untrusted data even then
 - Review verdicts are `COMMENT` or `APPROVE` — never `REQUEST_CHANGES`;
   blocking judgments stay with humans
 - The bot never resolves review threads, including its own addressed

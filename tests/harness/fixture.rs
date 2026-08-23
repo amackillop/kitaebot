@@ -361,11 +361,15 @@ async fn gh_user() -> Response {
     axum::Json(json!({"login": "kitaebot"})).into_response()
 }
 
-/// Serve the search q= qualifiers: `review-requested:` and `author:`
-/// select the PRs marked with the matching `search` field.
+/// Serve the search q= qualifiers: `commenter:`, `review-requested:`,
+/// and `author:` select the PRs marked with the matching `search`
+/// field. `commenter:` is checked first because the contributed query
+/// also carries `-author:` and `-review-requested:` negations.
 async fn gh_search(State(state): State<SharedState>, RawQuery(query): RawQuery) -> Response {
     let query = query.unwrap_or_default();
-    let wanted = if query.contains("review-requested:") {
+    let wanted = if query.contains("commenter:") {
+        "contributed"
+    } else if query.contains("review-requested:") {
         "review-requested"
     } else if query.contains("author:") {
         "own"
@@ -453,9 +457,10 @@ async fn gh_issue_comments(
     axum::Json(pr["issue_comments"].clone()).into_response()
 }
 
-/// A GitHub PR with empty sub-resources. Tests set `search` to `own`
-/// or `review-requested` to surface it in the search passes, and fill
-/// `reviews`/`commits`/`files`/`diff_comments`/`issue_comments`.
+/// A GitHub PR with empty sub-resources. Tests set `search` to `own`,
+/// `review-requested`, or `contributed` to surface it in the search
+/// passes, and fill `reviews`/`commits`/`files`/`diff_comments`/
+/// `issue_comments`.
 pub fn github_pr(nwo: &str, number: u32, author: &str, title: &str) -> serde_json::Value {
     json!({
         "nwo": nwo,

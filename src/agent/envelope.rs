@@ -21,6 +21,10 @@ use crate::dispatch::Reply;
 pub enum GitHubRole {
     /// Feedback on a PR the bot opened.
     Author,
+    /// Discussion on a third-party PR the bot has intervened on
+    /// (commented, usually also pushed fixes) without being asked to
+    /// review it.
+    Contributor,
     /// A review request, a re-review, or discussion on a PR the bot
     /// reviewed.
     Reviewer,

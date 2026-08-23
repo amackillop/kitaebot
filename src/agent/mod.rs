@@ -1626,9 +1626,11 @@ mod tests {
         assert_eq!(reviewer, [crate::channel::github::REVIEW_PROTOCOL_SEGMENT]);
         assert!(!reviewer.iter().any(|s| s.contains("## Developer Workflow")));
 
-        // Author is the bot's own PR, which is build work.
+        // Author is the bot's own PR and Contributor is a third-party
+        // PR it pushes fixes to; both are build work.
         for source in [
             github(GitHubRole::Author),
+            github(GitHubRole::Contributor),
             ChannelSource::Duty,
             ChannelSource::Socket,
             ChannelSource::Telegram,
