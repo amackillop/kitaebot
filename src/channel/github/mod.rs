@@ -8,3 +8,4 @@
 pub(crate) mod issues;
 pub(crate) mod prs;
 mod review_checkout;
+mod trust;

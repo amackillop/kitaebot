@@ -20,7 +20,7 @@ use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use super::prs::Trust;
+use super::trust::Trust;
 use crate::agent::AgentHandle;
 use crate::agent::envelope::ChannelSource;
 use crate::channel::execution_checkout;
