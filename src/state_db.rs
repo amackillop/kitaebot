@@ -135,6 +135,31 @@ impl StateDb {
 mod tests {
     use super::*;
 
+    /// Every ledger query must prepare against the migrated schema:
+    /// column drift between an INSERT and its SELECT, or between a
+    /// query and the ladder, fails here at `just check` instead of at
+    /// runtime (the FUTURE.md prepare-all-queries item).
+    #[test]
+    fn all_ledger_queries_prepare_against_migrated_schema() {
+        let db = StateDb::open_in_memory().unwrap();
+        let conn = db.connection();
+        let conn = conn.lock().unwrap();
+        for sql in [
+            crate::usage::INSERT_TURN,
+            crate::usage::SELECT_TURN_ROWS,
+            crate::review::INSERT_REVIEW,
+            crate::review::INSERT_SELF_FINDING,
+            crate::review::INSERT_EXTERNAL_FINDING,
+            crate::review::UPDATE_DISPOSITION,
+            crate::review::SELECT_REVIEWS_BY_GATE,
+            crate::review::SELECT_FINDINGS_BY_CATEGORY,
+            crate::review::SELECT_DISPOSITIONS_BY_SOURCE,
+        ] {
+            conn.prepare(sql)
+                .unwrap_or_else(|e| panic!("query failed to prepare: {e}\n{sql}"));
+        }
+    }
+
     /// A live database predates the task column; its rows must survive
     /// the ladder and read back with a NULL task.
     #[test]

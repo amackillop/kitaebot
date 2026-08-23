@@ -20,6 +20,19 @@ use tracing::warn;
 
 use crate::agent::TurnMeter;
 
+/// The ledger's SQL, as consts so the schema-drift test in
+/// `state_db` can prepare every query against the migrated schema.
+pub(crate) const SELECT_TURN_ROWS: &str =
+    "SELECT git_sha, model, prompt_tokens, completion_tokens, cost,
+            task, started_at, duration_ms
+         FROM turns ORDER BY id";
+
+pub(crate) const INSERT_TURN: &str = "INSERT INTO turns
+         (git_sha, session, source, model, task,
+          calls, prompt_tokens, completion_tokens, cost,
+          started_at, duration_ms, outcome)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)";
+
 /// The build's git revision, injected by the flake at compile time.
 /// `None` in plain `cargo` dev builds, where the env var is unset.
 const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
@@ -93,11 +106,7 @@ impl UsageLedger {
     /// fine.
     pub fn rows(&self) -> rusqlite::Result<Vec<TurnRow>> {
         let conn = self.conn.lock().expect("usage ledger mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT git_sha, model, prompt_tokens, completion_tokens, cost,
-                    task, started_at, duration_ms
-                 FROM turns ORDER BY id",
-        )?;
+        let mut stmt = conn.prepare(SELECT_TURN_ROWS)?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(TurnRow {
@@ -122,11 +131,7 @@ impl UsageLedger {
         // is a clock bug, not a reason to lose the row.
         let duration_ms = i64::try_from(turn.meter.duration.as_millis()).unwrap_or(i64::MAX);
         conn.execute(
-            "INSERT INTO turns
-                 (git_sha, session, source, model, task,
-                  calls, prompt_tokens, completion_tokens, cost,
-                  started_at, duration_ms, outcome)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            INSERT_TURN,
             params![
                 GIT_SHA,
                 turn.session,

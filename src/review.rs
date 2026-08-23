@@ -96,6 +96,42 @@ pub struct GateRecord<'a> {
 /// `reviews` answers what finding rows cannot: whether a gate ran at
 /// all. `findings` carries `source` so self findings and external
 /// escapes share one query surface.
+/// The ledger's SQL, as consts so the schema-drift test in
+/// `state_db` can prepare every query against the migrated schema.
+pub(crate) const INSERT_REVIEW: &str =
+    "INSERT INTO reviews (repo, gate, git_ref, verdict, confidence)
+     VALUES (?1, ?2, ?3, ?4, ?5)";
+
+pub(crate) const INSERT_SELF_FINDING: &str = "INSERT INTO findings
+         (repo, gate, git_ref, source, category, severity,
+          confidence, file, line, note)
+     VALUES (?1, ?2, ?3, 'self', ?4, ?5, ?6, ?7, ?8, ?9)";
+
+pub(crate) const INSERT_EXTERNAL_FINDING: &str = "INSERT INTO findings
+         (repo, gate, git_ref, source, category, file, line, note)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+
+pub(crate) const UPDATE_DISPOSITION: &str = "UPDATE findings
+     SET disposition = ?2, disposition_note = ?3,
+         disposed_at = datetime('now')
+     WHERE id = ?1";
+
+pub(crate) const SELECT_REVIEWS_BY_GATE: &str = "SELECT gate, COUNT(*),
+            SUM(CASE WHEN verdict = 'incorrect' THEN 1 ELSE 0 END)
+     FROM reviews GROUP BY gate ORDER BY gate";
+
+pub(crate) const SELECT_FINDINGS_BY_CATEGORY: &str = "SELECT category,
+            SUM(CASE WHEN source = 'self' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN source != 'self' THEN 1 ELSE 0 END)
+     FROM findings GROUP BY category ORDER BY COUNT(*) DESC";
+
+pub(crate) const SELECT_DISPOSITIONS_BY_SOURCE: &str = "SELECT source, COUNT(*),
+            SUM(CASE WHEN disposition = 'fixed' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN disposition = 'disputed' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN disposition = 'no-action' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN disposition IS NULL THEN 1 ELSE 0 END)
+     FROM findings GROUP BY source ORDER BY source";
+
 pub struct ReviewLedger {
     conn: Arc<Mutex<Connection>>,
 }
@@ -121,8 +157,7 @@ impl ReviewLedger {
         let mut conn = self.conn.lock().expect("review ledger mutex poisoned");
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO reviews (repo, gate, git_ref, verdict, confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            INSERT_REVIEW,
             params![
                 gate.repo,
                 gate.gate,
@@ -133,12 +168,7 @@ impl ReviewLedger {
         )?;
         let mut ids = Vec::with_capacity(output.findings.len());
         {
-            let mut ins = tx.prepare(
-                "INSERT INTO findings
-                     (repo, gate, git_ref, source, category, severity,
-                      confidence, file, line, note)
-                 VALUES (?1, ?2, ?3, 'self', ?4, ?5, ?6, ?7, ?8, ?9)",
-            )?;
+            let mut ins = tx.prepare(INSERT_SELF_FINDING)?;
             for f in &output.findings {
                 ins.execute(params![
                     gate.repo,
@@ -165,9 +195,7 @@ impl ReviewLedger {
     pub fn record_finding(&self, f: &ExternalFinding) -> rusqlite::Result<i64> {
         let conn = self.conn.lock().expect("review ledger mutex poisoned");
         conn.execute(
-            "INSERT INTO findings
-                 (repo, gate, git_ref, source, category, file, line, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            INSERT_EXTERNAL_FINDING,
             params![
                 f.repo, f.gate, f.git_ref, f.source, f.category, f.file, f.line, f.note,
             ],
@@ -185,13 +213,7 @@ impl ReviewLedger {
         note: Option<&str>,
     ) -> rusqlite::Result<bool> {
         let conn = self.conn.lock().expect("review ledger mutex poisoned");
-        let updated = conn.execute(
-            "UPDATE findings
-             SET disposition = ?2, disposition_note = ?3,
-                 disposed_at = datetime('now')
-             WHERE id = ?1",
-            params![id, disposition, note],
-        )?;
+        let updated = conn.execute(UPDATE_DISPOSITION, params![id, disposition, note])?;
         Ok(updated > 0)
     }
 
@@ -202,22 +224,13 @@ impl ReviewLedger {
         let conn = self.conn.lock().expect("review ledger mutex poisoned");
 
         let reviews: Vec<(String, i64, i64)> = {
-            let mut stmt = conn.prepare(
-                "SELECT gate, COUNT(*),
-                        SUM(CASE WHEN verdict = 'incorrect' THEN 1 ELSE 0 END)
-                 FROM reviews GROUP BY gate ORDER BY gate",
-            )?;
+            let mut stmt = conn.prepare(SELECT_REVIEWS_BY_GATE)?;
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
 
         let categories: Vec<(String, i64, i64)> = {
-            let mut stmt = conn.prepare(
-                "SELECT category,
-                        SUM(CASE WHEN source = 'self' THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN source != 'self' THEN 1 ELSE 0 END)
-                 FROM findings GROUP BY category ORDER BY COUNT(*) DESC",
-            )?;
+            let mut stmt = conn.prepare(SELECT_FINDINGS_BY_CATEGORY)?;
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
@@ -226,14 +239,7 @@ impl ReviewLedger {
         // rate per source is the query disposition tracking exists for;
         // pending measures disposition discipline itself (spec 23).
         let dispositions: Vec<(String, i64, i64, i64, i64, i64)> = {
-            let mut stmt = conn.prepare(
-                "SELECT source, COUNT(*),
-                        SUM(CASE WHEN disposition = 'fixed' THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN disposition = 'disputed' THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN disposition = 'no-action' THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN disposition IS NULL THEN 1 ELSE 0 END)
-                 FROM findings GROUP BY source ORDER BY source",
-            )?;
+            let mut stmt = conn.prepare(SELECT_DISPOSITIONS_BY_SOURCE)?;
             stmt.query_map([], |r| {
                 Ok((
                     r.get(0)?,
