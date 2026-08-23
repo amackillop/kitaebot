@@ -60,6 +60,14 @@ const LOG_CONTENT_MAX: usize = 500;
 const POLICY_STOP_DIRECTIVE: &str = "POLICY VIOLATION: A tool call was blocked. \
     Do NOT work around this. Report the situation to the user and await direction.";
 
+/// Identical tool failures (same tool, canonical args, error class)
+/// before the error text starts naming the repetition count.
+const STRIKE_NOTICE: usize = 3;
+
+/// Identical tool failures before the turn halts with a diagnosis
+/// instead of grinding to `max_iterations`.
+const STRIKE_HALT: usize = 5;
+
 /// Outcome of a completed turn.
 #[derive(Debug)]
 pub enum TurnOutput {
@@ -67,6 +75,14 @@ pub enum TurnOutput {
     Text(String),
     /// The turn was halted after repeated policy violations.
     PolicyHalt { reasons: Vec<String> },
+    /// The turn was halted after a tool failed identically too many
+    /// times — a deterministic failure the model kept retrying.
+    ToolHalt {
+        tool: String,
+        args: String,
+        error_class: String,
+        count: usize,
+    },
 }
 
 impl TurnOutput {
@@ -75,6 +91,12 @@ impl TurnOutput {
         match self {
             Self::Text(s) => s,
             Self::PolicyHalt { reasons } => policy_halt_msg(&reasons),
+            Self::ToolHalt {
+                tool,
+                args,
+                error_class,
+                count,
+            } => tool_halt_msg(&tool, &args, &error_class, count),
         }
     }
 }
@@ -90,6 +112,15 @@ fn policy_halt_msg(reasons: &[String]) -> String {
     }
     msg.push_str(" Please advise how to proceed.");
     msg
+}
+
+fn tool_halt_msg(tool: &str, args: &str, error_class: &str, count: usize) -> String {
+    format!(
+        "A tool call failed identically {count} times this turn. The failure \
+         is deterministic — retrying will not help. \
+         Tool: {tool}, args: {args}, error class: {error_class}. \
+         Please advise how to proceed."
+    )
 }
 
 /// What the root system prompt needs beyond the cached static files:
@@ -348,6 +379,7 @@ pub(crate) async fn run_turn_metered(
     let outcome = match &result {
         Ok(TurnOutput::Text(_)) => "text",
         Ok(TurnOutput::PolicyHalt { .. }) => "policy_halt",
+        Ok(TurnOutput::ToolHalt { .. }) => "tool_halt",
         Err(Error::Cancelled) => "cancelled",
         Err(Error::MaxIterationsReached) => "max_iterations",
         Err(Error::NoProgress) => "no_progress",
@@ -419,6 +451,7 @@ async fn turn_loop(
     let mut policy_strikes: BTreeMap<String, usize> = BTreeMap::new();
     let mut blocked_rounds: usize = 0;
     let mut repeat_strikes: usize = 0;
+    let mut tool_strikes = ToolStrikeTracker::default();
 
     for iteration in 0..max_iterations {
         if cancel.is_cancelled() {
@@ -562,7 +595,20 @@ async fn turn_loop(
                     })
                     .collect();
 
-                record_tool_results(engine, &calls, results, activity_tx).await;
+                let tool_halt =
+                    record_tool_results(engine, &calls, results, activity_tx, &mut tool_strikes)
+                        .await;
+
+                if let Some(halt) = tool_halt {
+                    warn!(
+                        tool = %match &halt {
+                            TurnOutput::ToolHalt { tool, .. } => tool.as_str(),
+                            _ => "",
+                        },
+                        "Tool strike limit reached, halting turn"
+                    );
+                    return Ok(halt);
+                }
 
                 if !blocked.is_empty() {
                     blocked_rounds += 1;
@@ -719,13 +765,146 @@ async fn cancellable<T>(
     }
 }
 
-/// Process tool execution results: check safety, emit events, record to engine.
+/// Canonicalize tool arguments so semantically identical JSON
+/// matches regardless of key order.
+fn canonical_args(args: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(args) {
+        Ok(v) => canonicalize_value(v).to_string(),
+        Err(_) => args.to_string(),
+    }
+}
+
+/// Recursively sort map keys so semantically identical JSON matches.
+fn canonicalize_value(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut sorted = serde_json::Map::new();
+            let mut keys: Vec<_> = map.into_iter().collect();
+            keys.sort_by(|a, b| a.0.cmp(&b.0));
+            for (k, v) in keys {
+                sorted.insert(k, canonicalize_value(v));
+            }
+            serde_json::Value::Object(sorted)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonicalize_value).collect())
+        }
+        other => other,
+    }
+}
+
+/// Classify a tool error into a coarse key for strike grouping. The
+/// key distinguishes "same tool, same args, same failure mode" from
+/// "same tool, same args, different failure" — only the former is
+/// deterministic and worth escalating.
+fn error_class(err: &ToolError) -> String {
+    match err {
+        ToolError::Blocked { .. } => "blocked".into(),
+        ToolError::Cancelled => "cancelled".into(),
+        ToolError::CommandFailed { exit_code, .. } => format!("command_failed:{exit_code}"),
+        ToolError::Github(e) => match e {
+            crate::error::GithubError::Api { status, .. } => format!("github:api:{status}"),
+            crate::error::GithubError::Deserialize(_) => "github:deserialize".into(),
+            crate::error::GithubError::Network(_) => "github:network".into(),
+        },
+        ToolError::Linear(e) => match e {
+            crate::error::LinearError::Api(_) => "linear:api".into(),
+            crate::error::LinearError::Deserialize(_) => "linear:deserialize".into(),
+            crate::error::LinearError::Network(_) => "linear:network".into(),
+        },
+        ToolError::Http { .. } => "http".into(),
+        ToolError::HttpStatus { status, .. } => format!("http_status:{status}"),
+        ToolError::InvalidArguments(_) => "invalid_arguments".into(),
+        ToolError::Join(_) => "join".into(),
+        ToolError::Io { .. } => "io".into(),
+        ToolError::Mcp { .. } => "mcp".into(),
+        ToolError::NotFound(_) => "not_found".into(),
+        ToolError::Precondition(_) => "precondition".into(),
+        ToolError::Sqlite { context, .. } => format!("sqlite:{context}"),
+        ToolError::Spawn { .. } => "spawn".into(),
+        ToolError::SubAgent { .. } => "sub_agent".into(),
+        ToolError::Telegram(_) => "telegram".into(),
+        ToolError::Timeout { .. } => "timeout".into(),
+        ToolError::WebSearch(_) => "web_search".into(),
+    }
+}
+
+/// Per-turn tracker for identical tool failures across non-consecutive
+/// rounds. The repeat detector only catches *consecutive* identical
+/// calls; a model that interleaves other calls escapes it. This tracker
+/// survives interleaving for the whole turn, keyed on
+/// (tool name, canonical args, error class).
+#[derive(Default)]
+struct ToolStrikeTracker {
+    strikes: BTreeMap<(String, String, String), usize>,
+}
+
+impl ToolStrikeTracker {
+    /// Record a failed tool call and return the strike count for this
+    /// signature. `ToolError::Blocked` is excluded — already gated by
+    /// the policy strike system.
+    fn record(&mut self, tool: &str, args: &str, err: &ToolError) -> Option<usize> {
+        if matches!(err, ToolError::Blocked { .. }) {
+            return None;
+        }
+        let key = (tool.to_string(), canonical_args(args), error_class(err));
+        let count = self.strikes.entry(key).or_insert(0);
+        *count += 1;
+        Some(*count)
+    }
+
+    /// Augment a tool error result with a repetition notice when the
+    /// strike count reaches [`STRIKE_NOTICE`]. The augmentation appends
+    /// after the `"Error: {Display}"` text, preserving the prefix that
+    /// `classify_failure` matches on.
+    fn augment_notice(content: &str, count: usize) -> String {
+        if count >= STRIKE_NOTICE {
+            format!(
+                "{content}\n\nThis exact call has failed {count} times \
+                 this turn. The failure is deterministic — stop retrying \
+                 and adapt your approach or report the problem."
+            )
+        } else {
+            content.to_string()
+        }
+    }
+
+    /// Progress-preserving guidance for timeout errors: retries may
+    /// resume further along (build artifacts persist in the target
+    /// dir / nix store). At [`STRIKE_NOTICE`] the guidance adds a
+    /// caveat: if the store has not advanced, the failure is
+    /// deterministic.
+    fn timeout_notice(command: &str, secs: u64, count: usize) -> String {
+        let base = format!("Error: `{command}` timed out after {secs}s");
+        if count >= STRIKE_NOTICE {
+            format!(
+                "{base}\n\nThis command has timed out {count} times this \
+                 turn. Partial progress persists — a retry resumes where \
+                 this stopped. But if the underlying store/target mtimes \
+                 have not advanced, the failure is deterministic: stop \
+                 retrying and report the problem."
+            )
+        } else {
+            format!(
+                "{base}\n\nPartial progress persists — a retry resumes \
+                 where this stopped."
+            )
+        }
+    }
+}
+
+/// Process tool execution results: check safety, emit events, record
+/// to engine. Returns `Some(TurnOutput::ToolHalt)` when a tool failure
+/// reaches the strike limit — after all results are recorded, so no
+/// dangling tool calls are left in the context.
 async fn record_tool_results<E: ContextEngine>(
     engine: &mut E,
     calls: &[ToolCall],
     results: Vec<Result<String, ToolError>>,
     activity_tx: Option<&mpsc::Sender<Activity>>,
-) {
+    tool_strikes: &mut ToolStrikeTracker,
+) -> Option<TurnOutput> {
+    let mut halt: Option<TurnOutput> = None;
     for (call, result) in calls.iter().zip(results) {
         let (content, err) = match result {
             Ok(output) => match safety::check_tool_output(call.function.name.as_str(), &output) {
@@ -738,7 +917,30 @@ async fn record_tool_results<E: ContextEngine>(
             },
             Err(e) => {
                 error!(tool = %call.function.name, "Tool execution failed: {}", e.log_summary());
-                (format!("Error: {e}"), Some(e.to_string()))
+                let base = format!("Error: {e}");
+                let count =
+                    tool_strikes.record(call.function.name.as_str(), &call.function.arguments, &e);
+                // Timeout errors get progress-preserving guidance;
+                // all others get the standard strike augmentation.
+                let content = match (&e, count) {
+                    (ToolError::Timeout { command, secs }, Some(n)) => {
+                        ToolStrikeTracker::timeout_notice(command, *secs, n)
+                    }
+                    (_, Some(n)) => ToolStrikeTracker::augment_notice(&base, n),
+                    (_, None) => base,
+                };
+                let err_str = e.to_string();
+                if let Some(n) = count
+                    && n >= STRIKE_HALT
+                {
+                    halt = Some(TurnOutput::ToolHalt {
+                        tool: call.function.name.to_string(),
+                        args: call.function.arguments.clone(),
+                        error_class: error_class(&e),
+                        count: n,
+                    });
+                }
+                (content, Some(err_str))
             }
         };
 
@@ -759,6 +961,7 @@ async fn record_tool_results<E: ContextEngine>(
             })
             .await;
     }
+    halt
 }
 
 #[cfg(test)]
@@ -769,7 +972,7 @@ mod tests {
     use crate::context::make_summarize_fn;
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
-    use crate::tools::{MockBlockedTool, MockTool};
+    use crate::tools::{MockBlockedTool, MockFailingTool, MockTool, Tool};
     use crate::types::{ToolCall, ToolFunction};
     use std::sync::Arc;
 
@@ -1453,7 +1656,8 @@ mod tests {
             .collect();
 
         let mut engine = test_engine();
-        record_tool_results(&mut engine, &calls, results, None).await;
+        let mut tracker = ToolStrikeTracker::default();
+        record_tool_results(&mut engine, &calls, results, None, &mut tracker).await;
 
         let ctx = engine.assemble("").await.unwrap();
         let stored: Vec<&String> = ctx
@@ -1937,5 +2141,256 @@ mod tests {
         )
         .await;
         assert_eq!(r2.unwrap().into_text(), "Turn 2 done");
+    }
+
+    // --- Tool strike escalation tests (issue #45) ---
+
+    /// Helper: execute a tool and collect the result, the way the agent
+    /// loop would for a single call.
+    async fn exec_failing(
+        tool: &Arc<dyn Tool>,
+        call: &ToolCall,
+        ctx: &ToolCtx,
+    ) -> Result<String, ToolError> {
+        let args: serde_json::Value =
+            serde_json::from_str(&call.function.arguments).unwrap_or_default();
+        tool.execute(args, ctx.clone()).await
+    }
+
+    /// Reproduce the 2026-08-13 turn-0 pattern: a tool that always
+    /// fails with the same error, called repeatedly. By `STRIKE_NOTICE`
+    /// (3) the error text names the repetition count; by `STRIKE_HALT`
+    /// (5) the turn halts with `ToolHalt`.
+    #[tokio::test]
+    async fn tool_strike_escalates_identical_failures() {
+        let tool = Arc::new(MockFailingTool::named("ci_status", || {
+            ToolError::HttpStatus {
+                url: "https://github.com/.../logs".into(),
+                status: 502,
+            }
+        })) as Arc<dyn Tool>;
+        let ctx = ToolCtx::default();
+
+        let mut engine = test_engine();
+        let mut tracker = ToolStrikeTracker::default();
+        let mut halt = None;
+
+        for i in 0..STRIKE_HALT {
+            let call = ToolCall {
+                id: format!("call-{i}"),
+                function: ToolFunction {
+                    name: "ci_status".parse().unwrap(),
+                    arguments: r#"{"repo":"owner/repo"}"#.into(),
+                },
+            };
+            let result = exec_failing(&tool, &call, &ctx).await;
+            let calls = vec![call];
+            if let Some(h) =
+                record_tool_results(&mut engine, &calls, vec![result], None, &mut tracker).await
+            {
+                halt = Some(h);
+                break;
+            }
+        }
+
+        match halt.expect("should halt by STRIKE_HALT") {
+            TurnOutput::ToolHalt {
+                tool,
+                error_class,
+                count,
+                ..
+            } => {
+                assert_eq!(tool, "ci_status");
+                assert_eq!(count, STRIKE_HALT);
+                assert_eq!(error_class, "http_status:502");
+            }
+            other => panic!("expected ToolHalt, got {other:?}"),
+        }
+    }
+
+    /// The error text at `STRIKE_NOTICE` contains the repetition count.
+    #[tokio::test]
+    async fn tool_strike_notice_at_threshold() {
+        let tool = Arc::new(MockFailingTool::named("failing_tool", || {
+            ToolError::Precondition("always fails".into())
+        })) as Arc<dyn Tool>;
+        let ctx = ToolCtx::default();
+
+        let mut engine = test_engine();
+        let mut tracker = ToolStrikeTracker::default();
+
+        for i in 0..STRIKE_NOTICE {
+            let call = ToolCall {
+                id: format!("call-{i}"),
+                function: ToolFunction {
+                    name: "failing_tool".parse().unwrap(),
+                    arguments: r#"{"key":"value"}"#.into(),
+                },
+            };
+            let result = exec_failing(&tool, &call, &ctx).await;
+            let calls = vec![call];
+            record_tool_results(&mut engine, &calls, vec![result], None, &mut tracker).await;
+        }
+
+        let ctx = engine.assemble("").await.unwrap();
+        let last_tool_msg = ctx
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::Tool { content, .. } => Some(content),
+                _ => None,
+            })
+            .expect("should have a tool message");
+        assert!(
+            last_tool_msg.contains("failed 3 times this turn"),
+            "expected repetition notice, got: {last_tool_msg}"
+        );
+    }
+
+    /// Timeouts get progress-preserving guidance, not the deterministic
+    /// escalation text. At `STRIKE_NOTICE` the guidance adds the caveat
+    /// about store mtimes not advancing.
+    #[tokio::test]
+    async fn tool_strike_timeout_gets_progress_notice() {
+        let tool = Arc::new(MockFailingTool::named("exec", || ToolError::Timeout {
+            command: "cargo build".into(),
+            secs: 600,
+        })) as Arc<dyn Tool>;
+        let ctx = ToolCtx::default();
+
+        let mut engine = test_engine();
+        let mut tracker = ToolStrikeTracker::default();
+
+        for i in 0..STRIKE_NOTICE {
+            let call = ToolCall {
+                id: format!("call-{i}"),
+                function: ToolFunction {
+                    name: "exec".parse().unwrap(),
+                    arguments: r#"{"command":"cargo build"}"#.into(),
+                },
+            };
+            let result = exec_failing(&tool, &call, &ctx).await;
+            let calls = vec![call];
+            record_tool_results(&mut engine, &calls, vec![result], None, &mut tracker).await;
+        }
+
+        let ctx = engine.assemble("").await.unwrap();
+        let last_tool_msg = ctx
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::Tool { content, .. } => Some(content),
+                _ => None,
+            })
+            .expect("should have a tool message");
+        assert!(
+            last_tool_msg.contains("timed out 3 times this turn"),
+            "expected timeout repetition notice, got: {last_tool_msg}"
+        );
+        assert!(
+            last_tool_msg.contains("Partial progress persists"),
+            "expected progress-preserving guidance, got: {last_tool_msg}"
+        );
+    }
+
+    /// Different error classes from the same tool+args do NOT
+    /// escalate: only identical (tool, args, `error_class`) signatures
+    /// count. Alternating exit codes 1 and 2 produce different
+    /// `command_failed:N` classes, so neither reaches `STRIKE_HALT`.
+    #[tokio::test]
+    async fn tool_strike_different_errors_dont_escalate() {
+        let tool_a = Arc::new(MockFailingTool::named("exec", || {
+            ToolError::CommandFailed {
+                command: "cmd".into(),
+                exit_code: 1,
+                output: "fail".into(),
+            }
+        })) as Arc<dyn Tool>;
+        let tool_b = Arc::new(MockFailingTool::named("exec", || {
+            ToolError::CommandFailed {
+                command: "cmd".into(),
+                exit_code: 2,
+                output: "fail".into(),
+            }
+        })) as Arc<dyn Tool>;
+        let ctx = ToolCtx::default();
+
+        let mut engine = test_engine();
+        let mut tracker = ToolStrikeTracker::default();
+        let mut halt = None;
+
+        for i in 0..((STRIKE_HALT - 1) * 2) {
+            let t = if i % 2 == 0 { &tool_a } else { &tool_b };
+            let call = ToolCall {
+                id: format!("call-{i}"),
+                function: ToolFunction {
+                    name: "exec".parse().unwrap(),
+                    arguments: r#"{"command":"cmd"}"#.into(),
+                },
+            };
+            let result = exec_failing(t, &call, &ctx).await;
+            let calls = vec![call];
+            if let Some(h) =
+                record_tool_results(&mut engine, &calls, vec![result], None, &mut tracker).await
+            {
+                halt = Some(h);
+                break;
+            }
+        }
+
+        assert!(
+            halt.is_none(),
+            "different error classes should not escalate to halt"
+        );
+    }
+
+    /// Blocked errors are excluded from strike tracking — already
+    /// handled by the policy strike system.
+    #[tokio::test]
+    async fn tool_strike_excludes_blocked_errors() {
+        let tool = Arc::new(MockBlockedTool::named(
+            "blocked_tool",
+            "you are not allowed",
+        )) as Arc<dyn Tool>;
+        let ctx = ToolCtx::default();
+
+        let mut engine = test_engine();
+        let mut tracker = ToolStrikeTracker::default();
+        let mut halt = None;
+
+        for i in 0..(STRIKE_HALT + 2) {
+            let call = ToolCall {
+                id: format!("call-{i}"),
+                function: ToolFunction {
+                    name: "blocked_tool".parse().unwrap(),
+                    arguments: r"{}".into(),
+                },
+            };
+            let result = exec_failing(&tool, &call, &ctx).await;
+            let calls = vec![call];
+            if let Some(h) =
+                record_tool_results(&mut engine, &calls, vec![result], None, &mut tracker).await
+            {
+                halt = Some(h);
+                break;
+            }
+        }
+
+        assert!(halt.is_none(), "Blocked errors should not trigger ToolHalt");
+        assert!(
+            tracker.strikes.is_empty(),
+            "Blocked errors should not be recorded in strike tracker"
+        );
+    }
+
+    /// `canonical_args` normalizes JSON key order so semantically
+    /// identical arguments match.
+    #[test]
+    fn canonical_args_normalizes_key_order() {
+        let a = canonical_args(r#"{"repo":"owner/repo","branch":"main"}"#);
+        let b = canonical_args(r#"{"branch":"main","repo":"owner/repo"}"#);
+        assert_eq!(a, b);
     }
 }

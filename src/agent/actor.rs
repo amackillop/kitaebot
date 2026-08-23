@@ -305,19 +305,39 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             },
         );
 
-        // A policy halt is an Ok reply, so the Err hook in `handle`
-        // never sees it. Alert here where the outcome is still typed.
-        if let Ok(super::TurnOutput::PolicyHalt { reasons }) = &result
+        // A policy halt or tool halt is an Ok reply, so the Err hook
+        // in `handle` never sees it. Alert here where the outcome is
+        // still typed.
+        if let Ok(halt) = &result
             && !envelope.source.is_attended()
             && let Some(notifier) = &self.notifier
         {
-            notifier
-                .alert(&format!(
-                    "{}: turn halted by policy gate: {}",
-                    envelope.source,
-                    reasons.join("; ")
-                ))
-                .await;
+            match halt {
+                super::TurnOutput::PolicyHalt { reasons } => {
+                    notifier
+                        .alert(&format!(
+                            "{}: turn halted by policy gate: {}",
+                            envelope.source,
+                            reasons.join("; ")
+                        ))
+                        .await;
+                }
+                super::TurnOutput::ToolHalt {
+                    tool,
+                    error_class,
+                    count,
+                    ..
+                } => {
+                    notifier
+                        .alert(&format!(
+                            "{}: turn halted by tool strike: \
+                             {tool} failed {count}x ({error_class})",
+                            envelope.source,
+                        ))
+                        .await;
+                }
+                super::TurnOutput::Text(_) => {}
+            }
         }
 
         // Deliver batched low-urgency notifications after every turn —
