@@ -494,6 +494,18 @@ pub fn github_review(author: &str, state: &str, body: &str) -> serde_json::Value
     })
 }
 
+/// A PR conversation comment stamped in the future, for the same
+/// reason as [`github_review`]: it exists before the daemon boots and
+/// must stay strictly newer than the poll cursor.
+pub fn github_issue_comment(author: &str, body: &str) -> serde_json::Value {
+    json!({
+        "id": 1,
+        "user": {"login": author},
+        "body": body,
+        "created_at": future_timestamp(5),
+    })
+}
+
 /// ISO 8601 timestamp `seconds` ahead of the wall clock. The daemon's
 /// poll cursors move at tick granularity; a same-second timestamp can
 /// compare at-or-before the cursor and never dispatch.

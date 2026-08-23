@@ -4,7 +4,8 @@
 mod fixture;
 
 pub use fixture::{
-    FixtureServer, github_pr, github_review, linear_comment, linear_issue, text, tool_call,
+    FixtureServer, github_issue_comment, github_pr, github_review, linear_comment, linear_issue,
+    text, tool_call,
 };
 
 use std::path::{Path, PathBuf};
