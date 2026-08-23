@@ -58,7 +58,7 @@ in
     };
     settings = {
       provider = {
-        model = "z-ai/glm-5.2";
+        model = "z-ai/glm-5.3";
         max_tokens = 32768;
         model_overrides = {
           explore = "deepseek/deepseek-v4-pro";
