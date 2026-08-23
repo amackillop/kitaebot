@@ -13,7 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::agent::{BudgetPolicy, ReplyPolicy, TurnUsage, run_turn_metered};
+use crate::agent::{BudgetPolicy, ReplyPolicy, TurnMeter, run_turn_metered};
 use crate::context::ephemeral::EphemeralSession;
 use crate::context::{ContextEngine, SummarizeFn, format_messages_for_summary};
 use crate::error::Error;
@@ -199,7 +199,7 @@ pub async fn run<P: Provider, E: ContextEngine>(
     workspace: &Workspace,
     state: &mut DistillState,
     gate: Gate,
-) -> Result<Option<(String, TurnUsage)>, Error> {
+) -> Result<Option<(String, TurnMeter)>, Error> {
     let pending = engine.pending_distill_tokens(&state.watermarks).await?;
     let total = total_pending(&pending);
     if gate == Gate::Enforce && !gate_open(total, distiller.threshold) {
@@ -240,7 +240,7 @@ pub async fn run<P: Provider, E: ContextEngine>(
     let mut ephemeral = EphemeralSession::new(DISTILL_TOOL_OUTPUT_TOKENS);
     // Fail, not FinalAnswer: a half-distilled memory write is worse
     // than retrying on the next cycle with the backlog carried.
-    let (result, usage) = run_turn_metered(
+    let (result, meter) = run_turn_metered(
         &mut ephemeral,
         summarize,
         &distiller.system_prompt,
@@ -271,7 +271,7 @@ pub async fn run<P: Provider, E: ContextEngine>(
             "\n[memory index still over cap: {over} — compaction required next pass]"
         );
     }
-    Ok(Some((summary, usage)))
+    Ok(Some((summary, meter)))
 }
 
 /// The spans a single pass will fold, plus the shared token budget and

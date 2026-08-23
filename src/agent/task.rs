@@ -323,7 +323,7 @@ impl<P: Provider> Tool for TaskTool<P> {
             // answer instead of erroring, so a reviewer that runs out
             // of budget still delivers a verdict and its cost is
             // recorded.
-            let (result, usage) = run_turn_metered(
+            let (result, meter) = run_turn_metered(
                 &mut engine,
                 &self.summarize,
                 &agent.system_prompt,
@@ -349,7 +349,7 @@ impl<P: Provider> Tool for TaskTool<P> {
                     session: "subagent",
                     source: label,
                     model: provider.model(),
-                    usage,
+                    meter,
                 },
             );
             let output = result.map_err(|e| ToolError::SubAgent {

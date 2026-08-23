@@ -298,7 +298,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         .await;
 
         // Bill the turn whatever its outcome: the calls were made.
-        let (result, usage) = metered;
+        let (result, meter) = metered;
         let source = envelope.source.to_string();
         usage::record_turn(
             self.usage_ledger.as_deref(),
@@ -307,7 +307,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                 source: &source,
                 model: self.provider.model(),
                 task: Some(&task),
-                usage,
+                meter,
             },
         );
 

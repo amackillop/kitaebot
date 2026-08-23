@@ -301,7 +301,7 @@ async fn distill_pass(
     )
     .await
     .map_err(|e| e.to_string())?;
-    Ok(out.map(|(summary, usage)| {
+    Ok(out.map(|(summary, meter)| {
         usage::record_turn(
             usage_ledger,
             &TurnRecord {
@@ -309,7 +309,7 @@ async fn distill_pass(
                 source: "distill",
                 model: memory_provider.model(),
                 task: Some(task),
-                usage,
+                meter,
             },
         );
         if let Err(e) = crate::workspace::journal(

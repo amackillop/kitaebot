@@ -186,7 +186,7 @@ pub(crate) async fn process_message_metered(
     review_gates: bool,
     role_segments: &[&str],
     ctx: &ToolCtx,
-) -> (Result<TurnOutput, Error>, TurnUsage) {
+) -> (Result<TurnOutput, Error>, TurnMeter) {
     let mut system_prompt =
         match crate::memory::index_segment(&workspace.memory_dir(), prompt.memory_index_cap) {
             Some(index) => format!("{}\n{index}", workspace.system_prompt()),
@@ -293,6 +293,35 @@ impl TurnUsage {
     }
 }
 
+/// Everything the ledger records about one finished turn (spec 27):
+/// billed usage plus wall time and the outcome label. Separate from
+/// [`TurnUsage`] because that type's contract is call-summing (it has
+/// a meaningful `Default` and `add_call`); a meter is measured once.
+pub(crate) struct TurnMeter {
+    pub usage: TurnUsage,
+    /// Turn start, epoch seconds.
+    pub started_at: u64,
+    /// Wall time of the turn.
+    pub duration: std::time::Duration,
+    /// The label the turn summary logs; one derivation feeds both the
+    /// log and the ledger.
+    pub outcome: &'static str,
+}
+
+/// The turn-summary outcome label, shared by the log line and the
+/// ledger row.
+fn outcome_label(result: &Result<TurnOutput, Error>) -> &'static str {
+    match result {
+        Ok(TurnOutput::PolicyHalt { .. }) => "policy_halt",
+        Ok(TurnOutput::Text(_)) => "text",
+        Ok(TurnOutput::ToolHalt { .. }) => "tool_halt",
+        Err(Error::Cancelled) => "cancelled",
+        Err(Error::MaxIterationsReached { .. }) => "max_iterations",
+        Err(Error::NoProgress) => "no_progress",
+        Err(_) => "error",
+    }
+}
+
 /// Test-only wrapper over [`run_turn_metered`] discarding the billed
 /// usage, so the turn-loop tests stay off the tuple return.
 #[cfg(test)]
@@ -324,7 +353,8 @@ pub(crate) async fn run_turn(
 }
 
 /// Run a single turn of the agent loop, returning its outcome and the
-/// billed [`TurnUsage`] so callers can record cost to the usage ledger.
+/// [`TurnMeter`] so callers can record cost, wall time, and the
+/// outcome label to the usage ledger.
 ///
 /// Pushes the user message onto the session, sends the history (with system
 /// prompt prepended) to the provider, and appends assistant/tool messages.
@@ -360,7 +390,8 @@ pub(crate) async fn run_turn_metered(
     budget: BudgetPolicy,
     reply: ReplyPolicy,
     ctx: &ToolCtx,
-) -> (Result<TurnOutput, Error>, TurnUsage) {
+) -> (Result<TurnOutput, Error>, TurnMeter) {
+    let started_at = crate::time::now_epoch();
     let started = std::time::Instant::now();
     let mut stats = TurnStats::default();
     let result = turn_loop(
@@ -378,15 +409,7 @@ pub(crate) async fn run_turn_metered(
     )
     .await;
     let elapsed = started.elapsed();
-    let outcome = match &result {
-        Ok(TurnOutput::Text(_)) => "text",
-        Ok(TurnOutput::PolicyHalt { .. }) => "policy_halt",
-        Ok(TurnOutput::ToolHalt { .. }) => "tool_halt",
-        Err(Error::Cancelled) => "cancelled",
-        Err(Error::MaxIterationsReached { .. }) => "max_iterations",
-        Err(Error::NoProgress) => "no_progress",
-        Err(_) => "error",
-    };
+    let outcome = outcome_label(&result);
     match &result {
         Ok(_) => info!(
             outcome,
@@ -416,7 +439,13 @@ pub(crate) async fn run_turn_metered(
             "Turn summary"
         ),
     }
-    (result, stats.usage)
+    let meter = TurnMeter {
+        usage: stats.usage,
+        started_at,
+        duration: elapsed,
+        outcome,
+    };
+    (result, meter)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1316,7 +1345,8 @@ mod tests {
         assert!(matches!(result.unwrap_err(), Error::NoProgress));
         // Two executed, two refused, then out: nowhere near the cap.
         assert_eq!(provider.call_count(), 4);
-        assert_eq!(usage.calls, 4, "the wasted calls are still billed");
+        assert_eq!(usage.usage.calls, 4, "the wasted calls are still billed");
+        assert_eq!(usage.outcome, "no_progress");
     }
 
     #[tokio::test]
@@ -1442,10 +1472,12 @@ mod tests {
         ));
         // The report squeeze is one extra call, billed like the rest.
         assert_eq!(
-            usage.calls,
+            usage.usage.calls,
             u32::try_from(MAX_ITER + 1).unwrap(),
             "every call the turn made should be billed"
         );
+        assert_eq!(usage.outcome, "max_iterations");
+        assert!(usage.started_at > 0);
     }
 
     #[tokio::test]

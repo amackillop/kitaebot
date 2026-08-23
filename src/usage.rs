@@ -18,7 +18,7 @@ use crate::agent::envelope::ChannelSource;
 use crate::state_db::StateDb;
 use tracing::warn;
 
-use crate::agent::TurnUsage;
+use crate::agent::TurnMeter;
 
 /// The build's git revision, injected by the flake at compile time.
 /// `None` in plain `cargo` dev builds, where the env var is unset.
@@ -61,8 +61,8 @@ impl fmt::Display for TaskKey {
     }
 }
 
-/// One turn's context, paired with its billed [`TurnUsage`] at write
-/// time. Borrowed — nothing is retained past the insert.
+/// One turn's context, paired with its [`TurnMeter`] at write time.
+/// Borrowed — nothing is retained past the insert.
 pub struct TurnRecord<'a> {
     pub session: &'a str,
     pub source: &'a str,
@@ -70,7 +70,7 @@ pub struct TurnRecord<'a> {
     /// `None` only where no task exists: legacy rows and turns with no
     /// dispatch identity (tests, the distiller's ephemeral engine).
     pub task: Option<&'a TaskKey>,
-    pub usage: TurnUsage,
+    pub meter: TurnMeter,
 }
 
 /// Append-only ledger of per-turn usage, on the shared operational
@@ -112,21 +112,28 @@ impl UsageLedger {
     /// Append one turn.
     pub fn record(&self, turn: &TurnRecord) -> rusqlite::Result<()> {
         let conn = self.conn.lock().expect("usage ledger mutex poisoned");
+        // Total conversion: a duration that overflows i64 milliseconds
+        // is a clock bug, not a reason to lose the row.
+        let duration_ms = i64::try_from(turn.meter.duration.as_millis()).unwrap_or(i64::MAX);
         conn.execute(
             "INSERT INTO turns
                  (git_sha, session, source, model, task,
-                  calls, prompt_tokens, completion_tokens, cost)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  calls, prompt_tokens, completion_tokens, cost,
+                  started_at, duration_ms, outcome)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 GIT_SHA,
                 turn.session,
                 turn.source,
                 turn.model,
                 turn.task.map(TaskKey::as_str),
-                turn.usage.calls,
-                turn.usage.prompt_tokens.cast_signed(),
-                turn.usage.completion_tokens.cast_signed(),
-                turn.usage.cost,
+                turn.meter.usage.calls,
+                turn.meter.usage.prompt_tokens.cast_signed(),
+                turn.meter.usage.completion_tokens.cast_signed(),
+                turn.meter.usage.cost,
+                turn.meter.started_at.cast_signed(),
+                duration_ms,
+                turn.meter.outcome,
             ],
         )?;
         Ok(())
@@ -313,6 +320,17 @@ fn fmt_count(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::TurnUsage;
+
+    /// A meter with fixed timing for write-path tests.
+    fn meter(usage: TurnUsage) -> TurnMeter {
+        TurnMeter {
+            usage,
+            started_at: 1_700_000_000,
+            duration: std::time::Duration::from_millis(1234),
+            outcome: "text",
+        }
+    }
 
     fn open_temp() -> (tempfile::TempDir, UsageLedger) {
         let dir = tempfile::tempdir().unwrap();
@@ -331,12 +349,12 @@ mod tests {
                 source: "socket",
                 model: "z-ai/glm-5.2",
                 task: None,
-                usage: TurnUsage {
+                meter: meter(TurnUsage {
                     calls: 3,
                     prompt_tokens: 1500,
                     completion_tokens: 200,
                     cost: Some(0.0042),
-                },
+                }),
             })
             .unwrap();
 
@@ -442,7 +460,7 @@ mod tests {
                 source: "GitHub issue owner/repo#62",
                 model: "m",
                 task: Some(&task),
-                usage: TurnUsage::default(),
+                meter: meter(TurnUsage::default()),
             })
             .unwrap();
         let conn = ledger.conn.lock().unwrap();
@@ -450,6 +468,36 @@ mod tests {
             .query_row("SELECT task FROM turns", [], |r| r.get(0))
             .unwrap();
         assert_eq!(stored.as_deref(), Some("issue:owner/repo#62"));
+    }
+
+    #[test]
+    fn timing_and_outcome_round_trip() {
+        let (_dir, ledger) = open_temp();
+        ledger
+            .record(&TurnRecord {
+                session: "s",
+                source: "Socket",
+                model: "m",
+                task: None,
+                meter: TurnMeter {
+                    usage: TurnUsage::default(),
+                    started_at: 1_756_000_000,
+                    duration: std::time::Duration::from_millis(530_271),
+                    outcome: "max_iterations",
+                },
+            })
+            .unwrap();
+        let conn = ledger.conn.lock().unwrap();
+        let (started_at, duration_ms, outcome): (i64, i64, String) = conn
+            .query_row(
+                "SELECT started_at, duration_ms, outcome FROM turns",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(started_at, 1_756_000_000);
+        assert_eq!(duration_ms, 530_271);
+        assert_eq!(outcome, "max_iterations");
     }
 
     #[test]
@@ -461,12 +509,12 @@ mod tests {
                 source: "telegram",
                 model: "m",
                 task: None,
-                usage: TurnUsage {
+                meter: meter(TurnUsage {
                     calls: 1,
                     prompt_tokens: 10,
                     completion_tokens: 5,
                     cost: None,
-                },
+                }),
             })
             .unwrap();
         let conn = ledger.conn.lock().unwrap();
@@ -486,7 +534,7 @@ mod tests {
                     source: "socket",
                     model: "m",
                     task: None,
-                    usage: TurnUsage::default(),
+                    meter: meter(TurnUsage::default()),
                 })
                 .unwrap();
         }
@@ -562,12 +610,12 @@ mod tests {
                 source: "socket",
                 model: "m",
                 task: None,
-                usage: TurnUsage {
+                meter: meter(TurnUsage {
                     calls: 1,
                     prompt_tokens: 42,
                     completion_tokens: 8,
                     cost: Some(0.5),
-                },
+                }),
             })
             .unwrap();
         let rows = ledger.rows().unwrap();
