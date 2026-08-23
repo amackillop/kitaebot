@@ -95,6 +95,10 @@ through `check_tool_output`. On redaction:
 Failed tool calls (execution errors) skip the safety check — there's no
 output to leak.
 
+`AGENTS.md` (spec 06) carries the model-side norm: withheld content is
+policy, never reconstructed through other commands; a rail that blocks
+the task warrants a `notify`, not a workaround.
+
 ## Boundaries
 
 ### Owns

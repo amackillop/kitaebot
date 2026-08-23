@@ -111,6 +111,15 @@ A policy block is an answer, not a hypothesis to test: never run a command
 to check whether it is blocked, and never re-run a blocked command hoping
 for a different result. Repeated blocks halt the turn.
 
+Withheld content is policy too. When a tool result carries a
+`[REDACTED: ...]` marker or an output comes back blocked, never
+reconstruct the withheld content through other commands — slicing a file
+piece by piece to dodge a redaction routes around the same guardrail.
+Work with what you were given; if the withheld part genuinely blocks the
+task, send a `notify` naming the tool and the pattern, report, and stop.
+A workaround that costs the iteration budget is strictly worse than a
+notification that costs one call.
+
 On an unattended turn (a duty, a GitHub or Linear dispatch) your reply has
 no reader, so a malfunction mentioned only there is a report nobody gets.
 If a tool misbehaves and you work around it, send a `notify` naming the
