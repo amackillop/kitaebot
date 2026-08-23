@@ -373,7 +373,6 @@ These are **not** in this spec but the architecture accommodates them:
 - **Scope-reduction invariant**: when recursive spawning is enabled, require
   sub-agents to declare `delegated_scope` and `kept_work` to prevent
   infinite delegation.
-- **Cost tracking**: roll up sub-agent token usage to the parent session.
 - **Concurrency limit**: cap parallel sub-agents if provider rate limits
   become a problem in practice.
 

@@ -19,7 +19,7 @@ use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::review::ReviewLedger;
 use crate::tools::Tools;
-use crate::usage::{self, TurnRecord, UsageLedger};
+use crate::usage::{self, TaskKey, TurnRecord, UsageLedger};
 use crate::workspace::Workspace;
 use tokio::sync::mpsc;
 
@@ -201,7 +201,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                         &self.distiller,
                         self.usage_ledger.as_deref(),
                         self.review_ledger.as_deref(),
-                        &usage::TaskKey::for_source(&envelope.source),
+                        &TaskKey::for_source(&envelope.source),
                     )
                     .await
                 }
@@ -275,6 +275,9 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         }
 
         let tagged = format!("[{}]: {text}", envelope.source);
+        // Derived once for both the ToolCtx and the ledger row, so the
+        // sub-agent inheritance and the root attribution cannot diverge.
+        let task = TaskKey::for_source(&envelope.source);
         let metered = super::process_message_metered(
             &mut self.engine,
             &self.summarize,
@@ -289,6 +292,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             &crate::tools::ToolCtx {
                 activity: envelope.activity_tx.clone(),
                 cancel: envelope.cancel.clone(),
+                task: Some(task.clone()),
             },
         )
         .await;
@@ -296,7 +300,6 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         // Bill the turn whatever its outcome: the calls were made.
         let (result, usage) = metered;
         let source = envelope.source.to_string();
-        let task = usage::TaskKey::for_source(&envelope.source);
         usage::record_turn(
             self.usage_ledger.as_deref(),
             &TurnRecord {

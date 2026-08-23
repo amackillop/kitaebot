@@ -317,6 +317,7 @@ impl<P: Provider> Tool for TaskTool<P> {
             let child_ctx = ToolCtx {
                 activity: ctx.activity.as_ref().map(|parent| forward(parent, label)),
                 cancel: ctx.cancel.clone(),
+                task: ctx.task.clone(),
             };
             // FinalAnswer: a maxed-out sub-agent returns a degraded
             // answer instead of erroring, so a reviewer that runs out
@@ -342,9 +343,9 @@ impl<P: Provider> Tool for TaskTool<P> {
             usage::record_turn(
                 self.usage_ledger.as_deref(),
                 &TurnRecord {
-                    // Parent-task inheritance lands with the ToolCtx
-                    // threading (spec 27); until then children are untracked.
-                    task: None,
+                    // Inherited from the parent: sub-agent spend folds
+                    // into the task that delegated it (spec 27).
+                    task: ctx.task.as_ref(),
                     session: "subagent",
                     source: label,
                     model: provider.model(),
@@ -492,6 +493,90 @@ mod tests {
 
     fn mock_tools() -> Tools {
         Tools::new(vec![Arc::new(MockTool::new("mock output"))], &[]).unwrap()
+    }
+
+    /// Sub-agent rows inherit the parent's task key through the ctx,
+    /// so delegated spend folds into the delegating task (spec 27).
+    #[tokio::test]
+    async fn child_row_inherits_the_parent_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap();
+        let ledger = Arc::new(UsageLedger::new(&db));
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text("done".into()))]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            Some(ledger.clone()),
+            None,
+        );
+
+        let task = usage::TaskKey::for_source(&crate::agent::envelope::ChannelSource::Duty {
+            duty: "self-analysis".into(),
+        });
+        tool.execute(
+            serde_json::json!({"prompt": "look around"}),
+            ToolCtx {
+                task: Some(task),
+                ..ToolCtx::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let rows: Vec<(String, String, Option<String>)> = {
+            let conn = db.connection();
+            let conn = conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT session, source, task FROM turns")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(rows.len(), 1);
+        let (session, source, stored) = &rows[0];
+        assert_eq!(session, "subagent");
+        assert_eq!(source, "explore");
+        assert_eq!(stored.as_deref(), Some("duty:self-analysis"));
+    }
+
+    /// No dispatch identity, no task: a default ctx records NULL.
+    #[tokio::test]
+    async fn child_row_without_task_records_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap();
+        let ledger = Arc::new(UsageLedger::new(&db));
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text("done".into()))]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            Some(ledger),
+            None,
+        );
+
+        tool.execute(serde_json::json!({"prompt": "look"}), ToolCtx::default())
+            .await
+            .unwrap();
+
+        let conn = db.connection();
+        let conn = conn.lock().unwrap();
+        let stored: Option<String> = conn
+            .query_row("SELECT task FROM turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, None);
     }
 
     /// Full local tool catalog plus the cfg-gated network names.

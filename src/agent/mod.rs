@@ -1915,6 +1915,7 @@ mod tests {
             &ToolCtx {
                 activity: None,
                 cancel,
+                ..ToolCtx::default()
             },
         )
         .await;

@@ -46,6 +46,7 @@ use crate::activity::Activity;
 use crate::config::Config;
 use crate::error::{ConfigError, ToolError};
 use crate::types::{ToolCall, ToolDefinition};
+use crate::usage::TaskKey;
 use crate::workspace::Workspace;
 
 pub use direnv::DirenvCache;
@@ -125,14 +126,19 @@ pub struct ToolCtx {
     pub activity: Option<mpsc::Sender<Activity>>,
     /// Cancelled when the client disconnects mid-turn.
     pub cancel: CancellationToken,
+    /// The task the turn bills to (spec 27); sub-agents inherit it so
+    /// their ledger rows fold into the parent's task. `None` where no
+    /// dispatch identity exists (tests, the distiller's ephemeral turn).
+    pub task: Option<TaskKey>,
 }
 
 impl Default for ToolCtx {
-    /// A context with no observer and a token that never fires.
+    /// A context with no observer, no task, and a token that never fires.
     fn default() -> Self {
         Self {
             activity: None,
             cancel: CancellationToken::new(),
+            task: None,
         }
     }
 }
