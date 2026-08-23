@@ -42,10 +42,6 @@ pub enum Error {
     #[error("Provider error: {0}")]
     Provider(#[from] ProviderError),
 
-    /// Safety layer blocked the output.
-    #[error("Safety error: {0}")]
-    Safety(#[from] SafetyError),
-
     /// Session load or save failure.
     #[error("Session error: {0}")]
     Session(#[from] SessionError),
@@ -429,14 +425,6 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
-}
-
-/// Safety layer errors.
-#[derive(Debug, Error)]
-pub enum SafetyError {
-    /// Tool output contained a pattern matching a known secret format.
-    #[error("Potential secret detected (pattern: {pattern_name})")]
-    LeakDetected { pattern_name: String },
 }
 
 /// Secret loading errors.

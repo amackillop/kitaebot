@@ -1,7 +1,8 @@
 //! Output safety layer.
 //!
-//! Checks tool output for leaked secrets and wraps clean output in XML tags
-//! before it enters the LLM conversation context.
+//! Scans tool output for secret-shaped spans, redacts each span in
+//! place, and wraps the result in XML tags before it enters the LLM
+//! conversation context.
 //!
 //! Patterns use regex with minimum-entropy requirements so that reading
 //! source code containing pattern *definitions* (e.g. `"sk-"`) does not
@@ -9,9 +10,7 @@
 
 use std::sync::LazyLock;
 
-use regex::RegexSet;
-
-use crate::error::SafetyError;
+use regex::{Regex, RegexSet};
 
 /// A secret-detection pattern: regex source + human-readable label.
 struct LeakPattern {
@@ -47,8 +46,10 @@ const PATTERNS: &[LeakPattern] = &[
         name: "AWS access key",
     },
     LeakPattern {
-        regex: r"-----BEGIN [A-Z ]+PRIVATE KEY-----",
-        name: "Private key header",
+        // Spans through the END marker (or end of output): redacting
+        // only the header would leave the key body readable.
+        regex: r"(?s)-----BEGIN [A-Z ]+PRIVATE KEY-----.*?(?:-----END [A-Z ]+PRIVATE KEY-----|\z)",
+        name: "Private key",
     },
     LeakPattern {
         regex: r"postgres://\S+:\S+@",
@@ -68,34 +69,66 @@ const PATTERNS: &[LeakPattern] = &[
     },
 ];
 
-/// Compiled pattern set for fast matching.
+/// Compiled pattern set for the single-pass clean-output fast path.
 static LEAK_SET: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new(PATTERNS.iter().map(|p| p.regex)).expect("invalid leak pattern")
 });
 
-/// Check tool output for leaked secrets and wrap in XML tags.
-///
-/// Returns the first matching pattern as an error.
-/// Clean output is wrapped as `<tool_output name="...">...</tool_output>`.
-pub fn check_tool_output(tool_name: &str, output: &str) -> Result<String, SafetyError> {
-    if let Some(idx) = LEAK_SET.matches(output).into_iter().next() {
-        return Err(SafetyError::LeakDetected {
-            pattern_name: PATTERNS[idx].name.to_string(),
-        });
-    }
+/// Per-pattern regexes for span replacement; only run on a set hit.
+static LEAK_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    PATTERNS
+        .iter()
+        .map(|p| Regex::new(p.regex).expect("invalid leak pattern"))
+        .collect()
+});
 
-    Ok(format!(
-        "<tool_output name=\"{tool_name}\">\n{output}\n</tool_output>"
-    ))
+/// Tool output after the safety pass: wrapped content with every
+/// secret-shaped span replaced by a `[REDACTED: {pattern}]` marker.
+pub struct CheckedOutput {
+    pub wrapped: String,
+    /// Names of the patterns actually redacted, in pattern order.
+    pub redactions: Vec<&'static str>,
+}
+
+/// Redact secret-shaped spans and wrap tool output in XML tags.
+///
+/// A span is redacted, never the whole output: one key-shaped string
+/// must not cost the model the rest of a file, and a withheld output
+/// only invites reconstructing the content through other commands.
+/// The secret itself never enters the conversation either way.
+pub fn check_tool_output(tool_name: &str, output: &str) -> CheckedOutput {
+    let matches = LEAK_SET.matches(output);
+    let mut redactions = Vec::new();
+    let mut content = output.to_string();
+    for idx in &matches {
+        let marker = format!("[REDACTED: {}]", PATTERNS[idx].name);
+        let replaced = LEAK_REGEXES[idx].replace_all(&content, marker.as_str());
+        // An earlier pattern can consume an overlapping match (an
+        // Anthropic key is also OpenAI-shaped); count real changes only.
+        if replaced != content {
+            redactions.push(PATTERNS[idx].name);
+            content = replaced.into_owned();
+        }
+    }
+    CheckedOutput {
+        wrapped: format!("<tool_output name=\"{tool_name}\">\n{content}\n</tool_output>"),
+        redactions,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn clean(tool: &str, output: &str) -> String {
+        let checked = check_tool_output(tool, output);
+        assert!(checked.redactions.is_empty(), "unexpected redaction");
+        checked.wrapped
+    }
+
     #[test]
     fn clean_output_wrapped() {
-        let result = check_tool_output("exec", "hello world").unwrap();
+        let result = clean("exec", "hello world");
         assert!(result.contains("<tool_output name=\"exec\">"));
         assert!(result.contains("hello world"));
         assert!(result.contains("</tool_output>"));
@@ -103,88 +136,101 @@ mod tests {
 
     #[test]
     fn wrapping_format() {
-        let result = check_tool_output("my_tool", "some output").unwrap();
+        let result = clean("my_tool", "some output");
         assert_eq!(
             result,
             "<tool_output name=\"my_tool\">\nsome output\n</tool_output>"
         );
     }
 
-    // --- Real secrets must be caught ---
+    // --- Real secrets must be redacted ---
 
     #[test]
-    fn leak_openai_key() {
-        let err = check_tool_output("exec", "key is sk-proj-abc123def456ghi789jkl012").unwrap_err();
-        assert!(matches!(
-            err,
-            SafetyError::LeakDetected { ref pattern_name } if pattern_name == "OpenAI API key"
-        ));
+    fn redacts_openai_key_span_only() {
+        let checked = check_tool_output(
+            "exec",
+            "key is sk-proj-abc123def456ghi789jkl012, rest stays",
+        );
+        assert_eq!(checked.redactions, ["OpenAI API key"]);
+        assert!(!checked.wrapped.contains("sk-proj-abc123def456ghi789jkl012"));
+        assert!(
+            checked
+                .wrapped
+                .contains("key is [REDACTED: OpenAI API key], rest stays")
+        );
+    }
+
+    /// An Anthropic key is also OpenAI-shaped; the more specific
+    /// pattern consumes it and the broader one must not double-report.
+    #[test]
+    fn redacts_anthropic_key_under_its_own_name() {
+        let checked = check_tool_output("exec", "key is sk-ant-api03-abc123def456ghi789jkl012");
+        assert_eq!(checked.redactions, ["Anthropic API key"]);
+        assert!(checked.wrapped.contains("[REDACTED: Anthropic API key]"));
+        assert!(!checked.wrapped.contains("sk-ant-api03"));
     }
 
     #[test]
-    fn leak_anthropic_key() {
-        let err =
-            check_tool_output("exec", "key is sk-ant-api03-abc123def456ghi789jkl012").unwrap_err();
-        assert!(matches!(
-            err,
-            SafetyError::LeakDetected { ref pattern_name } if pattern_name == "Anthropic API key"
-        ));
+    fn redacts_github_pat() {
+        let checked = check_tool_output("exec", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij");
+        assert_eq!(checked.redactions, ["GitHub PAT"]);
+        assert!(!checked.wrapped.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ"));
     }
 
     #[test]
-    fn leak_github_pat() {
-        let err =
-            check_tool_output("exec", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij").unwrap_err();
-        assert!(matches!(
-            err,
-            SafetyError::LeakDetected { ref pattern_name } if pattern_name == "GitHub PAT"
-        ));
+    fn redacts_aws_key() {
+        let checked = check_tool_output("exec", "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(checked.redactions, ["AWS access key"]);
+        assert!(!checked.wrapped.contains("AKIAIOSFODNN7EXAMPLE"));
     }
 
     #[test]
-    fn leak_aws_key() {
-        let err = check_tool_output("exec", "AKIAIOSFODNN7EXAMPLE").unwrap_err();
-        assert!(matches!(
-            err,
-            SafetyError::LeakDetected { ref pattern_name } if pattern_name == "AWS access key"
-        ));
+    fn redacts_private_key_through_end_marker() {
+        let pem = "before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow...base64...\n-----END RSA PRIVATE KEY-----\nafter";
+        let checked = check_tool_output("exec", pem);
+        assert_eq!(checked.redactions, ["Private key"]);
+        assert!(!checked.wrapped.contains("base64"));
+        assert!(
+            checked
+                .wrapped
+                .contains("before\n[REDACTED: Private key]\nafter")
+        );
+    }
+
+    /// A header with no END marker redacts to end of output — the key
+    /// body must not survive a truncated read.
+    #[test]
+    fn redacts_unterminated_private_key_to_end() {
+        let pem = "before\n-----BEGIN EC PRIVATE KEY-----\nMIIEow...base64...";
+        let checked = check_tool_output("exec", pem);
+        assert_eq!(checked.redactions, ["Private key"]);
+        assert!(!checked.wrapped.contains("base64"));
+        assert!(checked.wrapped.contains("before\n[REDACTED: Private key]"));
     }
 
     #[test]
-    fn leak_private_key_header() {
-        let err = check_tool_output("exec", "-----BEGIN RSA PRIVATE KEY-----").unwrap_err();
-        assert!(matches!(
-            err,
-            SafetyError::LeakDetected { ref pattern_name } if pattern_name == "Private key header"
-        ));
+    fn redacts_postgres_connection_string() {
+        let checked = check_tool_output("exec", "postgres://admin:s3cret@db.host/mydb");
+        assert_eq!(checked.redactions, ["PostgreSQL connection string"]);
+        assert!(!checked.wrapped.contains("s3cret"));
     }
 
     #[test]
-    fn leak_ec_private_key_header() {
-        let err = check_tool_output("exec", "-----BEGIN EC PRIVATE KEY-----").unwrap_err();
-        assert!(matches!(
-            err,
-            SafetyError::LeakDetected { ref pattern_name } if pattern_name == "Private key header"
-        ));
+    fn redacts_mongodb_srv_connection_string() {
+        let checked = check_tool_output("exec", "mongodb+srv://user:pass@cluster.mongodb.net/db");
+        assert_eq!(checked.redactions, ["MongoDB connection string"]);
+        assert!(!checked.wrapped.contains("user:pass"));
     }
 
     #[test]
-    fn leak_postgres_connection_string() {
-        let err = check_tool_output("exec", "postgres://admin:s3cret@db.host/mydb").unwrap_err();
-        assert!(matches!(
-            err,
-            SafetyError::LeakDetected { ref pattern_name } if pattern_name == "PostgreSQL connection string"
-        ));
-    }
-
-    #[test]
-    fn leak_mongodb_srv_connection_string() {
-        let err = check_tool_output("exec", "mongodb+srv://user:pass@cluster.mongodb.net/db")
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            SafetyError::LeakDetected { ref pattern_name } if pattern_name == "MongoDB connection string"
-        ));
+    fn redacts_every_occurrence_of_a_pattern() {
+        let checked = check_tool_output(
+            "exec",
+            "a: sk-proj-abc123def456ghi789jkl012 b: sk-proj-zyx987wvu654tsr321qpo000",
+        );
+        assert_eq!(checked.redactions, ["OpenAI API key"]);
+        assert!(!checked.wrapped.contains("sk-proj-"));
+        assert_eq!(checked.wrapped.matches("[REDACTED:").count(), 2);
     }
 
     // --- Short prefixes in source code must NOT trigger ---
@@ -192,34 +238,34 @@ mod tests {
     #[test]
     fn no_false_positive_bare_sk_prefix() {
         // String literal mentioning the prefix without a real key suffix.
-        check_tool_output("file_read", r#"("sk-", "OpenAI API key")"#).unwrap();
+        clean("file_read", r#"("sk-", "OpenAI API key")"#);
     }
 
     #[test]
     fn no_false_positive_bare_sk_ant_prefix() {
-        check_tool_output("file_read", r#"("sk-ant-", "Anthropic API key")"#).unwrap();
+        clean("file_read", r#"("sk-ant-", "Anthropic API key")"#);
     }
 
     #[test]
     fn no_false_positive_bare_ghp_prefix() {
-        check_tool_output("file_read", r#"("ghp_", "GitHub PAT")"#).unwrap();
+        clean("file_read", r#"("ghp_", "GitHub PAT")"#);
     }
 
     #[test]
     fn no_false_positive_bare_connection_scheme() {
         // Bare scheme without credentials.
-        check_tool_output("file_read", r"postgres://localhost/db").unwrap();
+        clean("file_read", r"postgres://localhost/db");
     }
 
     #[test]
     fn no_false_positive_begin_without_private_key() {
         // Certificate header (public, not secret).
-        check_tool_output("file_read", "-----BEGIN CERTIFICATE-----").unwrap();
+        clean("file_read", "-----BEGIN CERTIFICATE-----");
     }
 
     #[test]
     fn no_false_positive_begin_prefix_only() {
-        check_tool_output("file_read", r#"("-----BEGIN", "Private key header")"#).unwrap();
+        clean("file_read", r#"("-----BEGIN", "Private key header")"#);
     }
 
     /// Source code containing pattern *definitions* (short prefixes in string
@@ -241,6 +287,6 @@ mod tests {
                 ("redis://", "Redis connection string"),
             ];
         "#;
-        check_tool_output("file_read", source).unwrap();
+        clean("file_read", source);
     }
 }

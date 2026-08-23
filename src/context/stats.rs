@@ -41,6 +41,9 @@ pub(crate) enum FailureKind {
     Other,
     Spawn,
     Timeout,
+    /// Historical only: safety leaks blocked whole outputs before
+    /// redaction replaced blocking (2026-08). Old sessions still carry
+    /// the messages, so the classification stays.
     SafetyBlock,
     RepeatBlock,
 }

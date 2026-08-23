@@ -907,14 +907,19 @@ async fn record_tool_results<E: ContextEngine>(
     let mut halt: Option<TurnOutput> = None;
     for (call, result) in calls.iter().zip(results) {
         let (content, err) = match result {
-            Ok(output) => match safety::check_tool_output(call.function.name.as_str(), &output) {
-                Ok(wrapped) => (wrapped, None),
-                Err(e) => {
-                    warn!(tool = %call.function.name, "Tool output blocked: {e}");
-                    let msg = format!("Tool output blocked: {e}. Do not retry.");
-                    (msg, Some(e.to_string()))
+            Ok(output) => {
+                let checked = safety::check_tool_output(call.function.name.as_str(), &output);
+                // WARN feeds the error tee; recurring redactions are
+                // self-analysis symptoms (a real leak or a false positive).
+                for pattern in &checked.redactions {
+                    warn!(
+                        tool = %call.function.name,
+                        pattern,
+                        "Tool output redacted: secret-shaped span withheld"
+                    );
                 }
-            },
+                (checked.wrapped, None)
+            }
             Err(e) => {
                 error!(tool = %call.function.name, "Tool execution failed: {}", e.log_summary());
                 let base = format!("Error: {e}");
@@ -1526,7 +1531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_safety_blocks_leaked_secret() {
+    async fn test_safety_redacts_leaked_secret() {
         let provider = Arc::new(MockProvider::new(vec![
             Ok(mock_tool_calls(&["call-leak"])),
             Ok(text("Handled")),
@@ -1557,9 +1562,10 @@ mod tests {
             .expect("should have a tool message");
 
         if let Message::Tool { content, .. } = tool_msg {
-            assert!(content.contains("Tool output blocked"));
-            assert!(content.contains("Do not retry"));
+            // The span is withheld; the surrounding output survives.
             assert!(!content.contains("sk-proj-abc123def456ghi789jkl012"));
+            assert!(content.contains("Here is your key: [REDACTED: OpenAI API key]"));
+            assert!(content.contains("<tool_output name=\"mock\">"));
         }
     }
 
@@ -1601,20 +1607,17 @@ mod tests {
 
     /// Pins the string contract between `record_tool_results` (producer)
     /// and `stats::classify_failure` (consumer). There is no shared type:
-    /// errors are stored as `Error: {ToolError}` via Display, safety
-    /// blocks as `Tool output blocked: ...`. If either side drifts, the
-    /// /stats failure tables silently go blind -- exactly what happened
-    /// when `Blocked` was misclassified as success.
+    /// errors are stored as `Error: {ToolError}` via Display. If either
+    /// side drifts, the /stats failure tables silently go blind --
+    /// exactly what happened when `Blocked` was misclassified as
+    /// success. Safety redactions are successes and classify as None.
     #[tokio::test]
     async fn stored_tool_results_round_trip_stats_classification() {
         use crate::context::stats::{FailureKind, classify_failure};
 
         let cases: Vec<(Result<String, ToolError>, Option<FailureKind>)> = vec![
             (Ok("plain output".into()), None),
-            (
-                Ok("key is sk-proj-abc123def456ghi789jkl012".into()),
-                Some(FailureKind::SafetyBlock),
-            ),
+            (Ok("key is sk-proj-abc123def456ghi789jkl012".into()), None),
             (
                 Err(ToolError::Blocked {
                     operation: "git push origin main".into(),
