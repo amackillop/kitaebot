@@ -98,6 +98,7 @@ Interactive access is through `kchat` connecting to the daemon's Unix socket. No
 | [24](24-self-directed-work.md) | Self-Directed Work | Duty scheduler and built-in duties |
 | [25](25-github-issues.md) | GitHub Issues Channel | Assigned-issue polling, plan-then-execute flow |
 | [26](26-linear.md) | Linear Channel | Assigned-issue polling, plan-then-execute flow |
+| [27](27-usage.md) | Usage Ledger | Per-task cost, turn count, and wall time accounting |
 
 ## Data Flow
 
