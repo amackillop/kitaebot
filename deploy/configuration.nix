@@ -199,8 +199,13 @@ in
 
               Hard rules: one PR or one directory per run. Never touch
               anything under .github/workflows. Never force-push.
-              Never dismiss alerts. Never regenerate a lockfile whose
-              manifest you did not just author.
+              Before pushing a fix commit to a Dependabot PR, check the
+              PR's net diff against its base; if your fix would leave
+              that diff empty (the fix reverts the bump itself), do not
+              push — comment explaining why the bump is not applicable
+              and recommend closing the PR instead. Never dismiss
+              alerts. Never regenerate a lockfile whose manifest you
+              did not just author.
             '';
           }
           {
