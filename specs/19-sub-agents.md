@@ -327,7 +327,7 @@ off runs on the type's model.
 
 | Failure | Behavior |
 |---------|----------|
-| Sub-agent hits max_iterations | Error text returned as tool result. Parent continues. |
+| Sub-agent hits max_iterations | One final no-tools completion squeezes a degraded answer (`BudgetPolicy::FinalAnswer`), returned as the tool result. A reviewer that runs out of budget still delivers a verdict and its cost is recorded. Parent continues. |
 | Sub-agent provider error (incl. context overflow) | Error text returned as tool result. Parent continues. |
 | Sub-agent tool error | Handled inside the child loop (same as parent) |
 | Parent cancelled | Child future dropped mid-await, context discarded |
