@@ -6,7 +6,6 @@
 
 pub(crate) mod execution_checkout;
 pub(crate) mod github;
-pub(crate) mod github_issues;
 pub(crate) mod linear;
 pub(crate) mod socket;
 pub(crate) mod telegram;

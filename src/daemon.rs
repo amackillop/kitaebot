@@ -21,10 +21,10 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::agent::AgentHandle;
+use crate::channel::github::{issues, prs};
 use crate::channel::linear::{self, LinearChannel};
 use crate::channel::socket;
 use crate::channel::telegram::{self, TelegramChannel};
-use crate::channel::{github, github_issues};
 use crate::clients::github::GithubClient;
 use crate::config::{GithubConfig, SocketConfig};
 use crate::duty::{self, Duty};
@@ -107,7 +107,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         // guards against a future caller wiring it unconditionally.
         match github_client.filter(|_| github.enabled).zip(git_cli) {
             Some((client, git)) => {
-                github::poll_loop(client, git, github, handle, state_db).await;
+                prs::poll_loop(client, git, github, handle, state_db).await;
             }
             None => std::future::pending().await,
         }
@@ -118,7 +118,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         // built unless `github.enabled`, and the nested flag opts in.
         match github_client.filter(|_| github.issues.enabled).zip(git_cli) {
             Some((client, git)) => {
-                github_issues::poll_loop(client, git, github, repos, handle, state_db).await;
+                issues::poll_loop(client, git, github, repos, handle, state_db).await;
             }
             None => std::future::pending().await,
         }

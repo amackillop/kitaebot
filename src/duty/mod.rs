@@ -263,7 +263,7 @@ async fn run_one(duty: &Duty, ctx: &RunCtx<'_>, state: &mut DutyState) {
 
 /// Prepare a fresh checkout for a prompt-duty turn, or advise a
 /// manual clone on failure. Mirrors `checkout_note` in
-/// `src/channel/github_issues.rs`.
+/// `src/channel/github/issues.rs`.
 async fn checkout_note(duty: &Duty, git: Option<&GitCli>, repo: &str) -> String {
     let Some(git) = git else {
         warn!(duty = %duty.name, "no GitCli for prompt duty; agent must clone");

@@ -142,7 +142,7 @@ const DEVELOPER_WORKFLOW: &str = include_str!("../prompts/developer-workflow.md"
 /// exclusive: the two modes are the same agent under different
 /// instructions, not one agent holding both sets.
 const BUILDER_SEGMENTS: &[&str] = &[DEVELOPER_WORKFLOW];
-const REVIEWER_SEGMENTS: &[&str] = &[crate::channel::github::REVIEW_PROTOCOL_SEGMENT];
+const REVIEWER_SEGMENTS: &[&str] = &[crate::channel::github::prs::REVIEW_PROTOCOL_SEGMENT];
 
 /// Segments a dispatch carries (spec 06). Keyed on the dispatch rather
 /// than the session: a session is where history accumulates, a role is
@@ -1827,7 +1827,10 @@ mod tests {
             role,
         };
         let reviewer = role_segments(&github(GitHubRole::Reviewer));
-        assert_eq!(reviewer, [crate::channel::github::REVIEW_PROTOCOL_SEGMENT]);
+        assert_eq!(
+            reviewer,
+            [crate::channel::github::prs::REVIEW_PROTOCOL_SEGMENT]
+        );
         assert!(!reviewer.iter().any(|s| s.contains("## Developer Workflow")));
 
         // Author is the bot's own PR and Contributor is a third-party

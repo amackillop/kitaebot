@@ -12,8 +12,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-mod review_checkout;
-
+use super::review_checkout;
 use crate::config::GithubConfig;
 use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -543,7 +542,7 @@ fn parse_tracking_key(key: &str) -> Option<(&str, u32)> {
 /// static review choreography, appended to the system prompt of every
 /// turn dispatched as [`GitHubRole::Reviewer`] instead of riding in
 /// each dispatch message.
-pub(crate) const REVIEW_PROTOCOL_SEGMENT: &str = include_str!("../prompts/review-protocol.md");
+pub(crate) const REVIEW_PROTOCOL_SEGMENT: &str = include_str!("../../prompts/review-protocol.md");
 
 /// Dispatch a turn to the repo's work session. Every GitHub turn lands
 /// there (spec 20); `role` is what distinguishes them, not the session.

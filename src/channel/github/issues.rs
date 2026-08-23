@@ -20,10 +20,10 @@ use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use super::execution_checkout;
-use super::github::Trust;
+use super::prs::Trust;
 use crate::agent::AgentHandle;
 use crate::agent::envelope::ChannelSource;
+use crate::channel::execution_checkout;
 use crate::clients::github::{GithubClient, IssueComment, SearchIssue};
 use crate::config::GithubConfig;
 use crate::error::GithubError;
@@ -461,7 +461,7 @@ fn format_new_issue(view: &IssueView, trust: &Trust, bot_login: &str) -> String 
             let _ = writeln!(s, "[{}] {}", comment.user.login, comment.body);
         }
     }
-    let _ = writeln!(s, "\n{}", super::PLAN_INSTRUCTIONS);
+    let _ = writeln!(s, "\n{}", crate::channel::PLAN_INSTRUCTIONS);
     s
 }
 

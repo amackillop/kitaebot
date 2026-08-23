@@ -339,8 +339,7 @@ src/
 ├── channel/             Channels the agent talks through (spec 10)
 │   ├── socket.rs        Unix socket NDJSON channel
 │   ├── telegram.rs      Telegram Bot API channel
-│   ├── github.rs        GitHub PR polling channel (+ review_checkout)
-│   ├── github_issues.rs GitHub issue polling channel
+│   ├── github/          GitHub channels: prs.rs, issues.rs (+ review_checkout)
 │   ├── linear.rs        Linear issue polling channel
 │   └── execution_checkout.rs  Fresh-base checkout prep shared by ticket channels
 ├── notify.rs            notify tool + Telegram push batching
