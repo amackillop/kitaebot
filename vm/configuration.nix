@@ -545,6 +545,11 @@ in
       options = "--delete-older-than 7d";
     };
     nix.settings = {
+      # Stock nix disables these; every devshell and gate needs flakes.
+      experimental-features = [
+        "flakes"
+        "nix-command"
+      ];
       min-free = 3 * 1024 * 1024 * 1024; # 3 GiB
       max-free = 10 * 1024 * 1024 * 1024; # 10 GiB
     };
