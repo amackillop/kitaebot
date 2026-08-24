@@ -12,7 +12,6 @@
   inputs = {
     kitaebot.url = "path:..";
     nixpkgs.follows = "kitaebot/nixpkgs";
-    determinate.url = "https://flakehub.com/f/DeterminateSystems/determinate/*";
   };
 
   outputs =
@@ -20,7 +19,6 @@
       self,
       nixpkgs,
       kitaebot,
-      determinate,
       ...
     }:
     {
@@ -28,7 +26,6 @@
         system = "x86_64-linux";
         modules = [
           kitaebot.nixosModules.vm
-          determinate.nixosModules.default
           ./configuration.nix
           { kitaebot.package = kitaebot.packages.x86_64-linux.default; }
         ];

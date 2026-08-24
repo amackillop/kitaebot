@@ -279,7 +279,6 @@ kitaebot = {
     "github.com"
     "api.github.com"
     "githubusercontent.com"
-    "flakehub.com"
     "api.perplexity.ai"
   ];
 };

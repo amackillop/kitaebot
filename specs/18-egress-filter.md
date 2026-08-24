@@ -38,7 +38,6 @@ is the only path out.
 | `github.com` | Git clone/push, GitHub web |
 | `api.github.com` | GitHub REST/GraphQL API |
 | `githubusercontent.com` | GitHub raw content, git objects |
-| `flakehub.com` | FlakeHub Nix registry |
 | `api.perplexity.ai` | Web search tool |
 | `api.linear.app` | Linear API |
 | `bitcoinknowledge.dev` | bkb MCP server backend (spec 22) |

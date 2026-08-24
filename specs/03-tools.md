@@ -595,8 +595,8 @@ itself outgrows the cap; the cost of a miss is one leaf rebuild.
 ### Nix Store Roots
 
 `nix flake check` roots nothing it builds, and the VM's automatic
-GC (determinate-nixd, two-hourly, pressure-driven on a near-full
-disk) deletes any unrooted path. Without a root the crane dep
+GC (weekly `nix.gc` timer plus `min-free`/`max-free` pressure
+collection) deletes any unrooted path. Without a root the crane dep
 closure (`kitaebot-deps`, the vendored registry) is garbage by
 construction, and every GC pass costs the next nix operation a
 ~10-minute rebuild of all vendored crates — long enough to blow the

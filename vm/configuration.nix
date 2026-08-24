@@ -203,7 +203,6 @@ in
         "github.com"
         "api.github.com"
         "githubusercontent.com"
-        "flakehub.com"
         "api.perplexity.ai"
         "api.linear.app"
         # MCP server backends (spec 22).

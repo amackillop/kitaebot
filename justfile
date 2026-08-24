@@ -100,7 +100,7 @@ fix:
 # connection needs is passed explicitly below.
 SSH_OPTS := "-F /dev/null -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
-# Build the VM (uses Determinate Nix binary cache)
+# Build the VM
 #
 # The deploy flake locks the parent kitaebot input (path:..) by content
 # hash, so changes to vm/ or src/ are invisible without re-locking. Update
