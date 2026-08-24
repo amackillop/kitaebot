@@ -5,6 +5,8 @@
 //! Unicode-folded. Rungs are ordered least- to most-aggressive; the
 //! first rung with at least one match decides the outcome.
 
+use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -13,7 +15,7 @@ use serde::Deserialize;
 use tracing::debug;
 
 use super::path::PathGuard;
-use super::{Tool, ToolCtx};
+use super::{Tool, ToolCtx, truncate_output};
 use crate::error::ToolError;
 
 #[derive(Deserialize, JsonSchema)]
@@ -82,10 +84,10 @@ impl Tool for FileEdit {
             })?;
 
             let Some((rung, spans)) = find_matches(&content, &args.old_string) else {
-                return Err(ToolError::Precondition(format!(
-                    "no match found for old_string in {path}; the file may have \
-                     changed since you read it. Current content:\n{content}",
-                    path = args.path,
+                return Err(ToolError::Precondition(stale_read_message(
+                    &content,
+                    &args.old_string,
+                    &args.path,
                 )));
             };
 
@@ -229,6 +231,69 @@ fn ambiguous_message(rung: Rung, spans: &[Span], content: &str, path: &str) -> S
     )
 }
 
+/// Byte cap on the stale-read snapshot. The model needs enough to
+/// re-synchronize the edit, not the whole file; files that large are
+/// stubbed out of context by the engine anyway (spec 14).
+const SNAPSHOT_MAX_BYTES: usize = 2048;
+
+/// Error text for a no-match on every rung. Carries the stale-read
+/// hint plus a bounded excerpt around the closest candidate line, not
+/// the whole file: the whole-file embed drowned the error tee on large
+/// files (spec 24, entry size is correctness), and an excerpt around
+/// the nearest match beats a full dump for re-synchronization anyway.
+fn stale_read_message(content: &str, old: &str, path: &str) -> String {
+    let excerpt = match nearest_line(content, old) {
+        Some(line) => excerpt_around(content, line),
+        None => format!("({} bytes, no lines)", content.len()),
+    };
+    format!(
+        "no match found for old_string in {path}; the file may have \
+         changed since you read it. Nearest candidate:\n{}",
+        truncate_output(&excerpt, SNAPSHOT_MAX_BYTES),
+    )
+}
+
+/// 1-based line number of the line most similar to `old`, by
+/// normalized token overlap. Ties go to the earliest line; zero
+/// overlap anywhere anchors at the top. `None` only when the file
+/// has no lines at all.
+fn nearest_line(content: &str, old: &str) -> Option<usize> {
+    let normalized_old = normalize_line(old);
+    let needle: HashSet<&str> = normalized_old
+        .split(' ')
+        .filter(|t| !t.is_empty())
+        .collect();
+    content
+        .lines()
+        .map(|line| {
+            let normalized = normalize_line(line);
+            let tokens: HashSet<&str> = normalized.split(' ').collect();
+            needle.intersection(&tokens).count()
+        })
+        .enumerate()
+        .max_by_key(|&(i, overlap)| (overlap, Reverse(i)))
+        .map(|(i, overlap)| if overlap > 0 { i + 1 } else { 1 })
+}
+
+/// Numbered lines around `center` (inclusive), in `file_read`'s
+/// `line\tcontent` format. A header line names the window so the
+/// model can tell a partial excerpt from the whole file; it leads the
+/// excerpt so the byte cap cannot cut it off.
+fn excerpt_around(content: &str, center: usize) -> String {
+    use std::fmt::Write;
+
+    let total = content.lines().count();
+    let from = center.saturating_sub(CONTEXT_LINES).max(1);
+    let to = (center + CONTEXT_LINES).min(total);
+
+    let mut out = String::new();
+    if from > 1 || to < total {
+        let _ = writeln!(out, "[showing lines {from}-{to} of {total}]");
+    }
+    let _ = write!(out, "{}", numbered_lines(content, from, to));
+    out
+}
+
 /// 1-based line number of a byte position.
 fn line_of(content: &str, pos: usize) -> usize {
     content[..pos].bytes().filter(|&b| b == b'\n').count() + 1
@@ -237,20 +302,12 @@ fn line_of(content: &str, pos: usize) -> usize {
 /// Context lines on each side of an edited region in the success echo.
 const CONTEXT_LINES: usize = 3;
 
-/// Render the region at `[start, start + len)` with line numbers and
-/// context, in `file_read`'s `line\tcontent` format.
-fn echo_region(content: &str, start: usize, len: usize) -> String {
+/// Numbered lines `from..=to` (1-based, inclusive), in `file_read`'s
+/// `line\tcontent` format. `to` clamps to the last line.
+fn numbered_lines(content: &str, from: usize, to: usize) -> String {
     use std::fmt::Write;
 
-    let first = line_of(content, start);
-    let last = if len == 0 {
-        first
-    } else {
-        line_of(content, start + len - 1)
-    };
-    let from = first.saturating_sub(CONTEXT_LINES).max(1);
-    let to = last + CONTEXT_LINES;
-
+    let to = to.min(content.lines().count());
     content
         .lines()
         .enumerate()
@@ -260,6 +317,22 @@ fn echo_region(content: &str, start: usize, len: usize) -> String {
             let _ = writeln!(acc, "{}\t{line}", i + 1);
             acc
         })
+}
+
+/// Render the region at `[start, start + len)` with line numbers and
+/// context, in `file_read`'s `line\tcontent` format.
+fn echo_region(content: &str, start: usize, len: usize) -> String {
+    let first = line_of(content, start);
+    let last = if len == 0 {
+        first
+    } else {
+        line_of(content, start + len - 1)
+    };
+    numbered_lines(
+        content,
+        first.saturating_sub(CONTEXT_LINES).max(1),
+        last + CONTEXT_LINES,
+    )
 }
 
 /// Strip trailing whitespace only.
@@ -378,6 +451,73 @@ mod tests {
             Err(ToolError::Precondition(msg)) => {
                 assert!(msg.contains("may have changed since you read it"), "{msg}");
                 assert!(msg.contains("hello world"), "{msg}");
+            }
+            other => panic!("expected Precondition, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_match_excerpt_anchors_on_nearest_candidate() {
+        // Line 5 shares "fn" and "{" with the needle; every other line
+        // shares nothing. The excerpt must center on line 5, not dump
+        // the file.
+        let content = "mod a;\nmod b;\nmod c;\nmod d;\nfn stale_read_message() {\n}\n\
+                       mod e;\nmod f;\nmod g;\n";
+        let (_dir, tool) = setup(content);
+        let result = edit(&tool, "fn stale_read_message(&self) {", "x").await;
+        match result {
+            Err(ToolError::Precondition(msg)) => {
+                assert!(msg.contains("[showing lines 2-8 of 9]"), "{msg}");
+                assert!(msg.contains("5\tfn stale_read_message() {"), "{msg}");
+                assert!(!msg.contains("1\tmod a;"), "{msg}");
+                assert!(!msg.contains("9\tmod g;"), "{msg}");
+            }
+            other => panic!("expected Precondition, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_match_excerpt_is_bounded_on_large_files() {
+        // No token overlap anywhere: the excerpt anchors at the top and
+        // the long lines push it past the byte cap.
+        let content = format!("{}\n", "x".repeat(600)).repeat(100);
+        let (_dir, tool) = setup(&content);
+        let result = edit(&tool, "fn stale_read_message(&self) {", "x").await;
+        match result {
+            Err(ToolError::Precondition(msg)) => {
+                assert!(
+                    msg.len() <= SNAPSHOT_MAX_BYTES + 256,
+                    "msg is {} bytes",
+                    msg.len()
+                );
+                assert!(msg.contains("[showing lines 1-4 of 100]"), "{msg}");
+                assert!(msg.contains("[truncated"), "{msg}");
+            }
+            other => panic!("expected Precondition, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_match_with_zero_overlap_anchors_at_top() {
+        let (_dir, tool) = setup("alpha\nbeta\n");
+        let result = edit(&tool, "zzz qqq", "x").await;
+        match result {
+            Err(ToolError::Precondition(msg)) => {
+                assert!(msg.contains("1\talpha"), "{msg}");
+                assert!(msg.contains("2\tbeta"), "{msg}");
+                assert!(!msg.contains('['), "{msg}");
+            }
+            other => panic!("expected Precondition, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_match_on_empty_file_names_byte_count() {
+        let (_dir, tool) = setup("");
+        let result = edit(&tool, "anything", "x").await;
+        match result {
+            Err(ToolError::Precondition(msg)) => {
+                assert!(msg.contains("(0 bytes, no lines)"), "{msg}");
             }
             other => panic!("expected Precondition, got {other:?}"),
         }

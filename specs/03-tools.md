@@ -287,11 +287,21 @@ without a follow-up read and gets line anchors for subsequent edits.
 For `replace_all`, the match count plus the first edited region.
 
 **Stale-read failure**: when no rung matches, the error carries a hint
-that the file may have changed since it was read, followed by the
-file's current content. Recovery becomes a same-turn re-issue of the
-edit against fresh content instead of a read round-trip. The snapshot
-is not truncated at the tool layer; it rides the standard tool-output
-pipeline, where the engines own size policy.
+that the file may have changed since it was read, followed by a
+bounded excerpt around the nearest candidate line — the line with the
+highest normalized-token overlap with `old_string` (ties to the
+earliest; zero overlap anchors at the top) — in `file_read`'s numbered
+format with three lines of context each side and a `[showing lines
+X-Y of Z]` header when the window is partial. The excerpt is capped at
+2 KiB by the tool itself (`truncate_output`), not delegated to the
+engine: the same string is the log line and error-tee entry, and the
+tee has no per-entry cap (spec 24, "entry size is correctness"). An
+excerpt around the nearest match also beats a full dump for
+re-synchronization — the model gets line anchors near where it was
+editing instead of a wall of source to re-scan. Recovery remains a
+same-turn re-issue of the edit against the excerpt, or a targeted
+`file_read` when the excerpt shows the file moved further than one
+window.
 
 ---
 
@@ -596,9 +606,9 @@ for the shared target dir against the ~19 GB VM disk.
 | Malformed arguments | `InvalidArguments` | Error text returned to LLM |
 | Command on deny list | `Blocked { operation, guidance }` | Friendly message to LLM explaining what to use instead |
 | Exec timeout | `Timeout` | Process killed, error returned to LLM |
-| Tool runtime error | `ExecutionFailed` | Error text returned to LLM |
-| `file_edit` no match | `ExecutionFailed` | Error carries stale-read hint + current file content (see tool section) |
-| `file_edit` ambiguous match | `ExecutionFailed` | Error lists rung, count, and match line numbers |
+| Command exited non-zero | `CommandFailed` | Error text (command, output, exit code) returned to LLM |
+| `file_edit` no match | `Precondition` | Error carries stale-read hint + bounded excerpt around the nearest candidate line (see tool section) |
+| `file_edit` ambiguous match | `Precondition` | Error lists rung, count, and match line numbers |
 
 All errors are surfaced to the LLM as text. The LLM decides how to proceed.
 The agent loop's policy gate escalates repeated `Blocked` errors (see
