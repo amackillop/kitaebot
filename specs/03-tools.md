@@ -39,8 +39,9 @@ JSON value (e.g. `"review": "{\"repo\":\"...\"}"` instead of
 `"limit": 30`). Fields prone to this use the `string_or_value`
 deserializer, which parses the inner JSON string before deserializing into
 the target type. Applied to `task`'s `review` parameter,
-`github_api`'s `body` parameter, and `file_read`'s `offset`/`limit`
-parameters.
+`github_api`'s `body` parameter, `file_read`'s `offset`/`limit`
+parameters, `lcm_grep`'s `limit` parameter, and `lcm_expand`'s
+`depth`/`include_messages`/`token_cap` parameters.
 
 ### Per-Turn Context
 

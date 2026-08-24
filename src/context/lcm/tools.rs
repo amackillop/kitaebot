@@ -26,7 +26,7 @@ use tracing::debug;
 
 use super::explore::extract_file_ids;
 use crate::error::ToolError;
-use crate::tools::{Tool, ToolCtx};
+use crate::tools::{Tool, ToolCtx, string_or_value};
 use crate::types::estimate_tokens;
 
 /// Default result limit for `lcm_grep`. Generous but capped so a
@@ -104,7 +104,7 @@ struct GrepArgs {
     #[serde(default)]
     scope: Option<String>,
     /// Max results returned. Defaults to 50; capped at 200.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_value")]
     limit: Option<u32>,
 }
 
@@ -558,14 +558,14 @@ struct ExpandArgs {
     summary_id: String,
     /// Levels to expand (default 1). Each level fetches one DAG step
     /// further from `summary_id`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_value")]
     depth: Option<u32>,
     /// Include raw source messages for leaf summaries (default false).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_value")]
     include_messages: Option<bool>,
     /// Token cap on response. Default 5000; capped at 20000. Stops
     /// expansion early once the cap is reached.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_value")]
     token_cap: Option<u32>,
 }
 
@@ -985,6 +985,30 @@ mod tests {
             .await
             .unwrap();
         assert!(out.starts_with("No matches"));
+    }
+
+    #[test]
+    fn grep_args_accept_string_encoded_limit() {
+        let args: GrepArgs = serde_json::from_value(serde_json::json!({
+            "pattern": "x",
+            "limit": "5",
+        }))
+        .unwrap();
+        assert_eq!(args.limit, Some(5));
+    }
+
+    #[test]
+    fn expand_args_accept_string_encoded_values() {
+        let args: ExpandArgs = serde_json::from_value(serde_json::json!({
+            "summary_id": "sum_x",
+            "depth": "2",
+            "include_messages": "true",
+            "token_cap": "100",
+        }))
+        .unwrap();
+        assert_eq!(args.depth, Some(2));
+        assert_eq!(args.include_messages, Some(true));
+        assert_eq!(args.token_cap, Some(100));
     }
 
     #[tokio::test]
