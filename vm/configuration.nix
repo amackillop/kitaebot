@@ -211,6 +211,7 @@ in
         # Package registries: devShells fetch project dependencies here.
         "npmjs.org"
         "yarnpkg.com"
+        "pnpm.io"
         "crates.io"
         "pypi.org"
         "pythonhosted.org"

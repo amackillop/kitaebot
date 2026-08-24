@@ -40,8 +40,20 @@ is the only path out.
 | `githubusercontent.com` | GitHub raw content, git objects |
 | `flakehub.com` | FlakeHub Nix registry |
 | `api.perplexity.ai` | Web search tool |
+| `api.linear.app` | Linear API |
+| `bitcoinknowledge.dev` | bkb MCP server backend (spec 22) |
+| `npmjs.org` | npm/pnpm registry (devShell installs) |
+| `yarnpkg.com` | yarn registry (devShell installs) |
+| `pnpm.io` | pnpm docs — the dependency-maintenance duty reads override/config references |
+| `crates.io` | cargo registry (devShell installs) |
+| `pypi.org` | pip index (devShell installs) |
+| `pythonhosted.org` | pip package files (devShell installs) |
+| `rubygems.org` | gem registry (devShell installs) |
+| `doc.rust-lang.org` | rustdoc (devShell toolchain docs) |
 
-Each domain matches itself and all subdomains.
+Plus one anchored ERE in `egressAllowlistPatterns` (GitHub Actions
+log/artifact downloads, see the option's comment). Each domain matches
+itself and all subdomains.
 
 ### tinyproxy Configuration
 
@@ -106,7 +118,7 @@ The proxy must accept connections before the daemon starts.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `egressAllowlist` | list of str | (7 domains above) | Domains the kitaebot process may connect to |
+| `egressAllowlist` | list of str | (the default allowlist above) | Domains the kitaebot process may connect to |
 
 ### Side Effects
 
