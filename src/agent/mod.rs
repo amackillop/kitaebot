@@ -29,6 +29,11 @@ use crate::tools::{ToolCtx, Tools, truncate_output};
 use crate::types::{Message, Response, ToolCall};
 use crate::workspace::Workspace;
 
+/// Byte cap on the error shown in the turn-summary log line. State
+/// reports ride the error whole to the channel; the journal gets the
+/// headline.
+const TURN_SUMMARY_ERROR_MAX_BYTES: usize = 2_048;
+
 /// Consecutive identical tool calls before execution is skipped.
 const REPEAT_LIMIT: usize = 3;
 
@@ -426,7 +431,9 @@ pub(crate) async fn run_turn_metered(
         ),
         Err(e) => info!(
             outcome,
-            error = %e,
+            // Bounded copy: the full text (state reports included)
+            // reaches the channel; journald cuts long lines silently.
+            error = %truncate_output(&e.to_string(), TURN_SUMMARY_ERROR_MAX_BYTES),
             iterations = stats.iterations,
             tool_calls = stats.tool_calls,
             prompt_tokens = stats.prompt_tokens,
