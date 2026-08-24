@@ -104,17 +104,17 @@ const DISTILL_PROMPT: &str = include_str!("../prompts/distill.md");
 
 /// The distiller worker: a fixed system prompt plus the memory-editing
 /// tool set, mirroring the sub-agent construction in `agent::task`. It
-/// also carries the run knobs (the gate threshold and the tool-loop
-/// cap) since both are fixed properties of the distiller, not the call
-/// site.
+/// also carries the run knobs (the gate threshold, the per-pass slice
+/// budget, and the tool-loop cap) since all are fixed properties of
+/// the distiller, not the call site.
 pub struct Distiller {
     system_prompt: String,
     tools: Tools,
     threshold: u64,
-    /// Token budget for one pass's consolidated span: the slice
-    /// knob when set, else the threshold. Seeding the gather from
-    /// this rather than the threshold is what bounds a pass when
-    /// the backlog exceeds what one turn can fold.
+    /// Token budget for one pass's consolidated span. Defaults to the
+    /// threshold, so an unset slice folds the whole gated backlog in
+    /// one pass; a smaller value bounds each pass to one slice and an
+    /// oversized backlog drains across successive gate-open passes.
     slice_tokens: u64,
     max_iterations: usize,
     /// The injection cap for memory/MEMORY.md: the index is truncated
@@ -128,9 +128,6 @@ pub struct Distiller {
 impl Distiller {
     /// Build the distiller from the parent's base registry
     /// (post-`tools.disabled`), filtered to the memory-editing tools.
-    /// `slice_tokens` of `None` means one pass folds the whole gated
-    /// backlog (budget = threshold); `Some(n)` bounds each pass to one
-    /// slice so an oversized backlog drains across passes.
     pub fn new(
         base: &Tools,
         workspace_dir: &Path,
@@ -191,12 +188,11 @@ impl Distiller {
 /// Probes the per-session pending token totals, and if their sum has
 /// not reached the distiller's threshold, returns `Ok(None)` without an
 /// LLM call. Otherwise it gathers the pending spans across sessions
-/// (sharing one token budget — the slice, which defaults to the
-/// threshold — so the consolidated pass stays bounded), folds them into
-/// a single distiller turn on a fresh ephemeral context, and on success
-/// advances each session's watermark and persists the state. A failed
-/// turn leaves the watermarks untouched so the same span is retried at
-/// the next gate crossing.
+/// (sharing the distiller's slice budget so the consolidated pass stays
+/// bounded), folds them into a single distiller turn on a fresh
+/// ephemeral context, and on success advances each session's watermark
+/// and persists the state. A failed turn leaves the watermarks
+/// untouched so the same span is retried at the next gate crossing.
 ///
 /// Returns the pass summary paired with its billed [`TurnUsage`] so the
 /// caller can record the cost; `None` when the gate is closed.
@@ -220,9 +216,7 @@ pub async fn run<P: Provider, E: ContextEngine>(
 
     // Share one token budget across sessions so the consolidated span
     // cannot outgrow the distiller's window; each fetch is clamped and
-    // always makes progress. The budget is the slice, not the
-    // threshold, so a backlog larger than one pass drains slice by
-    // slice across gate-open ticks.
+    // always makes progress.
     let mut gathered = Gathered::new(distiller.slice_tokens);
     for name in pending.keys() {
         if gathered.budget == 0 {
@@ -1071,6 +1065,89 @@ mod run_tests {
         .unwrap();
         assert!(out.is_none());
         assert_eq!(provider.call_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn slice_below_threshold_bounds_first_pass() {
+        let (_dir, ws) = workspace();
+        // 1200 pending, threshold 1200, slice 400: the first pass must
+        // fold one 400-token slice, not the whole gated backlog — a
+        // threshold-seeded budget would fold all three sessions here.
+        let engine = FakeEngine {
+            pending: BTreeMap::new(),
+            transcripts: BTreeMap::from([
+                ("a".into(), session_messages(4, 100)),
+                ("b".into(), session_messages(4, 100)),
+                ("c".into(), session_messages(4, 100)),
+            ]),
+        };
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text("pass 1".into())),
+            Ok(Response::Text("pass 2".into())),
+        ]));
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 1200, Some(400), 5, 8192);
+        let mut state = DistillState::default();
+
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.expect("pass 1 runs").0, "pass 1");
+        assert_eq!(state.watermarks.get("a"), Some(&4));
+        assert!(!state.watermarks.contains_key("b"));
+        assert!(!state.watermarks.contains_key("c"));
+        assert_eq!(provider.call_count(), 1);
+
+        // 800 pending < 1200 threshold: the gate closes and the tail
+        // waits for new history — the floor of sliced draining.
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert!(out.is_none());
+        assert_eq!(provider.call_count(), 1);
+
+        // New history reopens the gate (1300 >= 1200) and the next
+        // pass folds the next slice.
+        let engine = FakeEngine {
+            pending: BTreeMap::new(),
+            transcripts: BTreeMap::from([
+                ("a".into(), session_messages(4, 100)),
+                ("b".into(), session_messages(4, 100)),
+                ("c".into(), session_messages(4, 100)),
+                ("d".into(), session_messages(5, 100)),
+            ]),
+        };
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.expect("pass 2 runs").0, "pass 2");
+        assert_eq!(state.watermarks.get("b"), Some(&4));
+        assert!(!state.watermarks.contains_key("c"));
+        assert_eq!(provider.call_count(), 2);
     }
 
     #[tokio::test]

@@ -132,13 +132,17 @@ reading session history through the context engine abstraction:
   **not** to the head — so history the budget could not reach this tick
   stays pending, not dropped. Between ticks a session can accumulate far
   more than the slice; the gate simply stays open and the next tick
-  folds the next slice. A backlog arbitrarily larger than one pass's
-  budget therefore distills completely across successive passes, the
-  cursor advancing per slice — a pass that fails retries its own slice
-  (watermarks move only on success) and never blocks later slices
-  beyond that retry. Bursty load drains on idle ticks. Sustained load
-  above one slice per tick lags without bound (nothing is lost, memory
-  just trails); draining the backlog within a tick is deferred
+  folds the next slice. Draining stops once the pending total falls
+  below the threshold — with a slice below the threshold, up to
+  `threshold - 1` tokens stay pending until new history reopens the
+  gate; a backlog drains to that floor, not to zero. A pass that fails
+  retries its own slice (watermarks move only on success); a transient
+  failure blocks later slices only until its retry succeeds, while a
+  deterministically failing slice (a fold that exceeds the iteration
+  cap, or poison content) blocks everything behind it — a known
+  residual. Bursty load drains on idle ticks. Sustained load above one
+  slice per tick lags without bound (nothing is lost, memory just
+  trails); draining the backlog within a tick is deferred
   ([FUTURE](FUTURE.md)).
 - **Duties:** extract durable facts from the new events into topics and
   index; merge and dedupe entries the in-turn writes accumulated; prune
@@ -245,7 +249,10 @@ not "no response".
   inside the distiller's window) is provisional; needs live
   token-volume data to confirm.
 - Large consolidated spans could approach the memory model's window at
-  very high thresholds. Resolved by `distill_slice_tokens` (#47): the
-  slice bounds each pass's span, and an oversized backlog drains
-  across successive gate-open passes instead of failing a single
-  oversized turn and retrying forever.
+  very high thresholds. Mitigated by `distill_slice_tokens` (#47): the
+  slice bounds each pass's span, so an oversized backlog drains across
+  successive gate-open passes instead of failing a single oversized
+  turn and retrying forever. The slice bounds spans, not atoms — a
+  single event larger than the slice is still folded whole (the
+  at-least-one-event clamp guarantees progress) and can fail the pass
+  on its own.
