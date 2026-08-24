@@ -570,14 +570,26 @@ The devShell does not set `CARGO_TARGET_DIR`, so the systemd
 environment is the sole source — direnv does not override it.
 
 The warm command (`just warm`: `cargo build --tests --features
-mock-network && cargo sweep --time 7 && nix build .#deps --out-link
-.gcroots/deps`) populates the shared dir, sweeps artifacts older
-than 7 days, and roots the crane dep closure (below). Chained after
-`just check` in the repo's warm config (`deploy/configuration.nix`),
-so the daily warm covers the cycle. `cargo-sweep` runs on the shared
-dir; cross-repo collisions are a known cargo hazard (upstream #14135)
-accepted because the agent serializes turns. Disk budget: ~1-2 GB
-for the shared target dir against the ~19 GB VM disk.
+mock-network && cargo sweep --time 7 && cargo sweep --maxsize 12GB
+&& nix build .#deps --out-link .gcroots/deps`) populates the shared
+dir, sweeps it, and roots the crane dep closure (below). Chained
+after `just check` in the repo's warm config
+(`deploy/configuration.nix`), so the daily warm covers the cycle.
+`cargo-sweep` runs on the shared dir; cross-repo collisions are a
+known cargo hazard (upstream #14135) accepted because the agent
+serializes turns.
+
+The sweep is two-stage because a pure time sweep cannot bound the
+dir: incremental caches accrete one universe per crate × feature set
+× profile × RUSTFLAGS combination, each up to ~650 MB, and steady
+build activity keeps them all inside any freshness window (measured
+2026-08-24: 18 GB, 11 GB of it incremental universes, against an
+original ~1-2 GB estimate). `--time 7` drops artifacts unused for a
+week; `--maxsize 12GB` then evicts oldest-first to a hard ceiling.
+12 GB is ~1.5× the measured healthy live set (~8 GB: the mock-network
+test profile, two clippy profiles, and the other repos' occasional
+builds), so eviction reaches hot artifacts only if the live set
+itself outgrows the cap; the cost of a miss is one leaf rebuild.
 
 ### Nix Store Roots
 

@@ -43,6 +43,7 @@ build:
 warm:
     cargo build --tests --features mock-network
     cargo sweep --time 7
+    cargo sweep --maxsize 12GB
     mkdir -p .gcroots && nix build .#deps --out-link .gcroots/deps
 
 # Run tests
