@@ -55,12 +55,9 @@ impl TelegramClient {
                         .body(body)
                         .send()
                         .await
-                        .map_err(|e| TelegramError::Network(e.to_string()))?;
+                        .map_err(|e| network_error(&method, e))?;
                     let status = resp.status().as_u16();
-                    let bytes = resp
-                        .bytes()
-                        .await
-                        .map_err(|e| TelegramError::Network(e.to_string()))?;
+                    let bytes = resp.bytes().await.map_err(|e| network_error(&method, e))?;
                     Ok(RawResponse {
                         status,
                         body: bytes.to_vec(),
@@ -110,6 +107,20 @@ impl TelegramClient {
         let raw = (self.post)("sendMessage".into(), raw_body).await?;
         interpret_response(&raw)
     }
+}
+
+/// Transport error → [`TelegramError::Network`], with the URL stripped:
+/// its path embeds the bot token. The method name and joined source
+/// chain replace what the URL carried.
+fn network_error(method: &str, e: reqwest::Error) -> TelegramError {
+    let e = e.without_url();
+    let chain = std::iter::successors(Some(&e as &(dyn std::error::Error + 'static)), |e| {
+        e.source()
+    })
+    .map(ToString::to_string)
+    .collect::<Vec<_>>()
+    .join(": ");
+    TelegramError::Network(format!("{method}: {chain}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +348,33 @@ mod tests {
         let json = api_error_json(429, "Too Many Requests");
         let err = interpret_response::<Vec<Update>>(&raw(&json)).unwrap_err();
         assert_eq!(err.retry_after(), None);
+    }
+
+    // -- network_error tests --
+
+    #[tokio::test]
+    async fn network_error_redacts_token_url() {
+        let token = "123456:AAF-secret";
+        // Bind-and-drop yields a loopback port that refuses connections.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let url = format!("http://{addr}/bot{token}/getUpdates");
+        let e = crate::clients::http_client(reqwest::Client::builder())
+            .post(&url)
+            .send()
+            .await
+            .expect_err("connection to dropped port must fail");
+        assert!(
+            e.to_string().contains(token),
+            "precondition: reqwest Display carries the URL"
+        );
+
+        let msg = network_error("getUpdates", e).to_string();
+        assert!(!msg.contains(token), "token leaked: {msg}");
+        assert!(msg.contains("getUpdates"));
+        assert!(msg.contains("Connection refused"), "lost cause: {msg}");
     }
 
     // -- Client integration tests via from_fn --
