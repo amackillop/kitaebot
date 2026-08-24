@@ -91,8 +91,9 @@ When an excerpt is not enough, ask a narrower question instead:
   are for.
 - `lcm_grep` to search the stored text for the part you need.
 - `grep` for a pattern against the reference's `path`.
-- A slice of the payload: `file_read` with `offset` and `limit`, or
-  `exec` with `working_dir` set and `sed -n '<from>,<to>p' <path>`.
+- A slice: `file_read` with `offset` and `limit`. This is the only
+  slicer that reaches `context/lcm/payloads/` — the exec sandbox masks
+  `context/`, so `sed` works only on original project files.
 
 Never re-issue an identical call hoping for different output. It will be
 refused, and a turn that keeps asking is abandoned.
