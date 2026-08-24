@@ -65,6 +65,7 @@ in
           worker.model = "deepseek/deepseek-v4-pro";
           reviewer.model = "moonshotai/kimi-k3";
           summarizer.model = "deepseek/deepseek-v4-flash";
+          memory.reasoning.effort = "low";
         };
       };
 
