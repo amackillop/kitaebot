@@ -40,7 +40,7 @@ pub(crate) async fn prepare(git: &GitCli, nwo: &str) -> Result<String, ToolError
 
 /// In-repo caches the per-turn clean must not touch: re-provisioning
 /// them costs far more than tolerating a stale entry.
-const KEPT_CACHES: &[&str] = &[".direnv", "node_modules", ".venv"];
+const KEPT_CACHES: &[&str] = &[".direnv", ".gcroots", "node_modules", ".venv"];
 
 /// URL-parametrized body of [`prepare`], so tests can use `file://`.
 async fn prepare_at(git: &GitCli, url: &str, rel: &str) -> Result<(), ToolError> {
@@ -195,6 +195,8 @@ mod tests {
         std::fs::write(checkout.join("node_modules/dep.js"), "cached\n").unwrap();
         std::fs::create_dir(checkout.join(".direnv")).unwrap();
         std::fs::write(checkout.join(".direnv/env"), "cached\n").unwrap();
+        std::fs::create_dir(checkout.join(".gcroots")).unwrap();
+        std::fs::write(checkout.join(".gcroots/deps"), "root\n").unwrap();
         std::fs::create_dir(checkout.join("target")).unwrap();
         std::fs::write(checkout.join("target/lib.rlib"), "cached\n").unwrap();
         std::fs::write(checkout.join("stale.log"), "junk\n").unwrap();
@@ -208,6 +210,10 @@ mod tests {
         assert!(
             checkout.join(".direnv/env").exists(),
             ".direnv must survive the clean"
+        );
+        assert!(
+            checkout.join(".gcroots/deps").exists(),
+            ".gcroots must survive the clean — it holds the nix store roots"
         );
         assert!(
             !checkout.join("target/lib.rlib").exists(),
