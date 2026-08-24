@@ -70,6 +70,7 @@ The `exec` tier (`Policy::child_exec`):
 | `/nix/store` | read + execute | Binaries |
 | `/tmp` | working access | No device or socket creation |
 | `/etc`, `/run`, `/proc` | read | resolv.conf, CA certs, procfs |
+| `/lib64` | read | Build tooling scandirs it to detect libc (prisma postinstall); no execute, so the compat loader cannot run foreign binaries |
 | `/dev` | read + write | `/dev/null`, `/dev/urandom` |
 | Everything else | denied | Including the signing keyring at `/var/lib/kitaebot-gnupg`, which lives outside the workspace and is granted only in the daemon policy ([spec 13](13-credentials.md)) |
 

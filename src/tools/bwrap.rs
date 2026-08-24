@@ -35,14 +35,18 @@ pub fn wrap_argv(workspace: &Path, cwd: &Path) -> Vec<String> {
     let mut push = |s: &str| argv.push(s.to_string());
 
     // Read-only system view: all binaries live in the nix store; /etc
-    // carries resolv.conf, CA certs, and nsswitch. `--ro-bind-try`
-    // tolerates a missing /etc in minimal test roots.
+    // carries resolv.conf, CA certs, and nsswitch; /lib64 is scandir'd
+    // by build tooling detecting libc (prisma). `--ro-bind-try`
+    // tolerates the path missing on minimal roots.
     push("--ro-bind");
     push("/nix/store");
     push("/nix/store");
     push("--ro-bind-try");
     push("/etc");
     push("/etc");
+    push("--ro-bind-try");
+    push("/lib64");
+    push("/lib64");
 
     // Fresh pseudo-filesystems and a private /tmp. The private /tmp
     // also denies a same-uid read of the git askpass file, which the
@@ -126,6 +130,11 @@ mod tests {
     #[test]
     fn store_is_read_only() {
         assert!(has_triple(&argv(), "--ro-bind", "/nix/store", "/nix/store"));
+    }
+
+    #[test]
+    fn lib64_is_bound_read_only() {
+        assert!(has_triple(&argv(), "--ro-bind-try", "/lib64", "/lib64"));
     }
 
     #[test]

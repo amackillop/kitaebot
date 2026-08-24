@@ -290,6 +290,12 @@ impl Policy {
                 rationale: "System config — read-only",
             },
             Rule {
+                path: PathBuf::from("/lib64"),
+                access: read_files,
+                presence: Presence::Optional,
+                rationale: "Loader dir — build tooling scandirs it to detect libc (prisma)",
+            },
+            Rule {
                 path: PathBuf::from("/run"),
                 access: read_files,
                 presence: Presence::Optional,
@@ -871,8 +877,21 @@ mod tests {
     fn child_expected_rule_count() {
         let policy = child_policy();
         // workspace root, projects, review checklist, 5 build caches,
-        // /nix/store, /tmp, /etc, /run, /dev, /proc
-        assert_eq!(policy.rules().len(), 14);
+        // /nix/store, /tmp, /etc, /lib64, /run, /dev, /proc
+        assert_eq!(policy.rules().len(), 15);
+    }
+
+    #[test]
+    fn child_lib64_is_read_only_no_execute() {
+        let policy = child_policy();
+        let rule = policy
+            .rules()
+            .iter()
+            .find(|r| r.path == Path::new("/lib64"))
+            .expect("/lib64 rule must exist");
+        assert_eq!(rule.access, AccessFs::ReadFile | AccessFs::ReadDir);
+        assert!(!rule.access.contains(AccessFs::Execute));
+        assert!(!rule.access.contains(AccessFs::WriteFile));
     }
 
     #[test]
