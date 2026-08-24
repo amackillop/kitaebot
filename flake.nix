@@ -92,9 +92,9 @@
             commonArgs
             // {
               inherit cargoArtifacts;
-              # e2e is excluded to keep `nix flake check` fast; run it
-              # with `just test-e2e`.
-              cargoTestExtraArgs = "--features mock-network --bins --test kchat";
+              # e2e included: the suite is ~4s warm and sandbox-safe
+              # (loopback fixture server, /tmp-pinned git fixtures).
+              cargoTestExtraArgs = "--features mock-network --bins --test kchat --test e2e";
               # review_checkout tests spawn real git against a fixture repo.
               nativeCheckInputs = [ pkgs.git ];
             }

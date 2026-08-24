@@ -179,3 +179,12 @@ impl Drop for TestDaemon {
         let _ = self.child.wait();
     }
 }
+
+/// Tempdir for fixture repos, pinned under /tmp: the daemon's git
+/// tier grants /tmp but not $TMPDIR (/build in the nix sandbox).
+pub fn fixtures_root() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("kitaebot-e2e")
+        .tempdir_in("/tmp")
+        .unwrap()
+}

@@ -2,8 +2,8 @@
 //!
 //! Requires the `mock-network` feature so client construction accepts
 //! only loopback hosts; the harness points the daemon at a local
-//! fixture server. Excluded from `nix flake check`; run with
-//! `just test-e2e`.
+//! fixture server. Runs in `nix flake check`; `just test-e2e` runs
+//! it alone.
 
 mod harness;
 
@@ -223,7 +223,7 @@ fn github_feedback_pass_dispatches_trusted_reviews_only() {
     // The future-stamped review can dispatch on more than one tick
     // before the cursor passes it; the rule must survive that.
     fixture.on_completion_always("by @alice: APPROVED", text("noted"));
-    let fixtures_root = tempfile::TempDir::new().unwrap();
+    let fixtures_root = harness::fixtures_root();
     let _daemon = TestDaemon::spawn_with(&fixture, &github_config(&fixture, fixtures_root.path()));
 
     // Quote-free matcher: the message is JSON-escaped inside the
@@ -241,7 +241,7 @@ fn github_feedback_pass_dispatches_trusted_reviews_only() {
 #[test]
 fn github_review_request_then_tracked_rereview() {
     let fixture = FixtureServer::start();
-    let fixtures_root = tempfile::TempDir::new().unwrap();
+    let fixtures_root = harness::fixtures_root();
     let sha1 = harness::git_fixture_pr_repo(fixtures_root.path(), "owner/repo", 7);
 
     let mut pr = github_pr("owner/repo", 7, "alice", "Fix bug");
@@ -292,7 +292,7 @@ fn github_contributed_pass_dispatches_trusted_comments_only() {
     // The future-stamped comments can dispatch on more than one tick
     // before the cursor passes them; the rule must survive that.
     fixture.on_completion_always("zero-diff", text("replied on the PR"));
-    let fixtures_root = tempfile::TempDir::new().unwrap();
+    let fixtures_root = harness::fixtures_root();
     let daemon = TestDaemon::spawn_with(&fixture, &github_config(&fixture, fixtures_root.path()));
 
     // The turn message names the third-party author and the bot's
@@ -367,7 +367,7 @@ fn duty_cadence_survives_restart() {
 #[test]
 fn duty_new_commits_gate_fires_only_on_new_commits() {
     let fixture = FixtureServer::start();
-    let fixtures_root = tempfile::TempDir::new().unwrap();
+    let fixtures_root = harness::fixtures_root();
     harness::git_fixture_pr_repo(fixtures_root.path(), "owner/repo", 1);
 
     fixture.on_completion_always("scan the new commits", text("scanned"));
