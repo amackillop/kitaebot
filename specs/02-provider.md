@@ -40,9 +40,15 @@ Requests are serialized to the OpenAI chat completions format:
     "messages": [...],
     "tools": [...],
     "max_tokens": 32768,
-    "temperature": 0.7
+    "temperature": 0.7,
+    "reasoning": {"effort": "low"}
 }
 ```
+
+`reasoning` is OpenRouter's reasoning-budget parameter — either
+`{"effort": "low|medium|high"}` or `{"max_tokens": n}` — sent only when
+`provider.reasoning` is set and the API is OpenRouter (strict endpoints
+reject unknown params).
 
 Messages are tagged by `role` (system, user, assistant, tool). Both text-only
 assistant messages and tool-call assistant messages serialize to the `assistant`
@@ -142,7 +148,7 @@ The provider is split into two layers:
 | Rate limited | `ProviderError::RateLimited` returned to caller |
 | Malformed response (valid HTTP, bad JSON) | `ProviderError::InvalidResponse` |
 | Empty choices array | `ProviderError::InvalidResponse` |
-| No content, no tool calls, `finish_reason = "length"` | `ProviderError::Truncated` — generation hit `provider.max_tokens` before any output (reasoning models can burn the whole budget on reasoning); the fix is a larger `provider.max_tokens` |
+| No content, no tool calls, `finish_reason = "length"` | `ProviderError::Truncated` — generation hit `provider.max_tokens` before any output (reasoning models can burn the whole budget on reasoning); the fix is a `reasoning` bound or a larger `provider.max_tokens` |
 | No content, no tool calls, other finish reason | `ProviderError::EmptyResponse` |
 | Partial text, `finish_reason = "length"` | Surfaced as a normal reply with `[truncated at max_tokens]` appended, so readers and the model (next turn) see the cut |
 | Transport failure (connect, timeout, body read) | `ProviderError::Network` |
@@ -164,10 +170,12 @@ Configuration via `config.toml` under `[provider]`:
 | `model` | `arcee-ai/trinity-large-preview:free` | Model identifier |
 | `max_tokens` | 32768 | Max tokens in LLM response. Reasoning tokens count against it (OpenRouter), so it must cover reasoning plus output |
 | `temperature` | 0.7 | Sampling temperature |
+| `reasoning` | unset | Reasoning budget for the root model: `{ effort = "low\|medium\|high" }` or `{ max_tokens = n }` (n > 0, below `max_tokens` to leave content room). OpenRouter only; unset leaves the model's default |
 | `model_overrides.explore` | unset | Model for `explore` sub-agents |
 | `model_overrides.worker` | unset | Model for `worker` sub-agents |
+| `model_overrides.reviewer` | unset | Model for `reviewer` sub-agents (spec 23) |
 | `model_overrides.summarizer` | unset | Model for compaction summaries |
-| `model_overrides.heartbeat` | unset | Model for heartbeat turns |
+| `model_overrides.memory` | unset | Model for memory distillation turns |
 
 Each `model_overrides.*` key overrides the model for that role only; unset roles
 fall back to `model`. `max_tokens` and `temperature` are shared across

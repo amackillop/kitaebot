@@ -9,7 +9,7 @@ use serde::Serialize;
 use tracing::{debug, trace, warn};
 
 use crate::clients::chat_completion::{ApiToolCall, ChatResponse, CompletionsClient};
-use crate::config::{Api, ProviderConfig};
+use crate::config::{Api, ProviderConfig, Reasoning};
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
@@ -42,6 +42,9 @@ pub struct CompletionsProvider {
     model: String,
     max_tokens: u32,
     temperature: f32,
+    /// Reasoning budget sent with every request; `None` leaves the
+    /// model's default in place.
+    reasoning: Option<Reasoning>,
     /// `OpenRouter`-only request extensions: usage accounting (cache
     /// hit details) and the data-collection denial. Off for other
     /// APIs — strict endpoints reject unknown params.
@@ -56,18 +59,20 @@ impl CompletionsProvider {
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             temperature: config.temperature,
+            reasoning: config.reasoning,
             openrouter: matches!(config.api, Api::OpenRouter),
         }
     }
 
     /// A variant of this provider using a different model. Client,
-    /// `max_tokens`, and temperature are shared.
+    /// `max_tokens`, temperature, and reasoning are shared.
     pub fn with_model(&self, model: &str) -> Self {
         Self {
             client: self.client.clone(),
             model: model.to_string(),
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            reasoning: self.reasoning,
             openrouter: self.openrouter,
         }
     }
@@ -176,6 +181,7 @@ impl Provider for CompletionsProvider {
             tools: if tools.is_empty() { None } else { Some(tools) },
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            reasoning: self.openrouter.then_some(self.reasoning).flatten(),
             usage: self.openrouter.then_some(UsageAccounting { include: true }),
             provider: self.openrouter.then_some(ProviderPreferences {
                 data_collection: "deny",
@@ -229,6 +235,10 @@ struct ChatRequest<'a> {
     tools: Option<&'a [ToolDefinition]>,
     max_tokens: u32,
     temperature: f32,
+    /// Reasoning budget (`OpenRouter` `reasoning` param); omitted
+    /// when unset or for other APIs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<Reasoning>,
     /// `OpenRouter` usage accounting opt-in; omitted for other APIs.
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<UsageAccounting>,
@@ -293,6 +303,7 @@ mod tests {
         let cheap = provider.with_model("cheap/model");
         assert_eq!(cheap.model, "cheap/model");
         assert_eq!(cheap.max_tokens, provider.max_tokens);
+        assert_eq!(cheap.reasoning, provider.reasoning);
         assert!((cheap.temperature - provider.temperature).abs() < f32::EPSILON);
         assert_eq!(cheap.openrouter, provider.openrouter);
     }
@@ -305,6 +316,7 @@ mod tests {
             tools: None,
             max_tokens: 1,
             temperature: 0.0,
+            reasoning: None,
             usage,
             provider,
             session_id,
@@ -324,6 +336,30 @@ mod tests {
         assert!(!without.contains("usage"));
         assert!(!without.contains("provider"));
         assert!(!without.contains("session_id"));
+    }
+
+    #[test]
+    fn reasoning_serialized_in_openrouter_shape() {
+        use crate::config::ReasoningEffort;
+
+        let request = |reasoning| ChatRequest {
+            model: "m",
+            messages: Vec::new(),
+            tools: None,
+            max_tokens: 1,
+            temperature: 0.0,
+            reasoning,
+            usage: None,
+            provider: None,
+            session_id: None,
+        };
+        let effort =
+            serde_json::to_string(&request(Some(Reasoning::Effort(ReasoningEffort::Low)))).unwrap();
+        assert!(effort.contains(r#""reasoning":{"effort":"low"}"#));
+        let cap = serde_json::to_string(&request(Some(Reasoning::MaxTokens(8192)))).unwrap();
+        assert!(cap.contains(r#""reasoning":{"max_tokens":8192}"#));
+        let unset = serde_json::to_string(&request(None)).unwrap();
+        assert!(!unset.contains("reasoning"));
     }
 
     #[test]

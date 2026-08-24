@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
@@ -138,8 +138,32 @@ pub struct ProviderConfig {
     /// empty responses (`finish_reason = "length"`).
     pub max_tokens: u32,
     pub temperature: f32,
+    /// Reasoning budget for the root model. Unset lets the provider
+    /// use the model's default. `OpenRouter` only.
+    pub reasoning: Option<Reasoning>,
     /// Per-role model overrides. Unset roles use `model`.
     pub model_overrides: ModelOverrides,
+}
+
+/// Reasoning budget for a model, sent as `OpenRouter`'s `reasoning`
+/// request parameter.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reasoning {
+    /// Qualitative budget; portable across reasoning models.
+    Effort(ReasoningEffort),
+    /// Hard cap on reasoning tokens. Counts against
+    /// `provider.max_tokens`, so it must leave content room.
+    MaxTokens(u32),
+}
+
+/// Effort levels accepted by `OpenRouter`'s `reasoning.effort`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    High,
+    Low,
+    Medium,
 }
 
 /// Per-role model overrides. Each role falls back to `provider.model`
@@ -790,6 +814,7 @@ impl Default for ProviderConfig {
             model: "arcee-ai/trinity-large-preview:free".to_string(),
             max_tokens: 32_768,
             temperature: 0.7,
+            reasoning: None,
             model_overrides: ModelOverrides::default(),
         }
     }
@@ -919,6 +944,22 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "temperature must be between 0.0 and 2.0".into(),
             ));
+        }
+        if let Some(reasoning) = self.provider.reasoning {
+            if !matches!(self.provider.api, Api::OpenRouter) {
+                return Err(ConfigError::Invalid(
+                    "provider reasoning requires the openrouter api".into(),
+                ));
+            }
+            if let Reasoning::MaxTokens(cap) = reasoning
+                && (cap == 0 || cap >= self.provider.max_tokens)
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "reasoning max_tokens ({cap}) must be > 0 and below \
+                     provider max_tokens ({}) to leave content room",
+                    self.provider.max_tokens,
+                )));
+            }
         }
         self.validate_channels()?;
         if self.tools.exec.timeout_secs == 0 {
@@ -1109,6 +1150,32 @@ mod tests {
     #[test]
     fn reject_context_window_not_larger_than_output_budget() {
         let result = load_toml("[provider]\nmax_tokens = 300000\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn reasoning_parses_effort_and_cap() {
+        let cfg = load_toml("[provider]\nreasoning = { effort = \"low\" }\n").unwrap();
+        assert_eq!(
+            cfg.provider.reasoning,
+            Some(Reasoning::Effort(ReasoningEffort::Low))
+        );
+        let cfg = load_toml("[provider]\nreasoning = { max_tokens = 8192 }\n").unwrap();
+        assert_eq!(cfg.provider.reasoning, Some(Reasoning::MaxTokens(8192)));
+        assert_eq!(load_toml("").unwrap().provider.reasoning, None);
+    }
+
+    #[test]
+    fn reject_reasoning_cap_without_content_room() {
+        for cap in ["0", "32768"] {
+            let result = load_toml(&format!("[provider]\nreasoning = {{ max_tokens = {cap} }}"));
+            assert!(matches!(result, Err(ConfigError::Invalid(_))), "cap {cap}");
+        }
+    }
+
+    #[test]
+    fn reject_reasoning_on_non_openrouter_api() {
+        let result = load_toml("[provider]\napi = \"openai\"\nreasoning = { effort = \"high\" }\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 
