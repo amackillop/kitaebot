@@ -60,6 +60,9 @@ in
       provider = {
         model = "z-ai/glm-5.3";
         max_tokens = 32768;
+        # Unset lets glm-5.3 free-run its thinking: 5.4x the output
+        # tokens per call that 5.2 produced, on every iteration.
+        reasoning.effort = "high";
         model_overrides = {
           explore.model = "deepseek/deepseek-v4-pro";
           worker.model = "deepseek/deepseek-v4-pro";
