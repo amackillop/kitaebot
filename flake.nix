@@ -107,6 +107,7 @@
         nixosTests = nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
           backup = import ./vm/test-backup.nix { inherit pkgs self; };
           egress = import ./vm/test-egress.nix { inherit pkgs self; };
+          flakes = import ./vm/test-flakes.nix { inherit pkgs self; };
         };
 
         packages = {
