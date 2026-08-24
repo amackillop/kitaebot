@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::tools::mcp::McpError;
+use crate::tools::truncate_output;
 
 /// Top-level agent error.
 #[derive(Debug, Error)]
@@ -288,7 +289,9 @@ pub enum ToolError {
     /// hold: an edit pattern that matches zero or many places, a
     /// missing working directory, a rate limit, a rewrite that
     /// changed the tree. The message is the whole story -- there is
-    /// no underlying error to keep.
+    /// no underlying error to keep. Messages must lead with the
+    /// operation and failure mode: the log rendering keeps only the
+    /// first 500 bytes (see `log_summary`).
     #[error("precondition failed: {0}")]
     Precondition(String),
 
@@ -390,16 +393,30 @@ impl ToolError {
             | Self::Linear(_)
             | Self::Mcp { .. }
             | Self::NotFound(_)
-            | Self::Precondition(_)
-            | Self::Spawn { .. }
             | Self::Sqlite { .. }
+            | Self::Spawn { .. }
             | Self::SubAgent { .. }
             | Self::Telegram(_)
             | Self::Timeout { .. }
             | Self::WebSearch(_) => self.to_string(),
+            // The message is the whole story, but it is also the
+            // model-facing payload: a file_edit no-match embeds a
+            // content excerpt, and other tools' messages carry
+            // arbitrary length. The model reads the whole thing in the
+            // tool result; the tee takes a bounded head, which keeps
+            // the operation and the failure mode and drops the
+            // payload (spec 24, entry size is correctness).
+            Self::Precondition(_) => {
+                truncate_output(&self.to_string(), PRECONDITION_LOG_MAX).into_owned()
+            }
         }
     }
 }
+
+/// Byte cap on a `Precondition` failure's log rendering. Generous
+/// against the structured variants (a path, a command, a URL) and
+/// cuts the payload-carrying ones (`file_edit`'s content excerpt).
+const PRECONDITION_LOG_MAX: usize = 500;
 
 /// Workspace initialization errors.
 #[derive(Debug, Error)]
@@ -586,6 +603,37 @@ mod tests {
     #[test]
     fn other_variants_summarize_as_themselves() {
         let e = ToolError::NotFound("nosuchtool".to_string());
+        assert_eq!(e.log_summary(), e.to_string());
+    }
+
+    /// A precondition's message is the model-facing payload (a
+    /// `file_edit` no-match embeds a content excerpt); the tee takes a
+    /// bounded head of it. The head keeps the operation and failure
+    /// mode, which lead the rendering.
+    #[test]
+    fn precondition_log_summary_is_capped() {
+        let e = ToolError::Precondition(format!(
+            "no match found for old_string in src/duty/mod.rs; the file may \
+             have changed since you read it. Nearest candidate:\n{}",
+            "filler\n".repeat(200)
+        ));
+        let summary = e.log_summary();
+        assert!(
+            summary.len() <= PRECONDITION_LOG_MAX + 64,
+            "{}",
+            summary.len()
+        );
+        assert!(
+            summary.starts_with("precondition failed: no match found"),
+            "{summary}"
+        );
+        assert!(summary.contains("[truncated"), "{summary}");
+    }
+
+    /// Short precondition messages — the common case — log whole.
+    #[test]
+    fn short_precondition_logs_whole() {
+        let e = ToolError::Precondition("ls-remote owner/repo: no HEAD in output".into());
         assert_eq!(e.log_summary(), e.to_string());
     }
 }
