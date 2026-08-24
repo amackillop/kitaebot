@@ -114,6 +114,11 @@
 
           bkb-mcp = pkgs.callPackage ./nix/bkb-mcp.nix { };
 
+          # Exposed so `just warm` can gcroot the dep closure (spec 03
+          # Build Warm); built from a dummy src, so the drv changes only
+          # with Cargo.toml/Cargo.lock.
+          deps = cargoArtifacts;
+
           default = craneLib.buildPackage (
             commonArgs
             // {

@@ -570,13 +570,43 @@ The devShell does not set `CARGO_TARGET_DIR`, so the systemd
 environment is the sole source — direnv does not override it.
 
 The warm command (`just warm`: `cargo build --tests --features
-mock-network && cargo sweep --time 7`) populates the shared dir
-and sweeps artifacts older than 7 days. Chained after `just check`
-in the repo's warm config (`deploy/configuration.nix`), so the
-daily warm covers the cycle. `cargo-sweep` runs on the shared dir;
-cross-repo collisions are a known cargo hazard (upstream #14135)
+mock-network && cargo sweep --time 7 && nix build .#deps --out-link
+.gcroots/deps`) populates the shared dir, sweeps artifacts older
+than 7 days, and roots the crane dep closure (below). Chained after
+`just check` in the repo's warm config (`deploy/configuration.nix`),
+so the daily warm covers the cycle. `cargo-sweep` runs on the shared
+dir; cross-repo collisions are a known cargo hazard (upstream #14135)
 accepted because the agent serializes turns. Disk budget: ~1-2 GB
 for the shared target dir against the ~19 GB VM disk.
+
+### Nix Store Roots
+
+`nix flake check` roots nothing it builds, and the VM's automatic
+GC (determinate-nixd, two-hourly, pressure-driven on a near-full
+disk) deletes any unrooted path. Without a root the crane dep
+closure (`kitaebot-deps`, the vendored registry) is garbage by
+construction, and every GC pass costs the next nix operation a
+~10-minute rebuild of all vendored crates — long enough to blow the
+600s exec timeout twice over while looking like a hung cargo (the
+2026-08-23 incident behind this section).
+
+`just warm` therefore pins the closure: `nix build .#deps --out-link
+.gcroots/deps`, where `packages.deps` exposes crane's
+`cargoArtifacts`. The out-link lives in the checkout, so the
+per-turn clean must keep it — `.gcroots` is in `KEPT_CACHES` beside
+`.direnv`, which survives for the same reason (nix-direnv's devshell
+and flake-input roots live there).
+
+Cleanup is by unrooting, not deletion: the out-link path is fixed,
+each warm atomically repoints it, and the superseded closure becomes
+garbage for the next GC pass. No code deletes old closures — the GC
+already does, and it runs often. The deps derivation is built from
+crane's dummy source (Cargo.toml/Cargo.lock only), so the root stays
+valid across source edits and the link rewrite is a no-op between
+lock changes; a stale closure outlives a lock bump by at most one GC
+period. Rooting stops at deps deliberately: check outputs
+(clippy/test) are ~40s leaf rebuilds with deps alive, and
+`packages.default` churns per commit.
 
 ## Boundaries
 

@@ -38,10 +38,12 @@ check-nix:
 build:
     cargo build
 
-# Warm the shared cargo target dir and sweep stale artifacts (spec 03)
+# Warm the shared cargo target dir, sweep stale artifacts, and gcroot
+# the crane dep closure so nix GC can't collect it (spec 03)
 warm:
     cargo build --tests --features mock-network
     cargo sweep --time 7
+    mkdir -p .gcroots && nix build .#deps --out-link .gcroots/deps
 
 # Run tests
 test:

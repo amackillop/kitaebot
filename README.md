@@ -108,7 +108,7 @@ just rust-check          # Fast inner loop: cargo fmt-check + clippy + tests (no
 just audit               # Supply-chain audit: RustSec advisories, sources, bans, licenses (deny.toml)
 just bench-build [rev]   # Benchmark cold/link-heavy builds; optional rev to compare against
 just build               # Compile
-just warm                # Warm the shared cargo target dir and sweep stale artifacts
+just warm                # Warm the shared cargo target dir, sweep stale artifacts, gcroot the dep closure
 just test                # Run tests (mock-network feature)
 just test-e2e            # E2e suite: real daemon against a loopback fixture server
 just test-one NAME       # Run tests matching a name
