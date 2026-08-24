@@ -241,12 +241,16 @@ kitaebot = {
       model = "arcee-ai/trinity-large-preview:free";
       max_tokens = 32768;
       temperature = 0.7;                         # 0.0–2.0
-      model_overrides = {                        # Per-role models, fall back to model
-        explore = "cheap/model";
-        worker = "mid/model";
-        summarizer = "cheap/model";
-        reviewer = "strong/model";                 # Judges the bot's own work and others' PRs
-        memory = "strong/model";                   # Distilled facts persist and inject every turn; don't skimp
+      # reasoning.effort = "high";               # Optional bound for the root model: effort or max_tokens (OpenRouter only)
+      model_overrides = {                        # Per-role: model, reasoning bound, or both; unset parts fall back to provider
+        explore.model = "cheap/model";
+        worker.model = "mid/model";
+        summarizer.model = "cheap/model";
+        reviewer.model = "strong/model";           # Judges the bot's own work and others' PRs
+        memory = {                                 # Distilled facts persist and inject every turn; don't skimp
+          model = "strong/model";
+          reasoning.effort = "low";                # Reasoning spirals starve content room; bound the thinking
+        };
       };
     };
     socket = {

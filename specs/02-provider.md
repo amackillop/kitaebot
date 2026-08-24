@@ -171,17 +171,21 @@ Configuration via `config.toml` under `[provider]`:
 | `max_tokens` | 32768 | Max tokens in LLM response. Reasoning tokens count against it (OpenRouter), so it must cover reasoning plus output |
 | `temperature` | 0.7 | Sampling temperature |
 | `reasoning` | unset | Reasoning budget for the root model: `{ effort = "low\|medium\|high" }` or `{ max_tokens = n }` (n > 0, below `max_tokens` to leave content room). OpenRouter only; unset leaves the model's default |
-| `model_overrides.explore` | unset | Model for `explore` sub-agents |
-| `model_overrides.worker` | unset | Model for `worker` sub-agents |
-| `model_overrides.reviewer` | unset | Model for `reviewer` sub-agents (spec 23) |
-| `model_overrides.summarizer` | unset | Model for compaction summaries |
-| `model_overrides.memory` | unset | Model for memory distillation turns |
+| `model_overrides.explore` | unset | Override for `explore` sub-agents |
+| `model_overrides.worker` | unset | Override for `worker` sub-agents |
+| `model_overrides.reviewer` | unset | Override for `reviewer` sub-agents (spec 23) |
+| `model_overrides.summarizer` | unset | Override for compaction summaries |
+| `model_overrides.memory` | unset | Override for memory distillation turns |
 
-Each `model_overrides.*` key overrides the model for that role only; unset roles
-fall back to `model`. `max_tokens` and `temperature` are shared across
+Each `model_overrides.*` value is a table setting `model`,
+`reasoning`, or both (`worker = { model = "cheap/model" }`;
+`memory = { reasoning = { effort = "low" } }` runs the root model
+with bounded thinking). An empty table is rejected. Unset parts fall
+back to `model` and the root `reasoning`; a role's reasoning bound
+replaces the root's. `max_tokens` and `temperature` are shared across
 all roles. Role providers are built once at startup via
-`CompletionsProvider::with_model`; the model choice per role is static —
-the agent cannot select models at runtime.
+`CompletionsProvider::with_spec`; the choice per role is static — the
+agent cannot select models at runtime.
 
 On OpenRouter, requests opt into usage accounting (`usage: {include:
 true}`) and the response's token usage — including prompt-cache hits

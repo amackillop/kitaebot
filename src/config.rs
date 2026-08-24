@@ -175,16 +175,43 @@ pub enum ReasoningEffort {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelOverrides {
-    /// Model for `explore` sub-agents (read-only research).
-    pub explore: Option<String>,
-    /// Model for `worker` sub-agents (delegated implementation).
-    pub worker: Option<String>,
-    /// Model for `reviewer` sub-agents (self-review gates, spec 23).
-    pub reviewer: Option<String>,
-    /// Model for context-compaction summaries.
-    pub summarizer: Option<String>,
-    /// Model for memory distillation turns.
-    pub memory: Option<String>,
+    /// Override for `explore` sub-agents (read-only research).
+    pub explore: Option<ModelSpec>,
+    /// Override for `worker` sub-agents (delegated implementation).
+    pub worker: Option<ModelSpec>,
+    /// Override for `reviewer` sub-agents (self-review gates, spec 23).
+    pub reviewer: Option<ModelSpec>,
+    /// Override for context-compaction summaries.
+    pub summarizer: Option<ModelSpec>,
+    /// Override for memory distillation turns.
+    pub memory: Option<ModelSpec>,
+}
+
+impl ModelOverrides {
+    /// Set overrides with their role names, for validation.
+    fn iter(&self) -> impl Iterator<Item = (&'static str, &ModelSpec)> {
+        [
+            ("explore", &self.explore),
+            ("memory", &self.memory),
+            ("reviewer", &self.reviewer),
+            ("summarizer", &self.summarizer),
+            ("worker", &self.worker),
+        ]
+        .into_iter()
+        .filter_map(|(name, spec)| spec.as_ref().map(|s| (name, s)))
+    }
+}
+
+/// A per-role model override: swap the model, bound reasoning, or
+/// both. An override that sets neither is rejected at validation;
+/// unset parts fall back to `[provider]`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelSpec {
+    /// The model to run; unset inherits `provider.model`.
+    pub model: Option<String>,
+    /// Reasoning bound; unset inherits `provider.reasoning`.
+    pub reasoning: Option<Reasoning>,
 }
 
 /// `OpenAI`-compatible chat completions API.
@@ -945,17 +972,32 @@ impl Config {
                 "temperature must be between 0.0 and 2.0".into(),
             ));
         }
-        if let Some(reasoning) = self.provider.reasoning {
+        for (role, spec) in self.provider.model_overrides.iter() {
+            if spec.model.is_none() && spec.reasoning.is_none() {
+                return Err(ConfigError::Invalid(format!(
+                    "model_overrides.{role} is empty: set model, reasoning, or both"
+                )));
+            }
+        }
+        let role_reasonings = self
+            .provider
+            .model_overrides
+            .iter()
+            .map(|(role, spec)| (role, spec.reasoning));
+        for (name, reasoning) in std::iter::once(("provider", self.provider.reasoning))
+            .chain(role_reasonings)
+            .filter_map(|(name, r)| r.map(|r| (name, r)))
+        {
             if !matches!(self.provider.api, Api::OpenRouter) {
-                return Err(ConfigError::Invalid(
-                    "provider reasoning requires the openrouter api".into(),
-                ));
+                return Err(ConfigError::Invalid(format!(
+                    "{name} reasoning requires the openrouter api"
+                )));
             }
             if let Reasoning::MaxTokens(cap) = reasoning
                 && (cap == 0 || cap >= self.provider.max_tokens)
             {
                 return Err(ConfigError::Invalid(format!(
-                    "reasoning max_tokens ({cap}) must be > 0 and below \
+                    "{name} reasoning max_tokens ({cap}) must be > 0 and below \
                      provider max_tokens ({}) to leave content room",
                     self.provider.max_tokens,
                 )));
@@ -1174,6 +1216,56 @@ mod tests {
     }
 
     #[test]
+    fn model_overrides_parse_model_reasoning_or_both() {
+        let cfg = load_toml(
+            "[provider.model_overrides]\n\
+             worker = { model = \"cheap/model\" }\n\
+             memory = { reasoning = { effort = \"low\" } }\n\
+             reviewer = { model = \"smart/model\", reasoning = { max_tokens = 4096 } }\n",
+        )
+        .unwrap();
+        let o = &cfg.provider.model_overrides;
+        assert_eq!(
+            o.worker.as_ref().unwrap().model.as_deref(),
+            Some("cheap/model")
+        );
+        assert_eq!(o.worker.as_ref().unwrap().reasoning, None);
+        let memory = o.memory.as_ref().unwrap();
+        assert_eq!(memory.model, None);
+        assert_eq!(
+            memory.reasoning,
+            Some(Reasoning::Effort(ReasoningEffort::Low))
+        );
+        let reviewer = o.reviewer.as_ref().unwrap();
+        assert_eq!(reviewer.model.as_deref(), Some("smart/model"));
+        assert_eq!(reviewer.reasoning, Some(Reasoning::MaxTokens(4096)));
+    }
+
+    #[test]
+    fn model_overrides_reject_bare_string_and_typos() {
+        // The pre-reasoning string form must fail loudly, not parse as
+        // something else.
+        let result = load_toml("[provider.model_overrides]\nworker = \"cheap/model\"\n");
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
+        let result =
+            load_toml("[provider.model_overrides]\nworker = { modle = \"cheap/model\" }\n");
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn model_overrides_reject_empty_spec() {
+        let result = load_toml("[provider.model_overrides]\nmemory = {}\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn reject_role_reasoning_cap_without_content_room() {
+        let result =
+            load_toml("[provider.model_overrides]\nmemory = { reasoning = { max_tokens = 0 } }\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
     fn reject_reasoning_on_non_openrouter_api() {
         let result = load_toml("[provider]\napi = \"openai\"\nreasoning = { effort = \"high\" }\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
@@ -1297,20 +1389,27 @@ BKB_API_KEY = \"bkb-api-key\"
         let cfg = load_toml(
             "\
 [provider.model_overrides]
-explore = \"cheap/explore\"
-worker = \"mid/worker\"
-reviewer = \"strong/reviewer\"
-summarizer = \"cheap/summarizer\"
-memory = \"cheap/memory\"
+explore = { model = \"cheap/explore\" }
+worker = { model = \"mid/worker\" }
+reviewer = { model = \"strong/reviewer\" }
+summarizer = { model = \"cheap/summarizer\" }
+memory = { model = \"cheap/memory\" }
 ",
         )
         .unwrap();
         let overrides = &cfg.provider.model_overrides;
-        assert_eq!(overrides.explore.as_deref(), Some("cheap/explore"));
-        assert_eq!(overrides.worker.as_deref(), Some("mid/worker"));
-        assert_eq!(overrides.reviewer.as_deref(), Some("strong/reviewer"));
-        assert_eq!(overrides.summarizer.as_deref(), Some("cheap/summarizer"));
-        assert_eq!(overrides.memory.as_deref(), Some("cheap/memory"));
+        let model = |spec: &Option<ModelSpec>| spec.as_ref().and_then(|s| s.model.clone());
+        assert_eq!(model(&overrides.explore).as_deref(), Some("cheap/explore"));
+        assert_eq!(model(&overrides.worker).as_deref(), Some("mid/worker"));
+        assert_eq!(
+            model(&overrides.reviewer).as_deref(),
+            Some("strong/reviewer")
+        );
+        assert_eq!(
+            model(&overrides.summarizer).as_deref(),
+            Some("cheap/summarizer")
+        );
+        assert_eq!(model(&overrides.memory).as_deref(), Some("cheap/memory"));
     }
 
     #[test]

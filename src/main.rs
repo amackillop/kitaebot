@@ -133,7 +133,7 @@ async fn daemon_main() {
             let workspace = Arc::new(workspace);
             let provider = Arc::new(rt.provider);
             let tools = rt.tools;
-            let summarizer = config.provider.model_overrides.summarizer.as_deref();
+            let summarizer = config.provider.model_overrides.summarizer.as_ref();
             let summarize = context::make_summarize_fn(role_provider(&provider, summarizer));
 
             let handle = build_handle(
@@ -333,14 +333,14 @@ fn build_duties(config: &Config) -> Vec<duty::Duty> {
     duties
 }
 
-/// Provider variant for a role: the override model when configured,
+/// Provider variant for a role: the override spec when configured,
 /// otherwise the shared root provider.
 fn role_provider(
     provider: &Arc<provider::CompletionsProvider>,
-    model: Option<&str>,
+    spec: Option<&config::ModelSpec>,
 ) -> Arc<provider::CompletionsProvider> {
-    match model {
-        Some(m) => Arc::new(provider.with_model(m)),
+    match spec {
+        Some(s) => Arc::new(provider.with_spec(s)),
         None => provider.clone(),
     }
 }
@@ -398,9 +398,9 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     let overrides = &config.provider.model_overrides;
     let task_tool: Arc<dyn tools::Tool> = Arc::new(agent::task::TaskTool::new(
         agent::task::TypeProviders {
-            explore: role_provider(&provider, overrides.explore.as_deref()),
-            worker: role_provider(&provider, overrides.worker.as_deref()),
-            reviewer: role_provider(&provider, overrides.reviewer.as_deref()),
+            explore: role_provider(&provider, overrides.explore.as_ref()),
+            worker: role_provider(&provider, overrides.worker.as_ref()),
+            reviewer: role_provider(&provider, overrides.reviewer.as_ref()),
         },
         summarize.clone(),
         agent_types,
@@ -419,7 +419,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
             Arc::new(review::ReviewDispositionTool::new(ledger.clone()));
         tools.extend_with(vec![review_log, review_disposition], &config.tools.disabled);
     }
-    let memory_provider = role_provider(&provider, overrides.memory.as_deref());
+    let memory_provider = role_provider(&provider, overrides.memory.as_ref());
     agent::AgentHandle::spawn(
         workspace,
         provider,

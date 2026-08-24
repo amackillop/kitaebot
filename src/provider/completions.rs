@@ -9,7 +9,7 @@ use serde::Serialize;
 use tracing::{debug, trace, warn};
 
 use crate::clients::chat_completion::{ApiToolCall, ChatResponse, CompletionsClient};
-use crate::config::{Api, ProviderConfig, Reasoning};
+use crate::config::{Api, ModelSpec, ProviderConfig, Reasoning};
 use crate::error::ProviderError;
 use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
@@ -64,15 +64,16 @@ impl CompletionsProvider {
         }
     }
 
-    /// A variant of this provider using a different model. Client,
-    /// `max_tokens`, temperature, and reasoning are shared.
-    pub fn with_model(&self, model: &str) -> Self {
+    /// A variant of this provider per a role's override spec: swap
+    /// the model, bound reasoning, or both. Everything the spec
+    /// leaves unset is shared with this provider.
+    pub fn with_spec(&self, spec: &ModelSpec) -> Self {
         Self {
             client: self.client.clone(),
-            model: model.to_string(),
+            model: spec.model.as_deref().unwrap_or(&self.model).to_string(),
             max_tokens: self.max_tokens,
             temperature: self.temperature,
-            reasoning: self.reasoning,
+            reasoning: spec.reasoning.or(self.reasoning),
             openrouter: self.openrouter,
         }
     }
@@ -294,18 +295,54 @@ mod tests {
     }
 
     #[test]
-    fn with_model_swaps_model_and_keeps_the_rest() {
+    fn with_spec_swaps_model_and_keeps_the_rest() {
         let client = CompletionsClient::new(
             "http://127.0.0.1:0".to_string(),
             crate::secrets::Secret::test("k"),
         );
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
-        let cheap = provider.with_model("cheap/model");
+        let cheap = provider.with_spec(&ModelSpec {
+            model: Some("cheap/model".into()),
+            reasoning: None,
+        });
         assert_eq!(cheap.model, "cheap/model");
         assert_eq!(cheap.max_tokens, provider.max_tokens);
         assert_eq!(cheap.reasoning, provider.reasoning);
         assert!((cheap.temperature - provider.temperature).abs() < f32::EPSILON);
         assert_eq!(cheap.openrouter, provider.openrouter);
+    }
+
+    #[test]
+    fn with_spec_bounds_reasoning_without_model_swap() {
+        use crate::config::ReasoningEffort;
+
+        let client = CompletionsClient::new(
+            "http://127.0.0.1:0".to_string(),
+            crate::secrets::Secret::test("k"),
+        );
+        let root = CompletionsProvider::new(
+            client,
+            &ProviderConfig {
+                reasoning: Some(Reasoning::Effort(ReasoningEffort::High)),
+                ..ProviderConfig::default()
+            },
+        );
+        let bounded = root.with_spec(&ModelSpec {
+            model: None,
+            reasoning: Some(Reasoning::Effort(ReasoningEffort::Low)),
+        });
+        // Model inherited, reasoning overridden.
+        assert_eq!(bounded.model, root.model);
+        assert_eq!(
+            bounded.reasoning,
+            Some(Reasoning::Effort(ReasoningEffort::Low))
+        );
+        // A model-only spec inherits the root reasoning untouched.
+        let named = root.with_spec(&ModelSpec {
+            model: Some("other/model".into()),
+            reasoning: None,
+        });
+        assert_eq!(named.reasoning, root.reasoning);
     }
 
     #[test]

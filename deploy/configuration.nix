@@ -61,10 +61,10 @@ in
         model = "z-ai/glm-5.3";
         max_tokens = 32768;
         model_overrides = {
-          explore = "deepseek/deepseek-v4-pro";
-          worker = "deepseek/deepseek-v4-pro";
-          reviewer = "moonshotai/kimi-k3";
-          summarizer = "deepseek/deepseek-v4-flash";
+          explore.model = "deepseek/deepseek-v4-pro";
+          worker.model = "deepseek/deepseek-v4-pro";
+          reviewer.model = "moonshotai/kimi-k3";
+          summarizer.model = "deepseek/deepseek-v4-flash";
         };
       };
 
