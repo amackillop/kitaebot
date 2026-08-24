@@ -77,9 +77,12 @@ Maintain it with the ordinary `file_write` and `file_edit` tools:
 
 Tool output above the context engine's threshold does not reach you
 whole. It arrives as a `<file>` reference carrying a head/tail excerpt
-and a token count. The full text is stored and searchable, but you
-cannot expand it back into your context, and re-issuing the command to
-get a smaller result wastes the turn — the result is already stored.
+and a token count. Its `path` attribute names the original file when
+there is one, otherwise the stored verbatim copy under
+`context/lcm/payloads/`. The full text is stored and searchable, but you
+cannot expand it back into your context: re-issuing the command wastes
+the turn, and reading the whole payload back with `file_read` just
+externalizes it again.
 
 When an excerpt is not enough, ask a narrower question instead:
 
@@ -87,9 +90,9 @@ When an excerpt is not enough, ask a narrower question instead:
   its own context and returns the conclusion; this is what sub-agents
   are for.
 - `lcm_grep` to search the stored text for the part you need.
-- `grep` for a pattern, or `file_read` on a smaller file.
-- `exec` with `working_dir` set and a slice: `sed -n '<from>,<to>p'
-  <path>`.
+- `grep` for a pattern against the reference's `path`.
+- A slice of the payload: `file_read` with `offset` and `limit`, or
+  `exec` with `working_dir` set and `sed -n '<from>,<to>p' <path>`.
 
 Never re-issue an identical call hoping for different output. It will be
 refused, and a turn that keeps asking is abandoned.

@@ -287,12 +287,11 @@ impl LcmEngine {
             path = path_hint.as_deref().unwrap_or("(none)"),
             "externalizing oversized payload"
         );
-        let reference =
-            explore::format_file_reference(&file_id, path_hint.as_deref(), token_count, &summary);
-        // With no original path, record where the payload lives —
+        // With no original path, point at the stored payload —
         // workspace-relative, so the confined file tools accept it.
         let path = path_hint
             .unwrap_or_else(|| format!("{}/lcm/payloads/{file_id}", crate::workspace::CONTEXT_DIR));
+        let reference = explore::format_file_reference(&file_id, &path, token_count, &summary);
         let row = LargeFileRow {
             file_id,
             path,
@@ -1279,7 +1278,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_user_message_is_externalized() {
         let (mut engine, dir) = temp_engine_small_threshold();
-        let payload = "z".repeat(100);
+        let payload = "z".repeat(400);
         engine
             .push_message(Message::User {
                 content: payload.clone(),
@@ -1302,11 +1301,13 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(byte_size, 100);
-        assert_eq!(token_count, 25);
+        assert_eq!(byte_size, 400);
+        assert_eq!(token_count, 100);
         // No hint: the recorded path is workspace-relative so the
-        // confined file tools accept it verbatim.
+        // confined file tools accept it verbatim, and the reference
+        // carries it so no lcm_describe lookup is needed.
         assert_eq!(path, format!("context/lcm/payloads/{file_id}"));
+        assert!(content.contains(&format!("path=\"{path}\"")));
 
         // Raw payload is on disk, lossless.
         let on_disk = fs::read_to_string(

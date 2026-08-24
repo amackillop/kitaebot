@@ -86,13 +86,12 @@ pub fn extract_file_ids(content: &str) -> Vec<String> {
 /// place of the raw payload.
 pub fn format_file_reference(
     file_id: &str,
-    path: Option<&str>,
+    path: &str,
     token_count: usize,
     summary: &str,
 ) -> String {
-    let path_attr = path.map_or_else(String::new, |p| format!(" path=\"{p}\""));
     format!(
-        "<file id=\"{file_id}\"{path_attr} tokens=\"{token_count}\">\n{}\n</file>",
+        "<file id=\"{file_id}\" path=\"{path}\" tokens=\"{token_count}\">\n{}\n</file>",
         summary.trim()
     )
 }
@@ -678,17 +677,11 @@ mod tests {
 
     #[test]
     fn file_reference_includes_attributes() {
-        let r = format_file_reference("file_0123456789abcdef", Some("data/out.json"), 42, "sum");
+        let r = format_file_reference("file_0123456789abcdef", "data/out.json", 42, "sum");
         assert_eq!(
             r,
             "<file id=\"file_0123456789abcdef\" path=\"data/out.json\" tokens=\"42\">\nsum\n</file>"
         );
-    }
-
-    #[test]
-    fn file_reference_omits_missing_path() {
-        let r = format_file_reference("file_0123456789abcdef", None, 7, "sum");
-        assert!(r.starts_with("<file id=\"file_0123456789abcdef\" tokens=\"7\">"));
     }
 
     #[test]
