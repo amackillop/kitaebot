@@ -113,28 +113,31 @@ reading session history through the context engine abstraction:
   sessions are weighed by their summed `token_count`, and distillation
   runs once that total crosses `distill_threshold_tokens`. Tokens, not
   a raw event count, because the binding constraint is the distiller's
-  context window: the threshold doubles as the shared token budget for
-  the consolidated span, so a triggered pass fits in one turn. Not
-  wall-clock either — an idle week burns nothing, a busy day may cross
-  the gate more than once. The watermark makes the probe a counting
-  query that never loads message bodies.
+  context window. Not wall-clock either — an idle week burns nothing,
+  a busy day may cross the gate more than once. The watermark makes
+  the probe a counting query that never loads message bodies.
 - **Execution:** one **consolidated** pass folds every session's pending
   span into a single distiller turn (cheapest, and it enables
   cross-session dedupe). It runs as a worker sub-agent on a fresh
   ephemeral context, never the root session — reading transcript spans
   is bulk work that must not evict real context. Uses the
   `provider.model_overrides.memory` role when configured. The spans
-  share one token budget seeded from the threshold; each fetch is
-  clamped to the remaining budget and still returns at least one event,
-  so an oversized head cannot stall progress.
+  share one token budget seeded from `distill_slice_tokens` (the
+  threshold when unset); each fetch is clamped to the remaining budget
+  and still returns at least one event, so an oversized head cannot
+  stall progress.
 - **Backlog carry:** exactly one pass runs per heartbeat tick, and it
-  reads at most one budget's worth. Each session's watermark advances by
+  reads at most one slice's worth. Each session's watermark advances by
   the events actually read (positions are dense, so `after + count`),
   **not** to the head — so history the budget could not reach this tick
   stays pending, not dropped. Between ticks a session can accumulate far
-  more than the budget; the gate simply stays open and the next tick
-  folds the next span. Bursty load drains on idle ticks. Sustained load
-  above one budget per tick lags without bound (nothing is lost, memory
+  more than the slice; the gate simply stays open and the next tick
+  folds the next slice. A backlog arbitrarily larger than one pass's
+  budget therefore distills completely across successive passes, the
+  cursor advancing per slice — a pass that fails retries its own slice
+  (watermarks move only on success) and never blocks later slices
+  beyond that retry. Bursty load drains on idle ticks. Sustained load
+  above one slice per tick lags without bound (nothing is lost, memory
   just trails); draining the backlog within a tick is deferred
   ([FUTURE](FUTURE.md)).
 - **Duties:** extract durable facts from the new events into topics and
@@ -222,7 +225,8 @@ not "no response".
 | Config key | Default | Description |
 |------------|---------|-------------|
 | `memory.index_cap_bytes` | 8192 | Injection truncation cap for MEMORY.md |
-| `memory.distill_threshold_tokens` | 40000 (provisional) | Undistilled-token total that opens the distillation gate, and the token budget for the consolidated span |
+| `memory.distill_threshold_tokens` | 40000 (provisional) | Undistilled-token total that opens the distillation gate |
+| `memory.distill_slice_tokens` | unset | Token budget for one pass's consolidated span; unset uses the threshold. Must be > 0 and <= the threshold |
 | `provider.model_overrides.memory` | unset | Model for the distillation pass (falls back to `provider.model`) |
 
 - The index is plain markdown, human-readable and human-editable; no
@@ -241,5 +245,7 @@ not "no response".
   inside the distiller's window) is provisional; needs live
   token-volume data to confirm.
 - Large consolidated spans could approach the memory model's window at
-  very high thresholds. The threshold bounds it in practice, so
-  chunking the span across turns is deferred, not built.
+  very high thresholds. Resolved by `distill_slice_tokens` (#47): the
+  slice bounds each pass's span, and an oversized backlog drains
+  across successive gate-open passes instead of failing a single
+  oversized turn and retrying forever.
