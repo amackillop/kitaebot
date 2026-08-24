@@ -111,6 +111,11 @@ pub struct Distiller {
     system_prompt: String,
     tools: Tools,
     threshold: u64,
+    /// Token budget for one pass's consolidated span: the slice
+    /// knob when set, else the threshold. Seeding the gather from
+    /// this rather than the threshold is what bounds a pass when
+    /// the backlog exceeds what one turn can fold.
+    slice_tokens: u64,
     max_iterations: usize,
     /// The injection cap for memory/MEMORY.md: the index is truncated
     /// past this at prompt time, so the distiller must keep it under.
@@ -123,11 +128,15 @@ pub struct Distiller {
 impl Distiller {
     /// Build the distiller from the parent's base registry
     /// (post-`tools.disabled`), filtered to the memory-editing tools.
+    /// `slice_tokens` of `None` means one pass folds the whole gated
+    /// backlog (budget = threshold); `Some(n)` bounds each pass to one
+    /// slice so an oversized backlog drains across passes.
     pub fn new(
         base: &Tools,
         workspace_dir: &Path,
         state_db: StateDb,
         threshold: u64,
+        slice_tokens: Option<u64>,
         max_iterations: usize,
         index_cap_bytes: usize,
     ) -> Self {
@@ -147,6 +156,7 @@ impl Distiller {
             system_prompt,
             tools,
             threshold,
+            slice_tokens: slice_tokens.unwrap_or(threshold),
             max_iterations,
             index_cap_bytes,
             state_db,
@@ -181,11 +191,12 @@ impl Distiller {
 /// Probes the per-session pending token totals, and if their sum has
 /// not reached the distiller's threshold, returns `Ok(None)` without an
 /// LLM call. Otherwise it gathers the pending spans across sessions
-/// (sharing one token budget so the consolidated pass stays bounded),
-/// folds them into a single distiller turn on a fresh ephemeral
-/// context, and on success advances each session's watermark and
-/// persists the state. A failed turn leaves the watermarks untouched so
-/// the same span is retried at the next gate crossing.
+/// (sharing one token budget — the slice, which defaults to the
+/// threshold — so the consolidated pass stays bounded), folds them into
+/// a single distiller turn on a fresh ephemeral context, and on success
+/// advances each session's watermark and persists the state. A failed
+/// turn leaves the watermarks untouched so the same span is retried at
+/// the next gate crossing.
 ///
 /// Returns the pass summary paired with its billed [`TurnUsage`] so the
 /// caller can record the cost; `None` when the gate is closed.
@@ -209,8 +220,10 @@ pub async fn run<P: Provider, E: ContextEngine>(
 
     // Share one token budget across sessions so the consolidated span
     // cannot outgrow the distiller's window; each fetch is clamped and
-    // always makes progress.
-    let mut gathered = Gathered::new(distiller.threshold);
+    // always makes progress. The budget is the slice, not the
+    // threshold, so a backlog larger than one pass drains slice by
+    // slice across gate-open ticks.
+    let mut gathered = Gathered::new(distiller.slice_tokens);
     for name in pending.keys() {
         if gathered.budget == 0 {
             break;
@@ -496,9 +509,28 @@ mod run_tests {
     impl ContextEngine for FakeEngine {
         async fn pending_distill_tokens(
             &self,
-            _since: &BTreeMap<String, u64>,
+            since: &BTreeMap<String, u64>,
         ) -> Result<BTreeMap<String, u64>, EngineError> {
-            Ok(self.pending.clone())
+            // A static pending map overrides the computed one, so tests
+            // that control the gate independently of transcript size
+            // keep working.
+            if !self.pending.is_empty() {
+                return Ok(self.pending.clone());
+            }
+            let mut out = BTreeMap::new();
+            for (name, msgs) in &self.transcripts {
+                let after = usize::try_from(since.get(name).copied().unwrap_or(0)).unwrap_or(0);
+                let total: u64 = msgs
+                    .get(after..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|m| u64::try_from(m.token_estimate()).unwrap_or(0))
+                    .sum();
+                if total > 0 {
+                    out.insert(name.clone(), total);
+                }
+            }
+            Ok(out)
         }
 
         fn backup(
@@ -520,10 +552,24 @@ mod run_tests {
         async fn transcript_since(
             &self,
             session: &str,
-            _after: u64,
-            _max_tokens: u64,
+            after: u64,
+            max_tokens: u64,
         ) -> Result<Vec<Message>, EngineError> {
-            Ok(self.transcripts.get(session).cloned().unwrap_or_default())
+            let Some(msgs) = self.transcripts.get(session) else {
+                return Ok(Vec::new());
+            };
+            let after = usize::try_from(after).unwrap_or(0);
+            let mut out = Vec::new();
+            let mut total: u64 = 0;
+            for msg in msgs.get(after..).unwrap_or(&[]) {
+                let tokens = u64::try_from(msg.token_estimate()).unwrap_or(u64::MAX);
+                if !out.is_empty() && total + tokens > max_tokens {
+                    break;
+                }
+                out.push(msg.clone());
+                total += tokens;
+            }
+            Ok(out)
         }
 
         async fn push_message(&mut self, _msg: Message) -> Result<(), EngineError> {
@@ -589,7 +635,15 @@ mod run_tests {
         };
         let provider = Arc::new(MockProvider::new(vec![]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
+        let distiller = Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            db.clone(),
+            1000,
+            None,
+            5,
+            8192,
+        );
         let mut state = DistillState::default();
 
         let out = run(
@@ -626,7 +680,15 @@ mod run_tests {
             "forced pass".into(),
         ))]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
+        let distiller = Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            db.clone(),
+            1000,
+            None,
+            5,
+            8192,
+        );
         let mut state = DistillState::default();
 
         let out = run(
@@ -665,7 +727,15 @@ mod run_tests {
             "did not compact".into(),
         ))]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
+        let distiller = Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            db.clone(),
+            1000,
+            None,
+            5,
+            8192,
+        );
         let mut state = DistillState::default();
 
         let out = run(
@@ -716,7 +786,15 @@ mod run_tests {
         };
         let provider = Arc::new(MockProvider::new(vec![]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
+        let distiller = Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            db.clone(),
+            1000,
+            None,
+            5,
+            8192,
+        );
         let mut state = DistillState::default();
 
         let out = run(
@@ -754,7 +832,15 @@ mod run_tests {
             "wrote canary fact".into(),
         ))]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
+        let distiller = Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            db.clone(),
+            1000,
+            None,
+            5,
+            8192,
+        );
         let mut state = DistillState::default();
 
         let out = run(
@@ -799,7 +885,15 @@ mod run_tests {
         };
         let provider = Arc::new(MockProvider::new(vec![]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
+        let distiller = Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            db.clone(),
+            1000,
+            None,
+            5,
+            8192,
+        );
 
         let state = distiller.load_state(&engine).await.unwrap();
 
@@ -828,7 +922,15 @@ mod run_tests {
             )]),
         };
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
+        let distiller = Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            db.clone(),
+            1000,
+            None,
+            5,
+            8192,
+        );
 
         let first = distiller.load_state(&engine).await.unwrap();
         // New history arrives after priming; a reload must keep the
@@ -851,7 +953,15 @@ mod run_tests {
         };
         let provider = Arc::new(MockProvider::new(vec![Err(ProviderError::RateLimited)]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db.clone(), 1000, 5, 8192);
+        let distiller = Distiller::new(
+            &Tools::default(),
+            ws.path(),
+            db.clone(),
+            1000,
+            None,
+            5,
+            8192,
+        );
         let mut state = DistillState::default();
 
         let result = run(
@@ -868,5 +978,169 @@ mod run_tests {
         assert!(result.is_err());
         assert!(state.watermarks.is_empty());
         assert!(db.get_doc("distillation").unwrap().is_none());
+    }
+
+    /// `n` user messages of `tokens` estimated tokens each.
+    fn session_messages(n: usize, tokens: usize) -> Vec<Message> {
+        (0..n)
+            .map(|_| Message::User {
+                content: "x".repeat(tokens * 4),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn oversized_backlog_drains_across_passes() {
+        let (_dir, ws) = workspace();
+        // Three sessions of 400 tokens each: 1200 pending against a
+        // 400-token slice, so each pass folds exactly one session and
+        // the gate (threshold 400) stays open until the backlog is
+        // gone. A single-threshold pass would have to fold all 1200.
+        let engine = FakeEngine {
+            pending: BTreeMap::new(),
+            transcripts: BTreeMap::from([
+                ("a".into(), session_messages(4, 100)),
+                ("b".into(), session_messages(4, 100)),
+                ("c".into(), session_messages(4, 100)),
+            ]),
+        };
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text("pass 1".into())),
+            Ok(Response::Text("pass 2".into())),
+            Ok(Response::Text("pass 3".into())),
+        ]));
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 400, Some(400), 5, 8192);
+        let mut state = DistillState::default();
+
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.expect("pass 1 runs").0, "pass 1");
+        assert_eq!(state.watermarks.get("a"), Some(&4));
+        assert!(!state.watermarks.contains_key("b"));
+
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.expect("pass 2 runs").0, "pass 2");
+        assert_eq!(state.watermarks.get("b"), Some(&4));
+        assert!(!state.watermarks.contains_key("c"));
+
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.expect("pass 3 runs").0, "pass 3");
+        assert_eq!(state.watermarks.get("c"), Some(&4));
+
+        // Backlog drained: the gate closes and no fourth call happens.
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert!(out.is_none());
+        assert_eq!(provider.call_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn failed_slice_retries_then_later_slices_proceed() {
+        let (_dir, ws) = workspace();
+        // Two sessions of 400 tokens each, slice 400: one session per
+        // pass. The first pass fails, so its watermarks stay put and
+        // the same slice is retried; once it succeeds the next pass
+        // proceeds to the later session. A failed slice never advances
+        // the cursor past undistilled history.
+        let engine = FakeEngine {
+            pending: BTreeMap::new(),
+            transcripts: BTreeMap::from([
+                ("a".into(), session_messages(4, 100)),
+                ("b".into(), session_messages(4, 100)),
+            ]),
+        };
+        let provider = Arc::new(MockProvider::new(vec![
+            Err(ProviderError::RateLimited),
+            Ok(Response::Text("pass 2".into())),
+            Ok(Response::Text("pass 3".into())),
+        ]));
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 400, Some(400), 5, 8192);
+        let mut state = DistillState::default();
+
+        // Pass 1 fails: no watermark moves, nothing persisted.
+        let result = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(state.watermarks.is_empty());
+
+        // Pass 2 retries the same slice and succeeds.
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.expect("retry succeeds").0, "pass 2");
+        assert_eq!(state.watermarks.get("a"), Some(&4));
+        assert!(!state.watermarks.contains_key("b"));
+
+        // Pass 3 proceeds to the later slice.
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.expect("later slice proceeds").0, "pass 3");
+        assert_eq!(state.watermarks.get("b"), Some(&4));
+        assert_eq!(provider.call_count(), 3);
     }
 }

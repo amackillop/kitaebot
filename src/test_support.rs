@@ -85,6 +85,7 @@ impl TestAgent {
             self.ws.path(),
             crate::state_db::StateDb::open_in_memory().unwrap(),
             40_000,
+            None,
             1,
             8192,
         ));
