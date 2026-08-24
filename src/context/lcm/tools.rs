@@ -93,9 +93,10 @@ fn snippet(s: &str) -> String {
 #[derive(Deserialize, JsonSchema)]
 struct GrepArgs {
     /// Search pattern. FTS5 query syntax in `fts` mode (token search,
-    /// boolean operators, phrase queries); patterns that fail to parse
-    /// as FTS5 syntax (e.g. dotted literals like `isl-0.20`) are
-    /// retried as a quoted phrase. Rust regex syntax in `regex` mode.
+    /// boolean operators, phrase queries); plain literals that fail to
+    /// parse (e.g. `isl-0.20`) are retried as a quoted phrase. Inside
+    /// operator queries, quote punctuated terms: `"security-lane" OR
+    /// alert`. Rust regex syntax in `regex` mode.
     pattern: String,
     /// `fts` (default) or `regex`.
     #[serde(default)]
@@ -187,11 +188,35 @@ fn fts_phrase(pattern: &str) -> String {
     format!("\"{}\"", pattern.replace('"', "\"\""))
 }
 
-fn is_fts_syntax_error(e: &ToolError) -> bool {
-    // SQLite reports it as a generic SQLITE_ERROR, so the fts5 detail
-    // only exists in the message; the variant match scopes the sniff
-    // to our own store's errors.
-    matches!(e, ToolError::Sqlite { source, .. } if source.to_string().contains("fts5: syntax error"))
+fn is_fts_parse_error(e: &ToolError) -> bool {
+    // SQLite reports both shapes as a generic SQLITE_ERROR, so the
+    // fts5 detail only exists in the message; the variant match scopes
+    // the sniff to our own store's errors. "no such column" is the
+    // query parser resolving a `-term`/`term:` column filter, the only
+    // caller-controlled column reference in fts mode.
+    matches!(e, ToolError::Sqlite { source, .. } if {
+        let msg = source.to_string();
+        msg.contains("fts5: syntax error") || msg.starts_with("no such column:")
+    })
+}
+
+/// True when the pattern uses explicit FTS5 query syntax, so
+/// phrase-quoting it whole would silently drop the operators.
+fn uses_fts_operators(pattern: &str) -> bool {
+    pattern.contains('"')
+        || pattern
+            .split_whitespace()
+            .any(|t| matches!(t, "AND" | "NOT" | "OR") || t.starts_with("NEAR("))
+}
+
+fn fts_query_error(pattern: &str, e: ToolError) -> ToolError {
+    match e {
+        ToolError::Sqlite { source, .. } => ToolError::FtsQuery {
+            pattern: pattern.to_owned(),
+            source,
+        },
+        other => other,
+    }
 }
 
 fn run_grep(
@@ -216,10 +241,21 @@ fn run_grep(
     };
 
     // LLMs routinely pass literal strings full of FTS5-hostile
-    // punctuation. When the raw pattern is not valid query syntax,
-    // retry it as a quoted phrase instead of surfacing the parse error.
+    // punctuation. When a plain pattern is not valid query syntax,
+    // retry it as a quoted phrase; operator-bearing patterns (and a
+    // failed retry) get the structured error instead.
     let hits = match run(pattern) {
-        Err(e) if mode == "fts" && is_fts_syntax_error(&e) => run(&fts_phrase(pattern))?,
+        Err(first) if mode == "fts" && is_fts_parse_error(&first) => {
+            if uses_fts_operators(pattern) {
+                return Err(fts_query_error(pattern, first));
+            }
+            match run(&fts_phrase(pattern)) {
+                Err(retry) if is_fts_parse_error(&retry) => {
+                    return Err(fts_query_error(pattern, first));
+                }
+                other => other?,
+            }
+        }
         other => other?,
     };
 
@@ -944,10 +980,63 @@ mod tests {
         assert!(out.contains("hello.world"), "missing match in: {out}");
     }
 
+    #[tokio::test]
+    async fn lcm_grep_fts_hyphenated_literal_falls_back_to_phrase() {
+        let (_dir, db) = fresh_db();
+        let writer = schema::open(&db).unwrap();
+        insert_message(&writer, 1, "user", "the security-lane alert fired");
+
+        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        // Raw `security-lane` fails as "no such column: lane"; the
+        // phrase retry must find the row anyway.
+        let out = tool
+            .execute(
+                serde_json::json!({"pattern": "security-lane"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("security-lane alert"), "missing match: {out}");
+    }
+
+    #[tokio::test]
+    async fn lcm_grep_fts_operator_pattern_with_bad_term_names_the_pattern() {
+        let (_dir, db) = fresh_db();
+        let pattern = "security lane OR security-lane OR \"fix every alert\"";
+        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let err = tool
+            .execute(serde_json::json!({"pattern": pattern}), ToolCtx::default())
+            .await
+            .unwrap_err();
+        let ToolError::FtsQuery { .. } = &err else {
+            panic!("expected FtsQuery, got: {err}");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("{pattern:?}")),
+            "pattern not named: {msg}"
+        );
+        assert!(msg.contains("no such column: lane"), "cause lost: {msg}");
+        assert!(msg.contains("mode=\"regex\""), "no guidance: {msg}");
+        let source = std::error::Error::source(&err).expect("sqlite cause dropped");
+        assert!(source.to_string().contains("no such column: lane"));
+    }
+
     #[test]
     fn fts_phrase_quotes_and_escapes() {
         assert_eq!(fts_phrase("isl-0.20"), "\"isl-0.20\"");
         assert_eq!(fts_phrase("a \"b\" c"), "\"a \"\"b\"\" c\"");
+    }
+
+    #[test]
+    fn uses_fts_operators_detects_intent() {
+        assert!(uses_fts_operators("a OR b"));
+        assert!(uses_fts_operators("NOT b"));
+        assert!(uses_fts_operators("NEAR(a b)"));
+        assert!(uses_fts_operators("\"a phrase\""));
+        assert!(!uses_fts_operators("isl-0.20"));
+        assert!(!uses_fts_operators("or and near"));
+        assert!(!uses_fts_operators("schema::open"));
     }
 
     #[tokio::test]

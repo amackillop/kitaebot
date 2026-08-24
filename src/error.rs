@@ -205,6 +205,23 @@ pub enum ToolError {
         output: String,
     },
 
+    /// FTS5 rejected an `lcm_grep` search pattern as query syntax and
+    /// the phrase fallback could not apply. Carries the pattern
+    /// verbatim and guidance, since the sqlite message alone ("no such
+    /// column: lane") names neither the operation nor the input.
+    #[error(
+        "FTS5 failed to parse search pattern {pattern:?}: {source}. \
+         Hyphens and colons are query syntax in fts mode; quote each \
+         literal term (\"security-lane\") or use mode=\"regex\"."
+    )]
+    FtsQuery {
+        /// The pattern exactly as supplied.
+        pattern: String,
+        /// The underlying FTS5 parse failure.
+        #[source]
+        source: rusqlite::Error,
+    },
+
     /// A GitHub API call made by a tool failed.
     ///
     /// Transparent: [`GithubError`] already distinguishes a non-2xx
@@ -384,6 +401,7 @@ impl ToolError {
             // what the service returns, so they log whole.
             Self::Blocked { .. }
             | Self::Cancelled
+            | Self::FtsQuery { .. }
             | Self::Github(_)
             | Self::Http { .. }
             | Self::HttpStatus { .. }

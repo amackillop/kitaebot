@@ -792,9 +792,17 @@ The LCM engine contributes three tools via `tools()`:
 
 `fts` mode uses SQLite FTS5 — token-based matching with boolean operators
 (`AND`, `OR`, `NOT`, phrase queries). This is the fast path for keyword
-searches. Patterns that fail FTS5 parsing (punctuation-heavy literals like
-`isl-0.20`, which models pass routinely) are retried once as a quoted
-phrase instead of surfacing the syntax error.
+searches. Plain patterns that fail FTS5 parsing (punctuation-heavy literals
+like `isl-0.20`, which models pass routinely) are retried once as a quoted
+phrase instead of surfacing the syntax error. This covers "no such column"
+failures too: in FTS5 query syntax `-term` and `term:` are column filters,
+so a hyphenated or coloned literal parses as a reference to a nonexistent
+column. Patterns using explicit operator syntax (quotes, uppercase
+`AND`/`OR`/`NOT`/`NEAR(`) are never phrase-quoted, since that would
+silently drop the operators; when such a pattern fails to parse (or the
+phrase retry itself fails), the tool returns `ToolError::FtsQuery`, which
+names the pattern verbatim, keeps the sqlite error as source, and tells
+the model to quote punctuated terms or switch to regex mode.
 
 `regex` mode uses a `REGEXP` user function registered on the SQLite connection.
 It scans the `content` column directly (no index), so it is slower than FTS but
@@ -1079,7 +1087,7 @@ For LCM, an unknown name simply creates a new conversation row.
 | Session not found on switch | — | Created automatically (idempotent) |
 | Active session file missing | — | Fall back to `general` |
 | Active session file corrupt | — | Fall back to `general` |
-| FTS query fails | `EngineError::Storage` | Error text returned to LLM via tool error |
+| FTS pattern rejected | `ToolError::FtsQuery` | Phrase retry for plain literals; operator patterns get the error, naming the pattern with guidance |
 | Regex query timeout / invalid pattern | `ToolError::ExecutionFailed` | Error text returned to LLM |
 | Token cap exceeded during expand | — | Partial result with `truncated: true` |
 | Large file exploration summary fails | — | Fall back to size + MIME metadata only |
