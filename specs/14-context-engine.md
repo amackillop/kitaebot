@@ -488,7 +488,9 @@ originating `file_read` call (linked by `call_id`) and reads its `path`
 argument. No state is carried between pushes and the `ContextEngine` trait is
 untouched. When no hint exists (e.g. an oversized raw user message), the
 attribute is omitted and `large_files.path` records the payload's on-disk
-location instead.
+location instead — workspace-relative (`context/lcm/payloads/<file_id>`),
+because `lcm_describe` hands this path to the model and the file tools
+reject absolute paths.
 
 **Externalization at ingest**: the oversized raw payload is written to disk
 under `context/lcm/payloads/<file_id>` and the `messages.content` row stores

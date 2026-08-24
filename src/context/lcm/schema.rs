@@ -37,7 +37,10 @@ PRAGMA temp_store = MEMORY;
 /// Entry `i` brings the database from version `i` to version `i + 1`.
 /// The first entry is the v1 baseline. Append new migrations; do not
 /// reorder, edit, or remove existing entries.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_baseline.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_baseline.sql"),
+    include_str!("migrations/0002_relative_payload_paths.sql"),
+];
 
 /// Open or create the LCM database at `path`.
 ///
@@ -122,6 +125,8 @@ fn register_regexp(conn: &Connection) -> Result<(), EngineError> {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::params;
+
     use super::*;
 
     fn fresh() -> Connection {
@@ -178,6 +183,52 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    /// Migration 0002 rewrites absolute fallback paths to the
+    /// workspace-relative payload location; hinted (relative) rows
+    /// are untouched.
+    #[test]
+    fn migration_relativizes_absolute_payload_paths() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::sqlite::apply_migrations(&conn, &MIGRATIONS[..1]).unwrap();
+        conn.execute(
+            "INSERT INTO conversations(name, created_at, updated_at) \
+             VALUES ('general', '2025-01-01', '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        for (file_id, path) in [
+            (
+                "file_00000000000000aa",
+                "/var/lib/kitaebot/context/lcm/payloads/file_00000000000000aa",
+            ),
+            ("file_00000000000000bb", "data/big.json"),
+        ] {
+            conn.execute(
+                "INSERT INTO large_files(file_id, conversation_id, path, mime_type, \
+                     byte_size, token_count, exploration_summary, created_at) \
+                 VALUES (?1, 1, ?2, 'application/json', 1, 1, 's', '2025-01-01')",
+                params![file_id, path],
+            )
+            .unwrap();
+        }
+
+        init(&conn).unwrap();
+
+        let path_of = |id: &str| -> String {
+            conn.query_row(
+                "SELECT path FROM large_files WHERE file_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            path_of("file_00000000000000aa"),
+            "context/lcm/payloads/file_00000000000000aa"
+        );
+        assert_eq!(path_of("file_00000000000000bb"), "data/big.json");
     }
 
     /// Foreign keys are enforced — inserting a message with a bogus

@@ -233,7 +233,7 @@ impl LcmEngine {
         self.context_dir.join("payloads")
     }
 
-    /// Write `content` to `state/lcm/payloads/<file_id>`, generate
+    /// Write `content` to `context/lcm/payloads/<file_id>`, generate
     /// its exploration summary, and return the `<file>` reference
     /// plus the metadata row for `large_files`.
     async fn externalize(
@@ -289,10 +289,13 @@ impl LcmEngine {
         );
         let reference =
             explore::format_file_reference(&file_id, path_hint.as_deref(), token_count, &summary);
+        // With no original path, record where the payload lives —
+        // workspace-relative, so the confined file tools accept it.
+        let path = path_hint
+            .unwrap_or_else(|| format!("{}/lcm/payloads/{file_id}", crate::workspace::CONTEXT_DIR));
         let row = LargeFileRow {
             file_id,
-            // With no original path, record where the payload lives.
-            path: path_hint.unwrap_or_else(|| payload_path.to_string_lossy().into_owned()),
+            path,
             mime_type: explore::mime_hint(kind).to_string(),
             byte_size: i64::try_from(content.len()).unwrap_or(i64::MAX),
             token_count: i64::try_from(token_count).unwrap_or(i64::MAX),
@@ -1290,17 +1293,20 @@ mod tests {
         assert!(content.contains("summary"));
         assert!(!content.contains(&payload));
 
-        let (file_id, byte_size, token_count): (String, i64, i64) = {
+        let (file_id, path, byte_size, token_count): (String, String, i64, i64) = {
             let conn = engine.conn.lock().unwrap();
             conn.query_row(
-                "SELECT file_id, byte_size, token_count FROM large_files",
+                "SELECT file_id, path, byte_size, token_count FROM large_files",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap()
         };
         assert_eq!(byte_size, 100);
         assert_eq!(token_count, 25);
+        // No hint: the recorded path is workspace-relative so the
+        // confined file tools accept it verbatim.
+        assert_eq!(path, format!("context/lcm/payloads/{file_id}"));
 
         // Raw payload is on disk, lossless.
         let on_disk = fs::read_to_string(
