@@ -46,16 +46,19 @@ warm:
     cargo sweep --maxsize 12GB
     mkdir -p .gcroots && nix build .#deps --out-link .gcroots/deps
 
-# Run tests
+# Run tests in the commit gate's scope, plus confine (self-skips
+# without Landlock, so this is its only live runner); e2e is excluded
+# to match the gate, run it with `just test-e2e`
 test:
-    cargo test --features mock-network
+    cargo test --features mock-network --bins --test kchat --test confine
 
 # Run the e2e suite (real daemon against a loopback fixture server;
 # excluded from `nix flake check` to keep the commit gate fast)
 test-e2e:
     cargo test --features mock-network --test e2e
 
-# Run tests matching a name (e.g. just test-one report_counts)
+# Run tests matching a name across every target, e2e included
+# (e.g. just test-one report_counts)
 test-one name:
     cargo test --features mock-network {{name}}
 

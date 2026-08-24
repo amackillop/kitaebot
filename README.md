@@ -109,9 +109,9 @@ just audit               # Supply-chain audit: RustSec advisories, sources, bans
 just bench-build [rev]   # Benchmark cold/link-heavy builds; optional rev to compare against
 just build               # Compile
 just warm                # Warm the shared cargo target dir, sweep stale artifacts, gcroot the dep closure
-just test                # Run tests (mock-network feature)
+just test                # Run tests in the commit gate's scope plus confine (e2e excluded)
 just test-e2e            # E2e suite: real daemon against a loopback fixture server
-just test-one NAME       # Run tests matching a name
+just test-one NAME       # Run tests matching a name across every target, e2e included
 just test-nixos          # Run all NixOS VM integration tests
 just test-nixos-one NAME # Run a single NixOS VM test (e.g. egress)
 just lint                # Clippy with --deny warnings
