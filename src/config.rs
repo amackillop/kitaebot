@@ -370,6 +370,13 @@ pub struct MemoryConfig {
     /// below the distiller's window so a triggered pass fits in one
     /// turn. Must be > 0.
     pub distill_threshold_tokens: u64,
+    /// Token budget for one distillation pass's consolidated span.
+    /// `None` (default) uses `distill_threshold_tokens`, so a pass
+    /// folds the whole gated backlog. `Some(n)` (must be > 0 and <=
+    /// the threshold) bounds each pass to one slice: a backlog too
+    /// large for one turn drains across successive gate-open ticks
+    /// instead of failing and retrying forever.
+    pub distill_slice_tokens: Option<u64>,
 }
 
 /// Telegram channel settings.
@@ -759,6 +766,7 @@ impl Default for MemoryConfig {
         Self {
             index_cap_bytes: 8192,
             distill_threshold_tokens: 40_000,
+            distill_slice_tokens: None,
         }
     }
 }
@@ -895,6 +903,13 @@ impl Config {
         if self.memory.distill_threshold_tokens == 0 {
             return Err(ConfigError::Invalid(
                 "memory distill_threshold_tokens must be > 0".into(),
+            ));
+        }
+        if let Some(slice) = self.memory.distill_slice_tokens
+            && (slice == 0 || slice > self.memory.distill_threshold_tokens)
+        {
+            return Err(ConfigError::Invalid(
+                "memory distill_slice_tokens must be > 0 and <= distill_threshold_tokens".into(),
             ));
         }
         if self.provider.max_tokens == 0 {
@@ -1390,14 +1405,19 @@ prompt = \"Review recent commits for security issues.\"
         let cfg = load_toml("").unwrap();
         assert_eq!(cfg.memory.index_cap_bytes, 8192);
         assert_eq!(cfg.memory.distill_threshold_tokens, 40_000);
+        assert_eq!(cfg.memory.distill_slice_tokens, None);
     }
 
     #[test]
     fn memory_parse() {
-        let cfg = load_toml("[memory]\nindex_cap_bytes = 4096\ndistill_threshold_tokens = 20000\n")
-            .unwrap();
+        let cfg = load_toml(
+            "[memory]\nindex_cap_bytes = 4096\ndistill_threshold_tokens = 20000\n\
+             distill_slice_tokens = 5000\n",
+        )
+        .unwrap();
         assert_eq!(cfg.memory.index_cap_bytes, 4096);
         assert_eq!(cfg.memory.distill_threshold_tokens, 20_000);
+        assert_eq!(cfg.memory.distill_slice_tokens, Some(5000));
     }
 
     #[test]
@@ -1410,6 +1430,26 @@ prompt = \"Review recent commits for security issues.\"
     fn memory_reject_zero_distill_threshold() {
         let result = load_toml("[memory]\ndistill_threshold_tokens = 0\n");
         assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn memory_reject_zero_slice() {
+        let result = load_toml("[memory]\ndistill_slice_tokens = 0\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn memory_reject_slice_above_threshold() {
+        let result =
+            load_toml("[memory]\ndistill_threshold_tokens = 20000\ndistill_slice_tokens = 20001\n");
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn memory_accept_slice_at_threshold() {
+        let result =
+            load_toml("[memory]\ndistill_threshold_tokens = 20000\ndistill_slice_tokens = 20000\n");
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -70,10 +70,10 @@ in
 
       context.engine = "lcm";
 
-      # WORKAROUND (kitaebot#47): 30 was too small for distillation to
-      # clear a 110k-token failure-day backlog, and the retry math
-      # diverges. Revert when chunked distillation lands.
-      sub_agents.max_iterations = 60;
+      # Chunked distillation (#47): bound each pass to a 10k-token
+      # slice so an oversized backlog drains across hourly passes
+      # instead of dying at the iteration cap and retrying forever.
+      memory.distill_slice_tokens = 10000;
 
       telegram = {
         enabled = true;

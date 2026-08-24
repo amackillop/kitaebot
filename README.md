@@ -234,6 +234,7 @@ kitaebot = {
     memory = {
       index_cap_bytes = 8192;                    # Byte cap on the injected MEMORY.md index
       distill_threshold_tokens = 40000;          # Undistilled tokens across all sessions before the distill duty runs
+      distill_slice_tokens = 10000;              # Per-pass token budget; unset = threshold. Backlogs drain slice by slice
     };
     provider = {
       api = "openrouter";                        # openrouter | openai | groq | together | mistral
