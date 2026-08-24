@@ -67,7 +67,11 @@ notification, since GitHub sends none for edits. Ids are pruned with
 their issues; state predating the field falls back to
 reply-with-full-plan. Execution turns
 get a fresh base checkout prepared at `projects/<owner>/<repo>`
-(shared `execution_checkout` logic). The branch convention is
+(shared `execution_checkout` logic). The reset preserves before it
+destroys: a predecessor turn's uncommitted changes or stranded
+detached-HEAD commits are parked on a `kitaebot_recovered/<epoch>`
+branch, named in the turn's ready note, before the checkout is
+force-detached and cleaned. The branch convention is
 `kitaebot_issue-{n}_<summary>` and the PR description carries
 `Closes #{n}`, so merging the PR closes the ticket — GitHub issues
 have no workflow states to move, and no state tool exists.

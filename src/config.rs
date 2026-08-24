@@ -972,37 +972,7 @@ impl Config {
                 "temperature must be between 0.0 and 2.0".into(),
             ));
         }
-        for (role, spec) in self.provider.model_overrides.iter() {
-            if spec.model.is_none() && spec.reasoning.is_none() {
-                return Err(ConfigError::Invalid(format!(
-                    "model_overrides.{role} is empty: set model, reasoning, or both"
-                )));
-            }
-        }
-        let role_reasonings = self
-            .provider
-            .model_overrides
-            .iter()
-            .map(|(role, spec)| (role, spec.reasoning));
-        for (name, reasoning) in std::iter::once(("provider", self.provider.reasoning))
-            .chain(role_reasonings)
-            .filter_map(|(name, r)| r.map(|r| (name, r)))
-        {
-            if !matches!(self.provider.api, Api::OpenRouter) {
-                return Err(ConfigError::Invalid(format!(
-                    "{name} reasoning requires the openrouter api"
-                )));
-            }
-            if let Reasoning::MaxTokens(cap) = reasoning
-                && (cap == 0 || cap >= self.provider.max_tokens)
-            {
-                return Err(ConfigError::Invalid(format!(
-                    "{name} reasoning max_tokens ({cap}) must be > 0 and below \
-                     provider max_tokens ({}) to leave content room",
-                    self.provider.max_tokens,
-                )));
-            }
-        }
+        self.validate_model_overrides()?;
         self.validate_channels()?;
         if self.tools.exec.timeout_secs == 0 {
             return Err(ConfigError::Invalid("timeout_secs must be > 0".into()));
@@ -1063,6 +1033,43 @@ impl Config {
             }
             if p.gate.is_some() && !self.github.enabled {
                 return Err(ctx("gate \"new-commits\" requires github.enabled".into()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Non-empty override specs, and reasoning bounds (root and
+    /// per-role) that fit the API and leave content room.
+    fn validate_model_overrides(&self) -> Result<(), ConfigError> {
+        for (role, spec) in self.provider.model_overrides.iter() {
+            if spec.model.is_none() && spec.reasoning.is_none() {
+                return Err(ConfigError::Invalid(format!(
+                    "model_overrides.{role} is empty: set model, reasoning, or both"
+                )));
+            }
+        }
+        let role_reasonings = self
+            .provider
+            .model_overrides
+            .iter()
+            .map(|(role, spec)| (role, spec.reasoning));
+        for (name, reasoning) in std::iter::once(("provider", self.provider.reasoning))
+            .chain(role_reasonings)
+            .filter_map(|(name, r)| r.map(|r| (name, r)))
+        {
+            if !matches!(self.provider.api, Api::OpenRouter) {
+                return Err(ConfigError::Invalid(format!(
+                    "{name} reasoning requires the openrouter api"
+                )));
+            }
+            if let Reasoning::MaxTokens(cap) = reasoning
+                && (cap == 0 || cap >= self.provider.max_tokens)
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "{name} reasoning max_tokens ({cap}) must be > 0 and below \
+                     provider max_tokens ({}) to leave content room",
+                    self.provider.max_tokens,
+                )));
             }
         }
         Ok(())
