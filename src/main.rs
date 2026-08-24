@@ -51,7 +51,7 @@ fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::util::SubscriberInitExt;
 
     let stderr = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
+        .with_writer(|| errlog::BoundedLineWriter::new(std::io::stderr(), errlog::LineFormat::Text))
         .with_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "kitaebot=info".into()),

@@ -226,13 +226,17 @@ grounds: outcomes that can never indicate a defect however often they
 repeat, such as a search command exiting non-zero because it matched
 nothing.
 
-*Entry size is a correctness concern, not tidiness.* The tee has no
-per-entry cap and the duty truncates the whole errors section at
-`SECTION_MAX_BYTES`. One oversized entry — a failed command logged
-with its entire stdout and stderr — therefore evicts every other
-incident in that window. Log a bounded, structured summary naming the
-operation, its inputs, and the outcome; the full payload belongs in
-the tool result the model reads, which is a separate path.
+*Entry size is a correctness concern, not tidiness.* The duty
+truncates the whole errors section at `SECTION_MAX_BYTES`, so one
+oversized entry — a failed command logged with its entire stdout and
+stderr — evicts every other incident in that window. The logging
+sinks enforce a per-line backstop (`errlog::LINE_MAX_BYTES`, 8 KiB):
+an oversized tee line is replaced by a parseable stub carrying the
+head, an oversized stderr line is head-truncated with a marker. The
+backstop keeps a forgotten call site from corrupting the window, but
+it keeps only the head — still log a bounded, structured summary
+naming the operation, its inputs, and the outcome; the full payload
+belongs in the tool result the model reads, which is a separate path.
 
 **Planned next, same contract:**
 
