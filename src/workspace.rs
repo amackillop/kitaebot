@@ -77,6 +77,8 @@ impl Workspace {
         mk(&path.join("memory"))?;
         mk(&path.join("memory/topics"))?;
         mk(&path.join(PROJECTS_DIR))?;
+        // The git tier's Landlock rule can only grant an existing path.
+        mk(&path.join(REVIEWS_DIR))?;
         mk(&path.join(STATE_DIR))?;
         seed_review_checklist(&path)?;
 

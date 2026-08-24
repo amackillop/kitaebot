@@ -50,8 +50,8 @@ warm:
 test:
     cargo test --features mock-network
 
-# Run the e2e suite (real daemon against a loopback fixture server;
-# excluded from `nix flake check` to keep the commit gate fast)
+# Run the e2e suite alone (real daemon against a loopback fixture
+# server; also part of `nix flake check`)
 test-e2e:
     cargo test --features mock-network --test e2e
 
