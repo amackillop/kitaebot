@@ -79,7 +79,10 @@ and `file_edit` tools, steered by prompt guidance in AGENTS.md:
 - Update or delete existing entries rather than appending duplicates;
   check the index before adding.
 - Session-specific state (current task, in-progress work) does not
-  belong in memory.
+  belong in memory. Neither does issue/PR lifecycle state ("awaiting
+  review") — GitHub answers that fresher than memory can — nor
+  anything re-derivable by reading the checkout: record the pointer,
+  not the restated content.
 - Detail goes in a topic file; the index gets one or two lines and a
   pointer. The index must stay under the cap.
 - Corrections are edits at the source: when a remembered fact turns out

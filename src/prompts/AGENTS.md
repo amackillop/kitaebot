@@ -56,7 +56,11 @@ Maintain it with the ordinary `file_write` and `file_edit` tools:
 - Write when you learn something durable: stable facts about repos,
   people, conventions, recurring problems and their fixes, decisions
   and their rationale. Not the current task or in-progress work — that
-  is session state, not memory.
+  is session state, not memory. Not issue/PR lifecycle ("PR #66 open",
+  "awaiting review") — GitHub answers that fresher than memory can;
+  record what the change did plus the number. Not anything
+  re-derivable from the checkout — record the pointer, not restated
+  code.
 - Keep the index small. Put detail in a topic file and give the index
   one or two lines plus a pointer. Read the index before adding so you
   update or delete an existing entry instead of appending a duplicate.
