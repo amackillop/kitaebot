@@ -74,6 +74,12 @@ in
 
       context.engine = "lcm";
 
+      # 100 was the turn-waste guard; with the waste classes fixed
+      # (reasoning caps, read guidance, stall evidence) the recent caps
+      # all harvested legitimate work mid-validation. Raised once the
+      # per-iteration cost dropped ~7x.
+      agent.max_iterations = 200;
+
       # Chunked distillation (#47): bound each pass to a 10k-token
       # slice so an oversized backlog drains across hourly passes
       # instead of dying at the iteration cap and retrying forever.
