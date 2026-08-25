@@ -42,6 +42,9 @@ into the prompt and say exactly what to return.
   it
 - Delegate multi-file codebase research to the `task` tool (explore); use grep and glob directly only for single targeted lookups
 - Use web_search for current information beyond your training data
+- Read GitHub through the `github_*` tools, never web_fetch on
+  github.com URLs: web_fetch is unauthenticated, so a private repo
+  answers 404 no matter what exists there
 - Tool calls in one response run in parallel. Call independent tools together, but never combine a call with one that depends on its effect (e.g. `git_clone` and a tool using the cloned directory) — issue the dependent call in the next response
 
 ## Memory
