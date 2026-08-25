@@ -86,7 +86,7 @@ fn euid() -> u32 {
 
 /// Spawn the daemon binary and wait for its socket.
 fn spawn_daemon(workspace: &Path, socket_path: &Path) -> Child {
-    let child = Command::new(assert_cmd::cargo::cargo_bin!("kitaebot"))
+    let mut child = Command::new(assert_cmd::cargo::cargo_bin!("kitaebot"))
         .arg("run")
         .env("KITAEBOT_WORKSPACE", workspace)
         // Hermetic HOME: git subprocesses inherit it via safe_env,
@@ -97,10 +97,16 @@ fn spawn_daemon(workspace: &Path, socket_path: &Path) -> Child {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !socket_path.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "daemon did not create socket within 5s"
-        );
+        if std::time::Instant::now() >= deadline {
+            // No owner exists yet, so TestDaemon's kill-on-drop cannot
+            // reach this child: an orphan here outlives the test, holds
+            // the inherited output pipes open, and turns the failure
+            // into a zero-CPU hang for whatever awaits our output
+            // (issue #74).
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("daemon did not create socket within 5s");
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
     child
