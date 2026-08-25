@@ -351,6 +351,11 @@ matches. Output truncated to configured max bytes.
 GET with timeout. Strips HTML tags via regex. Collapses whitespace. Truncates
 to max bytes.
 
+Requests carry no credentials. A 403/404 from a GitHub host (`github.com`,
+`*.github.com`, `*.githubusercontent.com`) is indistinguishable from a private
+resource, so it returns a blocked error steering the model to the
+authenticated `github_*` tools instead of a bare status.
+
 | Restriction | Default | Config key |
 |-------------|---------|------------|
 | Timeout | 30 seconds | `tools.web_fetch.timeout_secs` |
