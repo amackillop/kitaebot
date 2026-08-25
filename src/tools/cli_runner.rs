@@ -7,13 +7,14 @@ use std::ffi::OsString;
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tracing::debug;
 
-use crate::error::ToolError;
+use crate::error::{TimeoutEvidence, ToolError};
 use crate::sandbox::Tier;
 
 /// Default timeout for subprocess operations.
@@ -213,16 +214,19 @@ async fn exec_cmd(
 ) -> Result<CmdOutput, ToolError> {
     debug!(argv, cwd = %cwd.display(), "spawning");
 
-    let output = timeout(Duration::from_secs(timeout_secs), run(cmd, stdin))
+    let spawn_err = |source| ToolError::Spawn {
+        argv: argv.to_string(),
+        cwd: cwd.display().to_string(),
+        source,
+    };
+    let child = spawn_child(cmd, stdin).await.map_err(spawn_err)?;
+    let output = wait_with_evidence(child, Duration::from_secs(timeout_secs))
         .await
-        .map_err(|_| ToolError::Timeout {
+        .map_err(spawn_err)?
+        .map_err(|evidence| ToolError::Timeout {
             command: argv.to_string(),
             secs: timeout_secs,
-        })?
-        .map_err(|source| ToolError::Spawn {
-            argv: argv.to_string(),
-            cwd: cwd.display().to_string(),
-            source,
+            evidence,
         })?;
 
     Ok(CmdOutput {
@@ -238,7 +242,10 @@ async fn exec_cmd(
 /// The child leads its own process group, and the group is swept on
 /// timeout or cancellation (see [`GroupKillGuard`]) — a dropped wait
 /// future must not leave a `git fetch` or a warm build running.
-async fn run(cmd: &mut Command, stdin: Option<&str>) -> std::io::Result<std::process::Output> {
+async fn spawn_child(
+    cmd: &mut Command,
+    stdin: Option<&str>,
+) -> std::io::Result<tokio::process::Child> {
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
@@ -262,15 +269,177 @@ async fn run(cmd: &mut Command, stdin: Option<&str>) -> std::io::Result<std::pro
             result => break result?,
         }
     };
-    let guard = GroupKillGuard::arm(&child);
     if let Some(input) = stdin {
         let mut pipe = child.stdin.take().expect("stdin was piped");
         pipe.write_all(input.as_bytes()).await?;
         drop(pipe);
     }
-    let output = child.wait_with_output().await?;
-    guard.disarm();
-    Ok(output)
+    Ok(child)
+}
+
+/// Incremental pipe reader whose buffer survives a timeout kill.
+struct PipeReader {
+    buf: Arc<Mutex<Vec<u8>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Post-kill grace for readers to drain what the pipe still holds.
+const READER_GRACE: Duration = Duration::from_secs(2);
+
+impl PipeReader {
+    fn spawn(pipe: Option<impl AsyncReadExt + Unpin + Send + 'static>) -> Self {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&buf);
+        let task = tokio::spawn(async move {
+            let Some(mut pipe) = pipe else { return };
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => sink.lock().expect("reader buffer").extend(&chunk[..n]),
+                }
+            }
+        });
+        Self { buf, task }
+    }
+
+    /// Wait briefly for EOF (the kill closes the pipe), then take
+    /// whatever arrived — partial output beats none.
+    async fn finish(self) -> Vec<u8> {
+        let _ = timeout(READER_GRACE, self.task).await;
+        std::mem::take(&mut self.buf.lock().expect("reader buffer"))
+    }
+}
+
+/// Wait for the child within `budget`, keeping its output readable
+/// even when the budget kills it. On timeout the group is swept and
+/// [`TimeoutEvidence`] is returned so the error can say what the
+/// child was doing when it died and under what pressure (#74's stall
+/// class is silent memory.high throttling that no kernel log names).
+pub(crate) async fn wait_with_evidence(
+    mut child: tokio::process::Child,
+    budget: Duration,
+) -> std::io::Result<Result<std::process::Output, TimeoutEvidence>> {
+    let guard = GroupKillGuard::arm(&child);
+    let stdout = PipeReader::spawn(child.stdout.take());
+    let stderr = PipeReader::spawn(child.stderr.take());
+    match timeout(budget, child.wait()).await {
+        Ok(status) => {
+            guard.disarm();
+            let status = status?;
+            Ok(Ok(std::process::Output {
+                status,
+                stdout: stdout.finish().await,
+                stderr: stderr.finish().await,
+            }))
+        }
+        Err(_elapsed) => {
+            // Sweep the group first so the pipes close and the
+            // readers reach EOF instead of the grace timeout.
+            drop(guard);
+            let pressure = cgroup_snapshot();
+            let out = String::from_utf8_lossy(&stdout.finish().await).into_owned();
+            let err = String::from_utf8_lossy(&stderr.finish().await).into_owned();
+            Ok(Err(TimeoutEvidence {
+                output_tail: format_output_tail(&out, &err),
+                pressure,
+            }))
+        }
+    }
+}
+
+/// Bytes of stderr kept in timeout evidence; stderr first and larger
+/// because build tools put diagnoses there ("Blocking waiting for
+/// file lock ...").
+const EVIDENCE_STDERR_BYTES: usize = 1_200;
+const EVIDENCE_STDOUT_BYTES: usize = 600;
+
+/// Combined bounded tail of a killed child's streams. Pure.
+fn format_output_tail(stdout: &str, stderr: &str) -> String {
+    let mut tail = String::new();
+    if !stderr.trim().is_empty() {
+        let _ = write!(
+            tail,
+            "stderr: {}",
+            super::truncate_head(stderr.trim_end(), EVIDENCE_STDERR_BYTES)
+        );
+    }
+    if !stdout.trim().is_empty() {
+        if !tail.is_empty() {
+            tail.push('\n');
+        }
+        let _ = write!(
+            tail,
+            "stdout: {}",
+            super::truncate_head(stdout.trim_end(), EVIDENCE_STDOUT_BYTES)
+        );
+    }
+    tail
+}
+
+/// One-line pressure snapshot of the daemon's own cgroup — exec
+/// children share it, which is the suspected stall mechanism (#74).
+/// Best-effort: a snapshot that cannot be read reports why instead of
+/// masking the timeout.
+fn cgroup_snapshot() -> String {
+    let cgroup = match std::fs::read_to_string("/proc/self/cgroup") {
+        Ok(s) => s,
+        Err(e) => return format!("(unavailable: /proc/self/cgroup: {e})"),
+    };
+    let Some(rel) = parse_cgroup_v2_path(&cgroup) else {
+        return "(unavailable: no cgroup v2 entry)".into();
+    };
+    let base = format!("/sys/fs/cgroup{rel}");
+    let read = |file: &str| std::fs::read_to_string(format!("{base}/{file}")).ok();
+    format_snapshot(
+        read("memory.current").as_deref(),
+        read("memory.events").as_deref(),
+        read("memory.pressure").as_deref(),
+        read("cpu.pressure").as_deref(),
+    )
+}
+
+/// The v2 path from `/proc/self/cgroup` (`0::/system.slice/...`). Pure.
+fn parse_cgroup_v2_path(contents: &str) -> Option<&str> {
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(str::trim)
+}
+
+/// Render the snapshot files into one journal-greppable line. Pure.
+fn format_snapshot(
+    current: Option<&str>,
+    events: Option<&str>,
+    mem_psi: Option<&str>,
+    cpu_psi: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(bytes) = current.and_then(|c| c.trim().parse::<u64>().ok()) {
+        // Integer MiB: precise enough for a pressure snapshot, and
+        // u64 -> f64 is a clippy hard error here.
+        parts.push(format!("memory.current={}M", bytes / (1024 * 1024)));
+    }
+    if let Some(events) = events {
+        for counter in ["high", "max", "oom"] {
+            if let Some(v) = events
+                .lines()
+                .find_map(|l| l.strip_prefix(counter).map(str::trim))
+            {
+                parts.push(format!("memory.events.{counter}={v}"));
+            }
+        }
+    }
+    for (name, psi) in [("memory.psi", mem_psi), ("cpu.psi", cpu_psi)] {
+        if let Some(some) = psi.and_then(|p| p.lines().find(|l| l.starts_with("some"))) {
+            parts.push(format!("{name} {}", some.trim()));
+        }
+    }
+    if parts.is_empty() {
+        "(unavailable: no readable cgroup files)".into()
+    } else {
+        parts.join(", ")
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +456,68 @@ mod tests {
             stdin,
             confine: None,
         }
+    }
+
+    #[tokio::test]
+    async fn timeout_error_carries_the_childs_last_words() {
+        let call = SubprocessCall {
+            binary: "bash",
+            args: vec![
+                "-c".into(),
+                "echo lock-marker >&2; echo out-marker; sleep 30".into(),
+            ],
+            cwd: std::env::temp_dir(),
+            env: vec![("PATH".into(), std::env::var_os("PATH").unwrap_or_default())],
+            timeout_secs: Some(1),
+            stdin: None,
+            confine: None,
+        };
+        let err = exec(&call).await.unwrap_err();
+        let ToolError::Timeout { secs, evidence, .. } = err else {
+            panic!("expected Timeout, got {err:?}");
+        };
+        assert_eq!(secs, 1);
+        assert!(evidence.output_tail.contains("lock-marker"), "{evidence}");
+        assert!(evidence.output_tail.contains("out-marker"), "{evidence}");
+        // The snapshot is best-effort but never empty: real values or
+        // a reason.
+        assert!(!evidence.pressure.is_empty());
+    }
+
+    #[test]
+    fn parses_cgroup_v2_path() {
+        assert_eq!(
+            parse_cgroup_v2_path("0::/system.slice/kitaebot.service\n"),
+            Some("/system.slice/kitaebot.service")
+        );
+        assert_eq!(parse_cgroup_v2_path("1:name=systemd:/\n"), None);
+    }
+
+    #[test]
+    fn formats_snapshot_from_cgroup_files() {
+        let s = format_snapshot(
+            Some("4404019200\n"),
+            Some("low 0\nhigh 1234\nmax 5\noom 0\noom_kill 0\n"),
+            Some("some avg10=42.10 avg60=38.50 avg300=12.00 total=99\nfull avg10=1.0\n"),
+            Some("some avg10=88.00 avg60=70.00 avg300=30.00 total=11\n"),
+        );
+        assert!(s.contains("memory.current=4200M"), "{s}");
+        assert!(s.contains("memory.events.high=1234"), "{s}");
+        assert!(s.contains("memory.psi some avg10=42.10"), "{s}");
+        assert!(s.contains("cpu.psi some avg10=88.00"), "{s}");
+        assert_eq!(
+            format_snapshot(None, None, None, None),
+            "(unavailable: no readable cgroup files)"
+        );
+    }
+
+    #[test]
+    fn output_tail_prefers_stderr_and_bounds_both() {
+        let tail = format_output_tail(&"o".repeat(5000), &"e".repeat(5000));
+        assert!(tail.starts_with("stderr:"), "{tail}");
+        assert!(tail.contains("stdout:"));
+        assert!(tail.len() < 2 * (EVIDENCE_STDERR_BYTES + EVIDENCE_STDOUT_BYTES));
+        assert_eq!(format_output_tail("", "  \n"), "");
     }
 
     #[test]

@@ -1034,7 +1034,7 @@ async fn record_tool_results<E: ContextEngine>(
                 // Timeout errors get progress-preserving guidance;
                 // all others get the standard strike augmentation.
                 let content = match (&e, count) {
-                    (ToolError::Timeout { command, secs }, Some(n)) => {
+                    (ToolError::Timeout { command, secs, .. }, Some(n)) => {
                         ToolStrikeTracker::timeout_notice(command, *secs, n)
                     }
                     (_, Some(n)) => ToolStrikeTracker::augment_notice(&base, n),
@@ -1830,6 +1830,7 @@ mod tests {
                 Err(ToolError::Timeout {
                     command: "sleep 99".into(),
                     secs: 5,
+                    evidence: crate::error::TimeoutEvidence::default(),
                 }),
                 Some(FailureKind::Timeout),
             ),
@@ -2448,6 +2449,7 @@ mod tests {
         let tool = Arc::new(MockFailingTool::named("exec", || ToolError::Timeout {
             command: "cargo build".into(),
             secs: 600,
+            evidence: crate::error::TimeoutEvidence::default(),
         })) as Arc<dyn Tool>;
         let ctx = ToolCtx::default();
 

@@ -71,6 +71,7 @@ impl Tool for WebFetch {
                 .map_err(|_| ToolError::Timeout {
                     command: format!("fetch {}", args.url),
                     secs: self.timeout.as_secs(),
+                    evidence: crate::error::TimeoutEvidence::default(),
                 })?
                 .map_err(|e| ToolError::Http {
                     url: args.url.clone(),

@@ -178,6 +178,12 @@ impl Policy {
                 presence: Presence::Optional,
                 rationale: "Procfs — read-only (/proc/self/*, /proc/meminfo)",
             },
+            Rule {
+                path: PathBuf::from("/sys/fs/cgroup"),
+                access: read_files,
+                presence: Presence::Optional,
+                rationale: "Cgroup stats — timeout evidence reads pressure (#74)",
+            },
         ];
 
         // Socket directory derived from configured socket path.
@@ -675,8 +681,9 @@ mod tests {
     #[test]
     fn expected_rule_count() {
         let policy = test_policy();
-        // workspace, /nix/store, /tmp, /etc, /run, /dev, /proc, socket_dir
-        assert_eq!(policy.rules().len(), 8);
+        // workspace, /nix/store, /tmp, /etc, /run, /dev, /proc,
+        // /sys/fs/cgroup, socket_dir
+        assert_eq!(policy.rules().len(), 9);
     }
 
     #[test]

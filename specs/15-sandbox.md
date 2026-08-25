@@ -152,6 +152,7 @@ The per-child tiers are tabulated under Per-child confinement above.
 | `/run` | `ReadFile`, `ReadDir` | Optional |
 | `/dev` | `ReadFile`, `ReadDir`, `WriteFile` | Optional |
 | `/proc` | `ReadFile`, `ReadDir` | Optional |
+| `/sys/fs/cgroup` | `ReadFile`, `ReadDir` | Optional (timeout evidence reads pressure stats, issue #74) |
 | Socket parent dir (dynamic) | `MakeSock`, `ReadFile`, `WriteFile`, `ReadDir`, `RemoveFile` | Optional |
 | GPG keyring (`GNUPGHOME`, when outside the workspace) | Full access | Optional |
 | Daemon binary (`current_exe()`) | Read + execute | Optional |

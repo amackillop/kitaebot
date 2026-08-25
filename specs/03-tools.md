@@ -201,7 +201,12 @@ which kills the direct child and sweeps the rest of the group with `SIGKILL`
 via a drop guard, so grandchildren (`bash → just → cargo → test binaries`)
 cannot outlive the turn. A normal exit disarms the sweep: whatever a
 finished command deliberately left running in the background is its own
-business. The same group semantics apply to every subprocess spawned
+business. A timeout is never a bare kill: the child's output is read
+incrementally into buffers that survive the sweep, and the timeout
+error carries a bounded tail of it plus a cgroup pressure snapshot
+(memory.current, memory.events, PSI) taken at kill time — a stalled
+build's last words and the pressure it died under are the diagnosis
+(issue #74). The same group semantics apply to every subprocess spawned
 through `cli_runner` (git, warm). Descendants that call `setsid` escape
 the group and the sweep; nothing short of cgroups catches those.
 

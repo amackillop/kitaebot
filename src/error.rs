@@ -369,14 +369,42 @@ pub enum ToolError {
 
     /// Tool execution timed out. Names the command and the budget so a
     /// timeout is never a bare "timed out" with no way to tell what or
-    /// how long.
-    #[error("`{command}` timed out after {secs}s")]
+    /// how long, and carries what the child was doing when it died.
+    #[error("`{command}` timed out after {secs}s{evidence}")]
     Timeout {
         /// The command that exceeded the budget.
         command: String,
         /// The budget, in seconds.
         secs: u64,
+        /// What the kill would otherwise destroy; empty for timeouts
+        /// with no subprocess (HTTP fetches).
+        evidence: TimeoutEvidence,
     },
+}
+
+/// Diagnostics captured when a subprocess is killed at its budget:
+/// the output it had written (a stall's last words — a lock wait, a
+/// hung test name) and the cgroup pressure at kill time (the #74
+/// stall hypothesis is silent memory.high throttling, which no
+/// kernel log ever names).
+#[derive(Debug, Default)]
+pub struct TimeoutEvidence {
+    /// Bounded tail of the child's output at kill time.
+    pub output_tail: String,
+    /// Cgroup snapshot: memory.current, memory.events, PSI.
+    pub pressure: String,
+}
+
+impl std::fmt::Display for TimeoutEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.pressure.is_empty() {
+            write!(f, "\ncgroup at kill: {}", self.pressure)?;
+        }
+        if !self.output_tail.is_empty() {
+            write!(f, "\nlast output:\n{}", self.output_tail)?;
+        }
+        Ok(())
+    }
 }
 
 impl ToolError {

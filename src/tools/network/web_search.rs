@@ -81,6 +81,7 @@ impl Tool for WebSearch {
                     .map_err(|_| ToolError::Timeout {
                         command: format!("web_search {:?}", args.query),
                         secs: self.timeout.as_secs(),
+                        evidence: crate::error::TimeoutEvidence::default(),
                     })?
                     .map_err(|e| {
                         warn!("Search API error: {e}");

@@ -27,13 +27,13 @@ use regex::RegexSet;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::process::Command;
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 use tracing::{debug, warn};
 
 use std::future::Future;
 use std::pin::Pin;
 
-use super::cli_runner::{CONFINE_SELF, GroupKillGuard};
+use super::cli_runner::{self, CONFINE_SELF};
 use super::direnv::{DirenvCache, DirenvEnv, DirenvError};
 use super::git;
 use super::{Tool, ToolCtx};
@@ -678,19 +678,18 @@ impl Tool for Exec {
                     }
                 }
             };
-            let guard = GroupKillGuard::arm(&child);
-            let output = timeout(self.timeout, child.wait_with_output())
+            let output = cli_runner::wait_with_evidence(child, self.timeout)
                 .await
-                .map_err(|_| ToolError::Timeout {
-                    command: args.command.clone(),
-                    secs: self.timeout.as_secs(),
-                })?
                 .map_err(|source| ToolError::Spawn {
                     argv: spawned,
                     cwd: cwd.display().to_string(),
                     source,
+                })?
+                .map_err(|evidence| ToolError::Timeout {
+                    command: args.command.clone(),
+                    secs: self.timeout.as_secs(),
+                    evidence,
                 })?;
-            guard.disarm();
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
