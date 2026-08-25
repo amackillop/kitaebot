@@ -23,6 +23,11 @@ struct Args {
     title: String,
     /// Issue body / description.
     body: String,
+    /// Labels to apply: `bug` or `enhancement`, one of `priority:high`
+    /// (burning money, turns, or data now) or `priority:low`, and
+    /// `needs-plan` when the fix needs a design agreed before code.
+    #[serde(default)]
+    labels: Vec<String>,
 }
 
 pub struct IssueCreate {
@@ -76,7 +81,7 @@ impl IssueCreate {
         let issue = self
             .api
             .client()
-            .create_issue(&args.repo, &args.title, &args.body)
+            .create_issue(&args.repo, &args.title, &args.body, &args.labels)
             .await?;
         Ok(format!(
             "Created issue #{}: {}",
@@ -102,6 +107,7 @@ mod tests {
             repo: repo.into(),
             title: "Flaky test".into(),
             body: "Details".into(),
+            labels: vec!["bug".into(), "priority:low".into()],
         }
     }
 
@@ -113,6 +119,8 @@ mod tests {
             let payload: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
             assert_eq!(payload["title"], "Flaky test");
             assert_eq!(payload["body"], "Details");
+            assert_eq!(payload["labels"][0], "bug");
+            assert_eq!(payload["labels"][1], "priority:low");
             br#"{"number":42,"html_url":"https://github.com/owner/repo/issues/42"}"#.to_vec()
         });
 

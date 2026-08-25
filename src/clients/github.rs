@@ -175,10 +175,11 @@ impl GithubClient {
         nwo: &str,
         title: &str,
         body: &str,
+        labels: &[String],
     ) -> Result<CreatedIssue, GithubError> {
         self.post_json(
             format!("repos/{nwo}/issues"),
-            &json!({ "title": title, "body": body }),
+            &json!({ "title": title, "body": body, "labels": labels }),
         )
         .await
     }

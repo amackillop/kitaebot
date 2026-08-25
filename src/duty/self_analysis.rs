@@ -237,10 +237,15 @@ pub fn format_prompt(repo: &str, delta: &Delta, open_proposals: &[String]) -> St
          code first: explore the checkout of {repo} before concluding. \
          Then either file ONE issue on {repo} with github_issue_create \
          — evidence quoted, your analysis, the suspected code location \
-         — or reply briefly that nothing is actionable. Transient \
-         one-off failures that self-corrected are not actionable. Do \
-         not fix anything: proposals are triaged by a human, and an \
-         issue you file only becomes work when a human assigns it."
+         — or reply briefly that nothing is actionable. Label the \
+         issue: `bug` (broken, wasteful, or misleading behavior) or \
+         `enhancement` (new capability, hygiene), plus `priority:high` \
+         (burning money, turns, or data now) or `priority:low`, plus \
+         `needs-plan` when the fix needs a design agreed before code. \
+         Transient one-off failures that self-corrected are not \
+         actionable. Do not fix anything: proposals are triaged by a \
+         human, and an issue you file only becomes work when a human \
+         assigns it."
     );
     s
 }
