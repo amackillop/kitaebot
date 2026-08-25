@@ -186,6 +186,7 @@ impl Provider for CompletionsProvider {
             usage: self.openrouter.then_some(UsageAccounting { include: true }),
             provider: self.openrouter.then_some(ProviderPreferences {
                 data_collection: "deny",
+                require_parameters: true,
             }),
             // Sticky cache routing; OpenRouter-only, like the other
             // extensions — strict endpoints reject unknown params.
@@ -262,6 +263,12 @@ struct ProviderPreferences {
     /// "deny" restricts routing to endpoints that neither retain nor
     /// train on prompts. Not configurable: privacy is not a knob.
     data_collection: &'static str,
+    /// Route only to endpoints supporting every request parameter.
+    /// Without it, `OpenRouter` may land on a provider that rejects
+    /// temperature or reasoning outright (Alibaba's kimi-k3 serving
+    /// 400s on temperature=0.7), turning a routing choice into a
+    /// failed reviewer gate.
+    require_parameters: bool,
 }
 
 #[cfg(test)]
@@ -362,12 +369,15 @@ mod tests {
             Some(UsageAccounting { include: true }),
             Some(ProviderPreferences {
                 data_collection: "deny",
+                require_parameters: true,
             }),
             Some("amackillop/kitaebot"),
         ))
         .unwrap();
         assert!(with.contains(r#""usage":{"include":true}"#));
-        assert!(with.contains(r#""provider":{"data_collection":"deny"}"#));
+        assert!(
+            with.contains(r#""provider":{"data_collection":"deny","require_parameters":true}"#)
+        );
         assert!(with.contains(r#""session_id":"amackillop/kitaebot""#));
         let without = serde_json::to_string(&request(None, None, None)).unwrap();
         assert!(!without.contains("usage"));
@@ -424,7 +434,7 @@ mod tests {
         let client = CompletionsClient::from_fn(|body| async move {
             let body = String::from_utf8(body).unwrap();
             assert!(
-                body.contains(r#""provider":{"data_collection":"deny"}"#),
+                body.contains(r#""provider":{"data_collection":"deny","require_parameters":true}"#),
                 "request body missing the data-collection denial: {body}"
             );
             Ok(crate::clients::RawResponse {

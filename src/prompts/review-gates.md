@@ -56,10 +56,10 @@ your fixes. One exception: a wrong-approach verdict on a plan yields a
 redesigned plan, which gets one review; after that, proceed and let
 human sign-off arbitrate. A clean verdict needs no action. A failed
 reviewer call is a skipped review — proceed on your own judgment, and
-disclose it: state the skipped gate in your final reply, and for a
-commit or series gate also in the commit message body or PR
-description. A skipped review the human never hears about is a lie of
-omission.
+disclose it: state the skipped gate in your final reply and in the PR
+description — never in the commit message, which is the target repo's
+permanent history and carries the change, not your process. A skipped
+review the human never hears about is a lie of omission.
 
 External findings: when processing PR review comments or corrections
 to a posted plan, log each one with `review_log` before acting on it.
