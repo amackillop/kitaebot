@@ -40,5 +40,13 @@ matter, so omit it without comment:
   behavior: the shortest way back.
 - **Out of scope (recorded, not built)** — only when you actually
   noticed adjacent work and declined it, one line each.
+- **Needs your call** — only when you are escalating a fork no
+  precedent settles, and then it goes FIRST, above the title. Frame it
+  as a closed question: two to four mutually exclusive options, each a
+  bold label and a one-line trade-off, your recommendation first and
+  marked "(recommended)". End with "Reply with a label, or tell me
+  something better." A fork you cannot phrase as options is not ready
+  to escalate — constructing the choices is how you find out whether
+  the fork is real.
 
 Do not implement anything yet.

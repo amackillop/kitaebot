@@ -51,10 +51,14 @@ case-insensitively) gets the plan-first flow: plan comment, human
 approval, then execution. Without it the announcement is a direct
 execution turn — the human made both gestures (assign + label) at
 triage, so an unlabeled assignment means "just do it"; review gates
-and PR review still stand behind the result. The prompt keeps a
-judgment backstop: a ticket that turns out underspecified or larger
-than it reads gets a plan or questions instead of code. The label is
-read at announcement time; adding it later changes nothing.
+and PR review still stand behind the result. The prompt keeps two
+judgment backstops: a ticket that turns out underspecified or larger
+than it reads gets a plan or questions instead of code, and a plan
+containing a fork that no in-repo precedent settles — where reasonable
+designs genuinely disagree — is posted for sign-off even though the
+dispatch waived it (the waiver covers settled ground only; the bot can
+raise its own hand). The label is read at announcement time; adding it
+later changes nothing.
 
 **Plan revisions edit in place.** The channel records the announcement
 reply's comment id (that comment is the plan) and hands it to
