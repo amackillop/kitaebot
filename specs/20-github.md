@@ -187,11 +187,20 @@ For each of the bot's open PRs, fetch reviews
 (`/repos/{nwo}/pulls/{n}/reviews`), conversation comments
 (`/repos/{nwo}/issues/{n}/comments`), and inline diff comments
 (`/repos/{nwo}/pulls/{n}/comments`). Skip the bot's own items,
-items older than `last_poll`, and untrusted authors. Message formats:
+items older than `last_poll`, and untrusted authors. All new
+feedback on one PR folds into **one turn per PR per tick** — replies
+must not race each other on the same branch, and a review with N
+inline comments is one logical event, not N+1 turns. Message formats
+for the items inside the batched message:
 
 - Review: `Review on PR #5 "Title" (owner/repo) by @alice: APPROVED\n\nBody`
 - Comment: `Comment on PR #5 "Title" (owner/repo) by @carol:\n\nBody`
-- Diff comment: `Inline comment on PR #5 "Title" (owner/repo) by @dave at src/main.rs:42:\n\nBody`
+- Diff comment: `Inline comment on PR #5 "Title" (owner/repo) by @dave at src/main.rs:42 (comment id 12):\n\nBody`
+
+The diff comment carries its id so the turn can reply in-thread
+(`github_pr_diff_reply`) without a fetch round-trip. The batched
+message stays compact: the turn fetches the full comment set via
+`github_pr_diff_comments` when it needs detail.
 
 ### Review requests
 
