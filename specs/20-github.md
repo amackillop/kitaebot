@@ -215,9 +215,11 @@ formats for the items inside the batched message:
 - Diff comment: `Inline comment on PR #5 "Title" (owner/repo) by @dave at src/main.rs:42 (comment id 12):\n\nBody`
 
 The diff comment carries its id so the turn can reply in-thread
-(`github_pr_diff_reply`) without a fetch round-trip. The batched
-message stays compact: the turn fetches the full comment set via
-`github_pr_diff_comments` when it needs detail.
+(`github_pr_diff_reply`) without a fetch round-trip. Item bodies are
+inlined verbatim and unbounded — they are the work order, and a
+truncated body is a dropped request. The fold bounds turn count, not
+message size; oversized messages are externalized downstream by the
+context engine ([spec 14](14-context-engine.md)).
 
 ### Review requests
 
