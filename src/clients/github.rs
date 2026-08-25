@@ -286,15 +286,16 @@ impl GithubClient {
         self.post_json(format!("repos/{nwo}/pulls"), payload).await
     }
 
-    /// The most recent failed workflow run on a branch, if any.
-    pub async fn latest_failed_run(
+    /// The most recent workflow run on a branch, if any. The runs
+    /// endpoint sorts newest-first.
+    pub async fn latest_run(
         &self,
         nwo: &str,
         branch: &str,
     ) -> Result<Option<WorkflowRun>, GithubError> {
         let runs: WorkflowRuns = self
             .get_json(format!(
-                "repos/{nwo}/actions/runs?branch={branch}&status=failure&per_page=1"
+                "repos/{nwo}/actions/runs?branch={branch}&per_page=1"
             ))
             .await?;
         Ok(runs.workflow_runs.into_iter().next())
@@ -577,6 +578,10 @@ pub struct WorkflowRun {
     pub display_title: String,
     /// Workflow name.
     pub name: String,
+    /// `queued`, `in_progress`, `completed`, ...
+    pub status: String,
+    /// `success`, `failure`, `cancelled`, ...; absent until completed.
+    pub conclusion: Option<String>,
     pub created_at: String,
     pub html_url: String,
 }

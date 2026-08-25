@@ -424,7 +424,7 @@ directory, never a repo.
 | Tool | Description |
 |------|-------------|
 | `github_api` | Generic REST escape hatch. Paths are forced under `repos/<owner>/<repo>/` and the first segment must be one of `actions` (GET only — writing dispatches, re-runs, or cancels workflows, a human decision), `dependabot` (GET only — writing dismisses alerts, a human decision), `issues`, `labels`, `milestones`, `pulls`, `releases`. |
-| `github_ci_status` | Check CI status for a git ref. |
+| `github_ci_status` | Report the latest CI run on a branch (pending, green, or red), with failure logs when it failed. |
 | `github_pr_create` | Create a pull request. |
 | `github_pr_list` | List pull requests (open/closed/all). |
 | `github_pr_review_submit` | Submit a formal PR review (APPROVE or COMMENT) with inline comments. REQUEST_CHANGES is unrepresentable in the args. |

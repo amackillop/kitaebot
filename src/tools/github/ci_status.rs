@@ -1,4 +1,5 @@
-//! `github_ci_status` tool — fetch the latest failed CI run and its logs.
+//! `github_ci_status` tool — report the latest CI run on a branch,
+//! with failure logs when it failed.
 
 use std::fmt::Write;
 use std::future::Future;
@@ -28,7 +29,7 @@ impl Tool for CiStatus {
     }
 
     fn description(&self) -> &'static str {
-        "Fetch the latest failed CI run and its failure logs"
+        "Report the latest CI run on a branch, with failure logs when it failed"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -51,9 +52,13 @@ impl Tool for CiStatus {
 impl CiStatus {
     /// Pure: format the run header and per-job failure logs.
     fn format_output(run: &WorkflowRun, logs: &[(String, String)]) -> String {
+        let outcome = match &run.conclusion {
+            None => run.status.clone(),
+            Some(c) => c.clone(),
+        };
         let mut out = format!(
-            "Run #{}: \"{}\" ({})\nCreated: {}\nURL: {}\n",
-            run.id, run.display_title, run.name, run.created_at, run.html_url
+            "Run #{}: \"{}\" ({})\nOutcome: {}\nCreated: {}\nURL: {}\n",
+            run.id, run.display_title, run.name, outcome, run.created_at, run.html_url
         );
         for (job, log) in logs {
             let _ = write!(out, "\n--- job: {job} ---\n\n{log}");
@@ -70,11 +75,15 @@ impl CiStatus {
         };
 
         let client = self.0.client();
-        // No failed runs is the answer, not a failure: the model asked
-        // whether CI is red and it is not.
-        let Some(run) = client.latest_failed_run(&nwo, &branch_name).await? else {
-            return Ok(format!("No failed runs on branch `{branch_name}`."));
+        // No runs is the answer, not a failure: the model asked what
+        // CI did and CI never ran.
+        let Some(run) = client.latest_run(&nwo, &branch_name).await? else {
+            return Ok(format!("No workflow runs on branch `{branch_name}`."));
         };
+
+        if run.conclusion.as_deref() != Some("failure") {
+            return Ok(Self::format_output(&run, &[]));
+        }
 
         // Whole-job logs, not gh's failed-steps slice: the extra lines
         // carry the context around the failure anyway.
@@ -97,21 +106,28 @@ mod tests {
     use super::*;
     use crate::tools::github::test_helpers::stub_api_with_repo;
 
-    #[test]
-    fn formats_run_and_logs() {
-        let run = WorkflowRun {
+    fn run_fixture(status: &str, conclusion: Option<&str>) -> WorkflowRun {
+        WorkflowRun {
             id: 9999,
             display_title: "CI".to_string(),
             name: "test".to_string(),
+            status: status.to_string(),
+            conclusion: conclusion.map(str::to_string),
             created_at: "2025-01-15T10:00:00Z".to_string(),
             html_url: "https://github.com/o/r/actions/runs/9999".to_string(),
-        };
+        }
+    }
+
+    #[test]
+    fn formats_run_and_logs() {
+        let run = run_fixture("completed", Some("failure"));
         let logs = vec![("build".to_string(), "Step failed".to_string())];
         let result = CiStatus::format_output(&run, &logs);
         assert_eq!(
             result,
             "\
 Run #9999: \"CI\" (test)
+Outcome: failure
 Created: 2025-01-15T10:00:00Z
 URL: https://github.com/o/r/actions/runs/9999
 
@@ -121,15 +137,24 @@ Step failed"
         );
     }
 
+    /// A run without a conclusion reports its status, so pending is
+    /// distinguishable from green and from never-ran.
+    #[test]
+    fn pending_run_reports_status() {
+        let run = run_fixture("in_progress", None);
+        let result = CiStatus::format_output(&run, &[]);
+        assert!(result.contains("Outcome: in_progress"), "{result}");
+    }
+
     #[tokio::test]
     async fn fetches_failed_jobs_logs_only() {
         let api = stub_api_with_repo("owner/repo", |method, path, _body| {
             assert_eq!(method, "GET");
             if path.starts_with("repos/owner/repo/actions/runs?") {
                 assert!(path.contains("branch=work"));
-                assert!(path.contains("status=failure"));
                 return br#"{"workflow_runs":[{"id":7,"display_title":"CI",
-                    "name":"test","created_at":"2025-01-15T10:00:00Z",
+                    "name":"test","status":"completed","conclusion":"failure",
+                    "created_at":"2025-01-15T10:00:00Z",
                     "html_url":"https://example.invalid/7"}]}"#
                     .to_vec();
             }
@@ -150,17 +175,38 @@ Step failed"
         assert!(!out.contains("lint"));
     }
 
-    /// Green CI answers the question; it must not read as the tool
-    /// failing.
+    /// CI never running answers the question; it must not read as the
+    /// tool failing.
     #[tokio::test]
-    async fn no_failed_runs_is_a_result_not_an_error() {
+    async fn no_runs_is_a_result_not_an_error() {
         let api = stub_api_with_repo("owner/repo", |_method, path, _body| {
             assert!(path.starts_with("repos/owner/repo/actions/runs?"));
             br#"{"workflow_runs":[]}"#.to_vec()
         });
         let tool = CiStatus(api);
         let out = tool.run("projects/r", None).await.unwrap();
-        assert_eq!(out, "No failed runs on branch `work`.");
+        assert_eq!(out, "No workflow runs on branch `work`.");
+    }
+
+    /// A non-failed latest run is reported without touching the jobs
+    /// or logs endpoints.
+    #[tokio::test]
+    async fn green_run_skips_job_and_log_fetches() {
+        let api = stub_api_with_repo("owner/repo", |_method, path, _body| {
+            assert!(
+                path.starts_with("repos/owner/repo/actions/runs?"),
+                "unexpected call: {path}"
+            );
+            br#"{"workflow_runs":[{"id":8,"display_title":"CI",
+                "name":"test","status":"completed","conclusion":"success",
+                "created_at":"2025-01-15T10:00:00Z",
+                "html_url":"https://example.invalid/8"}]}"#
+                .to_vec()
+        });
+        let tool = CiStatus(api);
+        let out = tool.run("projects/r", None).await.unwrap();
+        assert!(out.contains("Outcome: success"), "{out}");
+        assert!(!out.contains("--- job:"), "{out}");
     }
 
     /// A log exceeding the ceiling is tail-truncated: the output ends
@@ -174,7 +220,8 @@ Step failed"
         let api = stub_api_with_repo("owner/repo", move |_method, path, _body| {
             if path.starts_with("repos/owner/repo/actions/runs?") {
                 return br#"{"workflow_runs":[{"id":7,"display_title":"CI",
-                    "name":"test","created_at":"2025-01-15T10:00:00Z",
+                    "name":"test","status":"completed","conclusion":"failure",
+                    "created_at":"2025-01-15T10:00:00Z",
                     "html_url":"https://example.invalid/7"}]}"#
                     .to_vec();
             }
