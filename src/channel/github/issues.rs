@@ -159,7 +159,7 @@ async fn checkout_note(git: &GitCli, d: &Dispatch) -> Option<String> {
         return None;
     }
     match execution_checkout::prepare(git, &d.nwo).await {
-        Ok(rel) => Some(execution_checkout::ready_note(&rel)),
+        Ok(prepared) => Some(prepared.ready_note()),
         Err(e) => {
             warn!(issue = %d.key, "execution checkout prep failed: {e}");
             Some(execution_checkout::CLONE_YOURSELF.into())

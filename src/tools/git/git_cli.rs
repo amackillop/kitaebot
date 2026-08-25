@@ -286,8 +286,13 @@ const LONG_TIMEOUT_SECS: u64 = 900;
 /// so no call site has to remember. Everything else is bounded by
 /// local IO and keeps the default.
 fn hook_timeout(args: &[&str]) -> Option<u64> {
+    // The subcommand may sit behind leading `-c key=val` pairs.
+    let mut rest = args;
+    while let ["-c", _, tail @ ..] = rest {
+        rest = tail;
+    }
     matches!(
-        args.first(),
+        rest.first(),
         Some(&"clone" | &"commit" | &"fetch" | &"push")
     )
     .then_some(LONG_TIMEOUT_SECS)
@@ -457,6 +462,15 @@ mod tests {
             vec!["commit", "-m", "x"],
             vec!["fetch", "origin"],
             vec!["push", "origin", "b"],
+            vec![
+                "-c",
+                "user.name=k",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "x",
+            ],
         ] {
             assert_eq!(hook_timeout(&slow), Some(LONG_TIMEOUT_SECS), "{slow:?}");
         }

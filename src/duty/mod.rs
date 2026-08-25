@@ -270,7 +270,7 @@ async fn checkout_note(duty: &Duty, git: Option<&GitCli>, repo: &str) -> String 
         return execution_checkout::CLONE_YOURSELF.into();
     };
     match execution_checkout::prepare(git, repo).await {
-        Ok(rel) => execution_checkout::ready_note(&rel),
+        Ok(prepared) => prepared.ready_note(),
         Err(e) => {
             warn!(duty = %duty.name, "duty checkout prep failed: {e}");
             execution_checkout::CLONE_YOURSELF.into()

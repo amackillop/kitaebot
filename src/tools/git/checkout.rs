@@ -112,6 +112,19 @@ pub(crate) async fn run(
     Ok(())
 }
 
+/// Like [`run`], but returns the exit code and stdout for callers
+/// that branch on them; a non-zero exit is data here, not an error.
+/// Unauthenticated only — every probing caller is local.
+pub(crate) async fn run_read(
+    git: &GitCli,
+    args: &[&str],
+    cwd: &Path,
+) -> Result<(i32, String), ToolError> {
+    let call = git.prepare_git(args, cwd);
+    let out = git.exec_git(call, false).await?;
+    Ok((out.exit_code, out.stdout))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
