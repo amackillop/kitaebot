@@ -765,26 +765,47 @@ fn transcript_since_sync(
     };
     let after = i64::try_from(after).unwrap_or(i64::MAX);
 
-    let rows: Vec<(i64, String, String, i64)> = {
-        let mut stmt = conn.prepare(
-            "SELECT message_id, role, content, token_count FROM messages \
-                 WHERE conversation_id = ?1 AND seq >= ?2 ORDER BY seq",
-        )?;
-        stmt.query_map(params![conversation_id, after], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-
-    let mut out = Vec::new();
+    // Pass 1: cheap (seq, token_count) scan to find the cutoff. The
+    // stored count is the same chars/4 estimate the clamp uses, so
+    // the cutoff is exact — only the kept rows are materialized.
+    let mut stmt = conn.prepare(
+        "SELECT seq, token_count FROM messages \
+             WHERE conversation_id = ?1 AND seq >= ?2 ORDER BY seq",
+    )?;
+    let mut rows = stmt.query(params![conversation_id, after])?;
+    let mut cutoff: Option<i64> = None;
     let mut total: u64 = 0;
-    for (id, role, content, tokens) in rows {
-        let tokens = u64::try_from(tokens).unwrap_or(0);
-        if !out.is_empty() && total + tokens > max_tokens {
+    let mut kept = false;
+    while let Some(row) = rows.next()? {
+        let tokens = u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0);
+        if kept && total + tokens > max_tokens {
+            cutoff = Some(row.get::<_, i64>(0)?);
             break;
         }
-        out.push(reconstruct_message(conn, id, &role, content)?);
+        kept = true;
         total += tokens;
+    }
+
+    // Pass 2: full rows below the cutoff.
+    let mut out = Vec::new();
+    if kept {
+        let mut stmt = conn.prepare(
+            "SELECT message_id, role, content FROM messages \
+                 WHERE conversation_id = ?1 AND seq >= ?2 AND seq < ?3 ORDER BY seq",
+        )?;
+        let cutoff = cutoff.unwrap_or(i64::MAX);
+        let rows = stmt
+            .query_map(params![conversation_id, after, cutoff], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, role, content) in rows {
+            out.push(reconstruct_message(conn, id, &role, content)?);
+        }
     }
     Ok(out)
 }
@@ -1900,6 +1921,62 @@ mod tests {
         // A zero budget still yields the head so the watermark can advance.
         let span = engine.transcript_since("general", 0, 0).await.unwrap();
         assert_eq!(span.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn transcript_since_clamp_cuts_mid_tail() {
+        let (mut engine, _dir) = temp_engine();
+        // 5 messages of 400 chars = 100 tokens each.
+        for i in 0..5 {
+            engine
+                .push_message(Message::User {
+                    content: format!("{i} ").repeat(200),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Budget 250: keeps m0..m1 (m2 would reach 300), cuts at m2.
+        let span = engine.transcript_since("general", 0, 250).await.unwrap();
+        assert_eq!(span.len(), 2);
+        for (i, msg) in span.iter().enumerate() {
+            assert!(
+                matches!(msg, Message::User { content } if content.starts_with(&format!("{i} "))),
+                "expected message {i}, got {msg:?}"
+            );
+        }
+
+        // Resuming after the clamp returns the next slice, not all
+        // the rest: the budget applies per fetch.
+        let rest = engine.transcript_since("general", 2, 250).await.unwrap();
+        assert_eq!(rest.len(), 2);
+
+        // Exact boundary: a budget the first two rows sum to exactly
+        // keeps both — the clamp is `>`, not `>=`.
+        let exact = engine.transcript_since("general", 0, 200).await.unwrap();
+        assert_eq!(exact.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn transcript_since_zero_budget_returns_oversized_head() {
+        let (mut engine, _dir) = temp_engine();
+        engine
+            .push_message(Message::User {
+                content: "huge".repeat(1000),
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::User {
+                content: "tail".into(),
+            })
+            .await
+            .unwrap();
+
+        // The head alone exceeds any budget; progress demands it anyway.
+        let span = engine.transcript_since("general", 0, 0).await.unwrap();
+        assert_eq!(span.len(), 1);
+        assert!(matches!(&span[0], Message::User { content } if content.starts_with("huge")));
     }
 
     #[tokio::test]
