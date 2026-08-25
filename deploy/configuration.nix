@@ -128,10 +128,12 @@ in
           "martinsaposnic"
           "NatElkins"
           "npslaney"
-          "sbddesign"
         ];
         trusted_bots = [ "chatgpt-codex-connector" ];
-        issues.enabled = true;
+        issues = {
+          enabled = true;
+          plan_label = "needs-plan";
+        };
       };
       linear = {
         enabled = true;
@@ -141,8 +143,8 @@ in
           "martin@moneydevkit.com"
           "nat@moneydevkit.com"
           "nick@moneydevkit.com"
-          "stephen@moneydevkit.com"
         ];
+        plan_label = "needs-plan";
       };
       duties = {
         # Weekly: the shared cargo target dir persists and devshell
