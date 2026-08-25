@@ -16,6 +16,7 @@ use crate::tools::string_or_value;
 
 /// Resources the model may touch.
 const ALLOWED_RESOURCES: &[&str] = &[
+    "actions",
     "dependabot",
     "issues",
     "labels",
@@ -24,9 +25,10 @@ const ALLOWED_RESOURCES: &[&str] = &[
     "releases",
 ];
 
-/// Resources limited to GET: writing `dependabot/alerts` dismisses
-/// alerts, and dismissal is a human decision.
-const READONLY_RESOURCES: &[&str] = &["dependabot"];
+/// Resources limited to GET: writing `actions` dispatches, re-runs, or
+/// cancels workflows, and writing `dependabot/alerts` dismisses
+/// alerts — human decisions.
+const READONLY_RESOURCES: &[&str] = &["actions", "dependabot"];
 
 #[derive(Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
@@ -55,8 +57,9 @@ struct Args {
     /// HTTP method.
     method: Method,
     /// Path under `repos/<owner>/<repo>/`, e.g. `issues/42/comments`
-    /// or `pulls?state=open`. Must start with one of: dependabot
-    /// (GET only), issues, labels, milestones, pulls, releases.
+    /// or `pulls?state=open`. Must start with one of: actions (GET
+    /// only), dependabot (GET only), issues, labels, milestones,
+    /// pulls, releases.
     path: String,
     /// JSON body for POST/PATCH.
     #[serde(default, deserialize_with = "string_or_value")]
@@ -189,6 +192,7 @@ mod tests {
     #[test]
     fn accepts_allowed_resources() {
         for path in [
+            "actions/runs?branch=work&per_page=5",
             "dependabot/alerts?state=open",
             "issues/42/comments",
             "pulls?state=open",
@@ -205,15 +209,14 @@ mod tests {
 
     #[test]
     fn readonly_resources_reject_writes() {
-        for method in [Method::Delete, Method::Patch, Method::Post] {
-            assert!(
-                matches!(
-                    validate_path("dependabot/alerts/4", method),
-                    Err(ToolError::Blocked { .. })
-                ),
-                "{} should be blocked on dependabot",
-                method.as_str(),
-            );
+        for path in ["actions/runs/7/rerun", "dependabot/alerts/4"] {
+            for method in [Method::Delete, Method::Patch, Method::Post] {
+                assert!(
+                    matches!(validate_path(path, method), Err(ToolError::Blocked { .. })),
+                    "{} should be blocked on {path}",
+                    method.as_str(),
+                );
+            }
         }
     }
 
