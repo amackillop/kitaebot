@@ -23,7 +23,13 @@ before reading the fence's rationale is a guess. Pure additions are exempt.
 ### Building
 - Build exactly one commit at a time from the plan then wait for human review.
 - Use `just rust-check` to validate code while iterating on Rust modules
-- DO NOT use `cargo` commands directly, use the `just` recipes.
+- Use `just test-one NAME` for a single test or module while iterating —
+  it carries the required feature flags; a raw `cargo test` without them
+  fails to compile or runs the wrong suite.
+- DO NOT use `cargo` commands directly, use the `just` recipes. The
+  recipes are the single source of truth for flags; when they change,
+  commands remembered from past turns go stale — prefer the recipe over
+  any remembered cargo invocation.
 - `just check` MUST PASS before asking for review.
 - Use `just fmt` to format code. Use `just fix` to fix simple lints automatically.
 - Prepare a commit message for review as well using the `/commit` skill
