@@ -444,6 +444,10 @@ async fn gh_pull_resource(
         "reviews" => "reviews",
         _ => return (StatusCode::NOT_FOUND, "unknown pull sub-resource").into_response(),
     };
+    // Failing one PR's reviews fetch exercises the skip-and-log path.
+    if pr["fail_reviews"].as_bool().unwrap_or(false) && resource == "reviews" {
+        return (StatusCode::NOT_FOUND, "fixture-induced failure").into_response();
+    }
     axum::Json(pr[field].clone()).into_response()
 }
 

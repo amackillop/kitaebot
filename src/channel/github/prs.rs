@@ -213,6 +213,13 @@ async fn poll_once(
 
 /// Pass 1: feedback (reviews, comments, diff comments) on the bot's
 /// own open PRs.
+///
+/// Stateless: items are cut on `last_poll`. A search failure
+/// propagates so `last_poll` does not advance; a per-PR fetch
+/// failure only skips that PR — one persistently broken PR (repo
+/// gone private, 404 every tick) must not wedge the cursor and
+/// starve every other PR's feedback, the same rule as the
+/// contributed pass.
 async fn feedback_pass(
     client: &GithubClient,
     config: &GithubConfig,
@@ -231,8 +238,26 @@ async fn feedback_pass(
             );
             continue;
         };
-        let feedback = fetch_pr_feedback(client, &nwo, pr.number).await?;
-        let diff_comments = client.pull_comments(&nwo, pr.number).await?;
+        let feedback = match fetch_pr_feedback(client, &nwo, pr.number).await {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(
+                    pr = %format!("{nwo}#{}", pr.number),
+                    "Skipping own PR this tick, feedback fetch failed: {e}"
+                );
+                continue;
+            }
+        };
+        let diff_comments = match client.pull_comments(&nwo, pr.number).await {
+            Ok(dcs) => dcs,
+            Err(e) => {
+                warn!(
+                    pr = %format!("{nwo}#{}", pr.number),
+                    "Skipping own PR this tick, diff comment fetch failed: {e}"
+                );
+                continue;
+            }
+        };
         snapshots.push(FeedbackSnapshot {
             nwo,
             pr,

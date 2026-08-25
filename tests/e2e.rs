@@ -239,6 +239,30 @@ fn github_feedback_pass_dispatches_trusted_reviews_only() {
 }
 
 #[test]
+fn github_feedback_pass_skips_broken_pr_without_starving_others() {
+    let fixture = FixtureServer::start();
+    // The broken PR must sort first: its fetch failure is what the
+    // skip-and-log path has to survive.
+    let mut broken = github_pr("owner/repo", 4, "kitaebot", "Gone private");
+    broken["search"] = "own".into();
+    broken["fail_reviews"] = true.into();
+    let mut healthy = github_pr("owner/repo", 5, "kitaebot", "Add feature");
+    healthy["search"] = "own".into();
+    healthy["reviews"] = serde_json::json!([github_review(
+        "alice",
+        "CHANGES_REQUESTED",
+        "Rename the flag"
+    ),]);
+    fixture.set_github_prs(vec![broken, healthy]);
+    fixture.on_completion_always("by @alice: CHANGES_REQUESTED", text("noted"));
+
+    let fixtures_root = harness::fixtures_root();
+    let _daemon = TestDaemon::spawn_with(&fixture, &github_config(&fixture, fixtures_root.path()));
+
+    fixture.wait_for_completion_request("(owner/repo) by @alice: CHANGES_REQUESTED");
+}
+
+#[test]
 fn github_review_request_then_tracked_rereview() {
     let fixture = FixtureServer::start();
     let fixtures_root = harness::fixtures_root();

@@ -190,8 +190,11 @@ For each of the bot's open PRs, fetch reviews
 items older than `last_poll`, and untrusted authors. All new
 feedback on one PR folds into **one turn per PR per tick** — replies
 must not race each other on the same branch, and a review with N
-inline comments is one logical event, not N+1 turns. Message formats
-for the items inside the batched message:
+inline comments is one logical event, not N+1 turns. A per-PR fetch
+failure skips that PR for the tick (one persistently broken PR must
+not wedge the cursor and starve every other PR's feedback); a
+search failure propagates so `last_poll` does not advance. Message
+formats for the items inside the batched message:
 
 - Review: `Review on PR #5 "Title" (owner/repo) by @alice: APPROVED\n\nBody`
 - Comment: `Comment on PR #5 "Title" (owner/repo) by @carol:\n\nBody`
