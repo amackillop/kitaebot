@@ -173,14 +173,18 @@ pub async fn poll_loop(
 
     loop {
         tick.tick().await;
+        // Turns run inline between passes, so last_poll may only
+        // advance to the tick's start — a post-dispatch "now" would
+        // swallow feedback that arrived after a PR's snapshot.
+        let tick_start = now_iso8601();
         match poll_once(
             client, git, config, handle, &bot_login, &mut state, state_db,
         )
         .await
         {
             Ok(count) => {
-                info!(count, "GitHub poll: dispatched {count} items");
-                state.last_poll = now_iso8601();
+                info!(count, "GitHub poll: dispatched {count} turns");
+                state.last_poll = tick_start;
                 save_state(state_db, &state);
             }
             Err(e) => {

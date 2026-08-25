@@ -58,7 +58,11 @@ role costs nothing to carry. It selects the review protocol segment
 
 **All GitHub turns route to the repo's work session** (`owner/repo`,
 the same key as Linear issue routing). `last_poll` advances only after
-a successful poll.
+a successful poll, and only to the tick's start time: turns run
+inline between passes, so a post-dispatch timestamp would swallow
+feedback that arrived mid-tick on a PR whose snapshot predates it —
+advancing to tick start re-examines such items next tick, trading a
+seconds-scale duplicate window for the absence of silent loss.
 
 An earlier revision gave reviews their own `review:{nwo}` session, to
 keep prior-review context from compacting in-progress work away and to
