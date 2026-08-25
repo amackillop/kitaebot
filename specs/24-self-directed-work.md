@@ -202,7 +202,9 @@ trusted and proposal-enabled), and `min_delta_tokens`. `/duties` reaches it like
 scheduler's trigger channel.
 
 **What belongs in the error tee.** The tee is not a severity filter
-that happens to be readable. It is this duty's evidence set, and
+that happens to be readable. It is this duty's evidence set (and the
+source of `/stats`'s failure tables, which need its process-wide view
+to count sub-agent turns), and
 `LevelFilter::WARN` is only the mechanism that populates it. Two
 consequences, both of which have already been got wrong once:
 

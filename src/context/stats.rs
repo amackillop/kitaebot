@@ -240,6 +240,115 @@ pub(crate) fn classify_failure(content: &str) -> Option<FailureKind> {
     }
 }
 
+// ── Error-tee analysis ──────────────────────────────────────────────
+//
+// The message tables only see persistent sessions: sub-agent turns
+// run on the ephemeral engine and leave no stored messages. The error
+// tee (spec 24) logs process-wide, so failures from every turn —
+// sub-agents included — are counted from its JSONL lines instead.
+
+/// Failure and blocked-command counts parsed from error-tee lines.
+#[derive(Default)]
+pub(crate) struct TeeReport {
+    /// `(tool, kind, sub_agent)` occurrence counts.
+    failures: HashMap<(String, FailureKind, bool), u64>,
+    /// Blocked exec commands (truncated), with counts.
+    blocked: HashMap<String, u64>,
+    /// Lines that parsed as JSON but matched no known shape, plus
+    /// lines that did not parse (includes the tee's truncation stubs).
+    skipped: u64,
+}
+
+/// Analyze raw tee lines. Pure.
+pub(crate) fn analyze_tee<'a>(lines: impl Iterator<Item = &'a str>) -> TeeReport {
+    let mut report = TeeReport::default();
+    for line in lines.filter(|l| !l.trim().is_empty()) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            report.skipped += 1;
+            continue;
+        };
+        let fields = &v["fields"];
+        let Some(msg) = fields["message"].as_str() else {
+            report.skipped += 1;
+            continue;
+        };
+        if let Some(err) = msg.strip_prefix("Tool execution failed: ") {
+            let tool = fields["tool"].as_str().unwrap_or("?").to_string();
+            let kind = classify_failure(&format!("Error: {err}")).unwrap_or(FailureKind::Other);
+            let sub_agent = v["spans"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|span| span.get("agent").is_some()));
+            *report.failures.entry((tool, kind, sub_agent)).or_default() += 1;
+        } else if msg == "Command blocked" {
+            let cmd = fields["command"].as_str().unwrap_or("?");
+            *report
+                .blocked
+                .entry(truncate_str(cmd, MAX_CMD_DISPLAY))
+                .or_default() += 1;
+        }
+        // Other WARN/ERROR events are the tee's other consumers'
+        // business; only unparseable lines count as skipped.
+    }
+    report
+}
+
+/// Render the tee tables. Pure.
+pub(crate) fn render_tee(report: &TeeReport) -> String {
+    let mut out = String::from("\nError Tee (last 7 days, all turns including sub-agents)\n\n");
+    if report.failures.is_empty() && report.blocked.is_empty() {
+        out.push_str("No tool failures or blocked commands recorded.\n");
+    }
+    if !report.failures.is_empty() {
+        writeln!(
+            out,
+            "{:<20} {:<16} {:<9} {:>5}",
+            "Tool", "Kind", "Origin", "Count"
+        )
+        .unwrap();
+        let mut rows: Vec<_> = report.failures.iter().collect();
+        rows.sort_by_key(|(_, count)| Reverse(**count));
+        for ((tool, kind, sub_agent), count) in rows {
+            let origin = if *sub_agent { "sub-agent" } else { "root" };
+            writeln!(out, "{tool:<20} {kind:<16} {origin:<9} {count:>5}").unwrap();
+        }
+    }
+    if !report.blocked.is_empty() {
+        out.push_str("\nBlocked commands:\n");
+        let mut rows: Vec<_> = report.blocked.iter().collect();
+        rows.sort_by_key(|(_, count)| Reverse(**count));
+        for (cmd, count) in rows {
+            writeln!(out, "  {count:>3}x {cmd}").unwrap();
+        }
+    }
+    if report.skipped > 0 {
+        writeln!(out, "\n({} unparseable tee lines skipped)", report.skipped).unwrap();
+    }
+    out
+}
+
+/// Read the tee directory and render its section. Thin IO shell over
+/// [`analyze_tee`]/[`render_tee`]; an unreadable tee reports why
+/// instead of failing the whole /stats reply.
+pub(crate) fn tee_section(errors_dir: &std::path::Path) -> String {
+    let mut contents = Vec::new();
+    let entries = match std::fs::read_dir(errors_dir) {
+        Ok(entries) => entries,
+        Err(e) => return format!("\nError Tee: unreadable ({e})\n"),
+    };
+    let mut files: Vec<_> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .collect();
+    files.sort();
+    for file in files {
+        match std::fs::read_to_string(&file) {
+            Ok(s) => contents.push(s),
+            Err(e) => return format!("\nError Tee: unreadable ({}: {e})\n", file.display()),
+        }
+    }
+    render_tee(&analyze_tee(contents.iter().flat_map(|s| s.lines())))
+}
+
 // ── Exec command extraction ─────────────────────────────────────────
 
 /// Extract a short command key from the exec tool's JSON arguments.
@@ -324,7 +433,8 @@ fn format_report(report: &Report) -> String {
 
     writeln!(
         out,
-        "Tool Usage ({sessions} session{})\n",
+        "Tool Usage ({sessions} session{}; persistent sessions only — \
+         sub-agent activity appears in the Error Tee section)\n",
         if sessions == 1 { "" } else { "s" }
     )
     .unwrap();
@@ -387,6 +497,58 @@ fn format_report(report: &Report) -> String {
 mod tests {
     use super::*;
     use crate::types::{ToolCall, ToolFunction};
+
+    // ── Error-tee analysis ──────────────────────────────────────────
+
+    #[test]
+    fn tee_counts_failures_blocked_and_subagent_origin() {
+        let lines = [
+            // Root-turn tool failure.
+            r#"{"level":"ERROR","fields":{"message":"Tool execution failed: Blocked: /abs/path (absolute paths not allowed)","tool":"file_read"},"spans":[{"id":4,"name":"turn"}]}"#,
+            // Sub-agent failure: a span carries an `agent` field.
+            r#"{"level":"ERROR","fields":{"message":"Tool execution failed: FTS5 failed to parse search pattern","tool":"lcm_grep"},"spans":[{"name":"turn"},{"agent":"explore","name":"subagent"}]}"#,
+            // Blocked exec command, twice.
+            r#"{"level":"WARN","fields":{"message":"Command blocked","command":"rm -rf /tmp/x"}}"#,
+            r#"{"level":"WARN","fields":{"message":"Command blocked","command":"rm -rf /tmp/x"}}"#,
+            // The tee's own truncation stub and garbage must be
+            // skipped, never panic.
+            r#"{"truncated_line":"{\"level\":\"ERROR\"","original_bytes":99999}"#,
+            "not json at all",
+            // Unrelated WARN passes through uncounted and unskipped.
+            r#"{"level":"WARN","fields":{"message":"direnv failed, running git without devshell"}}"#,
+        ];
+        let report = analyze_tee(lines.into_iter());
+        assert_eq!(
+            report.failures[&("file_read".into(), FailureKind::Blocked, false)],
+            1
+        );
+        assert_eq!(
+            report.failures[&("lcm_grep".into(), FailureKind::Other, true)],
+            1
+        );
+        assert_eq!(report.blocked["rm -rf /tmp/x"], 2);
+        assert_eq!(report.skipped, 2);
+
+        let rendered = render_tee(&report);
+        assert!(rendered.contains("sub-agent"), "{rendered}");
+        assert!(rendered.contains("  2x rm -rf /tmp/x"), "{rendered}");
+        assert!(rendered.contains("(2 unparseable tee lines skipped)"));
+    }
+
+    #[test]
+    fn tee_section_reports_missing_dir_instead_of_failing() {
+        let out = tee_section(std::path::Path::new("/nonexistent/errors"));
+        assert!(out.contains("Error Tee: unreadable"), "{out}");
+    }
+
+    #[test]
+    fn empty_tee_renders_a_quiet_note() {
+        let rendered = render_tee(&analyze_tee(std::iter::empty()));
+        assert!(
+            rendered.contains("No tool failures or blocked commands recorded."),
+            "{rendered}"
+        );
+    }
 
     fn make_assistant(calls: Vec<ToolCall>) -> Message {
         Message::ToolCalls {
@@ -602,7 +764,7 @@ mod tests {
     fn format_report_empty() {
         let report = analyze(&[]);
         let out = format_report(&report);
-        assert!(out.contains("Tool Usage (0 sessions)"));
+        assert!(out.contains("Tool Usage (0 sessions;"));
         assert!(!out.contains("Exec Breakdown"));
     }
 
@@ -617,7 +779,7 @@ mod tests {
         let report = analyze(&[session]);
         let out = format_report(&report);
 
-        assert!(out.contains("Tool Usage (1 session)"));
+        assert!(out.contains("Tool Usage (1 session;"));
         assert!(out.contains("exec"));
         assert!(out.contains("file_read"));
         assert!(out.contains("2.0 KiB"));

@@ -197,7 +197,7 @@ mod tests {
             .unwrap();
 
         let report = engine.report().await.unwrap();
-        assert!(report.contains("Tool Usage (1 session)"), "{report}");
+        assert!(report.contains("Tool Usage (1 session;"), "{report}");
         assert!(report.contains("exec"));
         assert!(report.contains("git status"));
         assert!(report.contains("LCM Health"));

@@ -164,11 +164,13 @@ pub async fn execute(
             Ok(Reply::text("Session cleared.".into()))
         }
         SlashCommand::Project { name } => project(engine, name).await,
-        SlashCommand::Stats => engine
-            .report()
-            .await
-            .map(Reply::pre)
-            .map_err(|e| e.to_string()),
+        SlashCommand::Stats => {
+            let mut out = engine.report().await.map_err(|e| e.to_string())?;
+            // Message-derived tables miss sub-agent turns (ephemeral
+            // engine); the tee section covers them.
+            out.push_str(&crate::context::stats::tee_section(&workspace.errors_dir()));
+            Ok(Reply::pre(out))
+        }
         SlashCommand::Usage => match usage_ledger {
             None => Ok(Reply::text("Usage tracking is disabled.".into())),
             Some(ledger) => ledger

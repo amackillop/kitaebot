@@ -1075,7 +1075,7 @@ mod tests {
             .unwrap();
 
         let report = engine.report().await.unwrap();
-        assert!(report.contains("Tool Usage (2 sessions)"));
+        assert!(report.contains("Tool Usage (2 sessions;"));
         assert!(report.contains("exec"));
         assert!(report.contains("file_read"));
         assert!(report.contains("git status"));
