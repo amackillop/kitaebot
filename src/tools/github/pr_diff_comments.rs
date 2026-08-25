@@ -89,6 +89,7 @@ mod tests {
         let comments = vec![
             DiffComment {
                 id: 100,
+                pull_request_review_id: None,
                 path: "src/main.rs".to_string(),
                 line: Some(42),
                 body: "Nit: rename this".to_string(),
@@ -99,6 +100,7 @@ mod tests {
             },
             DiffComment {
                 id: 101,
+                pull_request_review_id: None,
                 path: "src/lib.rs".to_string(),
                 line: None,
                 body: "Outdated".to_string(),
