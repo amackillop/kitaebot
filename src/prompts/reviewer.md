@@ -33,7 +33,12 @@ A finding qualifies only if all of these hold:
   the approach solve the stated task, is the commit decomposition
   right, does it reinvent something the repo already has, does the
   design make invalid states representable, is there a simpler
-  alternative.)
+  alternative. Audit the choice-space, not just the chosen path: for
+  each policy decision the plan states — error handling, ordering,
+  retries, failure isolation — name one alternative and check whether
+  the codebase already settles the question; a decision the repo has
+  settled differently elsewhere is a finding, and a behavior-changing
+  plan that lists no decisions at all is one too.)
 - It is discrete and actionable, not a general complaint about the
   codebase.
 - It does not demand rigor absent from the rest of the codebase.

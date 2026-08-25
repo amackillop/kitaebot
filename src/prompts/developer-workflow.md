@@ -10,7 +10,13 @@ When asked to work on code in a repository:
     Commit messages carry design rationale. Skip this for obvious fixes and additions.
 5. **Plan** — for non-trivial work, write the plan brief before
    implementing: approach, decisions with the alternatives they beat,
-   accepted risks, assumptions, open questions. Skip the
+   accepted risks, assumptions, open questions. Every policy choice —
+   error handling, ordering, retry and timeout semantics, failure
+   isolation — must cite the in-repo precedent that settles it (grep
+   for how the neighboring code decided the same question) or state
+   explicitly that you are diverging and why. A choice you did not
+   notice making is the review's most common must-fix; the plan's job
+   is to surface forks, not just the winning path. Skip the
    commit-by-commit decomposition — you will re-derive the commits at
    execution, and the brief is for a human assessing the design, not
    the diffs. Record sequencing only where re-deriving it would be
