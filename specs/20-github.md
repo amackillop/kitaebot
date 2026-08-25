@@ -37,10 +37,11 @@ four passes:
 2. **Review requests**: `GET /search/issues` with
    `is:pr is:open review-requested:{bot}`.
 3. **Tracked reviewed PRs**: for each PR in the `reviewed`
-   map, fetch state, head SHA, and new comments. Closed/merged PRs are
-   pruned; a new head SHA triggers an incremental re-review; new trusted
-   comments trigger a discussion turn; both in one tick fold into a
-   single combined turn.
+   map, fetch state, head SHA, comments, and reviews (the reviews
+   date review-linked diff comments by `submitted_at`). Closed/merged
+   PRs are pruned; a new head SHA triggers an incremental re-review;
+   new trusted comments trigger a discussion turn; both in one tick
+   fold into a single combined turn.
 4. **Contributed PRs**: `GET /search/issues` with
    `is:pr is:open commenter:{bot} -author:{bot} -review-requested:{bot}`,
    minus PRs in the `reviewed` map; new trusted feedback folds into one
@@ -58,7 +59,11 @@ role costs nothing to carry. It selects the review protocol segment
 
 **All GitHub turns route to the repo's work session** (`owner/repo`,
 the same key as Linear issue routing). `last_poll` advances only after
-a successful poll.
+a successful poll, and only to the tick's start time: turns run
+inline between passes, so a post-dispatch timestamp would swallow
+feedback that arrived mid-tick on a PR whose snapshot predates it —
+advancing to tick start re-examines such items next tick, trading a
+seconds-scale duplicate window for the absence of silent loss.
 
 An earlier revision gave reviews their own `review:{nwo}` session, to
 keep prior-review context from compacting in-progress work away and to
@@ -187,11 +192,34 @@ For each of the bot's open PRs, fetch reviews
 (`/repos/{nwo}/pulls/{n}/reviews`), conversation comments
 (`/repos/{nwo}/issues/{n}/comments`), and inline diff comments
 (`/repos/{nwo}/pulls/{n}/comments`). Skip the bot's own items,
-items older than `last_poll`, and untrusted authors. Message formats:
+items older than `last_poll`, and untrusted authors. A diff
+comment linked to a review is dated by that review's
+`submitted_at`, not its own `created_at`: GitHub stamps a
+pending-review comment at draft time, so a draft-then-submit
+review's comments would otherwise be older than every future
+`last_poll` and filtered out of the very event they belong to —
+permanently. (An in-thread reply carries the id of its own,
+newly created review, so replies date correctly too.) While the
+parent review is still pending, its comments are invisible
+drafts and skip with it. All new
+feedback on one PR folds into **one turn per PR per tick** — replies
+must not race each other on the same branch, and a review with N
+inline comments is one logical event, not N+1 turns. A per-PR fetch
+failure skips that PR for the tick (one persistently broken PR must
+not wedge the cursor and starve every other PR's feedback); a
+search failure propagates so `last_poll` does not advance. Message
+formats for the items inside the batched message:
 
 - Review: `Review on PR #5 "Title" (owner/repo) by @alice: APPROVED\n\nBody`
 - Comment: `Comment on PR #5 "Title" (owner/repo) by @carol:\n\nBody`
-- Diff comment: `Inline comment on PR #5 "Title" (owner/repo) by @dave at src/main.rs:42:\n\nBody`
+- Diff comment: `Inline comment on PR #5 "Title" (owner/repo) by @dave at src/main.rs:42 (comment id 12):\n\nBody`
+
+The diff comment carries its id so the turn can reply in-thread
+(`github_pr_diff_reply`) without a fetch round-trip. Item bodies are
+inlined verbatim and unbounded — they are the work order, and a
+truncated body is a dropped request. The fold bounds turn count, not
+message size; oversized messages are externalized downstream by the
+context engine ([spec 14](14-context-engine.md)).
 
 ### Review requests
 
@@ -324,7 +352,10 @@ merits: agree, state what that concedes about the original comment, or
 disagree and explain why, with specifics. Replies go to the same thread
 (inline replies via `github_pr_diff_reply`, PR comments via a normal
 comment). Going quiet is not an option; neither is reflexively
-defending a bad take.
+defending a bad take. Review-linked diff comments are dated by their
+review's `submitted_at` like the feedback pass (the tracked pass
+fetches reviews for exactly this), so a draft-then-submit reply event
+is never lost to draft-time stamps.
 
 When a commenter asks the bot to implement the fix, the answer is a
 suggestion block in the inline thread, never a push — same mechanism as
@@ -382,8 +413,9 @@ the bot's own pushed hunk is feedback addressed to the bot; fetching
 only conversation comments would recreate the blind spot this pass
 closes, one endpoint over. Items are filtered exactly like tracked
 comments (not the bot's own, newer than `last_poll`, trusted author,
-bodyless approvals dropped) and fold into **one turn per PR per tick**
-— replies must not race each other on the same branch.
+bodyless approvals dropped, review-linked diff comments dated by
+their review's `submitted_at`) and fold into **one turn per PR per
+tick** — replies must not race each other on the same branch.
 
 The dispatched message names the PR, its third-party author, and the
 fact that the bot previously intervened; the PR body is never included

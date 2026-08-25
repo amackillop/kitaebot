@@ -8,8 +8,8 @@
 mod harness;
 
 use harness::{
-    FixtureServer, TestDaemon, github_issue_comment, github_pr, github_review, linear_comment,
-    linear_issue, text, tool_call,
+    FixtureServer, TestDaemon, github_diff_comment, github_issue_comment, github_pr, github_review,
+    linear_comment, linear_issue, text, tool_call,
 };
 use predicates::prelude::*;
 use serde_json::json;
@@ -236,6 +236,57 @@ fn github_feedback_pass_dispatches_trusted_reviews_only() {
             .all(|body| !body.contains("mallory")),
         "untrusted review reached a turn",
     );
+}
+
+#[test]
+fn github_feedback_pass_skips_broken_pr_without_starving_others() {
+    let fixture = FixtureServer::start();
+    // The broken PR must sort first: its fetch failure is what the
+    // skip-and-log path has to survive.
+    let mut broken = github_pr("owner/repo", 4, "kitaebot", "Gone private");
+    broken["search"] = "own".into();
+    broken["fail_reviews"] = true.into();
+    let mut healthy = github_pr("owner/repo", 5, "kitaebot", "Add feature");
+    healthy["search"] = "own".into();
+    healthy["reviews"] = serde_json::json!([github_review(
+        "alice",
+        "CHANGES_REQUESTED",
+        "Rename the flag"
+    ),]);
+    fixture.set_github_prs(vec![broken, healthy]);
+    fixture.on_completion_always("by @alice: CHANGES_REQUESTED", text("noted"));
+
+    let fixtures_root = harness::fixtures_root();
+    let _daemon = TestDaemon::spawn_with(&fixture, &github_config(&fixture, fixtures_root.path()));
+
+    fixture.wait_for_completion_request("(owner/repo) by @alice: CHANGES_REQUESTED");
+}
+
+/// A draft-then-submit review: the inline comments are stamped at
+/// draft time, before the poll cursor, while the review submits after
+/// it. The comments must ride along with their review, not be
+/// filtered as old.
+#[test]
+fn github_feedback_pass_dates_review_comments_by_submission() {
+    let fixture = FixtureServer::start();
+    let mut pr = github_pr("owner/repo", 5, "kitaebot", "Add feature");
+    pr["search"] = "own".into();
+    pr["reviews"] = serde_json::json!([github_review(
+        "alice",
+        "CHANGES_REQUESTED",
+        "See my inline comments"
+    ),]);
+    pr["diff_comments"] = serde_json::json!([github_diff_comment(12, "alice", "Off by one?", 1),]);
+    fixture.set_github_prs(vec![pr]);
+    fixture.on_completion_always("by @alice: CHANGES_REQUESTED", text("noted"));
+
+    let fixtures_root = harness::fixtures_root();
+    let _daemon = TestDaemon::spawn_with(&fixture, &github_config(&fixture, fixtures_root.path()));
+
+    // The review body and the draft-time-stamped comment must both
+    // reach the turn.
+    fixture.wait_for_completion_request("(owner/repo) by @alice: CHANGES_REQUESTED");
+    fixture.wait_for_completion_request("Off by one?");
 }
 
 #[test]

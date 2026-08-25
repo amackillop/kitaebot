@@ -453,6 +453,7 @@ pub struct PullRef {
 /// A submitted PR review.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PrReview {
+    pub id: u64,
     pub user: UserRef,
     /// Null on reviews submitted without a body.
     pub body: Option<String>,
@@ -477,6 +478,11 @@ pub struct IssueComment {
 pub struct DiffComment {
     /// Comment id, needed to reply in-thread via the replies endpoint.
     pub id: u64,
+    /// Owning review's id. GitHub stamps a pending-review comment's
+    /// `created_at` at draft time, so a comment linked to a review
+    /// is dated by that review's `submitted_at` instead (see
+    /// `diff_comment_at` in the channel).
+    pub pull_request_review_id: Option<u64>,
     pub path: String,
     pub line: Option<u64>,
     pub body: String,

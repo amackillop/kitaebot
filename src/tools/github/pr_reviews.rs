@@ -130,6 +130,7 @@ mod tests {
     #[test]
     fn formats_reviews_and_comments() {
         let reviews = vec![PrReview {
+            id: 1,
             user: user("alice"),
             body: Some("Looks good".into()),
             state: "APPROVED".into(),

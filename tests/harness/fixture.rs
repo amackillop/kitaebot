@@ -444,6 +444,10 @@ async fn gh_pull_resource(
         "reviews" => "reviews",
         _ => return (StatusCode::NOT_FOUND, "unknown pull sub-resource").into_response(),
     };
+    // Failing one PR's reviews fetch exercises the skip-and-log path.
+    if pr["fail_reviews"].as_bool().unwrap_or(false) && resource == "reviews" {
+        return (StatusCode::NOT_FOUND, "fixture-induced failure").into_response();
+    }
     axum::Json(pr[field].clone()).into_response()
 }
 
@@ -487,11 +491,53 @@ pub fn github_pr(nwo: &str, number: u32, author: &str, title: &str) -> serde_jso
 /// otherwise leave the review at-or-before the cursor forever.
 pub fn github_review(author: &str, state: &str, body: &str) -> serde_json::Value {
     json!({
+        "id": 1,
         "user": {"login": author},
         "state": state,
         "body": body,
         "submitted_at": future_timestamp(5),
     })
+}
+
+/// An inline review comment linked to a review. `created_at` is
+/// stamped in the *past* — GitHub stamps a pending-review comment at
+/// draft time, so this is the shape of a draft-then-submit review's
+/// comment: older than the cursor while its review is newer.
+pub fn github_diff_comment(id: u64, author: &str, body: &str, review_id: u64) -> serde_json::Value {
+    json!({
+        "id": id,
+        "pull_request_review_id": review_id,
+        "path": "src/main.rs",
+        "line": 42,
+        "body": body,
+        "user": {"login": author},
+        "created_at": past_timestamp(60),
+    })
+}
+
+/// ISO 8601 timestamp `seconds` behind the wall clock.
+fn past_timestamp(seconds: u64) -> String {
+    future_timestamp_with_offset(-i64::try_from(seconds).unwrap_or(i64::MAX))
+}
+
+/// ISO 8601 timestamp `seconds` ahead of the wall clock. The daemon's
+/// poll cursors move at tick granularity; a same-second timestamp can
+/// compare at-or-before the cursor and never dispatch.
+fn future_timestamp(seconds: u64) -> String {
+    future_timestamp_with_offset(i64::try_from(seconds).unwrap_or(i64::MAX))
+}
+
+fn future_timestamp_with_offset(seconds: i64) -> String {
+    let out = std::process::Command::new("date")
+        .args([
+            "-u",
+            "-d",
+            &format!("{seconds:+} seconds"),
+            "+%Y-%m-%dT%H:%M:%S.000Z",
+        ])
+        .output()
+        .expect("failed to run date");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
 /// A PR conversation comment stamped in the future, for the same
@@ -504,22 +550,6 @@ pub fn github_issue_comment(author: &str, body: &str) -> serde_json::Value {
         "body": body,
         "created_at": future_timestamp(5),
     })
-}
-
-/// ISO 8601 timestamp `seconds` ahead of the wall clock. The daemon's
-/// poll cursors move at tick granularity; a same-second timestamp can
-/// compare at-or-before the cursor and never dispatch.
-fn future_timestamp(seconds: u64) -> String {
-    let out = std::process::Command::new("date")
-        .args([
-            "-u",
-            "-d",
-            &format!("+{seconds} seconds"),
-            "+%Y-%m-%dT%H:%M:%S.000Z",
-        ])
-        .output()
-        .expect("failed to run date");
-    String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
 /// A completion body holding a plain text reply.
