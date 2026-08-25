@@ -74,6 +74,21 @@ struct TrackedSnapshot {
     diff_comments: Vec<DiffComment>,
 }
 
+/// Feedback on one of the bot's own PRs, fetched together.
+struct FeedbackSnapshot {
+    nwo: String,
+    pr: SearchIssue,
+    feedback: PrFeedback,
+    diff_comments: Vec<DiffComment>,
+}
+
+/// One feedback turn to run on the bot's own PR.
+struct FeedbackDispatch {
+    pr_number: u32,
+    repo: String,
+    message: String,
+}
+
 /// Feedback on one contributed PR, fetched together.
 struct ContributedSnapshot {
     nwo: String,
@@ -205,11 +220,10 @@ async fn feedback_pass(
     bot_login: &str,
     last_poll: &str,
 ) -> Result<usize, GithubError> {
-    let trust = Trust::new(config);
     let prs = list_bot_prs(client, bot_login).await?;
-    let mut count = 0;
 
-    for pr in &prs {
+    let mut snapshots = Vec::new();
+    for pr in prs {
         let Some(nwo) = pr.nwo() else {
             warn!(
                 number = pr.number,
@@ -217,11 +231,40 @@ async fn feedback_pass(
             );
             continue;
         };
-
         let feedback = fetch_pr_feedback(client, &nwo, pr.number).await?;
         let diff_comments = client.pull_comments(&nwo, pr.number).await?;
+        snapshots.push(FeedbackSnapshot {
+            nwo,
+            pr,
+            feedback,
+            diff_comments,
+        });
+    }
 
-        for review in &feedback.reviews {
+    let dispatches = decide_feedback(&snapshots, bot_login, &Trust::new(config), last_poll);
+
+    let mut count = 0;
+    for d in dispatches {
+        send(handle, d.pr_number, &d.repo, GitHubRole::Author, d.message).await;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Decide which feedback items on the bot's own PRs become turns.
+///
+/// Pure core over the fetched snapshots: same filters as always
+/// (not the bot's own, newer than `last_poll`, trusted author,
+/// bodyless approvals dropped, pending reviews invisible).
+fn decide_feedback(
+    snapshots: &[FeedbackSnapshot],
+    bot_login: &str,
+    trust: &Trust,
+    last_poll: &str,
+) -> Vec<FeedbackDispatch> {
+    let mut dispatches = Vec::new();
+    for s in snapshots {
+        for review in &s.feedback.reviews {
             if review.user.login == bot_login {
                 continue;
             }
@@ -241,24 +284,20 @@ async fn feedback_pass(
             }
             if !review_is_actionable(review) {
                 debug!(
-                    number = pr.number,
+                    number = s.pr.number,
                     author = %review.user.login,
                     "Skipping bodyless approval; nothing to act on"
                 );
                 continue;
             }
-            send(
-                handle,
-                pr.number,
-                &nwo,
-                GitHubRole::Author,
-                format_review(pr, &nwo, review),
-            )
-            .await;
-            count += 1;
+            dispatches.push(FeedbackDispatch {
+                pr_number: s.pr.number,
+                repo: s.nwo.clone(),
+                message: format_review(&s.pr, &s.nwo, review),
+            });
         }
 
-        for comment in &feedback.comments {
+        for comment in &s.feedback.comments {
             if comment.user.login == bot_login {
                 continue;
             }
@@ -272,18 +311,14 @@ async fn feedback_pass(
                 );
                 continue;
             }
-            send(
-                handle,
-                pr.number,
-                &nwo,
-                GitHubRole::Author,
-                format_comment(pr, &nwo, comment),
-            )
-            .await;
-            count += 1;
+            dispatches.push(FeedbackDispatch {
+                pr_number: s.pr.number,
+                repo: s.nwo.clone(),
+                message: format_comment(&s.pr, &s.nwo, comment),
+            });
         }
 
-        for dc in &diff_comments {
+        for dc in &s.diff_comments {
             if dc.user.login == bot_login {
                 continue;
             }
@@ -297,19 +332,14 @@ async fn feedback_pass(
                 );
                 continue;
             }
-            send(
-                handle,
-                pr.number,
-                &nwo,
-                GitHubRole::Author,
-                format_diff_comment(pr, &nwo, dc),
-            )
-            .await;
-            count += 1;
+            dispatches.push(FeedbackDispatch {
+                pr_number: s.pr.number,
+                repo: s.nwo.clone(),
+                message: format_diff_comment(&s.pr, &s.nwo, dc),
+            });
         }
     }
-
-    Ok(count)
+    dispatches
 }
 
 /// Pass 2: PRs where a review is requested from the bot's account.
@@ -1666,6 +1696,100 @@ mod tests {
     }
 
     use crate::channel::github::trust::stub as trust;
+
+    fn feedback(nwo: &str, number: u32) -> FeedbackSnapshot {
+        FeedbackSnapshot {
+            nwo: nwo.to_string(),
+            pr: search_issue(number, "Add feature", nwo, "bot"),
+            feedback: PrFeedback {
+                reviews: Vec::new(),
+                comments: Vec::new(),
+            },
+            diff_comments: Vec::new(),
+        }
+    }
+
+    fn diff_comment(author: &str, body: &str, created_at: &str) -> DiffComment {
+        DiffComment {
+            id: 1,
+            path: "src/main.rs".to_string(),
+            line: Some(42),
+            body: body.to_string(),
+            user: user(author),
+            created_at: created_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn feedback_dispatches_each_actionable_item() {
+        let mut s = feedback("o/r", 5);
+        s.feedback.reviews.push(PrReview {
+            user: user("alice"),
+            body: Some("Rename the flag".to_string()),
+            state: "CHANGES_REQUESTED".to_string(),
+            submitted_at: Some(AFTER_POLL.to_string()),
+        });
+        s.feedback
+            .comments
+            .push(pr_comment("alice", "What about tests?", AFTER_POLL));
+        s.diff_comments
+            .push(diff_comment("alice", "Nit: rename this", AFTER_POLL));
+
+        let dispatches = decide_feedback(&[s], "bot", &trust("alice", &[], &[]), LAST_POLL);
+
+        assert_eq!(dispatches.len(), 3);
+        assert!(
+            dispatches
+                .iter()
+                .all(|d| d.pr_number == 5 && d.repo == "o/r")
+        );
+        assert!(dispatches[0].message.starts_with("Review on PR #5"));
+        assert!(dispatches[1].message.starts_with("Comment on PR #5"));
+        assert!(dispatches[2].message.starts_with("Inline comment on PR #5"));
+    }
+
+    #[test]
+    fn feedback_skips_bot_old_and_untrusted_items() {
+        let mut s = feedback("o/r", 5);
+        // Bot's own items never dispatch.
+        s.feedback
+            .comments
+            .push(pr_comment("bot", "My own reply", AFTER_POLL));
+        // Old items are already handled.
+        s.feedback
+            .comments
+            .push(pr_comment("alice", "Old news", BEFORE_POLL));
+        // Untrusted authors are skipped with a warning.
+        s.feedback
+            .comments
+            .push(pr_comment("mallory", "Untrusted", AFTER_POLL));
+        s.diff_comments
+            .push(diff_comment("mallory", "Untrusted", AFTER_POLL));
+        // Pending reviews carry no timestamp and are invisible drafts.
+        s.feedback.reviews.push(PrReview {
+            user: user("alice"),
+            body: Some("draft".to_string()),
+            state: "PENDING".to_string(),
+            submitted_at: None,
+        });
+
+        let dispatches = decide_feedback(&[s], "bot", &trust("alice", &[], &[]), LAST_POLL);
+        assert!(dispatches.is_empty());
+    }
+
+    #[test]
+    fn feedback_skips_bodyless_approval() {
+        let mut s = feedback("o/r", 5);
+        s.feedback.reviews.push(PrReview {
+            user: user("alice"),
+            body: None,
+            state: "APPROVED".to_string(),
+            submitted_at: Some(AFTER_POLL.to_string()),
+        });
+
+        let dispatches = decide_feedback(&[s], "bot", &trust("alice", &[], &[]), LAST_POLL);
+        assert!(dispatches.is_empty());
+    }
 
     fn contributed(nwo: &str, number: u32, author: &str) -> ContributedSnapshot {
         ContributedSnapshot {
