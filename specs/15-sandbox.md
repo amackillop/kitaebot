@@ -68,7 +68,7 @@ The `exec` tier (`Policy::child_exec`):
 | `.cache`, `.cargo`, `.npm`, `.local/{share,state}/pnpm` | full | `HOME` is the workspace root on the VM; nix flake eval fails hard without `~/.cache/nix`, and cargo/npm/pnpm need their caches. Provisioned by tmpfiles — Landlock cannot grant a path that does not exist. Grants are named, never speculative: onboarding a repo whose toolchain caches outside XDG (`.m2`, `.gradle`, `~/go/pkg/mod`, …) means adding its rule in `Policy::child_exec` plus a tmpfiles entry in the same commit |
 | `.local/share/direnv`, `.config` | denied | The direnv trust db: repo code must not self-approve an `.envrc` the daemon later evaluates |
 | `/nix/store` | read + execute | Binaries |
-| `/tmp` | working access | No device or socket creation |
+| `/tmp` | working access + `MakeSock` | Device nodes still denied. Sockets allowed: e2e/kchat test daemons bind here, `projects/` grants MakeSock anyway (from_all), abstract AF_UNIX bypasses FS rules, and PrivateTmp keeps bound sockets service-private. Anything that later *connects* to a `/tmp` socket must assume a repo-code child may have bound that path first |
 | `/etc`, `/run`, `/proc` | read | resolv.conf, CA certs, procfs |
 | `/lib64` | read | Build tooling scandirs it to detect libc (prisma postinstall); no execute, so the compat loader cannot run foreign binaries |
 | `/dev` | read + write | `/dev/null`, `/dev/urandom` |

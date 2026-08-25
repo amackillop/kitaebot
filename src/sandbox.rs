@@ -245,11 +245,18 @@ impl Policy {
         let all = AccessFs::from_all(abi);
         let read_files = AccessFs::ReadFile | AccessFs::ReadDir;
 
+        // MakeSock included: e2e/kchat tests spawn the daemon, which
+        // binds its socket in a /tmp tempdir. The capability is not a
+        // widening — projects/ already grants it via from_all, abstract
+        // AF_UNIX sockets bypass filesystem rules entirely, and
+        // PrivateTmp keeps anything bound here service-private. Device
+        // nodes stay excluded.
         let tmp_access = AccessFs::ReadFile
             | AccessFs::ReadDir
             | AccessFs::WriteFile
             | AccessFs::MakeReg
             | AccessFs::MakeDir
+            | AccessFs::MakeSock
             | AccessFs::MakeSym
             | AccessFs::RemoveFile
             | AccessFs::RemoveDir
@@ -834,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn child_tmp_excludes_device_creation() {
+    fn child_tmp_excludes_device_creation_but_allows_sockets() {
         let policy = child_policy();
         let rule = policy
             .rules()
@@ -843,8 +850,10 @@ mod tests {
             .expect("/tmp rule must exist");
         assert!(!rule.access.contains(AccessFs::MakeChar));
         assert!(!rule.access.contains(AccessFs::MakeBlock));
-        assert!(!rule.access.contains(AccessFs::MakeSock));
         assert!(!rule.access.contains(AccessFs::MakeFifo));
+        // Test daemons bind their socket in a /tmp tempdir; projects/
+        // grants MakeSock anyway, so denying it here protected nothing.
+        assert!(rule.access.contains(AccessFs::MakeSock));
     }
 
     #[test]
