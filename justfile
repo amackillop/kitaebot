@@ -280,3 +280,51 @@ ask message: (vm-run)
         [ -S "$SOCK" ] && break || sleep 0.1
     done
     cargo run --bin kchat -- "$SOCK" {{quote(message)}}
+
+# Create a worktree at .worktrees/<branch>: reuses the branch if it
+# exists (else creates it from base), symlinks the untracked local
+# files workflows expect (secrets/*, specs/FUTURE.md), and runs
+# `direnv allow` — trust is per-directory, so without it the devshell
+# silently fails to load.
+wt branch base="HEAD":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    branch="{{branch}}"; base="{{base}}"
+    case "$branch" in *..*|-*) echo "invalid branch name: $branch" >&2; exit 1;; esac
+    main="$(git rev-parse --path-format=absolute --git-common-dir)"; main="${main%/.git}"
+    dir=".worktrees/$branch"
+    if [ -e "$dir" ]; then echo "worktree already exists at $dir" >&2; exit 1; fi
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+        git worktree add "$dir" "$branch"
+    else
+        git worktree add -b "$branch" "$dir" "$base"
+    fi
+    for f in "$main"/secrets/*; do
+        [ -e "$f" ] || continue
+        case "$f" in */.gitkeep) continue;; esac
+        ln -s "$f" "$dir/secrets/$(basename "$f")"
+    done
+    if [ -e "$main/specs/FUTURE.md" ]; then ln -s "$main/specs/FUTURE.md" "$dir/specs/FUTURE.md"; fi
+    if command -v direnv > /dev/null; then direnv allow "$dir"; fi
+    echo "worktree ready: cd $dir"
+
+# List worktrees
+wt-list:
+    @git worktree list
+
+# Remove the worktree at .worktrees/<branch>; deletes the branch too if merged
+wt-rm branch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    branch="{{branch}}"
+    case "$branch" in *..*|-*) echo "invalid branch name: $branch" >&2; exit 1;; esac
+    dir=".worktrees/$branch"
+    find "$dir/secrets" -maxdepth 1 -type l -delete 2> /dev/null || true
+    rm -f "$dir/specs/FUTURE.md"
+    git worktree remove "$dir"
+    echo "removed worktree $dir"
+    if git branch -d "$branch" 2> /dev/null; then
+        echo "deleted branch $branch"
+    else
+        echo "branch $branch kept (unmerged); force-delete with: git branch -D $branch"
+    fi

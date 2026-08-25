@@ -117,6 +117,9 @@ just test-nixos-one NAME # Run a single NixOS VM test (e.g. egress)
 just lint                # Clippy with --deny warnings
 just fmt                 # Format Rust + Nix
 just fix                 # Auto-fix clippy issues
+just wt BRANCH [BASE]    # Worktree at .worktrees/BRANCH: branch, secrets/FUTURE.md symlinks, direnv allow
+just wt-list             # List worktrees
+just wt-rm BRANCH        # Remove worktree, delete branch if merged
 ```
 
 ### VM workflow
