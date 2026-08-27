@@ -15,6 +15,14 @@ pub(crate) fn desanitize_name(stem: &str) -> String {
     stem.replace("--", "/")
 }
 
+/// The single display rendering of a stored (sanitized) session name
+/// (spec 14): every operator-facing surface shows `owner/repo`, never
+/// the storage form `owner--repo`. Ambiguous on names that genuinely
+/// contain `--`, but storage never desanitizes, so it is display-only.
+pub(crate) fn display_name(session: &str) -> String {
+    desanitize_name(session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,5 +57,11 @@ mod tests {
     #[test]
     fn sanitize_plain_name_unchanged() {
         assert_eq!(sanitize_name("general"), "general");
+    }
+
+    #[test]
+    fn display_name_desanitizes_storage_form() {
+        assert_eq!(display_name("owner--repo"), "owner/repo");
+        assert_eq!(display_name("general"), "general");
     }
 }

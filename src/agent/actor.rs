@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tracing::{Instrument, error, field, info_span};
 
 use crate::commands;
+use crate::context::names::display_name;
 use crate::context::{ContextEngine, SummarizeFn};
 use crate::dispatch::{Input, Reply};
 use crate::duty::TriggerHandle;
@@ -134,7 +135,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
 
     /// Greeting derived from current engine state.
     fn format_greeting(&self) -> String {
-        let active = self.engine.active_session();
+        let active = display_name(self.engine.active_session());
         let count = self.engine.stats().message_count;
         if count == 0 {
             format!("New session: {active}")
@@ -261,7 +262,10 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         let original = self.engine.active_session().to_string();
         let target = envelope.session_hint.as_deref().unwrap_or(&original);
         let switched = target != original;
-        tracing::Span::current().record("session", target);
+        // Display rendering (spec 14): the span shows `owner/repo`,
+        // the same form every other operator-facing surface shows,
+        // never the sanitized storage name.
+        tracing::Span::current().record("session", display_name(target));
 
         if switched {
             // switch_session saves the current session before loading the target.
@@ -552,6 +556,111 @@ mod tests {
         assert!(!general.contains("github msg"));
         assert!(github.contains("github msg"));
         assert!(!github.contains("socket msg"));
+    }
+
+    /// The turn span's `session` field is display rendering (spec 14):
+    /// `owner/repo`, never the sanitized storage name — the same
+    /// conversation must not render under two names in the log. The
+    /// leak case is a no-hint turn (the span records the *active*
+    /// session, stored sanitized), so the test first makes a
+    /// repo-style session active via `/project`.
+    #[tokio::test]
+    async fn turn_span_shows_desanitized_session() {
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        /// Captures values recorded onto span fields named `session`.
+        struct Capture(Arc<std::sync::Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>> Layer<S>
+            for Capture
+        {
+            fn on_record(
+                &self,
+                _id: &tracing::span::Id,
+                values: &tracing::span::Record<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut visit = SessionField(None);
+                values.record(&mut visit);
+                if let Some(s) = visit.0 {
+                    self.0.lock().unwrap().push(s);
+                }
+            }
+        }
+        struct SessionField(Option<String>);
+        impl tracing::field::Visit for SessionField {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "session" {
+                    self.0 = Some(value.to_string());
+                }
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "session" {
+                    self.0 = Some(format!("{value:?}"));
+                }
+            }
+        }
+
+        let (_dir, ws) = workspace();
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text("first".into())),
+            Ok(Response::Text("second".into())),
+        ]));
+        let handle = spawn_agent(ws, provider);
+
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = recorded.clone();
+        let subscriber = tracing_subscriber::registry().with(Capture(captured));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // Create the repo-style session (GitHub turns route by hint).
+        handle
+            .send_message(
+                ChannelSource::GitHub {
+                    pr_number: 1,
+                    repo: "owner/repo".into(),
+                    role: GitHubRole::Author,
+                },
+                "github msg".into(),
+                Some("owner/repo".into()),
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        // Make it the persisted active session.
+        handle
+            .send_message(
+                ChannelSource::Socket,
+                "/project owner/repo".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        // The leak case: no hint, so the span records the active
+        // session — stored sanitized, displayed desanitized.
+        handle
+            .send_message(
+                ChannelSource::Socket,
+                "socket msg".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let sessions = recorded.lock().unwrap().clone();
+        assert!(
+            !sessions.is_empty(),
+            "no session field was recorded onto a turn span"
+        );
+        assert!(
+            sessions.iter().all(|s| s == "owner/repo"),
+            "sanitized session name leaked into a turn span: {sessions:?}"
+        );
     }
 
     /// Notifier over a fake Telegram client that records sendMessage bodies.
