@@ -309,6 +309,24 @@ same-turn re-issue of the edit against the excerpt, or a targeted
 `file_read` when the excerpt shows the file moved further than one
 window.
 
+**No-op loop guard**: the tool remembers recent futile payloads per
+path, in memory, for the daemon's lifetime. A payload is futile when
+it fails to match (or matches ambiguously), or when it matches but
+leaves the file byte-identical — reachable through a fuzzy rung even
+with `old_string != new_string`, when the replacement is the file's
+existing spelling. The third identical futile payload in a path's
+recent window returns `EditLoop` — a hard error instructing a re-read
+— instead of a third copy of the same result. Identical `old_string`
+and `new_string` never gets that far: it is rejected upfront as
+invalid arguments. A no-change success is labeled `(no change)` in the
+result and skips the write, so identical bytes never churn the mtime;
+a content-changing edit clears the path's history. The guard
+classifies outcomes rather than pre-blocking payloads: if the file
+changed since the failures and the same payload now lands, it succeeds
+normally. The window is a short per-path ring (not a consecutive
+counter), so alternating two failing payloads trips the guard for
+each.
+
 ---
 
 ### `glob_search` — Find Files by Pattern
@@ -662,6 +680,7 @@ period. Rooting stops at deps deliberately: check outputs
 | Command exited non-zero | `CommandFailed` | Error text (command, output, exit code) returned to LLM |
 | `file_edit` no match | `Precondition` | Error carries stale-read hint + bounded excerpt around the nearest candidate line (see tool section) |
 | `file_edit` ambiguous match | `Precondition` | Error lists rung, count, and match line numbers |
+| `file_edit` repeated futile payload | `EditLoop` | Third identical payload in a path's recent window that produced no change or failed identically; instructs a re-read |
 
 All errors are surfaced to the LLM as text. The LLM decides how to proceed.
 The agent loop's policy gate escalates repeated `Blocked` errors (see

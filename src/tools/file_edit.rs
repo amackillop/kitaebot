@@ -6,9 +6,11 @@
 //! first rung with at least one match decides the outcome.
 
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::pin::Pin;
+use std::sync::Mutex;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -16,7 +18,7 @@ use tracing::debug;
 
 use super::path::PathGuard;
 use super::{Tool, ToolCtx, truncate_output};
-use crate::error::ToolError;
+use crate::error::{EditFutility, ToolError};
 
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -37,11 +39,38 @@ struct Args {
 /// Tool that performs find-and-replace edits on workspace files.
 pub struct FileEdit {
     guard: PathGuard,
+    history: Mutex<EditHistory>,
 }
 
 impl FileEdit {
     pub fn new(guard: PathGuard) -> Self {
-        Self { guard }
+        Self {
+            guard,
+            history: Mutex::new(EditHistory::default()),
+        }
+    }
+
+    /// Record a futile attempt; the third identical payload in the
+    /// path's recent window becomes a hard stop.
+    fn record_futile(
+        &self,
+        path: &str,
+        fingerprint: u64,
+        outcome: EditFutility,
+    ) -> Result<(), ToolError> {
+        let attempts = self
+            .history
+            .lock()
+            .expect("edit history mutex poisoned")
+            .record_futile(path, fingerprint);
+        if attempts >= FUTILE_LIMIT {
+            return Err(ToolError::EditLoop {
+                path: path.to_string(),
+                attempts,
+                outcome,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -89,7 +118,9 @@ impl Tool for FileEdit {
                 source: e,
             })?;
 
+            let fingerprint = fingerprint(&args);
             let Some((rung, spans)) = find_matches(&content, &args.old_string) else {
+                self.record_futile(&args.path, fingerprint, EditFutility::FailedIdentically)?;
                 return Err(ToolError::Precondition(stale_read_message(
                     &content,
                     &args.old_string,
@@ -109,12 +140,23 @@ impl Tool for FileEdit {
                     many.len(),
                 ),
                 many => {
+                    self.record_futile(&args.path, fingerprint, EditFutility::FailedIdentically)?;
                     return Err(ToolError::Precondition(ambiguous_message(
                         rung, many, &content, &args.path,
                     )));
                 }
             };
 
+            if result == content {
+                self.record_futile(&args.path, fingerprint, EditFutility::NoChange)?;
+                let echo = echo_region(&result, edited_at, args.new_string.len());
+                return Ok(format!("Edited {} (no change):\n{echo}", args.path));
+            }
+
+            self.history
+                .lock()
+                .expect("edit history mutex poisoned")
+                .clear(&args.path);
             std::fs::write(&resolved, &result).map_err(|e| ToolError::Io {
                 operation: "write",
                 path: (&args.path).into(),
@@ -132,6 +174,53 @@ impl Tool for FileEdit {
             }
         })
     }
+}
+
+/// Attempts of one identical futile payload that trip the guard.
+const FUTILE_LIMIT: usize = 3;
+
+/// Futile payloads remembered per path.
+const RECENT_WINDOW: usize = 8;
+
+/// Paths tracked before the history resets. A heuristic guard, not a
+/// ledger: losing counts on overflow only delays a hard stop.
+const MAX_PATHS: usize = 32;
+
+/// Recent futile edit payloads per path — attempts that failed to
+/// match or matched without changing the file. A ring rather than a
+/// consecutive counter, so interleaving two failing payloads still
+/// trips the guard for each.
+#[derive(Default)]
+struct EditHistory(HashMap<String, VecDeque<u64>>);
+
+impl EditHistory {
+    /// Record a futile attempt; returns how many times this
+    /// fingerprint appears in the path's recent window, this one
+    /// included.
+    fn record_futile(&mut self, path: &str, fingerprint: u64) -> usize {
+        if self.0.len() >= MAX_PATHS && !self.0.contains_key(path) {
+            self.0.clear();
+        }
+        let ring = self.0.entry(path.to_string()).or_default();
+        if ring.len() >= RECENT_WINDOW {
+            ring.pop_front();
+        }
+        ring.push_back(fingerprint);
+        ring.iter().filter(|&&f| f == fingerprint).count()
+    }
+
+    /// A content-changing edit landed; prior futility is stale.
+    fn clear(&mut self, path: &str) {
+        self.0.remove(path);
+    }
+}
+
+/// Collision-tolerant payload identity: a false positive fires the
+/// guard early with a re-read instruction, which is harmless.
+fn fingerprint(args: &Args) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (&args.old_string, &args.new_string, args.replace_all).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A matched byte range in the original content.
@@ -684,6 +773,141 @@ mod tests {
         let (_dir, tool) = setup("content");
         let result = edit(&tool, "", "x").await;
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
+    }
+
+    async fn edit_path(
+        tool: &FileEdit,
+        path: &str,
+        old_string: &str,
+        new_string: &str,
+    ) -> Result<String, ToolError> {
+        tool.execute(
+            serde_json::json!({
+                "path": path,
+                "old_string": old_string,
+                "new_string": new_string
+            }),
+            ToolCtx::default(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn third_identical_no_match_hard_stops() {
+        let (_dir, tool) = setup("hello world");
+        for _ in 0..2 {
+            let result = edit(&tool, "missing", "x").await;
+            assert!(
+                matches!(result, Err(ToolError::Precondition(_))),
+                "{result:?}"
+            );
+        }
+        let result = edit(&tool, "missing", "x").await;
+        match result {
+            Err(ToolError::EditLoop {
+                attempts: 3,
+                outcome: EditFutility::FailedIdentically,
+                ref path,
+            }) => assert_eq!(path, "test.txt"),
+            other => panic!("expected EditLoop, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn third_identical_no_change_hard_stops() {
+        // Whitespace-flexible match where the replacement equals the
+        // file's existing bytes: a no-change success.
+        let (dir, tool) = setup("foo( 1 );\n");
+        for _ in 0..2 {
+            let result = edit(&tool, "foo(  1 );", "foo( 1 );").await.unwrap();
+            assert!(result.contains("(no change)"), "{result}");
+        }
+        let result = edit(&tool, "foo(  1 );", "foo( 1 );").await;
+        assert!(
+            matches!(
+                result,
+                Err(ToolError::EditLoop {
+                    attempts: 3,
+                    outcome: EditFutility::NoChange,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(read(&dir), "foo( 1 );\n");
+    }
+
+    #[tokio::test]
+    async fn changing_edit_clears_futility() {
+        let (_dir, tool) = setup("hello world");
+        for _ in 0..2 {
+            edit(&tool, "missing", "x").await.unwrap_err();
+        }
+        edit(&tool, "hello", "goodbye").await.unwrap();
+        // The counter restarted: the same payload gets two more
+        // ordinary errors before the guard would trip again.
+        for _ in 0..2 {
+            let result = edit(&tool, "missing", "x").await;
+            assert!(
+                matches!(result, Err(ToolError::Precondition(_))),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn interleaved_failing_payloads_each_trip() {
+        let (_dir, tool) = setup("hello world");
+        for _ in 0..2 {
+            edit(&tool, "missing a", "x").await.unwrap_err();
+            edit(&tool, "missing b", "x").await.unwrap_err();
+        }
+        let result = edit(&tool, "missing a", "x").await;
+        assert!(
+            matches!(result, Err(ToolError::EditLoop { .. })),
+            "{result:?}"
+        );
+        let result = edit(&tool, "missing b", "x").await;
+        assert!(
+            matches!(result, Err(ToolError::EditLoop { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn paths_do_not_share_futility() {
+        let (dir, tool) = setup("hello world");
+        std::fs::write(dir.path().join("other.txt"), "hello world").unwrap();
+        for _ in 0..2 {
+            edit(&tool, "missing", "x").await.unwrap_err();
+        }
+        let result = edit_path(&tool, "other.txt", "missing", "x").await;
+        assert!(
+            matches!(result, Err(ToolError::Precondition(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn history_window_evicts_old_fingerprints() {
+        let mut history = EditHistory::default();
+        assert_eq!(history.record_futile("p", 0), 1);
+        for f in 1..=RECENT_WINDOW as u64 {
+            history.record_futile("p", f);
+        }
+        // Fingerprint 0 was pushed out of the window.
+        assert_eq!(history.record_futile("p", 0), 1);
+    }
+
+    #[test]
+    fn history_path_cap_resets() {
+        let mut history = EditHistory::default();
+        for p in 0..MAX_PATHS {
+            history.record_futile(&format!("p{p}"), 7);
+        }
+        // The overflowing path wipes the map; counts restart at one.
+        assert_eq!(history.record_futile("overflow", 7), 1);
+        assert_eq!(history.record_futile("p0", 7), 1);
     }
 
     #[test]
