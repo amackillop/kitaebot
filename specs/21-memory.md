@@ -122,8 +122,10 @@ reading session history through the context engine abstraction:
   ephemeral context, never the root session — reading transcript spans
   is bulk work that must not evict real context. Uses the
   `provider.model_overrides.memory` role when configured. The spans
-  share one token budget seeded from `distill_slice_tokens` (the
-  threshold when unset); each fetch is clamped to the remaining budget
+  share one token budget seeded from `distill_slice_tokens` (unset
+  resolves to the threshold capped at 10000, the deploy-proven fit for
+  the default iteration budget — #47 was a threshold-sized slice
+  exceeding it); each fetch is clamped to the remaining budget
   and still returns at least one event, so an oversized head cannot
   stall progress.
 - **Backlog carry:** exactly one pass runs per heartbeat tick, and it
@@ -233,7 +235,7 @@ not "no response".
 |------------|---------|-------------|
 | `memory.index_cap_bytes` | 8192 | Injection truncation cap for MEMORY.md |
 | `memory.distill_threshold_tokens` | 40000 (provisional) | Undistilled-token total that opens the distillation gate |
-| `memory.distill_slice_tokens` | unset | Token budget for one pass's consolidated span; unset uses the threshold. Must be > 0 and <= the threshold |
+| `memory.distill_slice_tokens` | unset | Token budget for one pass's consolidated span; unset uses the threshold capped at 10000. Must be > 0 and <= the threshold |
 | `provider.model_overrides.memory` | unset | Model for the distillation pass (falls back to `provider.model`) |
 
 - The index is plain markdown, human-readable and human-editable; no

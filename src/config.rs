@@ -422,12 +422,29 @@ pub struct MemoryConfig {
     /// turn. Must be > 0.
     pub distill_threshold_tokens: u64,
     /// Token budget for one distillation pass's consolidated span.
-    /// `None` (default) uses `distill_threshold_tokens`, so a pass
-    /// folds the whole gated backlog. `Some(n)` (must be > 0 and <=
+    /// `None` (default) uses `distill_threshold_tokens` capped at
+    /// [`DEFAULT_DISTILL_SLICE_TOKENS`]. `Some(n)` (must be > 0 and <=
     /// the threshold) bounds each pass to one slice: a backlog too
     /// large for one turn drains across successive gate-open ticks
     /// instead of failing and retrying forever.
     pub distill_slice_tokens: Option<u64>,
+}
+
+/// Largest per-pass slice an unset `distill_slice_tokens` resolves to:
+/// the deploy-proven value for the default 30-iteration budget (#47:
+/// a threshold-sized 40k slice exceeds it and retries forever).
+const DEFAULT_DISTILL_SLICE_TOKENS: u64 = 10_000;
+
+impl MemoryConfig {
+    /// The slice budget a pass actually uses. Capping the unset case
+    /// at the threshold keeps `slice <= threshold` an invariant no
+    /// default can break.
+    pub fn effective_slice_tokens(&self) -> u64 {
+        self.distill_slice_tokens.unwrap_or(
+            self.distill_threshold_tokens
+                .min(DEFAULT_DISTILL_SLICE_TOKENS),
+        )
+    }
 }
 
 /// Telegram channel settings.
@@ -1591,6 +1608,26 @@ prompt = \"Review recent commits for security issues.\"
         assert_eq!(cfg.memory.index_cap_bytes, 4096);
         assert_eq!(cfg.memory.distill_threshold_tokens, 20_000);
         assert_eq!(cfg.memory.distill_slice_tokens, Some(5000));
+    }
+
+    #[test]
+    fn memory_effective_slice_defaults_bounded() {
+        let cfg = load_toml("").unwrap();
+        assert_eq!(cfg.memory.effective_slice_tokens(), 10_000);
+    }
+
+    #[test]
+    fn memory_effective_slice_clamps_to_low_threshold() {
+        let cfg = load_toml("[memory]\ndistill_threshold_tokens = 5000\n").unwrap();
+        assert_eq!(cfg.memory.effective_slice_tokens(), 5000);
+    }
+
+    #[test]
+    fn memory_effective_slice_explicit_wins() {
+        let cfg =
+            load_toml("[memory]\ndistill_threshold_tokens = 40000\ndistill_slice_tokens = 20000\n")
+                .unwrap();
+        assert_eq!(cfg.memory.effective_slice_tokens(), 20_000);
     }
 
     #[test]

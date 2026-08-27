@@ -111,10 +111,10 @@ pub struct Distiller {
     system_prompt: String,
     tools: Tools,
     threshold: u64,
-    /// Token budget for one pass's consolidated span. Defaults to the
-    /// threshold, so an unset slice folds the whole gated backlog in
-    /// one pass; a smaller value bounds each pass to one slice and an
-    /// oversized backlog drains across successive gate-open passes.
+    /// Token budget for one pass's consolidated span, already resolved
+    /// by `MemoryConfig::effective_slice_tokens`. A value below the
+    /// threshold bounds each pass to one slice and an oversized backlog
+    /// drains across successive gate-open passes.
     slice_tokens: u64,
     max_iterations: usize,
     /// The injection cap for memory/MEMORY.md: the index is truncated
@@ -133,7 +133,7 @@ impl Distiller {
         workspace_dir: &Path,
         state_db: StateDb,
         threshold: u64,
-        slice_tokens: Option<u64>,
+        slice_tokens: u64,
         max_iterations: usize,
         index_cap_bytes: usize,
     ) -> Self {
@@ -153,7 +153,7 @@ impl Distiller {
             system_prompt,
             tools,
             threshold,
-            slice_tokens: slice_tokens.unwrap_or(threshold),
+            slice_tokens,
             max_iterations,
             index_cap_bytes,
             state_db,
@@ -651,7 +651,7 @@ mod run_tests {
             ws.path(),
             db.clone(),
             1000,
-            None,
+            1000,
             5,
             8192,
         );
@@ -699,7 +699,7 @@ mod run_tests {
             ws.path(),
             db.clone(),
             1000,
-            None,
+            1000,
             5,
             8192,
         );
@@ -740,8 +740,7 @@ mod run_tests {
             "folded a".into(),
         ))]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller =
-            Distiller::new(&Tools::default(), ws.path(), db, 40_000, Some(400), 5, 8192);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 40_000, 400, 5, 8192);
         let mut state = DistillState::default();
 
         let out = run(
@@ -790,7 +789,7 @@ mod run_tests {
             ws.path(),
             db.clone(),
             1000,
-            None,
+            1000,
             5,
             8192,
         );
@@ -849,7 +848,7 @@ mod run_tests {
             ws.path(),
             db.clone(),
             1000,
-            None,
+            1000,
             5,
             8192,
         );
@@ -895,7 +894,7 @@ mod run_tests {
             ws.path(),
             db.clone(),
             1000,
-            None,
+            1000,
             5,
             8192,
         );
@@ -948,7 +947,7 @@ mod run_tests {
             ws.path(),
             db.clone(),
             1000,
-            None,
+            1000,
             5,
             8192,
         );
@@ -985,7 +984,7 @@ mod run_tests {
             ws.path(),
             db.clone(),
             1000,
-            None,
+            1000,
             5,
             8192,
         );
@@ -1016,7 +1015,7 @@ mod run_tests {
             ws.path(),
             db.clone(),
             1000,
-            None,
+            1000,
             5,
             8192,
         );
@@ -1068,7 +1067,7 @@ mod run_tests {
             Ok(Response::Text("pass 3".into())),
         ]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 400, Some(400), 5, 8192);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 400, 400, 5, 8192);
         let mut state = DistillState::default();
 
         let out = run(
@@ -1150,7 +1149,7 @@ mod run_tests {
             Ok(Response::Text("pass 2".into())),
         ]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 1200, Some(400), 5, 8192);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 1200, 400, 5, 8192);
         let mut state = DistillState::default();
 
         let out = run(
@@ -1235,7 +1234,7 @@ mod run_tests {
             Ok(Response::Text("pass 3".into())),
         ]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
-        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 400, Some(400), 5, 8192);
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 400, 400, 5, 8192);
         let mut state = DistillState::default();
 
         // Pass 1 fails: no watermark moves, nothing persisted.

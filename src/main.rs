@@ -383,7 +383,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         workspace.path(),
         state_db.clone(),
         config.memory.distill_threshold_tokens,
-        config.memory.distill_slice_tokens,
+        config.memory.effective_slice_tokens(),
         config.sub_agents.max_iterations,
         config.memory.index_cap_bytes,
     ));
