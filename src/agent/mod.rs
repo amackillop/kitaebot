@@ -1812,6 +1812,14 @@ mod tests {
                 Some(FailureKind::Precondition),
             ),
             (
+                Err(ToolError::EditLoop {
+                    path: "src/main.rs".into(),
+                    attempts: 3,
+                    outcome: crate::error::EditFutility::NoChange,
+                }),
+                Some(FailureKind::EditLoop),
+            ),
+            (
                 Err(ToolError::InvalidArguments("missing field".into())),
                 Some(FailureKind::InvalidArguments),
             ),
