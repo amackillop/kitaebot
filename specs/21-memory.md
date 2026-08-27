@@ -205,7 +205,10 @@ is speaking, not which channel they spoke through.
 - **Agent loop** appends the index to the system prompt per turn.
 - **Heartbeat** hosts the distillation duty and its mechanical gate.
   `/distill` forces a pass on demand, bypassing the gate (an empty
-  backlog still skips the LLM turn).
+  backlog still skips the LLM turn). A bypassed pass folds one slice
+  like any other; when a backlog remains, its reply reports the
+  pending total and says to run `/distill` again rather than implying
+  a full catch-up.
 - **Context engine** provides the event history and counts that gate
   and feed distillation.
 - **Sub-agents** run the distillation pass; its summary (what changed

@@ -266,11 +266,28 @@ pub async fn run<P: Provider, E: ContextEngine>(
         state.watermarks.insert(name, watermark);
     }
     state.save(&distiller.state_db);
+    // Reporting only: the pass already succeeded, so a failed probe
+    // must not turn it into an error.
+    let remaining = match engine.pending_distill_tokens(&state.watermarks).await {
+        Ok(pending) => total_pending(&pending),
+        Err(e) => {
+            warn!("Failed to probe the backlog remaining after the pass: {e}");
+            0
+        }
+    };
     info!(
         sessions = gathered.spans.len(),
-        "Distillation pass complete"
+        remaining, "Distillation pass complete"
     );
     let mut summary = output.into_text();
+    // A bypass pass folds one slice like any other; without this the
+    // reply reads as a full catch-up.
+    if gate == Gate::Bypass && remaining > 0 {
+        let _ = write!(
+            summary,
+            "\n[{remaining} tokens still pending — run /distill again to fold the next slice]"
+        );
+    }
     if let Some(over) = index_over_cap(workspace, distiller.index_cap_bytes) {
         warn!("memory index still over cap after distillation: {over}");
         let _ = write!(
@@ -661,8 +678,11 @@ mod run_tests {
     #[tokio::test]
     async fn bypass_runs_pass_below_threshold() {
         let (_dir, ws) = workspace();
+        // Pending computed from the transcripts (a few tokens, far
+        // below the 1000 threshold), so the post-pass probe sees the
+        // backlog actually drained.
         let engine = FakeEngine {
-            pending: BTreeMap::from([("general".into(), 10)]),
+            pending: BTreeMap::new(),
             transcripts: BTreeMap::from([(
                 "general".into(),
                 vec![Message::User {
@@ -701,6 +721,50 @@ mod run_tests {
         assert_eq!(summary, "forced pass");
         assert_eq!(provider.call_count(), 1);
         assert_eq!(state.watermarks.get("general"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn bypass_notes_remaining_backlog() {
+        let (_dir, ws) = workspace();
+        // Two 400-token sessions against a 400-token slice: the pass
+        // folds one, and the bypass reply must say the other is still
+        // pending instead of implying a full catch-up.
+        let engine = FakeEngine {
+            pending: BTreeMap::new(),
+            transcripts: BTreeMap::from([
+                ("a".into(), session_messages(4, 100)),
+                ("b".into(), session_messages(4, 100)),
+            ]),
+        };
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            "folded a".into(),
+        ))]));
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller =
+            Distiller::new(&Tools::default(), ws.path(), db, 40_000, Some(400), 5, 8192);
+        let mut state = DistillState::default();
+
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Bypass,
+        )
+        .await
+        .unwrap();
+
+        let (summary, _usage) = out.expect("bypass forces a pass");
+        assert!(summary.starts_with("folded a"), "{summary}");
+        assert!(
+            summary.contains("400 tokens still pending"),
+            "reply must report the backlog left behind: {summary}"
+        );
+        assert!(summary.contains("run /distill again"), "{summary}");
+        assert_eq!(state.watermarks.get("a"), Some(&4));
+        assert!(!state.watermarks.contains_key("b"));
     }
 
     #[tokio::test]
