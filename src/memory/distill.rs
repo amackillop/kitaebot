@@ -503,131 +503,28 @@ mod run_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::context::{AssembledContext, CompactionEvent, ContextStats, SessionInfo, ToolScope};
-    use crate::error::{EngineError, ProviderError};
+    use crate::config::ContextConfig;
+    use crate::context::flat::FlatSession;
+    use crate::error::ProviderError;
     use crate::provider::MockProvider;
     use crate::test_support::workspace;
-    use crate::tools::Tool;
     use crate::types::Response;
 
-    /// Engine stub: serves configured pending totals and transcripts.
-    /// Every other method is unreachable in the distillation path.
-    struct FakeEngine {
-        pending: BTreeMap<String, u64>,
-        transcripts: BTreeMap<String, Vec<Message>>,
-    }
-
-    impl ContextEngine for FakeEngine {
-        async fn pending_distill_tokens(
-            &self,
-            since: &BTreeMap<String, u64>,
-        ) -> Result<BTreeMap<String, u64>, EngineError> {
-            // A static pending map overrides the computed one, so tests
-            // that control the gate independently of transcript size
-            // keep working.
-            if !self.pending.is_empty() {
-                return Ok(self.pending.clone());
+    /// Seed a `FlatSession` (the production engine) with per-session
+    /// transcripts. The engine gets its own context dir: the distiller
+    /// writes into the workspace, never the engine's store.
+    async fn seeded_engine(sessions: &[(&str, Vec<Message>)]) -> FlatSession {
+        let dir = tempfile::tempdir().unwrap();
+        #[allow(deprecated)]
+        let base = dir.into_path();
+        let mut engine = FlatSession::new(&base.join("context"), ContextConfig::default()).unwrap();
+        for (name, messages) in sessions {
+            engine.switch_session(name).await.unwrap();
+            for msg in messages {
+                engine.push_message(msg.clone()).await.unwrap();
             }
-            let mut out = BTreeMap::new();
-            for (name, msgs) in &self.transcripts {
-                let after = usize::try_from(since.get(name).copied().unwrap_or(0)).unwrap_or(0);
-                let total: u64 = msgs
-                    .get(after..)
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(|m| u64::try_from(m.token_estimate()).unwrap_or(0))
-                    .sum();
-                if total > 0 {
-                    out.insert(name.clone(), total);
-                }
-            }
-            Ok(out)
         }
-
-        fn backup(
-            _context_dir: &std::path::Path,
-            _dest: &std::path::Path,
-        ) -> Result<(), EngineError> {
-            Ok(())
-        }
-
-        async fn latest_positions(&self) -> Result<BTreeMap<String, u64>, EngineError> {
-            Ok(self
-                .transcripts
-                .iter()
-                .filter(|(_, msgs)| !msgs.is_empty())
-                .map(|(name, msgs)| (name.clone(), msgs.len() as u64))
-                .collect())
-        }
-
-        async fn transcript_since(
-            &self,
-            session: &str,
-            after: u64,
-            max_tokens: u64,
-        ) -> Result<Vec<Message>, EngineError> {
-            let Some(msgs) = self.transcripts.get(session) else {
-                return Ok(Vec::new());
-            };
-            let after = usize::try_from(after).unwrap_or(0);
-            let mut out = Vec::new();
-            let mut total: u64 = 0;
-            for msg in msgs.get(after..).unwrap_or(&[]) {
-                let tokens = u64::try_from(msg.token_estimate()).unwrap_or(u64::MAX);
-                if !out.is_empty() && total + tokens > max_tokens {
-                    break;
-                }
-                out.push(msg.clone());
-                total += tokens;
-            }
-            Ok(out)
-        }
-
-        async fn push_message(&mut self, _msg: Message) -> Result<(), EngineError> {
-            unimplemented!()
-        }
-        async fn assemble(&self, _system_prompt: &str) -> Result<AssembledContext, EngineError> {
-            unimplemented!()
-        }
-        fn observe_tokens(&mut self, _prompt_tokens: usize) {
-            unimplemented!()
-        }
-        async fn compact_if_urgent(
-            &mut self,
-            _summarize: &SummarizeFn,
-        ) -> Result<Option<CompactionEvent>, EngineError> {
-            unimplemented!()
-        }
-        async fn force_compact(
-            &mut self,
-            _summarize: &SummarizeFn,
-        ) -> Result<CompactionEvent, EngineError> {
-            unimplemented!()
-        }
-        async fn clear(&mut self) -> Result<(), EngineError> {
-            unimplemented!()
-        }
-        async fn save(&mut self) -> Result<(), EngineError> {
-            unimplemented!()
-        }
-        fn stats(&self) -> ContextStats {
-            unimplemented!()
-        }
-        fn tools(&self, _scope: ToolScope) -> Vec<Arc<dyn Tool>> {
-            unimplemented!()
-        }
-        async fn report(&self) -> Result<String, EngineError> {
-            unimplemented!()
-        }
-        fn active_session(&self) -> &str {
-            unimplemented!()
-        }
-        async fn switch_session(&mut self, _name: &str) -> Result<(), EngineError> {
-            unimplemented!()
-        }
-        async fn list_sessions(&self) -> Result<Vec<SessionInfo>, EngineError> {
-            unimplemented!()
-        }
+        engine
     }
 
     fn noop_summarize() -> SummarizeFn {
@@ -640,10 +537,8 @@ mod run_tests {
     #[tokio::test]
     async fn gate_closed_makes_no_call_and_no_write() {
         let (_dir, ws) = workspace();
-        let engine = FakeEngine {
-            pending: BTreeMap::from([("general".into(), 10)]),
-            transcripts: BTreeMap::new(),
-        };
+        // 100 pending against a 1000 threshold: the gate stays closed.
+        let engine = seeded_engine(&[("general", session_messages(1, 100))]).await;
         let provider = Arc::new(MockProvider::new(vec![]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
         let distiller = Distiller::new(
@@ -681,15 +576,13 @@ mod run_tests {
         // Pending computed from the transcripts (a few tokens, far
         // below the 1000 threshold), so the post-pass probe sees the
         // backlog actually drained.
-        let engine = FakeEngine {
-            pending: BTreeMap::new(),
-            transcripts: BTreeMap::from([(
-                "general".into(),
-                vec![Message::User {
-                    content: "small backlog".into(),
-                }],
-            )]),
-        };
+        let engine = seeded_engine(&[(
+            "general",
+            vec![Message::User {
+                content: "small backlog".into(),
+            }],
+        )])
+        .await;
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
             "forced pass".into(),
         ))]));
@@ -729,13 +622,11 @@ mod run_tests {
         // Two 400-token sessions against a 400-token slice: the pass
         // folds one, and the bypass reply must say the other is still
         // pending instead of implying a full catch-up.
-        let engine = FakeEngine {
-            pending: BTreeMap::new(),
-            transcripts: BTreeMap::from([
-                ("a".into(), session_messages(4, 100)),
-                ("b".into(), session_messages(4, 100)),
-            ]),
-        };
+        let engine = seeded_engine(&[
+            ("a", session_messages(4, 100)),
+            ("b", session_messages(4, 100)),
+        ])
+        .await;
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
             "folded a".into(),
         ))]));
@@ -771,15 +662,13 @@ mod run_tests {
         let (_dir, ws) = workspace();
         std::fs::create_dir_all(ws.path().join("memory")).unwrap();
         std::fs::write(ws.path().join("memory/MEMORY.md"), "x".repeat(9000)).unwrap();
-        let engine = FakeEngine {
-            pending: BTreeMap::from([("general".into(), 10)]),
-            transcripts: BTreeMap::from([(
-                "general".into(),
-                vec![Message::User {
-                    content: "small backlog".into(),
-                }],
-            )]),
-        };
+        let engine = seeded_engine(&[(
+            "general",
+            vec![Message::User {
+                content: "small backlog".into(),
+            }],
+        )])
+        .await;
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
             "did not compact".into(),
         ))]));
@@ -837,10 +726,7 @@ mod run_tests {
     #[tokio::test]
     async fn bypass_with_empty_backlog_makes_no_call() {
         let (_dir, ws) = workspace();
-        let engine = FakeEngine {
-            pending: BTreeMap::new(),
-            transcripts: BTreeMap::new(),
-        };
+        let engine = seeded_engine(&[]).await;
         let provider = Arc::new(MockProvider::new(vec![]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
         let distiller = Distiller::new(
@@ -873,20 +759,12 @@ mod run_tests {
     #[tokio::test]
     async fn gate_open_runs_pass_and_advances_watermarks() {
         let (_dir, ws) = workspace();
-        let messages = vec![
-            Message::User {
-                content: "remember the canary is a quokka".into(),
-            },
-            Message::Assistant {
-                content: "noted".into(),
-            },
-        ];
-        let engine = FakeEngine {
-            pending: BTreeMap::from([("general".into(), 1500)]),
-            transcripts: BTreeMap::from([("general".into(), messages)]),
-        };
+        // 1000 pending (2 x 500) against a 1000 threshold and a
+        // 1000-token slice: gate open, and the pass folds both
+        // messages in one slice.
+        let engine = seeded_engine(&[("general", session_messages(2, 500))]).await;
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
-            "wrote canary fact".into(),
+            "folded the slice".into(),
         ))]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
         let distiller = Distiller::new(
@@ -913,7 +791,7 @@ mod run_tests {
         .unwrap();
 
         let (summary, _usage) = out.expect("gate open yields a pass");
-        assert_eq!(summary, "wrote canary fact");
+        assert_eq!(summary, "folded the slice");
         assert_eq!(provider.call_count(), 1);
         assert_eq!(state.watermarks.get("general"), Some(&2));
 
@@ -926,20 +804,18 @@ mod run_tests {
     async fn fresh_state_primes_at_tips_instead_of_reprocessing() {
         let (_dir, ws) = workspace();
         // An engine store with history that predates the state db.
-        let engine = FakeEngine {
-            pending: BTreeMap::from([("general".into(), 5_000)]),
-            transcripts: BTreeMap::from([(
-                "general".into(),
-                vec![
-                    Message::User {
-                        content: "old".into(),
-                    },
-                    Message::User {
-                        content: "history".into(),
-                    },
-                ],
-            )]),
-        };
+        let engine = seeded_engine(&[(
+            "general",
+            vec![
+                Message::User {
+                    content: "old".into(),
+                },
+                Message::User {
+                    content: "history".into(),
+                },
+            ],
+        )])
+        .await;
         let provider = Arc::new(MockProvider::new(vec![]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
         let distiller = Distiller::new(
@@ -969,15 +845,13 @@ mod run_tests {
     #[tokio::test]
     async fn primed_state_survives_reload_unchanged() {
         let (_dir, ws) = workspace();
-        let engine = FakeEngine {
-            pending: BTreeMap::new(),
-            transcripts: BTreeMap::from([(
-                "general".into(),
-                vec![Message::User {
-                    content: "x".into(),
-                }],
-            )]),
-        };
+        let engine = seeded_engine(&[(
+            "general",
+            vec![Message::User {
+                content: "x".into(),
+            }],
+        )])
+        .await;
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
         let distiller = Distiller::new(
             &Tools::default(),
@@ -999,15 +873,9 @@ mod run_tests {
     #[tokio::test]
     async fn failed_turn_leaves_watermarks_untouched() {
         let (_dir, ws) = workspace();
-        let engine = FakeEngine {
-            pending: BTreeMap::from([("general".into(), 1500)]),
-            transcripts: BTreeMap::from([(
-                "general".into(),
-                vec![Message::User {
-                    content: "x".into(),
-                }],
-            )]),
-        };
+        // 1500 pending (2 x 750) against a 1000 threshold: gate open,
+        // but the turn fails so nothing may advance.
+        let engine = seeded_engine(&[("general", session_messages(2, 750))]).await;
         let provider = Arc::new(MockProvider::new(vec![Err(ProviderError::RateLimited)]));
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
         let distiller = Distiller::new(
@@ -1053,14 +921,12 @@ mod run_tests {
         // 400-token slice, so each pass folds exactly one session and
         // the gate (threshold 400) stays open until the backlog is
         // gone. A single-threshold pass would have to fold all 1200.
-        let engine = FakeEngine {
-            pending: BTreeMap::new(),
-            transcripts: BTreeMap::from([
-                ("a".into(), session_messages(4, 100)),
-                ("b".into(), session_messages(4, 100)),
-                ("c".into(), session_messages(4, 100)),
-            ]),
-        };
+        let engine = seeded_engine(&[
+            ("a", session_messages(4, 100)),
+            ("b", session_messages(4, 100)),
+            ("c", session_messages(4, 100)),
+        ])
+        .await;
         let provider = Arc::new(MockProvider::new(vec![
             Ok(Response::Text("pass 1".into())),
             Ok(Response::Text("pass 2".into())),
@@ -1136,14 +1002,12 @@ mod run_tests {
         // 1200 pending, threshold 1200, slice 400: the first pass must
         // fold one 400-token slice, not the whole gated backlog — a
         // threshold-seeded budget would fold all three sessions here.
-        let engine = FakeEngine {
-            pending: BTreeMap::new(),
-            transcripts: BTreeMap::from([
-                ("a".into(), session_messages(4, 100)),
-                ("b".into(), session_messages(4, 100)),
-                ("c".into(), session_messages(4, 100)),
-            ]),
-        };
+        let engine = seeded_engine(&[
+            ("a", session_messages(4, 100)),
+            ("b", session_messages(4, 100)),
+            ("c", session_messages(4, 100)),
+        ])
+        .await;
         let provider = Arc::new(MockProvider::new(vec![
             Ok(Response::Text("pass 1".into())),
             Ok(Response::Text("pass 2".into())),
@@ -1187,15 +1051,13 @@ mod run_tests {
 
         // New history reopens the gate (1300 >= 1200) and the next
         // pass folds the next slice.
-        let engine = FakeEngine {
-            pending: BTreeMap::new(),
-            transcripts: BTreeMap::from([
-                ("a".into(), session_messages(4, 100)),
-                ("b".into(), session_messages(4, 100)),
-                ("c".into(), session_messages(4, 100)),
-                ("d".into(), session_messages(5, 100)),
-            ]),
-        };
+        let engine = seeded_engine(&[
+            ("a", session_messages(4, 100)),
+            ("b", session_messages(4, 100)),
+            ("c", session_messages(4, 100)),
+            ("d", session_messages(5, 100)),
+        ])
+        .await;
         let out = run(
             &engine,
             &distiller,
@@ -1221,13 +1083,11 @@ mod run_tests {
         // the same slice is retried; once it succeeds the next pass
         // proceeds to the later session. A failed slice never advances
         // the cursor past undistilled history.
-        let engine = FakeEngine {
-            pending: BTreeMap::new(),
-            transcripts: BTreeMap::from([
-                ("a".into(), session_messages(4, 100)),
-                ("b".into(), session_messages(4, 100)),
-            ]),
-        };
+        let engine = seeded_engine(&[
+            ("a", session_messages(4, 100)),
+            ("b", session_messages(4, 100)),
+        ])
+        .await;
         let provider = Arc::new(MockProvider::new(vec![
             Err(ProviderError::RateLimited),
             Ok(Response::Text("pass 2".into())),
