@@ -254,7 +254,7 @@ complexity on making failures recoverable in the same turn.
 |-------|------|----------|-------|
 | `path` | String | yes | Relative to workspace |
 | `old_string` | String | yes | Must be non-empty |
-| `new_string` | String | yes | Replacement (empty = delete) |
+| `new_string` | String | yes | Replacement (empty = delete); must differ from `old_string` |
 | `replace_all` | Bool | no | Replace every exact match (default false) |
 
 **Match ladder** — four rungs tried in order; the first rung that

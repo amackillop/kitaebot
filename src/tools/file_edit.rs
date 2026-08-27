@@ -25,7 +25,8 @@ struct Args {
     /// The exact string to find. Must match exactly once, unless
     /// `replace_all` is set.
     old_string: String,
-    /// The replacement string. Empty string deletes the match.
+    /// The replacement string. Empty string deletes the match. Must
+    /// differ from `old_string`.
     new_string: String,
     /// Replace every exact occurrence of `old_string`. Only applies to
     /// exact matches; fuzzy matches always require a unique target.
@@ -72,6 +73,11 @@ impl Tool for FileEdit {
             if args.old_string.is_empty() {
                 return Err(ToolError::InvalidArguments(
                     "old_string must be non-empty".into(),
+                ));
+            }
+            if args.old_string == args.new_string {
+                return Err(ToolError::InvalidArguments(
+                    "old_string and new_string are identical; the edit would be a no-op".into(),
                 ));
             }
 
@@ -663,6 +669,14 @@ mod tests {
             }
             other => panic!("expected Precondition, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn identical_old_and_new_rejected() {
+        let (dir, tool) = setup("content");
+        let result = edit(&tool, "content", "content").await;
+        assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
+        assert_eq!(read(&dir), "content");
     }
 
     #[tokio::test]
