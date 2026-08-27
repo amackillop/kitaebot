@@ -214,7 +214,7 @@ kitaebot = {
       trusted_users = [];                  # Additional allowed users
       trusted_bots = [];                   # Bot apps whose PR feedback to act on
       issues = {
-        enabled = true;                    # Poll issues assigned to the bot
+        enabled = true;                    # Poll assigned issues (work) + unassigned bot-authored/mentioning issues (discussion)
         poll_interval_secs = 300;
         plan_label = "needs-plan";         # Labeled issues get plan-first; unlabeled execute directly
       };
