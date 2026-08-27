@@ -34,6 +34,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("state_db/migrations/0001_baseline.sql"),
     include_str!("state_db/migrations/0002_task.sql"),
     include_str!("state_db/migrations/0003_turn_timing.sql"),
+    include_str!("state_db/migrations/0004_cached_tokens.sql"),
 ];
 
 /// Shared handle to the operational state database.

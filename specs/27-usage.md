@@ -30,7 +30,7 @@ wording change would silently split ledger history.
 ### Schema
 
 The `turns` table in `state/kitaebot.db` (spec 05), migrations
-`0001_baseline.sql` through `0003_turn_timing.sql`:
+`0001_baseline.sql` through `0004_cached_tokens.sql`:
 
 | Column | Added | Meaning |
 |--------|-------|---------|
@@ -47,6 +47,7 @@ The `turns` table in `state/kitaebot.db` (spec 05), migrations
 | `started_at` | 0003 | Turn start, epoch seconds; NULL on legacy rows |
 | `duration_ms` | 0003 | Wall time of the turn; NULL on legacy rows |
 | `outcome` | 0003 | Turn outcome label; NULL on legacy rows |
+| `cached_tokens` | 0004 | Prompt-cache hits, subset of `prompt_tokens`, summed over the calls that reported `prompt_tokens_details`; NULL when none did or on legacy rows |
 
 All post-baseline columns are nullable so both eras of rows parse.
 No index on `task`: the report reads the whole ledger by design and

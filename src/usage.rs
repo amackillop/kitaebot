@@ -29,9 +29,9 @@ pub(crate) const SELECT_TURN_ROWS: &str =
 
 pub(crate) const INSERT_TURN: &str = "INSERT INTO turns
          (git_sha, session, source, model, task,
-          calls, prompt_tokens, completion_tokens, cost,
+          calls, prompt_tokens, cached_tokens, completion_tokens, cost,
           started_at, duration_ms, outcome)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)";
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
 
 /// The build's git revision, injected by the flake at compile time.
 /// `None` in plain `cargo` dev builds, where the env var is unset.
@@ -140,6 +140,7 @@ impl UsageLedger {
                 turn.task.map(TaskKey::as_str),
                 turn.meter.usage.calls,
                 turn.meter.usage.prompt_tokens.cast_signed(),
+                turn.meter.usage.cached_tokens.map(u64::cast_signed),
                 turn.meter.usage.completion_tokens.cast_signed(),
                 turn.meter.usage.cost,
                 turn.meter.started_at.cast_signed(),
@@ -480,6 +481,7 @@ mod tests {
                 meter: meter(TurnUsage {
                     calls: 3,
                     prompt_tokens: 1500,
+                    cached_tokens: Some(1200),
                     completion_tokens: 200,
                     cost: Some(0.0042),
                 }),
@@ -487,18 +489,19 @@ mod tests {
             .unwrap();
 
         let conn = ledger.conn.lock().unwrap();
-        let (session, source, model, calls, prompt, completion, cost): (
+        let (session, source, model, calls, prompt, cached, completion, cost): (
             String,
             String,
             String,
             i64,
             i64,
+            Option<i64>,
             i64,
             Option<f64>,
         ) = conn
             .query_row(
                 "SELECT session, source, model, calls, prompt_tokens, \
-                 completion_tokens, cost FROM turns",
+                 cached_tokens, completion_tokens, cost FROM turns",
                 [],
                 |r| {
                     Ok((
@@ -509,6 +512,7 @@ mod tests {
                         r.get(4)?,
                         r.get(5)?,
                         r.get(6)?,
+                        r.get(7)?,
                     ))
                 },
             )
@@ -518,6 +522,7 @@ mod tests {
         assert_eq!(model, "z-ai/glm-5.2");
         assert_eq!(calls, 3);
         assert_eq!(prompt, 1500);
+        assert_eq!(cached, Some(1200));
         assert_eq!(completion, 200);
         assert_eq!(cost, Some(0.0042));
     }
@@ -640,16 +645,21 @@ mod tests {
                 meter: meter(TurnUsage {
                     calls: 1,
                     prompt_tokens: 10,
+                    cached_tokens: None,
                     completion_tokens: 5,
                     cost: None,
                 }),
             })
             .unwrap();
         let conn = ledger.conn.lock().unwrap();
-        let cost: Option<f64> = conn
-            .query_row("SELECT cost FROM turns", [], |r| r.get(0))
+        let (cost, cached): (Option<f64>, Option<i64>) = conn
+            .query_row("SELECT cost, cached_tokens FROM turns", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert_eq!(cost, None);
+        // Unreported cache details persist as NULL, never zero.
+        assert_eq!(cached, None);
     }
 
     #[test]
@@ -831,6 +841,7 @@ mod tests {
                 meter: meter(TurnUsage {
                     calls: 1,
                     prompt_tokens: 42,
+                    cached_tokens: Some(30),
                     completion_tokens: 8,
                     cost: Some(0.5),
                 }),
