@@ -327,6 +327,16 @@ normally. The window is a short per-path ring (not a consecutive
 counter), so alternating two failing payloads trips the guard for
 each.
 
+The history is one map shared across tasks and sub-agents — the tool
+is a daemon-lifetime singleton — so concurrent writers to the same
+path can race it: one agent's successful write clears counts another
+was accumulating, and interleaved attempts can trip the guard on a
+payload that would have succeeded after the next write. Both races
+are benign by the outcome-classifying design above: a cleared ring
+only delays the hard stop, and a spurious `EditLoop` costs exactly
+one re-read. The guard needs no serialization to stay correct, only
+to stay cheap — which a spurious trip does not threaten.
+
 ---
 
 ### `glob_search` — Find Files by Pattern
