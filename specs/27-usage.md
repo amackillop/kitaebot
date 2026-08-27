@@ -30,7 +30,7 @@ wording change would silently split ledger history.
 ### Schema
 
 The `turns` table in `state/kitaebot.db` (spec 05), migrations
-`0001_baseline.sql` through `0003_turn_timing.sql`:
+`0001_baseline.sql` through `0004_cached_tokens.sql`:
 
 | Column | Added | Meaning |
 |--------|-------|---------|
@@ -47,6 +47,7 @@ The `turns` table in `state/kitaebot.db` (spec 05), migrations
 | `started_at` | 0003 | Turn start, epoch seconds; NULL on legacy rows |
 | `duration_ms` | 0003 | Wall time of the turn; NULL on legacy rows |
 | `outcome` | 0003 | Turn outcome label; NULL on legacy rows |
+| `cached_tokens` | 0004 | Prompt-cache hits, subset of `prompt_tokens`, summed over the calls that reported `prompt_tokens_details`; NULL when none did or on legacy rows |
 
 All post-baseline columns are nullable so both eras of rows parse.
 No index on `task`: the report reads the whole ledger by design and
@@ -126,8 +127,25 @@ mixing eras shows cost from all rows and timing from the timed ones;
 `-` marks absent data, never rendered as zero.
 
 `By Build` ($/turn per deploy — the cost-regression view) and
-`By Model` follow unchanged. Tokens stay in those tables; the task
-table is cost and time.
+`By Model` follow. Tokens stay in those tables; the task table is
+cost and time. Both carry a `Cache` column — the share of prompt
+tokens served from the provider's cache — and the report header the
+overall rate. The rate's denominator is the prompt tokens of only
+the rows that recorded `cached_tokens`: pre-0004 history must not
+dilute the rate toward zero, and a group with no measurable rows
+shows `-`, consistent with the never-render-absence-as-zero rule.
+The header omits the rate entirely on an all-legacy ledger.
+
+Below the header, a `Cache savings` line estimates the USD saved by
+cache hits: cached tokens billed at the cache-read rate instead of
+the input rate, priced from operator-supplied `[usage.rates]` config
+(USD per million tokens per model id; rates vary by upstream
+endpoint, so they are never built in). The estimate is signed — a
+policy whose cache costs exceed its savings must report a negative
+number. Rows whose model has no configured rate are counted as
+`(N turns unpriced)` rather than skipped: silence would hide a
+misconfigured map. The line is absent when no rates are configured
+or no row has cache data.
 
 ## Boundaries
 

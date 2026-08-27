@@ -158,6 +158,7 @@ impl CompletionsProvider {
             .as_ref()
             .map_or_else(CallUsage::default, |u| CallUsage {
                 prompt_tokens: Some(u.prompt_tokens),
+                cached_tokens: u.prompt_tokens_details.as_ref().map(|d| d.cached_tokens),
                 completion_tokens: u.completion_tokens,
                 cost: u.cost,
             });
@@ -453,7 +454,8 @@ mod tests {
                 status: 200,
                 body: br#"{
                     "choices":[{"message":{"content":"hi"}}],
-                    "usage":{"prompt_tokens":42,"completion_tokens":7,"cost":0.0013}
+                    "usage":{"prompt_tokens":42,"completion_tokens":7,"cost":0.0013,
+                             "prompt_tokens_details":{"cached_tokens":30}}
                 }"#
                 .to_vec(),
             })
@@ -461,8 +463,28 @@ mod tests {
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
         let outcome = provider.chat("s", &[], &[]).await.unwrap();
         assert_eq!(outcome.usage.prompt_tokens, Some(42));
+        assert_eq!(outcome.usage.cached_tokens, Some(30));
         assert_eq!(outcome.usage.completion_tokens, 7);
         assert_eq!(outcome.usage.cost, Some(0.0013));
+    }
+
+    /// Usage without `prompt_tokens_details` must surface cache hits
+    /// as absent, not zero — "can't know" and "cold prompt" differ.
+    #[tokio::test]
+    async fn chat_without_cache_details_leaves_cached_none() {
+        let client = CompletionsClient::from_fn(|_body| async {
+            Ok(crate::clients::RawResponse {
+                status: 200,
+                body: br#"{
+                    "choices":[{"message":{"content":"hi"}}],
+                    "usage":{"prompt_tokens":42,"completion_tokens":7}
+                }"#
+                .to_vec(),
+            })
+        });
+        let provider = CompletionsProvider::new(client, &ProviderConfig::default());
+        let outcome = provider.chat("s", &[], &[]).await.unwrap();
+        assert_eq!(outcome.usage.cached_tokens, None);
     }
 
     #[tokio::test]

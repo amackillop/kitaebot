@@ -390,7 +390,10 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     // Telemetry: an open failure is logged and the daemon runs
     // unmetered and unrecorded. Opened before the task tool so
     // sub-agent turns share the ledgers.
-    let usage_ledger = Some(Arc::new(usage::UsageLedger::new(state_db)));
+    let usage_ledger = Some(Arc::new(usage::UsageLedger::new(
+        state_db,
+        config.usage.rates.clone(),
+    )));
     let review_ledger = config
         .review
         .enabled

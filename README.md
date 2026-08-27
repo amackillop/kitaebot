@@ -174,6 +174,14 @@ kitaebot = {
     sub_agents = {
       max_iterations = 30;                       # Tool-loop cap per sub-agent turn
     };
+    usage = {
+      rates = {                                  # USD per 1M tokens, for /usage cache savings (spec 27)
+        "z-ai/glm-5.2" = {
+          input_per_mtok = 0.4046;               # Rates vary by upstream endpoint; use your provider's
+          cache_read_per_mtok = 0.07514;
+        };
+      };
+    };
     context = {
       engine = "flat";                           # flat | lcm
       max_tokens = 200000;

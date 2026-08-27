@@ -501,7 +501,7 @@ mod tests {
     async fn child_row_inherits_the_parent_task() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap();
-        let ledger = Arc::new(UsageLedger::new(&db));
+        let ledger = Arc::new(UsageLedger::new(&db, std::collections::HashMap::new()));
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text("done".into()))]));
         let tool = TaskTool::new(
             same_provider(&provider),
@@ -552,7 +552,7 @@ mod tests {
     async fn child_row_without_task_records_null() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap();
-        let ledger = Arc::new(UsageLedger::new(&db));
+        let ledger = Arc::new(UsageLedger::new(&db, std::collections::HashMap::new()));
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text("done".into()))]));
         let tool = TaskTool::new(
             same_provider(&provider),

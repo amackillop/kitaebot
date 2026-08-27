@@ -278,6 +278,9 @@ pub(crate) struct TurnUsage {
     pub calls: u32,
     /// Prompt tokens billed, summed across calls.
     pub prompt_tokens: u64,
+    /// Prompt-cache hits, summed across the calls that reported them;
+    /// `None` when no call did (same contract as `cost`).
+    pub cached_tokens: Option<u64>,
     /// Tokens generated, summed across calls.
     pub completion_tokens: u64,
     /// Charged cost in USD, summed across calls; `None` when no call
@@ -290,6 +293,9 @@ impl TurnUsage {
         self.calls += 1;
         if let Some(prompt) = call.prompt_tokens {
             self.prompt_tokens += u64::from(prompt);
+        }
+        if let Some(cached) = call.cached_tokens {
+            self.cached_tokens = Some(self.cached_tokens.unwrap_or(0) + u64::from(cached));
         }
         self.completion_tokens += u64::from(call.completion_tokens);
         if let Some(cost) = call.cost {
@@ -1100,6 +1106,7 @@ mod tests {
         let mut usage = TurnUsage::default();
         usage.add_call(CallUsage {
             prompt_tokens: Some(100),
+            cached_tokens: Some(80),
             completion_tokens: 20,
             cost: Some(0.001),
         });
@@ -1107,11 +1114,13 @@ mod tests {
         usage.add_call(CallUsage::default());
         usage.add_call(CallUsage {
             prompt_tokens: Some(50),
+            cached_tokens: Some(0),
             completion_tokens: 10,
             cost: Some(0.002),
         });
         assert_eq!(usage.calls, 3);
         assert_eq!(usage.prompt_tokens, 150);
+        assert_eq!(usage.cached_tokens, Some(80));
         assert_eq!(usage.completion_tokens, 30);
         assert_eq!(usage.cost, Some(0.003));
     }
@@ -1121,11 +1130,14 @@ mod tests {
         let mut usage = TurnUsage::default();
         usage.add_call(CallUsage {
             prompt_tokens: Some(10),
+            cached_tokens: None,
             completion_tokens: 5,
             cost: None,
         });
         assert_eq!(usage.calls, 1);
         assert_eq!(usage.cost, None);
+        // No call reported cache details: absent, not zero.
+        assert_eq!(usage.cached_tokens, None);
     }
 
     fn text(s: &str) -> Response {

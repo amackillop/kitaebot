@@ -33,6 +33,10 @@ pub struct CallUsage {
     /// reports usage. Ground truth for context size — includes system
     /// prompt and tool schemas that char-based estimates miss.
     pub prompt_tokens: Option<u32>,
+    /// Subset of `prompt_tokens` served from the provider's prompt
+    /// cache. `None` when the response carried no
+    /// `prompt_tokens_details`; `Some(0)` is a reported cold prompt.
+    pub cached_tokens: Option<u32>,
     /// Tokens generated in the reply.
     pub completion_tokens: u32,
     /// Charged cost in USD; `OpenRouter` only, `None` elsewhere.

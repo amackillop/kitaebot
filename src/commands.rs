@@ -175,7 +175,7 @@ pub async fn execute(
             None => Ok(Reply::text("Usage tracking is disabled.".into())),
             Some(ledger) => ledger
                 .rows()
-                .map(|rows| Reply::pre(usage::report(&rows)))
+                .map(|rows| Reply::pre(usage::report(&rows, ledger.rates())))
                 .map_err(|e| format!("Usage query failed: {e}")),
         },
         SlashCommand::Findings => match review_ledger {
