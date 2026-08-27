@@ -600,6 +600,16 @@ pub enum GithubError {
     /// HTTP request failed (timeout, DNS, connection reset, etc.).
     #[error("Network error: {0}")]
     Network(String),
+
+    /// GitHub rate limited the request (primary or secondary; 429, or
+    /// 403 with a rate-limit signature).
+    #[error("GitHub rate limited ({status}), retry after {retry_after_secs:?}s: {body}")]
+    RateLimited {
+        status: u16,
+        /// From the `Retry-After` header, when GitHub sent one.
+        retry_after_secs: Option<u64>,
+        body: String,
+    },
 }
 
 /// Linear channel errors.

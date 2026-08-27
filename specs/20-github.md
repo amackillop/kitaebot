@@ -25,6 +25,17 @@ this spec owns the PR channel. Issue polling is a separate channel with its
 own loop and state, documented in [spec 25](25-github-issues.md); it shares
 this channel's REST client, identity, and trust model.
 
+**Rate-limit discipline.** All GitHub API traffic — both poll loops and
+the model's tools — flows through one shared client whose requests
+serialize through a gate: one request in flight at a time, at least a
+second apart, per GitHub's best-practice guidance. A rate-limited
+response (429, or 403 with a `Retry-After` header or rate-limit
+message) surfaces as the distinct `GithubError::RateLimited` and pushes
+the gate out by the `Retry-After` value (one minute when absent), so
+every caller waits out a limit any caller hit. Channels treat
+`RateLimited` as transient: comment-post retries pass back through the
+gate and so retry only after the server-mandated cooldown.
+
 ## Behavior
 
 ### Poll loop

@@ -953,6 +953,7 @@ mod tests {
                      "updated_at":"2026-08-14T11:00:00Z","labels":[]}
                 ]}"#
                 .to_vec(),
+                retry_after_secs: None,
             })
         });
         let proposals = open_proposals(&client, "owner/repo").await.unwrap();
@@ -969,6 +970,7 @@ mod tests {
                 return Ok(RawResponse {
                     status: 200,
                     body: br#"{"login":"kitaebot"}"#.to_vec(),
+                    retry_after_secs: None,
                 });
             }
             // Must filter by author: — the cap counts only bot-authored.
@@ -986,6 +988,7 @@ mod tests {
                      "updated_at":"2026-08-14T11:00:00Z","labels":[]}
                 ]}"#
                 .to_vec(),
+                retry_after_secs: None,
             })
         });
         let count = bot_proposal_count(&client, "owner/repo").await.unwrap();

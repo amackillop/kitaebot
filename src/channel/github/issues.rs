@@ -40,12 +40,14 @@ use crate::tools::git::GitCli;
 /// Maximum retries for posting a reply comment on transient failures.
 const POST_RETRIES: u32 = 3;
 
-/// Whether a [`GithubError`] is worth retrying.
+/// Whether a [`GithubError`] is worth retrying. Rate limits are: the
+/// client gate holds every request until the server-mandated cooldown
+/// passes, so the retry waits exactly as long as GitHub asked.
 fn is_transient(err: &GithubError) -> bool {
     match err {
-        GithubError::Api { status, .. } => *status == 429 || (500..=599).contains(status),
+        GithubError::Api { status, .. } => (500..=599).contains(status),
         GithubError::Deserialize(_) => false,
-        GithubError::Network(_) => true,
+        GithubError::Network(_) | GithubError::RateLimited { .. } => true,
     }
 }
 
@@ -1358,8 +1360,9 @@ mod tests {
     #[test]
     fn transient_error_classification() {
         assert!(is_transient(&GithubError::Network("timeout".into())));
-        assert!(is_transient(&GithubError::Api {
+        assert!(is_transient(&GithubError::RateLimited {
             status: 429,
+            retry_after_secs: None,
             body: String::new()
         }));
         assert!(is_transient(&GithubError::Api {
@@ -1393,6 +1396,7 @@ mod tests {
                         body: br#"{"id":7,"user":{"login":"kitaebot"},"body":"x",
                             "created_at":"2026-08-04T13:00:00Z"}"#
                             .to_vec(),
+                        retry_after_secs: None,
                     }),
                     Err(e) => Err(e),
                 }

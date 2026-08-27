@@ -70,6 +70,7 @@ impl CompletionsClient {
                     Ok(RawResponse {
                         status,
                         body: bytes.to_vec(),
+                        retry_after_secs: None,
                     })
                 })
             }),
@@ -220,6 +221,7 @@ mod tests {
         RawResponse {
             status,
             body: body.as_bytes().to_vec(),
+            retry_after_secs: None,
         }
     }
 
@@ -336,6 +338,7 @@ mod tests {
             Ok(RawResponse {
                 status: 200,
                 body: br#"{"choices":[{"message":{"content":"hi"}}]}"#.to_vec(),
+                retry_after_secs: None,
             })
         });
 

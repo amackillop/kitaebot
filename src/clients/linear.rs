@@ -98,6 +98,7 @@ impl LinearClient {
                     Ok(RawResponse {
                         status,
                         body: bytes.to_vec(),
+                        retry_after_secs: None,
                     })
                 })
             }),
@@ -377,6 +378,7 @@ mod tests {
         RawResponse {
             status,
             body: body.as_bytes().to_vec(),
+            retry_after_secs: None,
         }
     }
 
@@ -457,6 +459,7 @@ mod tests {
             Ok(RawResponse {
                 status: 200,
                 body: VIEWER_JSON.as_bytes().to_vec(),
+                retry_after_secs: None,
             })
         });
         let viewer = client.viewer().await.unwrap();
@@ -472,6 +475,7 @@ mod tests {
             Ok(RawResponse {
                 status: 200,
                 body: br#"{"data":{"commentCreate":{"success":true}}}"#.to_vec(),
+                retry_after_secs: None,
             })
         });
         client.create_comment("i1", "a plan").await.unwrap();
@@ -483,6 +487,7 @@ mod tests {
             Ok(RawResponse {
                 status: 200,
                 body: br#"{"data":{"commentCreate":{"success":false}}}"#.to_vec(),
+                retry_after_secs: None,
             })
         });
         let err = client.create_comment("i1", "a plan").await.unwrap_err();
@@ -519,6 +524,7 @@ mod tests {
                 Ok(RawResponse {
                     status: 200,
                     body: payload.as_bytes().to_vec(),
+                    retry_after_secs: None,
                 })
             }
         })

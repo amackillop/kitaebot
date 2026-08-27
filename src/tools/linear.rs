@@ -113,6 +113,7 @@ mod tests {
             Ok(RawResponse {
                 status: 200,
                 body: payload.as_bytes().to_vec(),
+                retry_after_secs: None,
             })
         });
         let tool = LinearSetState(client);

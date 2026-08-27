@@ -43,6 +43,7 @@ where
             Ok(RawResponse {
                 status: 200,
                 body: handler(method, path, body),
+                retry_after_secs: None,
             })
         }
     });
@@ -64,6 +65,7 @@ where
             Ok(RawResponse {
                 status: 200,
                 body: handler(method, path, body),
+                retry_after_secs: None,
             })
         }
     });

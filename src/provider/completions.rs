@@ -441,6 +441,7 @@ mod tests {
             Ok(crate::clients::RawResponse {
                 status: 200,
                 body: br#"{"choices":[{"message":{"content":"hi"}}]}"#.to_vec(),
+                retry_after_secs: None,
             })
         });
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
@@ -458,6 +459,7 @@ mod tests {
                              "prompt_tokens_details":{"cached_tokens":30}}
                 }"#
                 .to_vec(),
+                retry_after_secs: None,
             })
         });
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
@@ -480,6 +482,7 @@ mod tests {
                     "usage":{"prompt_tokens":42,"completion_tokens":7}
                 }"#
                 .to_vec(),
+                retry_after_secs: None,
             })
         });
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
@@ -493,6 +496,7 @@ mod tests {
             Ok(crate::clients::RawResponse {
                 status: 200,
                 body: br#"{"choices":[{"message":{"content":"hi"}}]}"#.to_vec(),
+                retry_after_secs: None,
             })
         });
         let provider = CompletionsProvider::new(client, &ProviderConfig::default());
@@ -556,6 +560,7 @@ mod tests {
                     Ok(crate::clients::RawResponse {
                         status: 200,
                         body: br#"{"choices":[{"message":{"content":"hi"}}]}"#.to_vec(),
+                        retry_after_secs: None,
                     })
                 }
             }
@@ -625,6 +630,7 @@ mod tests {
                     } else {
                         br#"{"choices":[{"message":{"content":"hi"}}]}"#.to_vec()
                     },
+                    retry_after_secs: None,
                 })
             }
         });

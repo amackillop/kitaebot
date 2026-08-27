@@ -10,6 +10,9 @@ pub mod telegram;
 pub struct RawResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    /// Seconds from the `Retry-After` header, when the server sent one
+    /// (rate-limit responses). `None` when absent or not plumbed.
+    pub retry_after_secs: Option<u64>,
 }
 
 /// Build the HTTP client for the closure IO layer. `mock-network`

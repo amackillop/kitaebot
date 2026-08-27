@@ -362,6 +362,7 @@ mod tests {
                             Some(updates) => Ok(RawResponse {
                                 status: 200,
                                 body: FakeTelegram::ok_json(&updates),
+                                retry_after_secs: None,
                             }),
                             None => std::future::pending().await,
                         }
@@ -386,6 +387,7 @@ mod tests {
                                     chat: Chat { id: chat_id },
                                     text: Some(text),
                                 }),
+                                retry_after_secs: None,
                             }),
                             Err(TelegramError::Api {
                                 error_code,
@@ -398,6 +400,7 @@ mod tests {
                                     description,
                                     *retry_after,
                                 ),
+                                retry_after_secs: None,
                             }),
                             Err(TelegramError::Network(msg)) => {
                                 Err(TelegramError::Network(msg.clone()))
@@ -408,6 +411,7 @@ mod tests {
                             Err(TelegramError::Session(msg)) => Ok(RawResponse {
                                 status: 200,
                                 body: FakeTelegram::error_json(0, msg, None),
+                                retry_after_secs: None,
                             }),
                         }
                     }

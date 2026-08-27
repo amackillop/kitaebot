@@ -679,6 +679,7 @@ mod tests {
                     status: 200,
                     body: br#"{"ok":true,"result":{"message_id":1,"chat":{"id":42},"text":null}}"#
                         .to_vec(),
+                    retry_after_secs: None,
                 })
             }
         });

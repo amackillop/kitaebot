@@ -33,13 +33,37 @@ type RequestFn = Arc<dyn Fn(&'static str, String, Option<Vec<u8>>) -> RequestFut
 // Client
 // ---------------------------------------------------------------------------
 
+/// Minimum gap between consecutive real API requests — GitHub's
+/// documented best practice for sustained request volume.
+const MIN_REQUEST_SPACING: Duration = Duration::from_secs(1);
+
+/// Cooldown after a rate-limit response without a `Retry-After`
+/// header — GitHub's documented minimum wait for secondary limits.
+const RATE_LIMIT_FALLBACK: Duration = Duration::from_mins(1);
+
+/// Earliest instant the next request may start. Shared by every clone,
+/// so both poll loops and the model's tools go through one gate.
+struct Gate {
+    next_allowed: tokio::time::Instant,
+}
+
 /// HTTP client for the GitHub REST API.
 ///
 /// Concrete struct — no generics. The IO strategy is a closure injected at
 /// construction time. `Clone` is free (`Arc`).
+///
+/// Every request passes through a shared [`Gate`]: requests are serial
+/// (GitHub asks that concurrent requests be avoided), spaced by
+/// [`MIN_REQUEST_SPACING`], and a rate-limited response pushes the gate
+/// out by the server-mandated cooldown, so no caller can hammer through
+/// a limit another caller just hit.
 #[derive(Clone)]
 pub struct GithubClient {
     request: RequestFn,
+    /// Gap enforced between consecutive requests. Zero for test
+    /// clients, [`MIN_REQUEST_SPACING`] for real ones.
+    spacing: Duration,
+    gate: Arc<tokio::sync::Mutex<Gate>>,
 }
 
 impl GithubClient {
@@ -71,6 +95,12 @@ impl GithubClient {
                         .await
                         .map_err(|e| GithubError::Network(e.to_string()))?;
                     let status = resp.status().as_u16();
+                    // Seconds form only; GitHub does not use HTTP-dates here.
+                    let retry_after_secs = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse().ok());
                     let bytes = resp
                         .bytes()
                         .await
@@ -78,13 +108,17 @@ impl GithubClient {
                     Ok(RawResponse {
                         status,
                         body: bytes.to_vec(),
+                        retry_after_secs,
                     })
                 })
             }),
+            spacing: MIN_REQUEST_SPACING,
+            gate: fresh_gate(),
         }
     }
 
-    /// Test constructor — inject an arbitrary closure.
+    /// Test constructor — inject an arbitrary closure. No inter-request
+    /// spacing, but rate-limit cooldowns still hold the gate.
     #[cfg(test)]
     pub fn from_fn<F, Fut>(f: F) -> Self
     where
@@ -93,11 +127,36 @@ impl GithubClient {
     {
         Self {
             request: Arc::new(move |method, path, body| Box::pin(f(method, path, body))),
+            spacing: Duration::ZERO,
+            gate: fresh_gate(),
         }
     }
 
+    /// Issue one request through the gate. The lock is held across the
+    /// request, so requests are serial; a rate-limited response sets
+    /// the cooldown every later request waits out.
+    async fn call(
+        &self,
+        method: &'static str,
+        path: String,
+        body: Option<Vec<u8>>,
+    ) -> RequestResult {
+        let mut gate = self.gate.lock().await;
+        tokio::time::sleep_until(gate.next_allowed).await;
+        let result = (self.request)(method, path, body).await;
+        let cooldown = match &result {
+            Ok(raw) if is_rate_limited(raw) => Duration::from_secs(
+                raw.retry_after_secs
+                    .unwrap_or(RATE_LIMIT_FALLBACK.as_secs()),
+            ),
+            _ => self.spacing,
+        };
+        gate.next_allowed = tokio::time::Instant::now() + cooldown;
+        result
+    }
+
     async fn get_json<T: DeserializeOwned>(&self, path: String) -> Result<T, GithubError> {
-        let raw = (self.request)("GET", path, None).await?;
+        let raw = self.call("GET", path, None).await?;
         interpret_response(&raw)
     }
 
@@ -107,7 +166,7 @@ impl GithubClient {
         payload: &serde_json::Value,
     ) -> Result<T, GithubError> {
         let body = serde_json::to_vec(payload).map_err(|e| GithubError::Network(e.to_string()))?;
-        let raw = (self.request)("POST", path, Some(body)).await?;
+        let raw = self.call("POST", path, Some(body)).await?;
         interpret_response(&raw)
     }
 
@@ -218,12 +277,13 @@ impl GithubClient {
     ) -> Result<IssueComment, GithubError> {
         let payload = serde_json::to_vec(&json!({ "body": body }))
             .map_err(|e| GithubError::Network(e.to_string()))?;
-        let raw = (self.request)(
-            "PATCH",
-            format!("repos/{nwo}/issues/comments/{comment_id}"),
-            Some(payload),
-        )
-        .await?;
+        let raw = self
+            .call(
+                "PATCH",
+                format!("repos/{nwo}/issues/comments/{comment_id}"),
+                Some(payload),
+            )
+            .await?;
         interpret_response(&raw)
     }
 
@@ -319,19 +379,20 @@ impl GithubClient {
         path: String,
         body: Option<Vec<u8>>,
     ) -> Result<RawResponse, GithubError> {
-        (self.request)(method, path, body).await
+        self.call(method, path, body).await
     }
 
     /// Raw log text of a job. GitHub answers with a redirect to a
     /// blob URL, which reqwest follows. Head-truncated to the
     /// tool-output ceiling before returning (CI logs are tail-weighted).
     pub async fn job_logs(&self, nwo: &str, job_id: u64) -> Result<String, GithubError> {
-        let raw = (self.request)(
-            "GET",
-            format!("repos/{nwo}/actions/jobs/{job_id}/logs"),
-            None,
-        )
-        .await?;
+        let raw = self
+            .call(
+                "GET",
+                format!("repos/{nwo}/actions/jobs/{job_id}/logs"),
+                None,
+            )
+            .await?;
         if !(200..=299).contains(&raw.status) {
             return Err(GithubError::Api {
                 status: raw.status,
@@ -353,15 +414,45 @@ impl GithubClient {
 /// Parse a raw HTTP response into a GitHub API result.
 ///
 /// Pure function — no IO, no async. Non-2xx statuses carry the body
-/// for diagnosis (GitHub error payloads name the problem).
+/// for diagnosis (GitHub error payloads name the problem). Rate limits
+/// get their own variant: a 429, or a 403 with a `Retry-After` header
+/// or a rate-limit message (GitHub reports primary and secondary
+/// limits as 403s).
 pub fn interpret_response<T: DeserializeOwned>(raw: &RawResponse) -> Result<T, GithubError> {
     if !(200..=299).contains(&raw.status) {
+        let body = String::from_utf8_lossy(&raw.body).into_owned();
+        if is_rate_limited(raw) {
+            return Err(GithubError::RateLimited {
+                status: raw.status,
+                retry_after_secs: raw.retry_after_secs,
+                body,
+            });
+        }
         return Err(GithubError::Api {
             status: raw.status,
-            body: String::from_utf8_lossy(&raw.body).into_owned(),
+            body,
         });
     }
     serde_json::from_slice(&raw.body).map_err(|e| GithubError::Deserialize(e.to_string()))
+}
+
+/// Whether a response is a rate limit: a 429, or a 403 with a
+/// `Retry-After` header or a rate-limit message (GitHub reports both
+/// primary and secondary limits as 403s).
+fn is_rate_limited(raw: &RawResponse) -> bool {
+    raw.status == 429
+        || (raw.status == 403
+            && (raw.retry_after_secs.is_some()
+                || String::from_utf8_lossy(&raw.body)
+                    .to_lowercase()
+                    .contains("rate limit")))
+}
+
+/// A gate that admits the next request immediately.
+fn fresh_gate() -> Arc<tokio::sync::Mutex<Gate>> {
+    Arc::new(tokio::sync::Mutex::new(Gate {
+        next_allowed: tokio::time::Instant::now(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -612,6 +703,7 @@ mod tests {
         RawResponse {
             status,
             body: body.as_bytes().to_vec(),
+            retry_after_secs: None,
         }
     }
 
@@ -623,11 +715,75 @@ mod tests {
 
     #[test]
     fn interpret_api_error_carries_body() {
-        let err =
-            interpret_response::<User>(&raw(403, r#"{"message":"rate limited"}"#)).unwrap_err();
+        let err = interpret_response::<User>(&raw(403, r#"{"message":"forbidden"}"#)).unwrap_err();
         assert!(
-            matches!(err, GithubError::Api { status: 403, ref body } if body.contains("rate limited"))
+            matches!(err, GithubError::Api { status: 403, ref body } if body.contains("forbidden"))
         );
+    }
+
+    #[test]
+    fn interpret_classifies_rate_limits() {
+        // 429 is always a rate limit.
+        let err = interpret_response::<User>(&raw(429, "slow down")).unwrap_err();
+        assert!(matches!(err, GithubError::RateLimited { status: 429, .. }));
+
+        // 403 with a rate-limit message (GitHub's secondary-limit shape).
+        let err = interpret_response::<User>(&raw(
+            403,
+            r#"{"message":"You have exceeded a secondary rate limit"}"#,
+        ))
+        .unwrap_err();
+        assert!(matches!(err, GithubError::RateLimited { status: 403, .. }));
+
+        // 403 with a Retry-After header, regardless of body.
+        let with_header = RawResponse {
+            status: 403,
+            body: b"forbidden".to_vec(),
+            retry_after_secs: Some(30),
+        };
+        let err = interpret_response::<User>(&with_header).unwrap_err();
+        assert!(matches!(
+            err,
+            GithubError::RateLimited {
+                retry_after_secs: Some(30),
+                ..
+            }
+        ));
+
+        // A plain 403 stays an Api error.
+        let err = interpret_response::<User>(&raw(403, "forbidden")).unwrap_err();
+        assert!(matches!(err, GithubError::Api { status: 403, .. }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_response_holds_the_gate() {
+        let client = GithubClient::from_fn(|_method, path, _body| async move {
+            if path == "user" {
+                Ok(RawResponse {
+                    status: 403,
+                    body: b"secondary rate limit".to_vec(),
+                    retry_after_secs: Some(30),
+                })
+            } else {
+                Ok(RawResponse {
+                    status: 200,
+                    body: br#"{"state":"open","title":"T",
+                        "head":{"sha":"a","ref":"f"},
+                        "base":{"sha":"b","ref":"m"}}"#
+                        .to_vec(),
+                    retry_after_secs: None,
+                })
+            }
+        });
+
+        let err = client.user().await.unwrap_err();
+        assert!(matches!(err, GithubError::RateLimited { .. }));
+
+        // The next request — any caller, any endpoint — waits out the
+        // server-mandated cooldown before hitting the API.
+        let start = tokio::time::Instant::now();
+        client.pull("o/r", 1).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(30));
     }
 
     #[test]
@@ -677,6 +833,7 @@ mod tests {
             Ok(RawResponse {
                 status: 200,
                 body: br#"{"items":[]}"#.to_vec(),
+                retry_after_secs: None,
             })
         });
         let items = client
@@ -697,6 +854,7 @@ mod tests {
                     "head":{"sha":"abc","ref":"feature"},
                     "base":{"sha":"def","ref":"master"}}"#
                     .to_vec(),
+                retry_after_secs: None,
             })
         });
         let pull = client.pull("owner/repo", 7).await.unwrap();
@@ -715,6 +873,7 @@ mod tests {
             Ok(RawResponse {
                 status: 200,
                 body: br#"{"id":9,"state":"COMMENTED"}"#.to_vec(),
+                retry_after_secs: None,
             })
         });
         let review = client
@@ -737,6 +896,7 @@ mod tests {
                 body: br#"{"id":7,"user":{"login":"bot"},"body":"A plan",
                     "created_at":"2026-01-01T00:00:00Z"}"#
                     .to_vec(),
+                retry_after_secs: None,
             })
         });
         let comment = client
@@ -758,6 +918,7 @@ mod tests {
                 body: br#"{"id":124,"path":"a.rs","line":1,"body":"Fixed",
                     "user":{"login":"bot"},"created_at":"2026-01-01T00:00:00Z"}"#
                     .to_vec(),
+                retry_after_secs: None,
             })
         });
         let comment = client

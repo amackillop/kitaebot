@@ -61,6 +61,7 @@ impl TelegramClient {
                     Ok(RawResponse {
                         status,
                         body: bytes.to_vec(),
+                        retry_after_secs: None,
                     })
                 })
             }),
@@ -223,6 +224,7 @@ mod tests {
         RawResponse {
             status: 200,
             body: body.as_bytes().to_vec(),
+            retry_after_secs: None,
         }
     }
 
@@ -391,6 +393,7 @@ mod tests {
                 Ok(RawResponse {
                     status: 200,
                     body: json.into_bytes(),
+                    retry_after_secs: None,
                 })
             }
         });

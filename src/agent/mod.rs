@@ -919,6 +919,7 @@ fn error_class(err: &ToolError) -> String {
             crate::error::GithubError::Api { status, .. } => format!("github:api:{status}"),
             crate::error::GithubError::Deserialize(_) => "github:deserialize".into(),
             crate::error::GithubError::Network(_) => "github:network".into(),
+            crate::error::GithubError::RateLimited { .. } => "github:rate_limited".into(),
         },
         ToolError::Linear(e) => match e {
             crate::error::LinearError::Api(_) => "linear:api".into(),

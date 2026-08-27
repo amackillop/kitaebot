@@ -774,6 +774,7 @@ mod tests {
                     Ok(()) => Ok(RawResponse {
                         status: 200,
                         body: br#"{"data":{"commentCreate":{"success":true}}}"#.to_vec(),
+                        retry_after_secs: None,
                     }),
                     Err(e) => Err(e),
                 }
