@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::LazyLock;
 
-use regex::RegexSet;
+use regex::{Regex, RegexSet};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::process::Command;
@@ -443,9 +443,13 @@ static ALL_DENY_RULES: LazyLock<Vec<DenyRule>> = LazyLock::new(|| {
     let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
     let mut rules = DENY_RULES.to_vec();
     // Anchored so paths like src/context/ inside checkouts stay usable.
+    // Quotes are not anchors: a quoted grep pattern like 'context/' is
+    // not a path, and a quoted real path falls through to the kernel
+    // denial instead of a policy strike.
     rules.push(DenyRule {
-        pattern: leak(format!(r#"(^|[\s"'=])(\./)?{CONTEXT_DIR}/"#)),
-        guidance: "engine context is daemon-owned; use the lcm tools for history",
+        pattern: leak(format!(r"(^|[\s=])(\./)?{CONTEXT_DIR}/")),
+        guidance: "engine context is daemon-owned; use the lcm tools for history \
+                   (payload files under the lcm payload store are exec-readable)",
     });
     rules.push(DenyRule {
         pattern: leak(format!(r">\s*(\./)?{STATE_DIR}/")),
@@ -462,6 +466,28 @@ static ALL_DENY_RULES: LazyLock<Vec<DenyRule>> = LazyLock::new(|| {
 static DENY_SET: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new(ALL_DENY_RULES.iter().map(|r| r.pattern)).expect("invalid deny pattern")
 });
+
+/// A payload-store file path as handed to the model in `<file>`
+/// references (spec 14). Exact file-id form only, so traversal like
+/// `payloads/../lcm.db` stays denied. The optional `>` prefix is
+/// captured so redirects into the store can be left for the deny rules.
+static PAYLOAD_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    use crate::workspace::{CONTEXT_DIR, LCM_DIR, LCM_PAYLOADS_DIR};
+    Regex::new(&format!(
+        r"(>\s*)?(\./)?{CONTEXT_DIR}/{LCM_DIR}/{LCM_PAYLOADS_DIR}/file_[0-9a-fA-F]{{16}}\b"
+    ))
+    .expect("invalid payload ref pattern")
+});
+
+/// Blank out sanctioned payload-store reads so the deny rules don't
+/// see them. Redirects into the store are kept verbatim: the read
+/// grant is not a write grant, and the context rule should still fire.
+fn sanitize_payload_refs(cmd: &str) -> std::borrow::Cow<'_, str> {
+    PAYLOAD_REF_RE.replace_all(cmd, |caps: &regex::Captures<'_>| match caps.get(1) {
+        Some(_) => caps[0].to_string(),
+        None => "payload_ref".to_string(),
+    })
+}
 
 /// Arguments for the exec tool.
 #[derive(Deserialize, JsonSchema)]
@@ -772,8 +798,11 @@ fn nearest_envrc_dir<'a>(cwd: &'a Path, workspace_root: &Path) -> Option<&'a Pat
 /// then a parsed-command layer that tokenizes with shell quoting to
 /// catch bypasses like `VAR=x git commit`.
 fn blocked_reason(cmd: &str) -> Option<&'static str> {
-    // Layer 1: regex on raw string
-    if let Some(i) = DENY_SET.matches(cmd).iter().next() {
+    // Payload-store reads are sanctioned (the sandbox grants them), so
+    // those paths are blanked out before the deny rules look.
+    let sanitized = sanitize_payload_refs(cmd);
+    // Layer 1: regex on the sanitized string
+    if let Some(i) = DENY_SET.matches(&sanitized).iter().next() {
         return Some(ALL_DENY_RULES[i].guidance);
     }
     // Layer 2: shell-aware structural match
@@ -939,7 +968,7 @@ mod tests {
     fn internal_state_rules_block_the_obvious() {
         assert_blocked("cat context/sessions/general.json");
         assert_blocked("ls ./context/");
-        assert_blocked("grep foo 'context/lcm.db'");
+        assert_blocked("sqlite3 context/lcm/lcm.db 'select 1'");
         assert_blocked("echo forged > state/JOURNAL.md");
         assert_blocked("echo x >> ./state/kitaebot.db");
     }
@@ -952,6 +981,34 @@ mod tests {
         assert_allowed("git -C projects/o/r log src/context/mod.rs");
         assert_allowed("grep notify state/JOURNAL.md");
         assert_allowed("wc -l state/review-checklist.md");
+    }
+
+    #[test]
+    fn quoted_strings_are_not_path_anchors() {
+        // A quoted grep pattern naming context/ is not a context/ path;
+        // this exact command killed a turn (#110).
+        assert_allowed("grep -rn 'names::' src/ | grep -v 'context/' | head -5");
+        // The cost: a quoted real path falls through to the kernel
+        // denial instead of getting deny-list guidance.
+        assert_allowed("cat 'context/lcm/lcm.db'");
+    }
+
+    #[test]
+    fn payload_store_reads_are_exempt() {
+        // The other #110 turn killers: <file> references hand out these
+        // paths, and the sandbox grants the reads.
+        assert_allowed("grep -c 'alerts/' context/lcm/payloads/file_4c97f88955639190");
+        assert_allowed("grep -n 'ledger' context/lcm/payloads/file_c67b33eda84d6e71 | head -3");
+        assert_allowed("sed -n '5,20p' ./context/lcm/payloads/file_0123456789abcdef");
+    }
+
+    #[test]
+    fn payload_store_exemption_is_exact() {
+        // Only the file-id form is sanctioned: traversal, the bare
+        // directory, and writes stay blocked.
+        assert_blocked("cat context/lcm/payloads/../lcm.db");
+        assert_blocked("ls context/lcm/payloads/");
+        assert_blocked("echo x > context/lcm/payloads/file_0123456789abcdef");
     }
 
     #[test]

@@ -125,7 +125,9 @@ Executes commands via `bash -c` within the workspace.
 
 1. **Regex layer** — a compiled `RegexSet` of ~70+ patterns covering:
    destructive file ops (`rm -rf`, `shred`, `find -delete`), internal state
-   (workspace-root `context/` references, redirection into `state/`),
+   (workspace-root `context/` references except reads of
+   `context/lcm/payloads/<file_id>`, which `<file>` references hand to the
+   model and the sandbox grants; redirection into `state/`),
    disk/filesystem (`mkfs`, `dd`, `fdisk`, `mount`), system power
    (`shutdown`, `reboot`, `systemctl`), privilege escalation (`sudo`, `su`,
    `chmod`, `chown`),
