@@ -127,8 +127,14 @@ mixing eras shows cost from all rows and timing from the timed ones;
 `-` marks absent data, never rendered as zero.
 
 `By Build` ($/turn per deploy — the cost-regression view) and
-`By Model` follow unchanged. Tokens stay in those tables; the task
-table is cost and time.
+`By Model` follow. Tokens stay in those tables; the task table is
+cost and time. Both carry a `Cache` column — the share of prompt
+tokens served from the provider's cache — and the report header the
+overall rate. The rate's denominator is the prompt tokens of only
+the rows that recorded `cached_tokens`: pre-0004 history must not
+dilute the rate toward zero, and a group with no measurable rows
+shows `-`, consistent with the never-render-absence-as-zero rule.
+The header omits the rate entirely on an all-legacy ledger.
 
 ## Boundaries
 

@@ -24,7 +24,7 @@ use crate::agent::TurnMeter;
 /// `state_db` can prepare every query against the migrated schema.
 pub(crate) const SELECT_TURN_ROWS: &str =
     "SELECT git_sha, model, prompt_tokens, completion_tokens, cost,
-            task, started_at, duration_ms
+            task, started_at, duration_ms, cached_tokens
          FROM turns ORDER BY id";
 
 pub(crate) const INSERT_TURN: &str = "INSERT INTO turns
@@ -118,6 +118,7 @@ impl UsageLedger {
                     task: r.get(5)?,
                     started_at: r.get::<_, Option<i64>>(6)?.map(i64::cast_unsigned),
                     duration_ms: r.get::<_, Option<i64>>(7)?.map(i64::cast_unsigned),
+                    cached_tokens: r.get::<_, Option<i64>>(8)?.map(i64::cast_unsigned),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -174,6 +175,7 @@ pub struct TurnRow {
     pub task: Option<String>,
     pub started_at: Option<u64>,
     pub duration_ms: Option<u64>,
+    pub cached_tokens: Option<u64>,
 }
 
 /// Running totals over a group of turns.
@@ -185,6 +187,11 @@ struct Agg {
     /// At least one turn in the group reported a cost. When false the
     /// cost column shows "-": the provider never billed, so 0 would lie.
     metered: bool,
+    /// Prompt-cache hits, and the prompt tokens of only the rows that
+    /// reported them: the hit rate is computed over measurable rows,
+    /// so pre-0004 history cannot dilute it toward zero.
+    cached: u64,
+    cached_prompt: u64,
 }
 
 impl Agg {
@@ -195,7 +202,23 @@ impl Agg {
             self.cost += cost;
             self.metered = true;
         }
+        if let Some(cached) = row.cached_tokens {
+            self.cached += cached;
+            self.cached_prompt += row.prompt_tokens;
+        }
     }
+
+    /// Share of prompt tokens served from cache, over the rows that
+    /// reported cache details; `None` when none did.
+    fn cache_rate(&self) -> Option<f64> {
+        #[allow(clippy::cast_precision_loss)]
+        (self.cached_prompt > 0).then(|| self.cached as f64 / self.cached_prompt as f64)
+    }
+}
+
+/// `87%`, or `-` when the group has no measurable rows.
+fn fmt_rate(rate: Option<f64>) -> String {
+    rate.map_or_else(|| "-".to_string(), |r| format!("{:.0}%", r * 100.0))
 }
 
 /// Group turns by `key` in first-seen order. Rows arrive in insertion
@@ -325,9 +348,14 @@ pub fn report(rows: &[TurnRow]) -> String {
     }
 
     let mut out = String::new();
+    // The header carries the overall hit rate only once turns have
+    // recorded cache details; older ledgers keep the old shape.
+    let cache = total
+        .cache_rate()
+        .map_or_else(String::new, |r| format!(", cache {}", fmt_rate(Some(r))));
     let _ = writeln!(
         out,
-        "Usage ({} turns, {})\n",
+        "Usage ({} turns, {}{cache})\n",
         total.turns,
         fmt_cost(total.cost, total.metered),
     );
@@ -367,18 +395,19 @@ fn write_table(
     if per_turn {
         let _ = writeln!(
             out,
-            "{label:<24} {:>6} {:>10} {:>12} {:>10}",
-            "Turns", "Tokens", "Cost", "$/turn"
+            "{label:<24} {:>6} {:>10} {:>6} {:>12} {:>10}",
+            "Turns", "Tokens", "Cache", "Cost", "$/turn"
         );
     } else {
         let _ = writeln!(
             out,
-            "{label:<24} {:>6} {:>10} {:>12}",
-            "Turns", "Tokens", "Cost"
+            "{label:<24} {:>6} {:>10} {:>6} {:>12}",
+            "Turns", "Tokens", "Cache", "Cost"
         );
     }
     for (name, agg) in groups {
         let cost = fmt_cost(agg.cost, agg.metered);
+        let cache = fmt_rate(agg.cache_rate());
         if per_turn {
             let per = if agg.metered && agg.turns > 0 {
                 #[allow(clippy::cast_precision_loss)]
@@ -389,14 +418,14 @@ fn write_table(
             };
             let _ = writeln!(
                 out,
-                "{name:<24} {:>6} {:>10} {cost:>12} {per:>10}",
+                "{name:<24} {:>6} {:>10} {cache:>6} {cost:>12} {per:>10}",
                 agg.turns,
                 fmt_count(agg.tokens),
             );
         } else {
             let _ = writeln!(
                 out,
-                "{name:<24} {:>6} {:>10} {cost:>12}",
+                "{name:<24} {:>6} {:>10} {cache:>6} {cost:>12}",
                 agg.turns,
                 fmt_count(agg.tokens),
             );
@@ -693,6 +722,7 @@ mod tests {
             task: None,
             started_at: None,
             duration_ms: None,
+            cached_tokens: None,
         }
     }
 
@@ -850,8 +880,62 @@ mod tests {
         let rows = ledger.rows().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].prompt_tokens, 42);
+        assert_eq!(rows[0].cached_tokens, Some(30));
         assert_eq!(rows[0].completion_tokens, 8);
         assert_eq!(rows[0].cost, Some(0.5));
+    }
+
+    /// The hit rate is computed over the rows that reported cache
+    /// details; a pre-0004 row in the same group must not dilute it.
+    #[test]
+    fn cache_rate_ignores_unreporting_rows() {
+        let mut agg = Agg::default();
+        agg.add(&TurnRow {
+            cached_tokens: Some(800),
+            ..row(Some("abcdef1234"), "glm", 1000, None)
+        });
+        agg.add(&row(Some("abcdef1234"), "glm", 500, None));
+        assert_eq!(agg.cache_rate(), Some(0.8));
+    }
+
+    #[test]
+    fn report_renders_cache_rate_per_group_and_header() {
+        let rows = vec![
+            TurnRow {
+                cached_tokens: Some(750),
+                ..row(Some("abcdef1234"), "glm", 1000, Some(0.01))
+            },
+            row(Some("9999999999"), "glm", 500, Some(0.01)),
+        ];
+        let out = report(&rows);
+        assert!(out.contains("cache 75%"), "header rate missing: {out}");
+        let cached_build = out
+            .lines()
+            .find(|l| l.starts_with("abcdef1"))
+            .unwrap()
+            .to_string();
+        assert!(
+            cached_build.contains("75%"),
+            "build rate missing: {cached_build}"
+        );
+        // The era without details renders absence, never 0%.
+        let uncached_build = out
+            .lines()
+            .find(|l| l.starts_with("9999999"))
+            .unwrap()
+            .to_string();
+        assert!(
+            uncached_build.contains('-'),
+            "expected dash: {uncached_build}"
+        );
+    }
+
+    /// A ledger with no cache-era rows keeps the old header shape.
+    #[test]
+    fn report_header_omits_cache_when_unmeasured() {
+        let out = report(&[row(Some("abcdef1234"), "glm", 100, Some(0.01))]);
+        assert!(out.contains("Usage (1 turns, $0.0100)"));
+        assert!(!out.contains("cache"));
     }
 
     #[test]
