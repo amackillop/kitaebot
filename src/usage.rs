@@ -12,9 +12,12 @@ use std::cmp::Ordering;
 use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
 
+use std::collections::HashMap;
+
 use rusqlite::{Connection, params};
 
 use crate::agent::envelope::ChannelSource;
+use crate::config::ModelRates;
 use crate::state_db::StateDb;
 use tracing::warn;
 
@@ -91,13 +94,21 @@ pub struct TurnRecord<'a> {
 /// migration.
 pub struct UsageLedger {
     conn: Arc<Mutex<Connection>>,
+    /// Operator-supplied prices for the report's savings estimate;
+    /// carried here so command sites need no extra config plumbing.
+    rates: HashMap<String, ModelRates>,
 }
 
 impl UsageLedger {
-    pub fn new(db: &StateDb) -> Self {
+    pub fn new(db: &StateDb, rates: HashMap<String, ModelRates>) -> Self {
         Self {
             conn: db.connection(),
+            rates,
         }
+    }
+
+    pub fn rates(&self) -> &HashMap<String, ModelRates> {
+        &self.rates
     }
 
     /// Read every recorded turn, projected to the columns the report
@@ -211,6 +222,7 @@ impl Agg {
     /// Share of prompt tokens served from cache, over the rows that
     /// reported cache details; `None` when none did.
     fn cache_rate(&self) -> Option<f64> {
+        // Token sums sit far below f64's 2^53 integer ceiling.
         #[allow(clippy::cast_precision_loss)]
         (self.cached_prompt > 0).then(|| self.cached as f64 / self.cached_prompt as f64)
     }
@@ -333,11 +345,64 @@ fn write_task_table(out: &mut String, groups: &[(String, TaskAgg)]) {
     out.push('\n');
 }
 
+/// Estimated USD saved by prompt-cache hits: every cached token was
+/// billed at the cache-read rate instead of the input rate. Signed on
+/// purpose — a future policy whose cache costs exceed its savings must
+/// report that, not flatter itself. `None` until rates are configured
+/// and a row has recorded cache details. Rows whose model has no rate
+/// are counted, not skipped: silence would hide a misconfigured map.
+fn cache_savings(rows: &[TurnRow], rates: &HashMap<String, ModelRates>) -> Option<CacheSavings> {
+    if rates.is_empty() || rows.iter().all(|r| r.cached_tokens.is_none()) {
+        return None;
+    }
+    let mut savings = CacheSavings::default();
+    for row in rows {
+        let Some(cached) = row.cached_tokens else {
+            continue;
+        };
+        match rates.get(&row.model) {
+            // Token sums sit far below f64's 2^53 integer ceiling.
+            #[allow(clippy::cast_precision_loss)]
+            Some(rate) => {
+                savings.dollars +=
+                    cached as f64 * (rate.input_per_mtok - rate.cache_read_per_mtok) / 1e6;
+                savings.priced = true;
+            }
+            None => savings.unpriced_turns += 1,
+        }
+    }
+    Some(savings)
+}
+
+#[derive(Default)]
+struct CacheSavings {
+    dollars: f64,
+    /// At least one row's model had a configured rate.
+    priced: bool,
+    /// Rows with cache data but no rate for their model.
+    unpriced_turns: u64,
+}
+
+impl fmt::Display for CacheSavings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Cache savings: ")?;
+        match (self.priced, self.dollars < 0.0) {
+            (false, _) => write!(f, "-")?,
+            (true, true) => write!(f, "-${:.4}", -self.dollars)?,
+            (true, false) => write!(f, "${:.4}", self.dollars)?,
+        }
+        if self.unpriced_turns > 0 {
+            write!(f, " ({} turns unpriced)", self.unpriced_turns)?;
+        }
+        Ok(())
+    }
+}
+
 /// Render the `/usage` report: totals, the per-task headline, then the
 /// per-build and per-model breakdowns. By Task answers what a unit of
 /// work cost; By Build attributes a cost shift to the change that
 /// shipped it.
-pub fn report(rows: &[TurnRow]) -> String {
+pub fn report(rows: &[TurnRow], rates: &HashMap<String, ModelRates>) -> String {
     if rows.is_empty() {
         return "No usage recorded yet.".to_string();
     }
@@ -355,10 +420,14 @@ pub fn report(rows: &[TurnRow]) -> String {
         .map_or_else(String::new, |r| format!(", cache {}", fmt_rate(Some(r))));
     let _ = writeln!(
         out,
-        "Usage ({} turns, {}{cache})\n",
+        "Usage ({} turns, {}{cache})",
         total.turns,
         fmt_cost(total.cost, total.metered),
     );
+    if let Some(savings) = cache_savings(rows, rates) {
+        let _ = writeln!(out, "{savings}");
+    }
+    out.push('\n');
 
     write_task_table(&mut out, &group_by_task(rows));
 
@@ -494,6 +563,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ledger = UsageLedger::new(
             &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+            HashMap::new(),
         );
         (dir, ledger)
     }
@@ -726,6 +796,21 @@ mod tests {
         }
     }
 
+    /// The report without configured rates: no savings line.
+    fn report_no_rates(rows: &[TurnRow]) -> String {
+        report(rows, &HashMap::new())
+    }
+
+    fn glm_rates(input: f64, cache_read: f64) -> HashMap<String, ModelRates> {
+        HashMap::from([(
+            "glm".to_string(),
+            ModelRates {
+                input_per_mtok: input,
+                cache_read_per_mtok: cache_read,
+            },
+        )])
+    }
+
     /// A task-attributed row with timing, the post-spec-27 shape.
     fn task_row(task: &str, cost: f64, started_at: u64, duration_ms: u64) -> TurnRow {
         TurnRow {
@@ -739,7 +824,7 @@ mod tests {
 
     #[test]
     fn by_task_is_the_headline() {
-        let out = report(&[task_row("issue:o/r#1", 0.01, 100, 1_000)]);
+        let out = report_no_rates(&[task_row("issue:o/r#1", 0.01, 100, 1_000)]);
         let task = out.find("By Task").unwrap();
         let build = out.find("By Build").unwrap();
         assert!(task < build);
@@ -754,7 +839,7 @@ mod tests {
             task_row("issue:o/r#1", 0.01, 100, 60_000),
             task_row("issue:o/r#1", 0.02, 400, 120_000),
         ];
-        let out = report(&rows);
+        let out = report_no_rates(&rows);
         // Active: 1m + 2m; span: 100s..(400s + 120s) = 420s.
         assert!(out.contains("3m00s"), "active missing: {out}");
         assert!(out.contains("7m00s"), "span missing: {out}");
@@ -771,7 +856,7 @@ mod tests {
             row(Some("abcdef1234"), "glm", 100, Some(0.01)),
             task_row("duty:distill", 0.02, 100, 1_000),
         ];
-        let out = report(&rows);
+        let out = report_no_rates(&rows);
         let tracked = out.find("duty:distill").unwrap();
         let untracked = out.find("(untracked)").unwrap();
         assert!(tracked < untracked);
@@ -793,7 +878,7 @@ mod tests {
             .collect();
         // Re-touch the oldest task so recency puts it first.
         rows.push(task_row("issue:o/r#0", 0.01, 200, 1_000));
-        let out = report(&rows);
+        let out = report_no_rates(&rows);
         let first = out.find("issue:o/r#0 ").unwrap();
         let second = out
             .find(&format!("issue:o/r#{} ", TASK_GROUP_CAP + 1))
@@ -815,7 +900,7 @@ mod tests {
 
     #[test]
     fn report_empty_is_a_notice() {
-        assert_eq!(report(&[]), "No usage recorded yet.");
+        assert_eq!(report_no_rates(&[]), "No usage recorded yet.");
     }
 
     #[test]
@@ -825,7 +910,7 @@ mod tests {
             row(Some("abcdef1234"), "kimi", 500, Some(0.02)),
             row(Some("9999999999"), "glm", 2000, Some(0.05)),
         ];
-        let out = report(&rows);
+        let out = report_no_rates(&rows);
         // Header total: 3 turns, summed cost.
         assert!(out.contains("Usage (3 turns, $0.0800)"));
         // Short SHA, not the full hash.
@@ -846,7 +931,7 @@ mod tests {
             row(Some("aaaaaaa111"), "glm", 100, Some(0.90)),
             row(Some("bbbbbbb222"), "glm", 100, Some(0.01)),
         ];
-        let out = report(&rows);
+        let out = report_no_rates(&rows);
         let old = out.find("aaaaaaa").unwrap();
         let new = out.find("bbbbbbb").unwrap();
         assert!(old < new);
@@ -854,7 +939,7 @@ mod tests {
 
     #[test]
     fn report_unmetered_shows_dash() {
-        let out = report(&[row(None, "local", 10, None)]);
+        let out = report_no_rates(&[row(None, "local", 10, None)]);
         assert!(out.contains("Usage (1 turns, -)"));
         assert!(out.contains("unknown"));
     }
@@ -907,7 +992,7 @@ mod tests {
             },
             row(Some("9999999999"), "glm", 500, Some(0.01)),
         ];
-        let out = report(&rows);
+        let out = report_no_rates(&rows);
         assert!(out.contains("cache 75%"), "header rate missing: {out}");
         let cached_build = out
             .lines()
@@ -930,10 +1015,88 @@ mod tests {
         );
     }
 
+    /// 2M cached tokens at $0.40/M input vs $0.075/M cache read
+    /// saves 2 x $0.325 = $0.65.
+    #[test]
+    fn savings_priced_from_configured_rates() {
+        let rows = vec![
+            TurnRow {
+                cached_tokens: Some(1_500_000),
+                ..row(Some("abcdef1234"), "glm", 2_000_000, Some(0.5))
+            },
+            TurnRow {
+                cached_tokens: Some(500_000),
+                ..row(Some("abcdef1234"), "glm", 600_000, Some(0.2))
+            },
+        ];
+        let out = report(&rows, &glm_rates(0.4, 0.075));
+        assert!(out.contains("Cache savings: $0.6500"), "missing: {out}");
+        assert!(!out.contains("unpriced"), "nothing is unpriced: {out}");
+    }
+
+    /// The estimate is signed: rates where caching costs more than it
+    /// saves must show a negative number, not clamp to zero.
+    #[test]
+    fn savings_can_go_negative() {
+        let rows = vec![TurnRow {
+            cached_tokens: Some(1_000_000),
+            ..row(Some("abcdef1234"), "glm", 1_000_000, None)
+        }];
+        let out = report(&rows, &glm_rates(0.4, 0.5));
+        assert!(out.contains("Cache savings: -$0.1000"), "missing: {out}");
+    }
+
+    /// A model missing from the rates map is counted, not skipped:
+    /// silence would hide a misconfigured map behind a rosy number.
+    #[test]
+    fn savings_reports_unpriced_models() {
+        let rows = vec![
+            TurnRow {
+                cached_tokens: Some(1_000_000),
+                ..row(Some("abcdef1234"), "glm", 1_000_000, None)
+            },
+            TurnRow {
+                cached_tokens: Some(100),
+                ..row(Some("abcdef1234"), "kimi", 200, None)
+            },
+        ];
+        let out = report(&rows, &glm_rates(0.4, 0.075));
+        assert!(
+            out.contains("Cache savings: $0.3250 (1 turns unpriced)"),
+            "missing: {out}"
+        );
+        // Rates that price nothing still surface the row count.
+        let other = HashMap::from([(
+            "other-model".to_string(),
+            ModelRates {
+                input_per_mtok: 0.4,
+                cache_read_per_mtok: 0.075,
+            },
+        )]);
+        let none_priced = report(&rows, &other);
+        assert!(
+            none_priced.contains("Cache savings: - (2 turns unpriced)"),
+            "missing: {none_priced}"
+        );
+    }
+
+    /// No rates configured, or no rows with cache data: no line.
+    #[test]
+    fn savings_line_absent_without_rates_or_data() {
+        let cached = vec![TurnRow {
+            cached_tokens: Some(100),
+            ..row(Some("abcdef1234"), "glm", 200, None)
+        }];
+        assert!(!report_no_rates(&cached).contains("Cache savings"));
+        let uncached = vec![row(Some("abcdef1234"), "glm", 200, None)];
+        let out = report(&uncached, &glm_rates(0.4, 0.075));
+        assert!(!out.contains("Cache savings"), "no cache-era rows: {out}");
+    }
+
     /// A ledger with no cache-era rows keeps the old header shape.
     #[test]
     fn report_header_omits_cache_when_unmeasured() {
-        let out = report(&[row(Some("abcdef1234"), "glm", 100, Some(0.01))]);
+        let out = report_no_rates(&[row(Some("abcdef1234"), "glm", 100, Some(0.01))]);
         assert!(out.contains("Usage (1 turns, $0.0100)"));
         assert!(!out.contains("cache"));
     }

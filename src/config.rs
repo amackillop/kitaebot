@@ -42,6 +42,26 @@ pub struct Config {
     pub telegram: TelegramConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub usage: UsageConfig,
+}
+
+/// Usage-report settings (spec 27).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UsageConfig {
+    /// Prices per model, keyed by the provider model id, for the
+    /// report's cache-savings estimate. Empty means no estimate.
+    pub rates: std::collections::HashMap<String, ModelRates>,
+}
+
+/// One model's input prices, in USD per million tokens. Rates vary by
+/// upstream endpoint, so these are operator-supplied, not built in.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRates {
+    pub input_per_mtok: f64,
+    pub cache_read_per_mtok: f64,
 }
 
 /// Agent loop settings.

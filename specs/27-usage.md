@@ -136,6 +136,17 @@ dilute the rate toward zero, and a group with no measurable rows
 shows `-`, consistent with the never-render-absence-as-zero rule.
 The header omits the rate entirely on an all-legacy ledger.
 
+Below the header, a `Cache savings` line estimates the USD saved by
+cache hits: cached tokens billed at the cache-read rate instead of
+the input rate, priced from operator-supplied `[usage.rates]` config
+(USD per million tokens per model id; rates vary by upstream
+endpoint, so they are never built in). The estimate is signed — a
+policy whose cache costs exceed its savings must report a negative
+number. Rows whose model has no configured rate are counted as
+`(N turns unpriced)` rather than skipped: silence would hide a
+misconfigured map. The line is absent when no rates are configured
+or no row has cache data.
+
 ## Boundaries
 
 ### Owns
