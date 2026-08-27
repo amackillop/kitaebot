@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use tracing::error;
 
-use crate::context::names::sanitize_name;
+use crate::context::names::{display_name, sanitize_name};
 use crate::context::{ContextEngine, SessionInfo, SummarizeFn};
 use crate::dispatch::Reply;
 use crate::memory::distill::{self, Distiller};
@@ -233,7 +233,7 @@ fn context_reply(engine: &impl ContextEngine) -> Reply {
         stats.token_estimate,
         stats.budget,
         stats.message_count,
-        engine.active_session(),
+        display_name(engine.active_session()),
     ))
 }
 
@@ -384,7 +384,7 @@ async fn switch_project(engine: &mut impl ContextEngine, name: &str) -> Result<R
     }
     Ok(Reply::text(format!(
         "Switched to '{}' ({} messages)",
-        engine.active_session(),
+        display_name(engine.active_session()),
         engine.stats().message_count,
     )))
 }
@@ -435,7 +435,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(engine.active_session(), "CumuloGlobal--open-money");
-        assert!(reply.content.contains("Switched to"), "{}", reply.content);
+        assert!(
+            reply
+                .content
+                .contains("Switched to 'CumuloGlobal/open-money'"),
+            "{}",
+            reply.content
+        );
     }
 
     #[tokio::test]
