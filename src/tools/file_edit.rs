@@ -182,8 +182,8 @@ const FUTILE_LIMIT: usize = 3;
 /// Futile payloads remembered per path.
 const RECENT_WINDOW: usize = 8;
 
-/// Paths tracked before the history resets. A heuristic guard, not a
-/// ledger: losing counts on overflow only delays a hard stop.
+/// Paths tracked before the oldest is evicted. Eviction is per-path,
+/// so an overflow never disarms another path's near-trip count.
 const MAX_PATHS: usize = 32;
 
 /// Recent futile edit payloads per path — attempts that failed to
@@ -191,17 +191,27 @@ const MAX_PATHS: usize = 32;
 /// consecutive counter, so interleaving two failing payloads still
 /// trips the guard for each.
 #[derive(Default)]
-struct EditHistory(HashMap<String, VecDeque<u64>>);
+struct EditHistory {
+    by_path: HashMap<String, VecDeque<u64>>,
+    /// First-record order of tracked paths; the front is evicted on
+    /// overflow.
+    order: VecDeque<String>,
+}
 
 impl EditHistory {
-    /// Record a futile attempt; returns how many times this
-    /// fingerprint appears in the path's recent window, this one
-    /// included.
+    /// Record a futile attempt; returns this fingerprint's total
+    /// occurrences anywhere in the path's recent window (not a
+    /// consecutive run), this one included.
     fn record_futile(&mut self, path: &str, fingerprint: u64) -> usize {
-        if self.0.len() >= MAX_PATHS && !self.0.contains_key(path) {
-            self.0.clear();
+        if !self.by_path.contains_key(path) {
+            if self.by_path.len() >= MAX_PATHS
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.by_path.remove(&oldest);
+            }
+            self.order.push_back(path.to_string());
         }
-        let ring = self.0.entry(path.to_string()).or_default();
+        let ring = self.by_path.entry(path.to_string()).or_default();
         if ring.len() >= RECENT_WINDOW {
             ring.pop_front();
         }
@@ -211,7 +221,9 @@ impl EditHistory {
 
     /// A content-changing edit landed; prior futility is stale.
     fn clear(&mut self, path: &str) {
-        self.0.remove(path);
+        if self.by_path.remove(path).is_some() {
+            self.order.retain(|p| p != path);
+        }
     }
 }
 
@@ -900,14 +912,27 @@ mod tests {
     }
 
     #[test]
-    fn history_path_cap_resets() {
+    fn history_path_cap_evicts_only_the_oldest_path() {
         let mut history = EditHistory::default();
         for p in 0..MAX_PATHS {
             history.record_futile(&format!("p{p}"), 7);
         }
-        // The overflowing path wipes the map; counts restart at one.
         assert_eq!(history.record_futile("overflow", 7), 1);
+        // p0 was evicted and restarts; p1 kept its count.
+        assert_eq!(history.record_futile("p1", 7), 2);
         assert_eq!(history.record_futile("p0", 7), 1);
+    }
+
+    #[test]
+    fn history_clear_untracks_the_path() {
+        let mut history = EditHistory::default();
+        history.record_futile("p", 7);
+        history.clear("p");
+        assert!(history.order.is_empty());
+        // Re-recording tracks the path exactly once.
+        history.record_futile("p", 7);
+        history.record_futile("p", 7);
+        assert_eq!(history.order.len(), 1);
     }
 
     #[test]
