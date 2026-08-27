@@ -435,6 +435,12 @@ pub struct MemoryConfig {
 /// a threshold-sized 40k slice exceeds it and retries forever).
 const DEFAULT_DISTILL_SLICE_TOKENS: u64 = 10_000;
 
+/// Tokens one distiller iteration plausibly folds, for the load-time
+/// slice-vs-budget warning. Calibrated so the known-good pair (10k in
+/// 30 iterations) clears it and the known-fatal one (40k in 30) does
+/// not; deliberately rough, hence a warning rather than a rejection.
+const DISTILL_SLICE_TOKENS_PER_ITERATION: u64 = 350;
+
 impl MemoryConfig {
     /// The slice budget a pass actually uses. Capping the unset case
     /// at the threshold keeps `slice <= threshold` an invariant no
@@ -923,7 +929,30 @@ impl Config {
             source,
         })?;
         config.validate()?;
+        for warning in config.warnings() {
+            tracing::warn!("{warning}");
+        }
         Ok(config)
+    }
+
+    /// Suspect-but-legal configurations, reported at load. Each is a
+    /// heuristic without the certainty rejection would need.
+    fn warnings(&self) -> Vec<String> {
+        let slice = self.memory.effective_slice_tokens();
+        let capacity = u64::try_from(self.sub_agents.max_iterations)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(DISTILL_SLICE_TOKENS_PER_ITERATION);
+        (slice > capacity)
+            .then(|| {
+                format!(
+                    "memory distill slice of {slice} tokens likely exceeds what \
+                     sub_agents.max_iterations = {} can fold (~{capacity} tokens); \
+                     a gathered pass may hit the iteration cap and retry forever",
+                    self.sub_agents.max_iterations,
+                )
+            })
+            .into_iter()
+            .collect()
     }
 
     /// Context config with the provider's output budget reserved.
@@ -1628,6 +1657,39 @@ prompt = \"Review recent commits for security issues.\"
             load_toml("[memory]\ndistill_threshold_tokens = 40000\ndistill_slice_tokens = 20000\n")
                 .unwrap();
         assert_eq!(cfg.memory.effective_slice_tokens(), 20_000);
+    }
+
+    #[test]
+    fn no_warning_for_default_config() {
+        let cfg = load_toml("").unwrap();
+        assert!(cfg.warnings().is_empty());
+    }
+
+    #[test]
+    fn warning_for_slice_beyond_iteration_budget() {
+        // The #47 incident pair: threshold-sized 40k slice against the
+        // default 30-iteration budget.
+        let cfg =
+            load_toml("[memory]\ndistill_threshold_tokens = 40000\ndistill_slice_tokens = 40000\n")
+                .unwrap();
+        let warnings = cfg.warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("40000 tokens"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("max_iterations = 30"),
+            "{}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn no_warning_when_iteration_budget_covers_slice() {
+        let cfg = load_toml(
+            "[memory]\ndistill_threshold_tokens = 40000\ndistill_slice_tokens = 40000\n\
+             [sub_agents]\nmax_iterations = 120\n",
+        )
+        .unwrap();
+        assert!(cfg.warnings().is_empty());
     }
 
     #[test]

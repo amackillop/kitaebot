@@ -224,6 +224,7 @@ is speaking, not which channel they spoke through.
 | `MEMORY.md` unreadable | Warn log, nothing injected, turn proceeds |
 | Index over the byte cap | Truncated at injection, warn log |
 | Distillation turn fails | Logged, watermark not advanced, retried at the next gate crossing |
+| Slice exceeds what `sub_agents.max_iterations` plausibly folds | Warned at config load (rough tokens-per-iteration heuristic); the config still loads |
 | Model writes garbage to memory | Contained by the cap; corrected by guidance-driven edits or the distiller |
 
 Memory never fails a turn. Every failure degrades to "less context",
