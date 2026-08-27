@@ -33,6 +33,7 @@ pub(crate) enum FailureKind {
     /// `CommandFailed`'s rendering keeps the historical
     /// "Execution failed:" prefix, so old sessions classify the same.
     CommandFailed,
+    EditLoop,
     InvalidArguments,
     NotFound,
     Precondition,
@@ -53,6 +54,7 @@ impl fmt::Display for FailureKind {
         match self {
             Self::Blocked => write!(f, "Blocked"),
             Self::CommandFailed => write!(f, "CommandFailed"),
+            Self::EditLoop => write!(f, "EditLoop"),
             Self::InvalidArguments => write!(f, "InvalidArguments"),
             Self::NotFound => write!(f, "NotFound"),
             Self::Other => write!(f, "Other"),
@@ -219,6 +221,8 @@ pub(crate) fn classify_failure(content: &str) -> Option<FailureKind> {
         Some(FailureKind::Blocked)
     } else if content.starts_with("Error: Execution failed: ") {
         Some(FailureKind::CommandFailed)
+    } else if content.starts_with("Error: file_edit on ") {
+        Some(FailureKind::EditLoop)
     } else if content.starts_with("Error: precondition failed: ") {
         Some(FailureKind::Precondition)
     } else if content.starts_with("Error: Invalid arguments: ") {

@@ -907,6 +907,7 @@ fn error_class(err: &ToolError) -> String {
         ToolError::Blocked { .. } => "blocked".into(),
         ToolError::Cancelled => "cancelled".into(),
         ToolError::CommandFailed { exit_code, .. } => format!("command_failed:{exit_code}"),
+        ToolError::EditLoop { .. } => "edit_loop".into(),
         ToolError::FtsQuery { .. } => "fts_query".into(),
         ToolError::Github(e) => match e {
             crate::error::GithubError::Api { status, .. } => format!("github:api:{status}"),
@@ -1805,6 +1806,14 @@ mod tests {
                     guidance: "use the git_push tool".into(),
                 }),
                 Some(FailureKind::Blocked),
+            ),
+            (
+                Err(ToolError::EditLoop {
+                    path: "src/main.rs".into(),
+                    attempts: 3,
+                    outcome: crate::error::EditFutility::NoChange,
+                }),
+                Some(FailureKind::EditLoop),
             ),
             (
                 Err(ToolError::Precondition("exit 1".into())),

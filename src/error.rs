@@ -169,6 +169,24 @@ impl ProviderError {
 #[error("tool name {0:?} must match ^[a-zA-Z0-9_-]+$")]
 pub struct InvalidToolName(pub String);
 
+/// What every attempt in a [`ToolError::EditLoop`] produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditFutility {
+    /// Each attempt returned the same match failure.
+    FailedIdentically,
+    /// Each attempt matched but left the file byte-identical.
+    NoChange,
+}
+
+impl std::fmt::Display for EditFutility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FailedIdentically => f.write_str("failed identically"),
+            Self::NoChange => f.write_str("produced no change"),
+        }
+    }
+}
+
 /// Tool execution errors.
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -203,6 +221,23 @@ pub enum ToolError {
         exit_code: i32,
         /// `$ command`, stdout, stderr, `Exit code: N`.
         output: String,
+    },
+
+    /// The same `file_edit` payload was futile several times running:
+    /// the model is looping on a stale view of the file. No `#[source]`
+    /// carrying the repeated result — the model already received it
+    /// verbatim twice; the payload here is the instruction to stop.
+    #[error(
+        "file_edit on {path} {outcome} {attempts} times running; \
+         re-read the file to re-anchor before editing it again"
+    )]
+    EditLoop {
+        /// The workspace-relative path the edits targeted.
+        path: String,
+        /// Occurrences of this payload in the path's recent window.
+        attempts: usize,
+        /// What every attempt produced.
+        outcome: EditFutility,
     },
 
     /// FTS5 rejected an `lcm_grep` search pattern as query syntax and
@@ -429,6 +464,7 @@ impl ToolError {
             // what the service returns, so they log whole.
             Self::Blocked { .. }
             | Self::Cancelled
+            | Self::EditLoop { .. }
             | Self::FtsQuery { .. }
             | Self::Github(_)
             | Self::Http { .. }
