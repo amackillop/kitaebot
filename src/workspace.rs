@@ -18,6 +18,11 @@ const APP_NAME: &str = "kitaebot";
 /// with the directory instead of silently detaching it.
 pub const CONFIG_FILE: &str = "config.toml";
 pub const CONTEXT_DIR: &str = "context";
+/// LCM engine subtree under [`CONTEXT_DIR`]: `lcm.db` plus the payload store.
+pub const LCM_DIR: &str = "lcm";
+/// Externalized payload store under [`LCM_DIR`]; `<file>` references
+/// hand these paths to the model.
+pub const LCM_PAYLOADS_DIR: &str = "payloads";
 /// Repository checkouts live under this directory.
 pub const PROJECTS_DIR: &str = "projects";
 /// Review worktrees prepared by the GitHub channel live here.

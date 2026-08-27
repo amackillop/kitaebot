@@ -112,7 +112,7 @@ impl LcmEngine {
     ) -> Result<Self, EngineError> {
         // Each engine namespaces its own subdirectory: switching
         // backends can never clobber another engine's files (spec 14).
-        let context_dir = context_dir.join("lcm");
+        let context_dir = context_dir.join(crate::workspace::LCM_DIR);
         std::fs::create_dir_all(&context_dir).map_err(|e| EngineError::Io {
             operation: "create",
             path: context_dir.clone(),
@@ -230,7 +230,7 @@ impl LcmEngine {
 
     /// Directory holding externalized payloads.
     fn payloads_dir(&self) -> PathBuf {
-        self.context_dir.join("payloads")
+        self.context_dir.join(crate::workspace::LCM_PAYLOADS_DIR)
     }
 
     /// Write `content` to `context/lcm/payloads/<file_id>`, generate
@@ -289,8 +289,10 @@ impl LcmEngine {
         );
         // With no original path, point at the stored payload —
         // workspace-relative, so the confined file tools accept it.
-        let path = path_hint
-            .unwrap_or_else(|| format!("{}/lcm/payloads/{file_id}", crate::workspace::CONTEXT_DIR));
+        let path = path_hint.unwrap_or_else(|| {
+            use crate::workspace::{CONTEXT_DIR, LCM_DIR, LCM_PAYLOADS_DIR};
+            format!("{CONTEXT_DIR}/{LCM_DIR}/{LCM_PAYLOADS_DIR}/{file_id}")
+        });
         let reference = explore::format_file_reference(&file_id, &path, token_count, &summary);
         let row = LargeFileRow {
             file_id,
