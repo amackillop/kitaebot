@@ -920,7 +920,9 @@ mod tests {
         assert_eq!(history.record_futile("overflow", 7), 1);
         // p0 was evicted and restarts; p1 kept its count.
         assert_eq!(history.record_futile("p1", 7), 2);
+        // Re-tracking p0 at capacity evicts the next-oldest path, p1.
         assert_eq!(history.record_futile("p0", 7), 1);
+        assert_eq!(history.record_futile("p1", 7), 1);
     }
 
     #[test]

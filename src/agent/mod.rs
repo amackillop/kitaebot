@@ -1808,16 +1808,16 @@ mod tests {
                 Some(FailureKind::Blocked),
             ),
             (
-                Err(ToolError::Precondition("exit 1".into())),
-                Some(FailureKind::Precondition),
-            ),
-            (
                 Err(ToolError::EditLoop {
                     path: "src/main.rs".into(),
                     attempts: 3,
                     outcome: crate::error::EditFutility::NoChange,
                 }),
                 Some(FailureKind::EditLoop),
+            ),
+            (
+                Err(ToolError::Precondition("exit 1".into())),
+                Some(FailureKind::Precondition),
             ),
             (
                 Err(ToolError::InvalidArguments("missing field".into())),
