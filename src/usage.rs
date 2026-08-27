@@ -228,9 +228,13 @@ impl Agg {
     }
 }
 
-/// `87%`, or `-` when the group has no measurable rows.
+/// `87%`, or `-` when the group has no measurable rows. Floored, not
+/// rounded: "100%" must mean every prompt token came from cache.
 fn fmt_rate(rate: Option<f64>) -> String {
-    rate.map_or_else(|| "-".to_string(), |r| format!("{:.0}%", r * 100.0))
+    rate.map_or_else(
+        || "-".to_string(),
+        |r| format!("{:.0}%", (r * 100.0).floor()),
+    )
 }
 
 /// Group turns by `key` in first-seen order. Rows arrive in insertion
@@ -888,6 +892,14 @@ mod tests {
             out.contains("(+2 more tasks)"),
             "cap trailer missing: {out}"
         );
+    }
+
+    #[test]
+    fn fmt_rate_floors_instead_of_rounding() {
+        // 1499/1500 is not a full cache hit; it must not display as one.
+        assert_eq!(fmt_rate(Some(1499.0 / 1500.0)), "99%");
+        assert_eq!(fmt_rate(Some(1.0)), "100%");
+        assert_eq!(fmt_rate(None), "-");
     }
 
     #[test]
