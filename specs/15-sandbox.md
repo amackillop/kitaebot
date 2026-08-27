@@ -65,6 +65,7 @@ The `exec` tier (`Policy::child_exec`):
 | Workspace root | list only (`ReadDir`) | Navigation works. Landlock rules are recursive, so `ReadFile` here would grant reads of everything beneath; with list-only, file reads and all writes under `state/`, `context/`, `memory/`, and `config.toml` are denied, and new root-level files cannot be created |
 | `projects/` | full | Builds, checkouts, `.diffs/` all work |
 | `state/review-checklist.md` | read | The one model-facing state file |
+| `context/lcm/payloads/` | read | The LCM payload store: `<file>` references hand these workspace-relative paths to the model ([spec 14](14-context-engine.md)), so shell reads of them must work. Optional — created lazily on first externalization, and references only exist after that point |
 | `.cache`, `.cargo`, `.npm`, `.local/{share,state}/pnpm` | full | `HOME` is the workspace root on the VM; nix flake eval fails hard without `~/.cache/nix`, and cargo/npm/pnpm need their caches. Provisioned by tmpfiles — Landlock cannot grant a path that does not exist. Grants are named, never speculative: onboarding a repo whose toolchain caches outside XDG (`.m2`, `.gradle`, `~/go/pkg/mod`, …) means adding its rule in `Policy::child_exec` plus a tmpfiles entry in the same commit |
 | `.local/share/direnv`, `.config` | denied | The direnv trust db: repo code must not self-approve an `.envrc` the daemon later evaluates |
 | `/nix/store` | read + execute | Binaries |
@@ -76,7 +77,8 @@ The `exec` tier (`Policy::child_exec`):
 
 Reads of `state/` and `context/` are denied because no rule names them
 and the workspace-root rule is not recursive-write: Landlock denies
-whatever no rule grants. Unix-socket **connects are not mediated**
+whatever no rule grants. The payload store is the one named exception
+under `context/`. Unix-socket **connects are not mediated**
 by this ruleset — the chat socket stays reachable path-wise, which is why
 the socket's SO_PEERCRED uid gate is load-bearing.
 
@@ -107,8 +109,9 @@ Landlock. The authoritative check is the VM smoke, which gates flipping
 the default on.
 
 **Alternative: bubblewrap** (`"bwrap"`). Kept as a non-default option: a
-mount-namespace view that masks the daemon-owned paths with tmpfs and
-additionally unshares pid/ipc and hides `/run`. Stronger in those corners,
+mount-namespace view that masks the daemon-owned paths with tmpfs
+(re-binding `context/lcm/payloads/` read-only on top, mirroring the
+Landlock carve-out) and additionally unshares pid/ipc and hides `/run`. Stronger in those corners,
 but requires loosening `RestrictNamespaces` and the mount syscalls on the
 trusted daemon unit, which is why Landlock-in-child is the default
 mechanism. Argv construction lives in `tools::bwrap::wrap_argv` and stays

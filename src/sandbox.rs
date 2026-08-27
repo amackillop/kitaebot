@@ -230,7 +230,9 @@ impl Policy {
     /// the daemon-owned paths by default. Landlock path rules are
     /// recursive, so the workspace root gets `ReadDir` only: listing
     /// works everywhere, but file *reads* under `state/`, `context/`,
-    /// `memory/`, and `.gnupg` are denied along with all writes.
+    /// `memory/`, and `.gnupg` are denied along with all writes. One
+    /// carve-out: the LCM payload store is readable, since `<file>`
+    /// references hand its paths to the model.
     ///
     /// On the VM, `HOME` is the workspace root, so builds also need the
     /// toolchain cache dirs beneath it (nix flake eval fails hard
@@ -239,10 +241,71 @@ impl Policy {
     /// repo code cannot self-approve an `.envrc` the daemon would later
     /// evaluate.
     pub fn child_exec(workspace: &Path) -> Self {
-        use crate::workspace::{PROJECTS_DIR, REVIEW_CHECKLIST, STATE_DIR};
+        use crate::workspace::{
+            CONTEXT_DIR, LCM_DIR, LCM_PAYLOADS_DIR, PROJECTS_DIR, REVIEW_CHECKLIST, STATE_DIR,
+        };
 
-        let abi = ABI_VERSION;
-        let all = AccessFs::from_all(abi);
+        let all = AccessFs::from_all(ABI_VERSION);
+        let read_files = AccessFs::ReadFile | AccessFs::ReadDir;
+
+        let mut rules = vec![
+            Rule {
+                path: workspace.to_path_buf(),
+                access: AccessFs::ReadDir.into(),
+                presence: Presence::Required,
+                rationale: "Workspace root — list-only; file reads need a narrower rule",
+            },
+            Rule {
+                path: workspace.join(PROJECTS_DIR),
+                access: all,
+                presence: Presence::Optional,
+                rationale: "Projects — full access for builds and checkouts",
+            },
+            Rule {
+                path: workspace.join(STATE_DIR).join(REVIEW_CHECKLIST),
+                access: AccessFs::ReadFile.into(),
+                presence: Presence::Optional,
+                rationale: "Review checklist — read-only for exec inspection",
+            },
+            // Optional: created lazily on first externalization, and the
+            // model only learns these paths from references that exist
+            // only after that point.
+            Rule {
+                path: workspace
+                    .join(CONTEXT_DIR)
+                    .join(LCM_DIR)
+                    .join(LCM_PAYLOADS_DIR),
+                access: read_files,
+                presence: Presence::Optional,
+                rationale: "LCM payload store — file references hand these paths to the model",
+            },
+        ];
+        rules.extend(Self::child_system_rules());
+
+        // Toolchain caches under HOME (= the workspace root on the VM).
+        // Provisioned by tmpfiles; Landlock cannot grant a missing path.
+        let caches = [
+            (
+                ".cache",
+                "Build caches — nix eval/fetcher cache, pnpm cache",
+            ),
+            (".cargo", "Cargo home — registry cache"),
+            (".npm", "npm cache"),
+            (".local/share/pnpm", "pnpm content-addressed store"),
+            (".local/state/pnpm", "pnpm state"),
+        ];
+        rules.extend(caches.map(|(dir, rationale)| Rule {
+            path: workspace.join(dir),
+            access: all,
+            presence: Presence::Optional,
+            rationale,
+        }));
+
+        Self { rules }
+    }
+
+    /// System paths every child tier needs, workspace-independent.
+    fn child_system_rules() -> Vec<Rule> {
         let read_files = AccessFs::ReadFile | AccessFs::ReadDir;
 
         // MakeSock included: e2e/kchat tests spawn the daemon, which
@@ -265,28 +328,10 @@ impl Policy {
 
         let dev_access = AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::WriteFile;
 
-        let mut rules = vec![
-            Rule {
-                path: workspace.to_path_buf(),
-                access: AccessFs::ReadDir.into(),
-                presence: Presence::Required,
-                rationale: "Workspace root — list-only; file reads need a narrower rule",
-            },
-            Rule {
-                path: workspace.join(PROJECTS_DIR),
-                access: all,
-                presence: Presence::Optional,
-                rationale: "Projects — full access for builds and checkouts",
-            },
-            Rule {
-                path: workspace.join(STATE_DIR).join(REVIEW_CHECKLIST),
-                access: AccessFs::ReadFile.into(),
-                presence: Presence::Optional,
-                rationale: "Review checklist — read-only for exec inspection",
-            },
+        vec![
             Rule {
                 path: PathBuf::from("/nix/store"),
-                access: AccessFs::from_read(abi),
+                access: AccessFs::from_read(ABI_VERSION),
                 presence: Presence::Optional,
                 rationale: "Nix store — read + execute",
             },
@@ -326,28 +371,7 @@ impl Policy {
                 presence: Presence::Optional,
                 rationale: "Procfs — read-only",
             },
-        ];
-
-        // Toolchain caches under HOME (= the workspace root on the VM).
-        // Provisioned by tmpfiles; Landlock cannot grant a missing path.
-        let caches = [
-            (
-                ".cache",
-                "Build caches — nix eval/fetcher cache, pnpm cache",
-            ),
-            (".cargo", "Cargo home — registry cache"),
-            (".npm", "npm cache"),
-            (".local/share/pnpm", "pnpm content-addressed store"),
-            (".local/state/pnpm", "pnpm state"),
-        ];
-        rules.extend(caches.map(|(dir, rationale)| Rule {
-            path: workspace.join(dir),
-            access: all,
-            presence: Presence::Optional,
-            rationale,
-        }));
-
-        Self { rules }
+        ]
     }
 
     /// Per-child policy for `GitCli` spawns: clone, fetch, push, and
@@ -711,6 +735,19 @@ mod tests {
     }
 
     #[test]
+    fn exec_tier_reads_the_payload_store() {
+        let ws = Path::new("/home/agent/workspace");
+        let rule = Policy::child_exec(ws)
+            .rules()
+            .iter()
+            .find(|r| r.path == ws.join("context/lcm/payloads"))
+            .cloned()
+            .expect("payload store rule must exist");
+        assert_eq!(rule.access, AccessFs::ReadFile | AccessFs::ReadDir);
+        assert_eq!(rule.presence, Presence::Optional);
+    }
+
+    #[test]
     fn tier_round_trips_through_its_cli_form() {
         for (tier, s) in [(Tier::Exec, "exec"), (Tier::Git, "git")] {
             assert_eq!(s.parse::<Tier>(), Ok(tier));
@@ -892,9 +929,10 @@ mod tests {
     #[test]
     fn child_expected_rule_count() {
         let policy = child_policy();
-        // workspace root, projects, review checklist, 5 build caches,
-        // /nix/store, /tmp, /etc, /lib64, /run, /dev, /proc
-        assert_eq!(policy.rules().len(), 15);
+        // workspace root, projects, review checklist, payload store,
+        // 5 build caches, /nix/store, /tmp, /etc, /lib64, /run, /dev,
+        // /proc
+        assert_eq!(policy.rules().len(), 16);
     }
 
     #[test]

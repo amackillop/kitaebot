@@ -21,7 +21,7 @@
 
 use std::path::Path;
 
-use crate::workspace::{CONFIG_FILE, CONTEXT_DIR, STATE_DIR};
+use crate::workspace::{CONFIG_FILE, CONTEXT_DIR, LCM_DIR, LCM_PAYLOADS_DIR, STATE_DIR};
 
 /// Build the `bwrap` argv that precedes the `bash -c <command>` tail.
 ///
@@ -68,6 +68,13 @@ pub fn wrap_argv(workspace: &Path, cwd: &Path) -> Vec<String> {
         push("--tmpfs");
         push(&format!("{ws}/{dir}"));
     }
+    // Bound back over the context mask: `<file>` references hand these
+    // paths to the model. `--ro-bind-try` because the store is created
+    // lazily on first externalization.
+    let payloads = format!("{ws}/{CONTEXT_DIR}/{LCM_DIR}/{LCM_PAYLOADS_DIR}");
+    push("--ro-bind-try");
+    push(&payloads);
+    push(&payloads);
     push("--ro-bind");
     push("/dev/null");
     push(&format!("{ws}/{CONFIG_FILE}"));
@@ -120,6 +127,17 @@ mod tests {
             has_triple(&a, "--ro-bind", "/dev/null", "/ws/config.toml"),
             "config.toml must be masked by an empty file"
         );
+    }
+
+    #[test]
+    fn payload_store_is_readable_through_the_context_mask() {
+        let a = argv();
+        let p = "/ws/context/lcm/payloads";
+        assert!(has_triple(&a, "--ro-bind-try", p, p));
+        // The bind must come after the tmpfs mask to land on top of it.
+        let mask = a.iter().position(|s| s == "/ws/context").unwrap();
+        let bind = a.iter().position(|s| s == p).unwrap();
+        assert!(mask < bind);
     }
 
     #[test]
