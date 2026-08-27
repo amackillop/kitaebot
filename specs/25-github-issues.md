@@ -12,19 +12,45 @@ Shares the PR channel's REST client, identity, and trust model
 ([spec 20](20-github.md)); runs as its own daemon loop with its own
 poll state.
 
-**Assignment is the human gate.** An issue nobody assigned to the bot
-dispatches nothing — including issues the bot filed itself via
-`github_issue_create` (the spec 24 proposal path). A human triages a
+**Assignment is the human gate for work.** An issue nobody assigned to
+the bot dispatches no execution — including issues the bot filed itself
+via `github_issue_create` (the spec 24 proposal path). A human triages a
 proposal by assigning it; the channel then picks it up like any other
 ticket. The bot's own comments are skipped by login, so it never
 replies to itself.
+
+**Discussion is comment-gated.** A second pass surfaces unassigned
+issues for reply-only turns, so a human can nudge a proposal's
+direction *before* assigning the hard work, and can talk to the bot on
+tickets it will never be assigned. Three cursor-bounded searches:
+bot-authored open issues (no mention needed — the bot filed it, a
+trusted comment on it is addressed to the bot), bot-authored recently
+closed issues (comments there are disposition on finished work; the
+prompt says so and forbids reopening), and open issues where the bot
+is mentioned (`mentions:{bot}`; once mentioned, the issue stays in the
+search, so follow-up trusted comments dispatch without re-tagging).
+The trigger is always a new trusted comment past the cursor — matching
+the search alone dispatches nothing. Discussion turns prepare no
+checkout, record no plan id, and instruct the model to reply as a peer
+and not start work; if a discussion settles a direction, the later
+assignment's announcement embeds the thread, so the work turn starts
+from the settled direction. The first discussion turn on an issue
+embeds title, body, and the trusted thread (tracked in the
+`discussion_announced` set); later comments dispatch incrementally.
+When a race surfaces an issue in both passes on one tick, the work
+view wins. Unconfigured-repo hits are only warned about on the work
+pass: a mention in a repo the bot does not manage is routine, not
+evidence for self-analysis.
 
 ## Behavior
 
 **Poll loop**: `tokio::time::interval` with `MissedTickBehavior::Skip`.
 Each tick:
 
-1. `GET /search/issues` with `is:issue is:open assignee:{bot}`
+1. `GET /search/issues` with `is:issue is:open assignee:{bot}`, then
+   the three discussion searches (`author:{bot}` open and closed,
+   `mentions:{bot}`), each bounded by `updated:>{last_poll}` and
+   deduplicated first-search-wins
 2. Skip issues whose repo is not a `[git.repositories]` key (the repo
    is read from the issue itself — no label convention needed)
 3. Fetch conversation comments, but only for unannounced issues (the
@@ -88,7 +114,11 @@ always trusted, plus `github.trusted_users` and `github.trusted_bots`
 database, same shape as Linear's — `last_poll` cursor plus the
 announced set, keyed `owner/repo#42`. Missing or corrupt state starts
 from now. Announced keys absent from a fetch (closed, unassigned) are
-pruned.
+pruned. The `discussion_announced` set follows the same lifetime: it
+persists while the issue stays in a discussion search's view and
+prunes when it leaves (a pruned closed issue that draws another
+comment simply re-embeds — rare and harmless, and the state stays
+bounded).
 
 **Send retries**: comment posting retries up to 3 times with
 exponential backoff (1s, 2s, 4s) on network errors, 429, and 5xx.

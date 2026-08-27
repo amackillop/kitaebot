@@ -4,8 +4,14 @@
 //! repositories. New issues are announced to the agent, which replies
 //! with an implementation plan; comments from trusted users drive plan
 //! revision or end-to-end execution. Replies are posted back as issue
-//! comments. Assignment is the human gate: an issue nobody assigned to
-//! the bot — its own included — dispatches nothing.
+//! comments. Assignment is the human gate for *work*: an issue nobody
+//! assigned to the bot — its own included — dispatches no execution.
+//!
+//! A second, discussion-only pass covers unassigned issues: trusted
+//! comments on bot-authored issues (open, or recently closed — the
+//! disposition case) and on issues where a trusted user mentioned the
+//! bot. Discussion turns reply in the thread and prepare no checkout;
+//! settling a direction there is exactly what precedes assignment.
 //!
 //! This module holds the pure core: event detection, message
 //! formatting, and poll-state persistence. The poll loop is the thin
@@ -109,45 +115,77 @@ pub async fn poll_loop(
     }
 }
 
-/// Fetch assigned open issues and the comments of the ones that need
-/// them: new issues embed their history in the announcement, updated
-/// ones are scanned for new comments, untouched ones skip the fetch.
+/// Fetch the tick's issues and the comments of the ones that need
+/// them: the work search (assigned) plus the discussion searches
+/// (bot-authored open, bot-authored recently closed, and mentions).
+/// The discussion searches are cursor-bounded — a new comment is the
+/// only trigger and it bumps `updated_at`, so untouched issues never
+/// surface. An issue found by more than one search keeps its first
+/// view; the work search runs first, so assignment wins.
 async fn fetch_views(
     client: &GithubClient,
     bot_login: &str,
     repos: &[String],
     state: &PollState,
 ) -> Result<Vec<IssueView>, GithubError> {
-    let issues = client
-        .search_issues(&format!("is:issue is:open assignee:{bot_login}"))
-        .await?;
+    let cursor = &state.last_poll;
+    let searches = [
+        (
+            format!("is:issue is:open assignee:{bot_login}"),
+            ViewMode::Work,
+        ),
+        (
+            format!("is:issue is:open author:{bot_login} -assignee:{bot_login} updated:>{cursor}"),
+            ViewMode::Discussion { closed: false },
+        ),
+        (
+            format!("is:issue is:closed author:{bot_login} updated:>{cursor}"),
+            ViewMode::Discussion { closed: true },
+        ),
+        (
+            format!(
+                "is:issue is:open mentions:{bot_login} -assignee:{bot_login} \
+                 -author:{bot_login} updated:>{cursor}"
+            ),
+            ViewMode::Discussion { closed: false },
+        ),
+    ];
 
-    let mut views = Vec::new();
-    for issue in issues {
-        let Some(nwo) = issue.nwo() else {
-            warn!(
-                number = issue.number,
-                "Skipping issue with unparseable repository URL"
-            );
-            continue;
-        };
-        if !repos.contains(&nwo) {
-            warn!(
-                issue = %format!("{nwo}#{}", issue.number),
-                "Skipping issue in unconfigured repository"
-            );
-            continue;
+    let mut views: Vec<IssueView> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (query, mode) in searches {
+        for issue in client.search_issues(&query).await? {
+            let Some(nwo) = issue.nwo() else {
+                warn!(
+                    number = issue.number,
+                    "Skipping issue with unparseable repository URL"
+                );
+                continue;
+            };
+            if !repos.contains(&nwo) {
+                if mode == ViewMode::Work {
+                    warn!(
+                        issue = %format!("{nwo}#{}", issue.number),
+                        "Skipping issue in unconfigured repository"
+                    );
+                }
+                continue;
+            }
+            if !seen.insert(format!("{nwo}#{}", issue.number)) {
+                continue;
+            }
+            let comments = if wants_comments(&issue, &nwo, state, mode) {
+                client.issue_comments(&nwo, issue.number).await?
+            } else {
+                Vec::new()
+            };
+            views.push(IssueView {
+                issue,
+                nwo,
+                comments,
+                mode,
+            });
         }
-        let comments = if wants_comments(&issue, &nwo, state) {
-            client.issue_comments(&nwo, issue.number).await?
-        } else {
-            Vec::new()
-        };
-        views.push(IssueView {
-            issue,
-            nwo,
-            comments,
-        });
     }
     Ok(views)
 }
@@ -155,7 +193,7 @@ async fn fetch_views(
 /// Prepare a fresh base checkout for an execution turn and describe it
 /// for the agent, or `None` when the turn needs no checkout.
 async fn checkout_note(git: &GitCli, d: &Dispatch) -> Option<String> {
-    if !d.needs_checkout {
+    if d.kind != TurnKind::Execution {
         return None;
     }
     match execution_checkout::prepare(git, &d.nwo).await {
@@ -200,7 +238,7 @@ async fn dispatch(
         }
     };
     match post_comment(client, &d.nwo, d.number, &body).await {
-        Ok(posted) => (!d.needs_checkout).then_some(posted.id),
+        Ok(posted) => (d.kind == TurnKind::Plan).then_some(posted.id),
         Err(e) => {
             error!("GitHub issue {}: failed to post comment: {e}", d.key);
             None
@@ -252,6 +290,10 @@ pub struct PollState {
     /// so the plan can be edited in place.
     #[serde(default)]
     pub plan_comments: BTreeMap<String, u64>,
+    /// Issues whose discussion thread was already embedded in a turn,
+    /// keyed `owner/repo#42`; later comments dispatch incrementally.
+    #[serde(default)]
+    pub discussion_announced: BTreeSet<String>,
 }
 
 impl PollState {
@@ -261,6 +303,7 @@ impl PollState {
             last_poll: now_iso8601(),
             announced_issues: BTreeSet::new(),
             plan_comments: BTreeMap::new(),
+            discussion_announced: BTreeSet::new(),
         }
     }
 }
@@ -282,13 +325,27 @@ pub fn save_state(db: &StateDb, state: &PollState) {
 // Event detection (pure core)
 // ---------------------------------------------------------------------------
 
-/// An assigned issue with its routing key and (possibly skipped)
+/// How an issue reached the poll. Decides the choreography: work views
+/// get the plan/execute machinery, discussion views get a reply-only
+/// turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Unassigned issue surfaced for peer discussion. `closed` is read
+    /// from the search that found it: comments on a closed bot-authored
+    /// issue are disposition on finished work, and the prompt says so.
+    Discussion { closed: bool },
+    /// Assigned to the bot: the ticket is a work item.
+    Work,
+}
+
+/// A polled issue with its routing key and (possibly skipped)
 /// comment fetch resolved.
 pub struct IssueView {
     pub issue: SearchIssue,
     /// `owner/repo`, parsed from the repository URL.
     pub nwo: String,
     pub comments: Vec<IssueComment>,
+    pub mode: ViewMode,
 }
 
 impl IssueView {
@@ -298,14 +355,34 @@ impl IssueView {
     }
 }
 
-/// Whether an issue's comments must be fetched this tick: always for
-/// unannounced issues (the announcement embeds them), otherwise only
-/// when the issue changed since the cursor.
-pub fn wants_comments(issue: &SearchIssue, nwo: &str, state: &PollState) -> bool {
-    !state
-        .announced_issues
-        .contains(&format!("{nwo}#{}", issue.number))
-        || issue.updated_at.as_str() > state.last_poll.as_str()
+/// Whether an issue's comments must be fetched this tick. Work views:
+/// always for unannounced issues (the announcement embeds them),
+/// otherwise only when the issue changed since the cursor. Discussion
+/// views need comments only when the issue changed — a new comment is
+/// the only trigger, and it bumps `updated_at`.
+pub fn wants_comments(issue: &SearchIssue, nwo: &str, state: &PollState, mode: ViewMode) -> bool {
+    let changed = issue.updated_at.as_str() > state.last_poll.as_str();
+    match mode {
+        ViewMode::Discussion { .. } => changed,
+        ViewMode::Work => {
+            changed
+                || !state
+                    .announced_issues
+                    .contains(&format!("{nwo}#{}", issue.number))
+        }
+    }
+}
+
+/// What a dispatched turn is for; each kind gets different plumbing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnKind {
+    /// Peer discussion: no checkout, reply is just a comment.
+    Discussion,
+    /// May implement: a fresh base checkout is prepared first.
+    Execution,
+    /// Plan-first announcement: the reply comment id is recorded so
+    /// revision turns can edit the plan in place.
+    Plan,
 }
 
 /// One agent turn to run: message in, reply posted as a comment.
@@ -319,10 +396,7 @@ pub struct Dispatch {
     pub number: u32,
     /// Message for the agent.
     pub message: String,
-    /// Whether a fresh base checkout is prepared before the turn.
-    /// True for comment turns (which may execute), false for the
-    /// plan-only new-issue announcement.
-    pub needs_checkout: bool,
+    pub kind: TurnKind,
 }
 
 /// Decide what to dispatch for one poll tick.
@@ -340,8 +414,14 @@ pub fn decide_events(
 ) -> (Vec<Dispatch>, PollState) {
     let mut dispatches = Vec::new();
     let mut announced = BTreeSet::new();
+    let mut discussion_announced = BTreeSet::new();
 
-    for view in views {
+    // Work views first: when a race lands an issue in both passes the
+    // same tick, assignment wins and the discussion view is dropped.
+    let (work, discussion): (Vec<&IssueView>, Vec<&IssueView>) =
+        views.iter().partition(|v| matches!(v.mode, ViewMode::Work));
+
+    for view in work {
         let key = view.key();
         if !state.announced_issues.contains(&key) {
             // The label chooses the choreography: plan-first when the
@@ -356,28 +436,18 @@ pub fn decide_events(
                 } else {
                     format_new_issue_execute(view, trust, bot_login)
                 },
-                needs_checkout: !plan_first,
+                kind: if plan_first {
+                    TurnKind::Plan
+                } else {
+                    TurnKind::Execution
+                },
             });
             announced.insert(key);
             continue;
         }
         announced.insert(key.clone());
 
-        for comment in &view.comments {
-            if comment.created_at.as_str() <= state.last_poll.as_str() {
-                continue;
-            }
-            if comment.user.login == bot_login {
-                continue;
-            }
-            if !trust.allows(&comment.user.login) {
-                warn!(
-                    issue = %key,
-                    author = %comment.user.login,
-                    "Skipping comment from untrusted user"
-                );
-                continue;
-            }
+        for comment in new_trusted_comments(view, state, bot_login, trust) {
             dispatches.push(Dispatch {
                 key: key.clone(),
                 nwo: view.nwo.clone(),
@@ -388,9 +458,53 @@ pub fn decide_events(
                     &comment.body,
                     state.plan_comments.get(&key).copied(),
                 ),
-                needs_checkout: true,
+                kind: TurnKind::Execution,
             });
         }
+    }
+
+    for view in discussion {
+        let key = view.key();
+        if announced.contains(&key) {
+            continue;
+        }
+        let closed = matches!(view.mode, ViewMode::Discussion { closed: true });
+        let new_trusted = new_trusted_comments(view, state, bot_login, trust);
+        if new_trusted.is_empty() {
+            // Membership persists while the issue stays in view, so
+            // follow-up comments dispatch incrementally.
+            if state.discussion_announced.contains(&key) {
+                discussion_announced.insert(key);
+            }
+            continue;
+        }
+        if state.discussion_announced.contains(&key) {
+            for comment in new_trusted {
+                dispatches.push(Dispatch {
+                    key: key.clone(),
+                    nwo: view.nwo.clone(),
+                    number: view.issue.number,
+                    message: format_discussion_comment(
+                        view,
+                        &comment.user.login,
+                        &comment.body,
+                        closed,
+                    ),
+                    kind: TurnKind::Discussion,
+                });
+            }
+        } else {
+            // First discussion turn embeds the full trusted thread;
+            // the new comments are part of it.
+            dispatches.push(Dispatch {
+                key: key.clone(),
+                nwo: view.nwo.clone(),
+                number: view.issue.number,
+                message: format_discussion(view, trust, bot_login, closed),
+                kind: TurnKind::Discussion,
+            });
+        }
+        discussion_announced.insert(key);
     }
 
     let next = PollState {
@@ -405,8 +519,35 @@ pub fn decide_events(
             .map(|(k, v)| (k.clone(), *v))
             .collect(),
         announced_issues: announced,
+        discussion_announced,
     };
     (dispatches, next)
+}
+
+/// Comments past the cursor from trusted users other than the bot,
+/// with untrusted skips logged.
+fn new_trusted_comments<'a>(
+    view: &'a IssueView,
+    state: &PollState,
+    bot_login: &str,
+    trust: &Trust,
+) -> Vec<&'a IssueComment> {
+    view.comments
+        .iter()
+        .filter(|c| c.created_at.as_str() > state.last_poll.as_str())
+        .filter(|c| c.user.login != bot_login)
+        .filter(|c| {
+            if !trust.allows(&c.user.login) {
+                warn!(
+                    issue = %view.key(),
+                    author = %c.user.login,
+                    "Skipping comment from untrusted user"
+                );
+                return false;
+            }
+            true
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +691,69 @@ fn format_comment(view: &IssueView, author: &str, body: &str, plan_comment: Opti
     s
 }
 
+/// The standing instructions for a discussion turn, varied by issue
+/// state: open issues are direction-setting, closed ones disposition.
+fn discussion_instructions(closed: bool) -> &'static str {
+    if closed {
+        "This issue is closed, so the comments are disposition on \
+         finished work — how a human resolved or judged it. Take note \
+         of anything that should change how you work, and reply \
+         briefly; your reply is posted verbatim as a comment. Do not \
+         reopen the issue or start any work."
+    } else {
+        "This is discussion, not an assignment. Reply as a peer: \
+         engage with the comments, answer questions, and where a \
+         comment changes your mind about the issue's direction, say so \
+         concretely — your reply is posted verbatim as a comment on \
+         the issue. Where you disagree, push back with your reasoning \
+         rather than complying. Do not create branches, commit, open \
+         PRs, or start implementing; assignment is the gate for work. \
+         If the discussion settles the direction, state it plainly so \
+         a later assignment starts from it."
+    }
+}
+
+/// The first discussion turn on an issue: full context, since the
+/// session may have long since compacted the issue away.
+fn format_discussion(view: &IssueView, trust: &Trust, bot_login: &str, closed: bool) -> String {
+    let state_word = if closed { "closed " } else { "" };
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "New discussion on {state_word}GitHub issue {} \"{}\" (not assigned to you).",
+        view.key(),
+        view.issue.title,
+    );
+    if let Some(body) = view.issue.body.as_deref().filter(|b| !b.is_empty()) {
+        let _ = writeln!(s, "\nDescription:\n{body}");
+    }
+    let trusted = trusted_comments(&view.comments, trust, bot_login, &view.key());
+    if !trusted.is_empty() {
+        let _ = writeln!(s, "\nComments:");
+        for comment in &trusted {
+            let _ = writeln!(s, "[{}] {}", comment.user.login, comment.body);
+        }
+    }
+    let _ = writeln!(s, "\n{}", discussion_instructions(closed));
+    s
+}
+
+/// A follow-up comment on an already-discussed issue.
+fn format_discussion_comment(view: &IssueView, author: &str, body: &str, closed: bool) -> String {
+    let state_word = if closed { "closed " } else { "" };
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "Comment on {state_word}GitHub issue {} \"{}\" by @{author} \
+         (discussion; not assigned to you):",
+        view.key(),
+        view.issue.title,
+    );
+    let _ = writeln!(s, "\n{body}");
+    let _ = writeln!(s, "\n{}", discussion_instructions(closed));
+    s
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -593,6 +797,7 @@ mod tests {
             },
             nwo: "owner/repo".into(),
             comments,
+            mode: ViewMode::Work,
         }
     }
 
@@ -602,11 +807,19 @@ mod tests {
         labeled_view(number, updated_at, comments, &["needs-plan"])
     }
 
+    /// An unassigned view surfaced by the discussion pass.
+    fn discussion_view(number: u32, closed: bool, comments: Vec<IssueComment>) -> IssueView {
+        let mut v = labeled_view(number, "2026-08-04T12:30:00Z", comments, &[]);
+        v.mode = ViewMode::Discussion { closed };
+        v
+    }
+
     fn state(last_poll: &str, announced: &[&str]) -> PollState {
         PollState {
             last_poll: last_poll.into(),
             announced_issues: announced.iter().map(|s| (*s).into()).collect(),
             plan_comments: BTreeMap::new(),
+            discussion_announced: BTreeSet::new(),
         }
     }
 
@@ -637,7 +850,7 @@ mod tests {
         assert_eq!(dispatches[0].nwo, "owner/repo");
         assert_eq!(dispatches[0].number, 1);
         assert!(dispatches[0].message.contains("assigned to you"));
-        assert!(!dispatches[0].needs_checkout);
+        assert_eq!(dispatches[0].kind, TurnKind::Plan);
         assert!(next.announced_issues.contains("owner/repo#1"));
         assert_eq!(next.last_poll, NOW);
 
@@ -762,7 +975,7 @@ mod tests {
         let (dispatches, _) = decide(&views, &st);
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0].nwo, "owner/repo");
-        assert!(dispatches[0].needs_checkout);
+        assert_eq!(dispatches[0].kind, TurnKind::Execution);
         let msg = &dispatches[0].message;
         assert!(msg.contains("approved, go ahead"));
         assert!(msg.contains("kitaebot_issue-1_<short-summary>"));
@@ -779,8 +992,9 @@ mod tests {
         let (dispatches, next) = decide(&views, &st);
 
         assert_eq!(dispatches.len(), 1);
-        assert!(
-            dispatches[0].needs_checkout,
+        assert_eq!(
+            dispatches[0].kind,
+            TurnKind::Execution,
             "direct execution needs a checkout"
         );
         let msg = &dispatches[0].message;
@@ -806,7 +1020,7 @@ mod tests {
 
         let (dispatches, _) = decide(&views, &st);
 
-        assert!(!dispatches[0].needs_checkout);
+        assert_eq!(dispatches[0].kind, TurnKind::Plan);
         assert!(
             dispatches[0]
                 .message
@@ -905,15 +1119,190 @@ mod tests {
 
         // Unannounced: always fetch.
         let fresh = view(2, "2026-08-04T11:00:00Z", vec![]);
-        assert!(wants_comments(&fresh.issue, &fresh.nwo, &st));
+        assert!(wants_comments(
+            &fresh.issue,
+            &fresh.nwo,
+            &st,
+            ViewMode::Work
+        ));
 
         // Announced and untouched since the cursor: skip.
         let stale = view(1, "2026-08-04T11:00:00Z", vec![]);
-        assert!(!wants_comments(&stale.issue, &stale.nwo, &st));
+        assert!(!wants_comments(
+            &stale.issue,
+            &stale.nwo,
+            &st,
+            ViewMode::Work
+        ));
 
         // Announced but updated: fetch.
         let updated = view(1, "2026-08-04T12:30:00Z", vec![]);
-        assert!(wants_comments(&updated.issue, &updated.nwo, &st));
+        assert!(wants_comments(
+            &updated.issue,
+            &updated.nwo,
+            &st,
+            ViewMode::Work
+        ));
+
+        // Discussion views: only a change matters; there is no
+        // announcement that must embed history.
+        let mode = ViewMode::Discussion { closed: false };
+        let untouched = discussion_view(3, false, vec![]);
+        let mut old = untouched.issue.clone();
+        old.updated_at = "2026-08-04T11:00:00Z".into();
+        assert!(!wants_comments(&old, &untouched.nwo, &st, mode));
+        assert!(wants_comments(&untouched.issue, &untouched.nwo, &st, mode));
+    }
+
+    #[test]
+    fn discussion_first_comment_embeds_full_context() {
+        let views = [discussion_view(
+            9,
+            false,
+            vec![
+                comment("2026-08-04T11:00:00Z", BOT, "proposed fix: direction A"),
+                comment("2026-08-04T12:30:00Z", "alice", "direction A seems wrong"),
+            ],
+        )];
+        let st = state("2026-08-04T12:00:00Z", &[]);
+
+        let (dispatches, next) = decide(&views, &st);
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].kind, TurnKind::Discussion);
+        let msg = &dispatches[0].message;
+        assert!(msg.contains("It is broken"), "embeds the issue body");
+        assert!(msg.contains("[kitaebot] proposed fix: direction A"));
+        assert!(msg.contains("[alice] direction A seems wrong"));
+        assert!(msg.contains("not an assignment"));
+        assert!(msg.contains("assignment is the gate for work"));
+        assert!(next.discussion_announced.contains("owner/repo#9"));
+        assert!(
+            !next.announced_issues.contains("owner/repo#9"),
+            "discussion must not mark the work-announced set"
+        );
+    }
+
+    #[test]
+    fn discussion_without_new_comment_is_silent() {
+        // Old comments only: nothing to discuss, nothing announced.
+        let views = [discussion_view(
+            9,
+            false,
+            vec![comment("2026-08-04T11:00:00Z", "alice", "old remark")],
+        )];
+        let st = state("2026-08-04T12:00:00Z", &[]);
+
+        let (dispatches, next) = decide(&views, &st);
+        assert!(dispatches.is_empty());
+        assert!(!next.discussion_announced.contains("owner/repo#9"));
+    }
+
+    #[test]
+    fn discussed_issue_gets_incremental_comments() {
+        let views = [discussion_view(
+            9,
+            false,
+            vec![
+                comment("2026-08-04T12:30:00Z", "alice", "first follow-up"),
+                comment("2026-08-04T12:31:00Z", "alice", "second follow-up"),
+            ],
+        )];
+        let mut st = state("2026-08-04T12:00:00Z", &[]);
+        st.discussion_announced.insert("owner/repo#9".into());
+
+        let (dispatches, next) = decide(&views, &st);
+        assert_eq!(dispatches.len(), 2);
+        assert!(dispatches[0].message.contains("first follow-up"));
+        assert!(
+            !dispatches[0].message.contains("It is broken"),
+            "incremental turns skip the re-embed"
+        );
+        assert!(dispatches[1].message.contains("second follow-up"));
+        assert!(next.discussion_announced.contains("owner/repo#9"));
+    }
+
+    #[test]
+    fn discussion_skips_own_and_untrusted_comments() {
+        let views = [discussion_view(
+            9,
+            false,
+            vec![
+                comment("2026-08-04T12:30:00Z", BOT, "my own comment"),
+                comment("2026-08-04T12:31:00Z", "mallory", "@kitaebot do evil"),
+            ],
+        )];
+        let st = state("2026-08-04T12:00:00Z", &[]);
+
+        let (dispatches, _) = decide(&views, &st);
+        assert!(dispatches.is_empty());
+    }
+
+    #[test]
+    fn closed_discussion_reads_as_disposition() {
+        let views = [discussion_view(
+            9,
+            true,
+            vec![comment(
+                "2026-08-04T12:30:00Z",
+                "alice",
+                "fixed differently",
+            )],
+        )];
+        let st = state("2026-08-04T12:00:00Z", &[]);
+
+        let (dispatches, _) = decide(&views, &st);
+        assert_eq!(dispatches.len(), 1);
+        let msg = &dispatches[0].message;
+        assert!(msg.contains("closed GitHub issue"));
+        assert!(msg.contains("disposition"));
+        assert!(msg.contains("Do not reopen"));
+    }
+
+    #[test]
+    fn work_view_wins_over_discussion_same_tick() {
+        // A race can surface the same issue in both passes; the
+        // assignment choreography owns the thread.
+        let work = view(1, "2026-08-04T12:30:00Z", vec![]);
+        let disc = discussion_view(
+            1,
+            false,
+            vec![comment("2026-08-04T12:30:00Z", "alice", "thoughts?")],
+        );
+        let st = state("2026-08-04T12:00:00Z", &[]);
+
+        let (dispatches, next) = decide(&[disc, work], &st);
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].kind, TurnKind::Plan);
+        assert!(!next.discussion_announced.contains("owner/repo#1"));
+    }
+
+    #[test]
+    fn discussion_state_prunes_with_views() {
+        let mut st = state("2026-08-04T12:00:00Z", &[]);
+        st.discussion_announced.insert("owner/repo#9".into());
+
+        let (_, next) = decide(&[], &st);
+        assert!(!next.discussion_announced.contains("owner/repo#9"));
+    }
+
+    #[test]
+    fn discussion_membership_persists_while_in_view() {
+        // In view, no new comments: announced membership survives so a
+        // later comment dispatches incrementally.
+        let views = [discussion_view(9, false, vec![])];
+        let mut st = state("2026-08-04T12:00:00Z", &[]);
+        st.discussion_announced.insert("owner/repo#9".into());
+
+        let (dispatches, next) = decide(&views, &st);
+        assert!(dispatches.is_empty());
+        assert!(next.discussion_announced.contains("owner/repo#9"));
+    }
+
+    #[test]
+    fn state_without_discussion_field_deserializes() {
+        let json = r#"{"last_poll":"2026-08-04T12:00:00Z","announced_issues":[]}"#;
+        let st: PollState = serde_json::from_str(json).unwrap();
+        assert!(st.discussion_announced.is_empty());
     }
 
     #[test]
@@ -1083,7 +1472,7 @@ mod tests {
                 nwo: "owner/repo".into(),
                 number: 1,
                 message: "new issue".into(),
-                needs_checkout: false,
+                kind: TurnKind::Plan,
             },
         )
         .await;
