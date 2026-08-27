@@ -491,7 +491,10 @@ attribute carries the payload's stored location instead —
 workspace-relative (`context/lcm/payloads/<file_id>`), because both the
 reference and `lcm_describe` hand this path to the model and the file
 tools reject absolute paths. `large_files.path` records the same value
-the reference carries, in both cases.
+the reference carries, in both cases. Because these paths are handed
+out, reads of them are sanctioned everywhere: the file tools, the exec
+deny list ([spec 03](03-tools.md)), and both exec sandbox mechanisms
+([spec 15](15-sandbox.md)).
 
 **Externalization at ingest**: the oversized raw payload is written to disk
 under `context/lcm/payloads/<file_id>` and the `messages.content` row stores
