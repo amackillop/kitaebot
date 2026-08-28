@@ -362,6 +362,34 @@ disposition), and instructs the model to:
 The `reviewed` entry updates to the new SHA on dispatch, so each push
 gets at most one incremental turn.
 
+**The quiet path.** A push landing on a standing approval usually just
+polishes the nits that approval carried, and publishing another
+`APPROVE` over it is noise — PR #106's third round had nothing to say
+beyond "both nits addressed" (issue #112). When the bot's latest
+published review is an `APPROVE` and nothing pending in the ledger for
+the prior round is worse than a `nit`, the dispatch says so, and the
+protocol licenses silence: the reviewer round still runs — nit fixes
+can introduce defects, which is exactly what re-reviews exist for —
+but a verdict of `correct` with no new findings on a delta that stays
+within the pending feedback's scope publishes nothing. The standing
+approval covers the push; the findings close through their normal
+dispositions, whose notes carry what was verified. The alternative —
+skipping the dispatch entirely and closing the findings mechanically —
+was rejected: the channel cannot tell a nit-fix push from new work
+without reading the delta, and a mechanical `fixed` records a
+verification nobody performed.
+
+The round stays visible without a published artifact: the reviewer
+invocation records its `reviews` row and the dispositions their
+timestamps ([spec 23](23-self-review.md)); what was published remains
+the GitHub API's record. The eligibility gate is mechanical and
+deliberately strict — a pending `should-fix`, or anything but an
+`APPROVE` as the latest submitted bot review, publishes as usual. A
+delta that regresses or does new work beyond the feedback also
+publishes as usual; the reviewer judges scope, which is why the
+dispatch still runs. Both invariants above stand: each push gets at
+most one incremental turn, and every push gets its reviewer round.
+
 ### Review thread follow-ups
 
 Humans can push back on the bot's review comments, and the bot holds up

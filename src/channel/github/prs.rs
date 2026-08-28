@@ -752,10 +752,36 @@ fn decide_tracked(
                 pushed.then_some(prev_sha.as_str()),
                 &comments,
                 &checkout,
+                quiet_path_eligible(s, bot_login),
             ),
         });
     }
     (dispatches, prunes)
+}
+
+/// Whether a push may go unpublished (spec 20, quiet path): the bot's
+/// latest published review is an APPROVE and nothing pending on it is
+/// worse than a nit. Strict on purpose — a pending should-fix, or no
+/// standing approve, publishes as usual. Only publication is at stake:
+/// the reviewer round runs either way, and the root makes the final
+/// call from its verdict.
+fn quiet_path_eligible(s: &TrackedSnapshot, bot_login: &str) -> bool {
+    latest_bot_review_state(&s.view.reviews, bot_login) == Some("APPROVED")
+        && s.prior_findings
+            .iter()
+            .filter(|f| f.disposition.is_none())
+            .all(|f| f.severity.as_deref() == Some("nit"))
+}
+
+/// State of the bot's latest submitted review. Pending reviews carry
+/// no `submitted_at`; a draft is not a verdict.
+fn latest_bot_review_state<'a>(reviews: &'a [PrReview], bot_login: &str) -> Option<&'a str> {
+    reviews
+        .iter()
+        .filter(|r| r.user.login == bot_login)
+        .filter_map(|r| Some((r.submitted_at.as_deref()?, r.state.as_str())))
+        .max_by_key(|&(at, _)| at)
+        .map(|(_, state)| state)
 }
 
 /// New comments on a tracked PR worth discussing: newer than
@@ -1125,12 +1151,14 @@ fn format_review_request(
 
 /// Build the turn message for a tracked PR: an incremental re-review
 /// (`prev_sha` is `Some`), a discussion of new comments, or both
-/// combined.
+/// combined. `quiet_eligible` marks a push the quiet path may cover;
+/// it only matters alongside `prev_sha`.
 fn format_tracked_turn(
     s: &TrackedSnapshot,
     prev_sha: Option<&str>,
     comments: &[String],
     checkout: &str,
+    quiet_eligible: bool,
 ) -> String {
     let n = s.pr_number;
     let nwo = &s.nwo;
@@ -1175,6 +1203,15 @@ fn format_tracked_turn(
                 "\nPack the ledger findings above into the reviewer dispatch \
                  as the outstanding feedback, and record a disposition by id \
                  for each pending one once the verdict is in.",
+            );
+        }
+        if quiet_eligible {
+            let _ = write!(
+                msg,
+                "\nYour latest published review is an APPROVE and nothing \
+                 pending on it is worse than a nit, so the quiet path \
+                 applies (Review Protocol, re-reviews): a clean delta that \
+                 stays within that feedback's scope publishes nothing.",
             );
         }
         if !comments.is_empty() {
@@ -1729,6 +1766,111 @@ mod tests {
         assert!(d.message.contains("reviewed SHA: old"));
         // No comments, so no discussion block.
         assert!(!d.message.contains("Respond to each comment"));
+    }
+
+    fn tracked_review(login: &str, state: &str, submitted_at: Option<&str>) -> PrReview {
+        PrReview {
+            id: 9,
+            user: user(login),
+            body: None,
+            state: state.to_string(),
+            submitted_at: submitted_at.map(str::to_string),
+        }
+    }
+
+    const QUIET_PATH: &str = "the quiet path applies";
+
+    #[test]
+    fn tracked_push_on_approve_with_nits_offers_quiet_path() {
+        let mut s = snapshot("o/r", 1, "open", "new");
+        s.view.reviews.push(tracked_review(
+            "bot",
+            "APPROVED",
+            Some("2026-08-10T00:00:00Z"),
+        ));
+        s.prior_findings = vec![
+            prior_finding(121, "nit", None),
+            // Disposed findings no longer count against the push.
+            prior_finding(120, "must-fix", Some(("fixed", "guard restored"))),
+        ];
+
+        let (dispatches, _) = decide_tracked(
+            &[s],
+            &reviewed("o/r#1", "old"),
+            "bot",
+            &trust("alice", &[], &[]),
+            LAST_POLL,
+        );
+        assert!(dispatches[0].message.contains(QUIET_PATH));
+    }
+
+    #[test]
+    fn tracked_quiet_path_needs_a_standing_approve() {
+        // A later COMMENT supersedes the approve; a should-fix left
+        // pending disqualifies on its own; a stranger's approve is not
+        // the bot's. Comment-only turns never carry the quiet path.
+        let approve = tracked_review("bot", "APPROVED", Some("2026-08-10T00:00:00Z"));
+
+        let mut superseded = snapshot("o/r", 1, "open", "new");
+        superseded.view.reviews.push(approve.clone());
+        superseded.view.reviews.push(tracked_review(
+            "bot",
+            "COMMENTED",
+            Some("2026-08-11T00:00:00Z"),
+        ));
+
+        let mut should_fix = snapshot("o/r", 1, "open", "new");
+        should_fix.view.reviews.push(approve.clone());
+        should_fix.prior_findings = vec![prior_finding(121, "should-fix", None)];
+
+        let mut strangers = snapshot("o/r", 1, "open", "new");
+        strangers.view.reviews.push(tracked_review(
+            "alice",
+            "APPROVED",
+            Some("2026-08-10T00:00:00Z"),
+        ));
+
+        let mut comment_only = snapshot("o/r", 1, "open", "abc");
+        comment_only.view.reviews.push(approve.clone());
+        comment_only
+            .view
+            .comments
+            .push(pr_comment("alice", "Looks good now.", AFTER_POLL));
+
+        for s in [superseded, should_fix, strangers, comment_only] {
+            let (dispatches, _) = decide_tracked(
+                &[s],
+                &reviewed("o/r#1", "abc"),
+                "bot",
+                &trust("alice", &[], &[]),
+                LAST_POLL,
+            );
+            assert_eq!(dispatches.len(), 1);
+            assert!(!dispatches[0].message.contains(QUIET_PATH));
+        }
+    }
+
+    #[test]
+    fn tracked_quiet_path_ignores_pending_drafts() {
+        // A draft review has no submitted_at and is not a verdict.
+        let mut s = snapshot("o/r", 1, "open", "new");
+        s.view.reviews.push(tracked_review(
+            "bot",
+            "APPROVED",
+            Some("2026-08-10T00:00:00Z"),
+        ));
+        s.view
+            .reviews
+            .push(tracked_review("bot", "COMMENTED", None));
+
+        let (dispatches, _) = decide_tracked(
+            &[s],
+            &reviewed("o/r#1", "old"),
+            "bot",
+            &trust("alice", &[], &[]),
+            LAST_POLL,
+        );
+        assert!(dispatches[0].message.contains(QUIET_PATH));
     }
 
     #[test]

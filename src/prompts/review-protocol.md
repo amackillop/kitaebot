@@ -131,6 +131,16 @@ review the delta, not the whole PR:
   rules.
 - Translate and submit as above: `correct` → APPROVE, the feedback is
   addressed; `incorrect` → COMMENT naming the remaining gaps.
+- When the dispatch says the quiet path applies — your latest published
+  review is an APPROVE and nothing pending on it is worse than a nit —
+  a clean delta publishes nothing. Clean means all three hold: verdict
+  `correct`, no new findings, and the delta stays within the scope of
+  the pending feedback. The standing approval already covers the PR,
+  so another APPROVE saying "nits addressed" is noise; record the
+  dispositions and stop — their notes carry what you verified. If any
+  of the three fails, publish as usual: a regression or new finding is
+  a COMMENT, and a delta doing new work beyond the feedback earns its
+  published verdict even when clean.
 
 ## Comment follow-ups
 
