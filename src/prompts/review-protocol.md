@@ -146,7 +146,10 @@ review the delta, not the whole PR:
   review is an APPROVE and nothing pending on it is worse than a nit —
   a clean delta publishes nothing. Clean means all three hold: verdict
   `correct`, no new findings, and the delta stays within the scope of
-  the pending feedback. The standing approval already covers the PR,
+  the pending feedback; when nothing is pending (a push after a clean
+  approve), that third condition reads: the delta introduces no new
+  work — a rebase, fixup, or polish. The standing approval already
+  covers the PR,
   so another APPROVE saying "nits addressed" is noise; record the
   dispositions and stop — their notes carry what you verified. If any
   of the three fails, publish as usual: a regression or new finding is

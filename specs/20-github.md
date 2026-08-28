@@ -394,7 +394,11 @@ the prior round is worse than a `nit`, the dispatch says so, and the
 protocol licenses silence: the reviewer round still runs — nit fixes
 can introduce defects, which is exactly what re-reviews exist for —
 but a verdict of `correct` with no new findings on a delta that stays
-within the pending feedback's scope publishes nothing. The standing
+within the pending feedback's scope publishes nothing. A standing
+approve with nothing pending qualifies too — there the scope condition
+reads "introduces no new work", covering the rebase or fixup push
+that would otherwise earn a second APPROVE on top of a clean one
+(PR #115, 2026-08-28: two APPROVEs fifteen minutes apart). The standing
 approval covers the push; the findings close through their normal
 dispositions, whose notes carry what was verified. The alternative —
 skipping the dispatch entirely and closing the findings mechanically —
