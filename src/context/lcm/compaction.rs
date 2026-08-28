@@ -1031,6 +1031,55 @@ mod tests {
         assert_eq!(prefix_end(&sent, &sent.clone()), Some(4));
     }
 
+    #[tokio::test]
+    async fn ride_ladder_exhaustion_retries_the_fresh_path() {
+        use std::future::Future;
+        use std::pin::Pin;
+
+        use crate::context::SummarizeFn;
+        use crate::error::ProviderError;
+
+        // Big enough that the degenerate floor is active.
+        let chunk = vec![user_msg(&"x".repeat(4000))];
+        let snapshot = SentRequest {
+            session: "general".into(),
+            messages: chunk.clone(),
+            tools: Arc::from([]),
+            at: tokio::time::Instant::now(),
+        };
+
+        // Both ride levels fail; the ladder would bottom out at
+        // deterministic truncation without the fresh retry.
+        let ride_calls = Arc::new(Mutex::new(0usize));
+        let ride_calls_inner = Arc::clone(&ride_calls);
+        let chat: RawChatFn = Arc::new(move |_session, _messages, _tools| {
+            *ride_calls_inner.lock().unwrap() += 1;
+            Box::pin(async { Err(ProviderError::RateLimited) })
+                as Pin<Box<dyn Future<Output = _> + Send>>
+        });
+
+        let fresh_summary = "fresh ".repeat(100);
+        let fresh: SummarizeFn = {
+            let summary = fresh_summary.clone();
+            Arc::new(move |_prompt, _messages| {
+                let summary = summary.clone();
+                Box::pin(async move { Ok(summary) }) as Pin<Box<dyn Future<Output = _> + Send>>
+            })
+        };
+
+        let ride = RideContext {
+            snapshot: &snapshot,
+            chat: &chat,
+        };
+        let outcome = summarize_chunk(&chunk, &fresh, Some(&ride)).await;
+
+        // L1 and L2 rode and failed; the accepted summary is the
+        // fresh ladder's, not the level-3 truncation.
+        assert_eq!(*ride_calls.lock().unwrap(), 2);
+        assert_eq!(outcome.level, EscalationLevel::Normal);
+        assert_eq!(outcome.content, fresh_summary);
+    }
+
     #[test]
     fn prefix_end_takes_the_last_of_duplicate_runs() {
         let sent = vec![
