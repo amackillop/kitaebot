@@ -41,7 +41,9 @@ pub struct CompletionsProvider {
     client: CompletionsClient,
     model: String,
     max_tokens: u32,
-    temperature: f32,
+    /// Sampling temperature; `None` leaves the endpoint's default
+    /// in place.
+    temperature: Option<f32>,
     /// Reasoning budget sent with every request; `None` leaves the
     /// model's default in place.
     reasoning: Option<Reasoning>,
@@ -244,7 +246,10 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [ToolDefinition]>,
     max_tokens: u32,
-    temperature: f32,
+    /// Omitted when unset, leaving the endpoint's default; some
+    /// models fix sampling server-side and reject the parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
     /// Reasoning budget (`OpenRouter` `reasoning` param); omitted
     /// when unset or for other APIs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -273,9 +278,9 @@ struct ProviderPreferences {
     data_collection: &'static str,
     /// Route only to endpoints supporting every request parameter.
     /// Without it, `OpenRouter` may land on a provider that rejects
-    /// temperature or reasoning outright (Alibaba's kimi-k3 serving
-    /// 400s on temperature=0.7), turning a routing choice into a
-    /// failed reviewer gate.
+    /// a parameter outright (reasoning, or temperature on models
+    /// that fix sampling server-side), turning a routing choice into
+    /// a failed reviewer gate.
     require_parameters: bool,
 }
 
@@ -324,7 +329,7 @@ mod tests {
         assert_eq!(cheap.model, "cheap/model");
         assert_eq!(cheap.max_tokens, provider.max_tokens);
         assert_eq!(cheap.reasoning, provider.reasoning);
-        assert!((cheap.temperature - provider.temperature).abs() < f32::EPSILON);
+        assert_eq!(cheap.temperature, provider.temperature);
         assert_eq!(cheap.openrouter, provider.openrouter);
     }
 
@@ -368,7 +373,7 @@ mod tests {
             messages: Vec::new(),
             tools: None,
             max_tokens: 1,
-            temperature: 0.0,
+            temperature: None,
             reasoning: None,
             usage,
             provider,
@@ -395,6 +400,25 @@ mod tests {
     }
 
     #[test]
+    fn temperature_serialized_only_when_set() {
+        let request = |temperature| ChatRequest {
+            model: "m",
+            messages: Vec::new(),
+            tools: None,
+            max_tokens: 1,
+            temperature,
+            reasoning: None,
+            usage: None,
+            provider: None,
+            session_id: None,
+        };
+        let set = serde_json::to_string(&request(Some(0.5))).unwrap();
+        assert!(set.contains(r#""temperature":0.5"#));
+        let unset = serde_json::to_string(&request(None)).unwrap();
+        assert!(!unset.contains("temperature"));
+    }
+
+    #[test]
     fn reasoning_serialized_in_openrouter_shape() {
         use crate::config::ReasoningEffort;
 
@@ -403,7 +427,7 @@ mod tests {
             messages: Vec::new(),
             tools: None,
             max_tokens: 1,
-            temperature: 0.0,
+            temperature: None,
             reasoning,
             usage: None,
             provider: None,

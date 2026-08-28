@@ -40,7 +40,7 @@ Requests are serialized to the OpenAI chat completions format:
     "messages": [...],
     "tools": [...],
     "max_tokens": 32768,
-    "temperature": 0.7,
+    "temperature": 0.7,        // only when set; unset omits the key
     "reasoning": {"effort": "low"}
 }
 ```
@@ -169,7 +169,7 @@ Configuration via `config.toml` under `[provider]`:
 | `api` | `openrouter` | Backend endpoint selection |
 | `model` | `arcee-ai/trinity-large-preview:free` | Model identifier |
 | `max_tokens` | 32768 | Max tokens in LLM response. Reasoning tokens count against it (OpenRouter), so it must cover reasoning plus output |
-| `temperature` | 0.7 | Sampling temperature |
+| `temperature` | unset | Sampling temperature (0.0–2.0). Unset omits the parameter so the endpoint's default applies; some models fix sampling server-side and reject it |
 | `reasoning` | unset | Reasoning budget for the root model: `{ effort = "low\|medium\|high" }` or `{ max_tokens = n }` (n > 0, below `max_tokens` to leave content room). OpenRouter only; unset leaves the model's default |
 | `model_overrides.explore` | unset | Override for `explore` sub-agents |
 | `model_overrides.worker` | unset | Override for `worker` sub-agents |

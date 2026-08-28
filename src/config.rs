@@ -157,7 +157,10 @@ pub struct ProviderConfig {
     /// `OpenRouter`, so a small value starves reasoning models into
     /// empty responses (`finish_reason = "length"`).
     pub max_tokens: u32,
-    pub temperature: f32,
+    /// Sampling temperature. Unset omits the parameter so the
+    /// endpoint's default applies; some models fix sampling
+    /// server-side and reject the parameter outright.
+    pub temperature: Option<f32>,
     /// Reasoning budget for the root model. Unset lets the provider
     /// use the model's default. `OpenRouter` only.
     pub reasoning: Option<Reasoning>,
@@ -893,7 +896,7 @@ impl Default for ProviderConfig {
             api: Api::default(),
             model: "arcee-ai/trinity-large-preview:free".to_string(),
             max_tokens: 32_768,
-            temperature: 0.7,
+            temperature: None,
             reasoning: None,
             model_overrides: ModelOverrides::default(),
         }
@@ -1043,7 +1046,11 @@ impl Config {
         if self.provider.max_tokens == 0 {
             return Err(ConfigError::Invalid("max_tokens must be > 0".into()));
         }
-        if !(0.0..=2.0).contains(&self.provider.temperature) {
+        if self
+            .provider
+            .temperature
+            .is_some_and(|t| !(0.0..=2.0).contains(&t))
+        {
             return Err(ConfigError::Invalid(
                 "temperature must be between 0.0 and 2.0".into(),
             ));
@@ -1266,7 +1273,7 @@ mod tests {
         let cfg = Config::load(dir.path()).unwrap();
         assert_eq!(cfg.provider.model, "arcee-ai/trinity-large-preview:free");
         assert_eq!(cfg.provider.max_tokens, 32_768);
-        assert!((cfg.provider.temperature - 0.7).abs() < f32::EPSILON);
+        assert_eq!(cfg.provider.temperature, None);
         assert_eq!(cfg.agent.max_iterations, 100);
         assert_eq!(cfg.tools.exec.timeout_secs, 600);
         assert_eq!(cfg.tools.web_fetch.max_response_bytes, 512 * 1024);
@@ -1408,7 +1415,7 @@ timeout_secs = 120
         .unwrap();
         assert_eq!(cfg.provider.model, "openai/gpt-4");
         assert_eq!(cfg.provider.max_tokens, 8192);
-        assert!((cfg.provider.temperature - 0.5).abs() < f32::EPSILON);
+        assert_eq!(cfg.provider.temperature, Some(0.5));
         assert_eq!(cfg.agent.max_iterations, 30);
         assert_eq!(cfg.tools.exec.timeout_secs, 120);
     }

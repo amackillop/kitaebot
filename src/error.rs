@@ -147,8 +147,9 @@ impl ProviderError {
     /// True when the identical request may succeed if resent.
     ///
     /// `MalformedToolCall` qualifies because sampling is not
-    /// deterministic at our temperature: the request is fine, the draw
-    /// was not, and a fresh draw is the whole remedy.
+    /// deterministic at non-zero temperature (ours or any endpoint
+    /// default): the request is fine, the draw was not, and a fresh
+    /// draw is the whole remedy.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
