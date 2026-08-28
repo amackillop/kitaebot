@@ -38,6 +38,7 @@ trait ContextEngine: Send + Sync {
     save() -> Result<(), EngineError>
     stats() -> ContextStats                    // sync, infallible
     observe_tokens(prompt_tokens: usize)       // sync, infallible
+    observe_request(messages, tools)           // sync, default no-op
 
     // -- Tools contributed by this engine --
     tools(scope: ToolScope) -> Vec<Arc<dyn Tool>>
@@ -72,7 +73,15 @@ Escalation"), so the engine only varies instructions per call.
 The provider captured by the closure uses `provider.model_overrides.summarizer`
 when set (see [spec 02](02-provider.md)), falling back to the root
 model. Summaries are high-volume and low-stakes, so they typically run
-on a cheaper model.
+on a cheaper model. LCM's leaf pass bypasses this closure when it can
+ride the main session's prompt cache instead (§"Cache-Prefix Riding");
+the closure remains the path for everything else and every fallback.
+
+`observe_request` hands the engine a byte-exact copy of the request the
+agent loop just sent — assembled messages and tool schemas. It is the
+ground truth for what the provider's implicit prefix cache holds; LCM
+keeps the latest one per process for cache-prefix riding, the other
+engines discard it via the trait's default no-op.
 
 ### Assembled Context
 
@@ -692,7 +701,10 @@ The `model` column on the summary records which LLM produced it. If a
 dedicated summarizer model is configured (`provider.model_overrides.summarizer`),
 it is used instead of the agent's primary model. This allows using a
 cheaper/faster model for summarization. Level 3 records
-`level3-truncate` (no LLM).
+`level3-truncate` (no LLM). Exception: leaf chunks summarized by
+riding the main session's cache prefix (§"Cache-Prefix Riding") go
+through the **main** model deliberately — the cache being ridden lives
+under it, and a summarizer override does not apply there.
 
 **Deferred**:
 
@@ -709,6 +721,58 @@ cheaper/faster model for summarization. Level 3 records
 **Metadata propagation**: on each summary creation, propagate
 `descendant_count`, `descendant_token_count`, `source_message_token_count`,
 and time ranges up through the DAG.
+
+##### Cache-Prefix Riding
+
+The fresh-prompt path bills every summarized span at fresh-input rates,
+even though the identical bytes sit in the provider's implicit prefix
+cache under the main session at ~5x cheaper read pricing. Leaf chunks
+are contiguous runs of the very messages the session last sent, so the
+leaf pass rides that cache instead: the summarization request is the
+last-sent request truncated right after the chunk, plus one trailing
+user instruction scoping "the final N messages" (anchored on the
+chunk's first message), routed with the main session's sticky key and
+the snapshot's tool schemas. Prefix matching bills everything up to
+the chunk boundary as cache reads; only the instruction is fresh. The
+response commits as the summary row exactly as on the fresh path, and
+the session's own prefix is untouched, so its cache survives.
+
+Byte identity is the whole contract — any assembly divergence
+(different system prompt, tool schema ordering) silently forfeits the
+discount — so the request is built from the `observe_request`
+snapshot, the bytes that actually went out, never re-assembled from
+the database. Cost per chunk becomes prefix tokens at the cached rate
+instead of chunk tokens at the fresh rate, a win while a cycle stays
+under ~10 chunks at GLM pricing; the deployed shape (~5 chunks of
+20k) is roughly 44% cheaper on compaction input, with the summary
+coming from the main model seeing the full conversation.
+
+Guards, in order, each falling back to the fresh-prompt path:
+
+1. A snapshot exists (the process has completed a call this lifetime).
+2. Snapshot session == active session — identical content in two
+   sessions must not cross-match.
+3. Snapshot age under 2 minutes. The implicit cache's TTL is
+   unpublished (empirically minutes < TTL < 2h) and hits are
+   unverifiable per request; riding a cold cache re-uploads the whole
+   prefix at fresh rates — dearer than the fresh path — while a
+   skipped warm ride only forfeits the discount. Turn-boundary
+   compaction fires seconds after the last completion, so the normal
+   path always qualifies; a manual `/compact` minutes later falls
+   back.
+4. The chunk aligns byte-exactly as a contiguous run inside the
+   snapshot. This also self-scopes riding to the leaf pass: condensed
+   chunks are synthetic `<summary>` messages built this cycle, absent
+   from any sent request.
+
+The snapshot is never cleared: local rewrites (compaction, clear)
+don't touch the provider-side cache it mirrors, and the guards above
+handle staleness. A ride whose escalation ladder bottoms out at
+level-3 truncation retries the fresh ladder before accepting the
+lossy floor, so riding never yields a worse summary than the path it
+replaces. Distillation over idle sessions stays on the fresh path by
+construction — their cache entries have expired by the time the duty
+runs (and the snapshot's age guard would reject them anyway).
 
 #### Context Assembly
 
