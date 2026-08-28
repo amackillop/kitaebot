@@ -1,6 +1,7 @@
 pub mod chat_completion;
 pub mod github;
 pub mod linear;
+pub mod openrouter_pricing;
 pub mod telegram;
 
 /// Raw HTTP response at the IO/pure boundary.

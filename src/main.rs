@@ -390,10 +390,14 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     // Telemetry: an open failure is logged and the daemon runs
     // unmetered and unrecorded. Opened before the task tool so
     // sub-agent turns share the ledgers.
-    let usage_ledger = Some(Arc::new(usage::UsageLedger::new(
-        state_db,
-        config.usage.rates.clone(),
-    )));
+    let usage_ledger = usage::UsageLedger::new(state_db, config.usage.rates.clone());
+    let usage_ledger = match config.provider.api.pricing_endpoint() {
+        Some(base) => usage_ledger.with_pricing(clients::openrouter_pricing::PricingClient::new(
+            base.to_string(),
+        )),
+        None => usage_ledger,
+    };
+    let usage_ledger = Some(Arc::new(usage_ledger));
     let review_ledger = config
         .review
         .enabled
