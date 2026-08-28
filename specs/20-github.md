@@ -390,6 +390,21 @@ publishes as usual; the reviewer judges scope, which is why the
 dispatch still runs. Both invariants above stand: each push gets at
 most one incremental turn, and every push gets its reviewer round.
 
+**Closure prose.** When a re-review does publish, its per-finding
+closures are one line each ("`<sha>` — confirmed fixed"), split by
+destination: the published body carries the verdict and the closure
+lines, the disposition notes carry the verification claims — what was
+checked, against what. Recapping the fix commit in the body narrates
+what its author just wrote; the verification claim is the only part
+the review adds, and the ledger, not the body, is the audit trail
+later escapes are judged against. Prose in the body is reserved for
+findings that are *not* closed and for checks non-obvious enough that
+a bare line would be an unsupported claim. Thinning the body is safe
+only because the dispatch feeds the prior findings from the ledger
+(above); before that, the published body — recalled via the GitHub
+API — was what carried closure context into the next round, and
+thinning it would have starved that round.
+
 ### Review thread follow-ups
 
 Humans can push back on the bot's review comments, and the bot holds up

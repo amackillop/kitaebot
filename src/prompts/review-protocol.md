@@ -131,6 +131,16 @@ review the delta, not the whole PR:
   rules.
 - Translate and submit as above: `correct` → APPROVE, the feedback is
   addressed; `incorrect` → COMMENT naming the remaining gaps.
+- When you do publish, keep closures thin. The body is the verdict
+  plus one line per closed finding ("72511d4 — confirmed fixed");
+  recapping the fix you just read is narration, not verification —
+  the author wrote the fix and needs no summary of it. A closure
+  earns prose only when the finding is not closed, or when the check
+  itself is non-obvious enough that a bare line would be an
+  unsupported claim. The verification claims — what you checked,
+  against what — go in the disposition notes: the ledger is the audit
+  trail, and the next round reads the findings from its dispatch, not
+  from your published body.
 - When the dispatch says the quiet path applies — your latest published
   review is an APPROVE and nothing pending on it is worse than a nit —
   a clean delta publishes nothing. Clean means all three hold: verdict
