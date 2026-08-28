@@ -92,11 +92,24 @@ impl PricingClient {
 }
 
 /// Parse a raw endpoints response into per-endpoint rates. Pure.
+/// Status routing mirrors `chat_completion::interpret_response`: the
+/// error variant is the failure mode, not a catch-all label.
 fn interpret_pricing(raw: &RawResponse) -> Result<Vec<EndpointRates>, ProviderError> {
     debug!(status = raw.status, "Endpoint pricing response");
-    if !(200..=299).contains(&raw.status) {
-        let body = String::from_utf8_lossy(&raw.body);
-        return Err(ProviderError::BadRequest(format!("{}: {body}", raw.status)));
+    match raw.status {
+        200..=299 => {}
+        429 => return Err(ProviderError::RateLimited),
+        500..=599 => {
+            let body = String::from_utf8_lossy(&raw.body);
+            return Err(ProviderError::ServerError(format!(
+                "{}: {body}",
+                raw.status
+            )));
+        }
+        s => {
+            let body = String::from_utf8_lossy(&raw.body);
+            return Err(ProviderError::BadRequest(format!("{s}: {body}")));
+        }
     }
     let parsed: PricingResponse = serde_json::from_slice(&raw.body)
         .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
@@ -198,6 +211,24 @@ mod tests {
     fn non_2xx_is_an_error_carrying_the_body() {
         let err = interpret_pricing(&raw(404, "no such model")).unwrap_err();
         assert!(err.to_string().contains("404"), "{err}");
+    }
+
+    /// The variant names the failure mode: a rate limit or server
+    /// error must not be labeled a bad request.
+    #[test]
+    fn status_routes_to_the_matching_variant() {
+        assert!(matches!(
+            interpret_pricing(&raw(429, "")).unwrap_err(),
+            ProviderError::RateLimited
+        ));
+        assert!(matches!(
+            interpret_pricing(&raw(500, "boom")).unwrap_err(),
+            ProviderError::ServerError(s) if s.contains("boom")
+        ));
+        assert!(matches!(
+            interpret_pricing(&raw(404, "")).unwrap_err(),
+            ProviderError::BadRequest(_)
+        ));
     }
 
     #[tokio::test]
