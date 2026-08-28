@@ -48,6 +48,7 @@ The `turns` table in `state/kitaebot.db` (spec 05), migrations
 | `duration_ms` | 0003 | Wall time of the turn; NULL on legacy rows |
 | `outcome` | 0003 | Turn outcome label; NULL on legacy rows |
 | `cached_tokens` | 0004 | Prompt-cache hits, subset of `prompt_tokens`, summed over the calls that reported `prompt_tokens_details`; NULL when none did or on legacy rows |
+| `provider` | 0005 | Upstream endpoint that served the turn (OpenRouter response `provider` field), last seen across its calls; NULL when never named or on legacy rows |
 
 All post-baseline columns are nullable so both eras of rows parse.
 No index on `task`: the report reads the whole ledger by design and
@@ -138,14 +139,23 @@ The header omits the rate entirely on an all-legacy ledger.
 
 Below the header, a `Cache savings` line estimates the USD saved by
 cache hits: cached tokens billed at the cache-read rate instead of
-the input rate, priced from operator-supplied `[usage.rates]` config
-(USD per million tokens per model id; rates vary by upstream
-endpoint, so they are never built in). The estimate is signed — a
-policy whose cache costs exceed its savings must report a negative
-number. Rows whose model has no configured rate are counted as
-`(N turns unpriced)` rather than skipped: silence would hide a
-misconfigured map. The line is absent when no rates are configured
-or no row has cache data.
+the input rate. Each row is priced by, in order: operator-supplied
+`[usage.rates]` config (USD per million tokens per model id — the
+override), then the live rate of the endpoint that served it,
+fetched at report time from OpenRouter's model-endpoints API and
+matched on the row's recorded `provider`. The fetch is best-effort
+garnish (5 s timeout, unauthenticated, same egress allowlist as the
+chat API): a failure degrades to config-then-unpriced, never to a
+failed report, and APIs without a pricing endpoint (including e2e
+fixture servers via `Custom`) never fetch. An endpoint that lists no
+cache-read price bills hits at the full input rate — a real spread
+of zero, kept, not dropped. Live rates are today's prices applied to
+historical rows; the recorded endpoint is what keeps the estimate
+grounded. The estimate is signed — a policy whose cache costs exceed
+its savings must report a negative number. Rows that resolve no rate
+are counted as `(N turns unpriced)` rather than skipped: silence
+would hide a misconfigured map. The line is absent when no rates
+exist from either source or no row has cache data.
 
 ## Boundaries
 

@@ -173,10 +173,13 @@ pub async fn execute(
         }
         SlashCommand::Usage => match usage_ledger {
             None => Ok(Reply::text("Usage tracking is disabled.".into())),
-            Some(ledger) => ledger
-                .rows()
-                .map(|rows| Reply::pre(usage::report(&rows, ledger.rates())))
-                .map_err(|e| format!("Usage query failed: {e}")),
+            Some(ledger) => match ledger.rows() {
+                Ok(rows) => {
+                    let live = ledger.live_rates(&rows).await;
+                    Ok(Reply::pre(usage::report(&rows, ledger.rates(), &live)))
+                }
+                Err(e) => Err(format!("Usage query failed: {e}")),
+            },
         },
         SlashCommand::Findings => match review_ledger {
             None => Ok(Reply::text("Review tracking is disabled.".into())),

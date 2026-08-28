@@ -27,7 +27,7 @@ pub struct ChatOutcome {
 }
 
 /// Per-call usage reported by the provider, when it reports any.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CallUsage {
     /// Prompt size as counted by the provider's tokenizer, when the API
     /// reports usage. Ground truth for context size — includes system
@@ -37,6 +37,9 @@ pub struct CallUsage {
     /// cache. `None` when the response carried no
     /// `prompt_tokens_details`; `Some(0)` is a reported cold prompt.
     pub cached_tokens: Option<u32>,
+    /// Upstream endpoint that served the call (`OpenRouter` names it
+    /// in every response). Decides which endpoint's rates apply.
+    pub provider: Option<String>,
     /// Tokens generated in the reply.
     pub completion_tokens: u32,
     /// Charged cost in USD; `OpenRouter` only, `None` elsewhere.

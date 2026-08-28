@@ -175,9 +175,9 @@ kitaebot = {
       max_iterations = 30;                       # Tool-loop cap per sub-agent turn
     };
     usage = {
-      rates = {                                  # USD per 1M tokens, for /usage cache savings (spec 27)
-        "z-ai/glm-5.2" = {
-          input_per_mtok = 0.4046;               # Rates vary by upstream endpoint; use your provider's
+      rates = {                                  # Optional overrides, USD per 1M tokens (spec 27).
+        "z-ai/glm-5.2" = {                       # On OpenRouter, /usage prices from the live per-endpoint
+          input_per_mtok = 0.4046;               # rates automatically; an entry here overrides them.
           cache_read_per_mtok = 0.07514;
         };
       };

@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use rusqlite::{Connection, params};
 
 use crate::agent::envelope::ChannelSource;
+use crate::clients::openrouter_pricing::PricingClient;
 use crate::config::ModelRates;
 use crate::state_db::StateDb;
 use tracing::warn;
@@ -27,14 +28,14 @@ use crate::agent::TurnMeter;
 /// `state_db` can prepare every query against the migrated schema.
 pub(crate) const SELECT_TURN_ROWS: &str =
     "SELECT git_sha, model, prompt_tokens, completion_tokens, cost,
-            task, started_at, duration_ms, cached_tokens
+            task, started_at, duration_ms, cached_tokens, provider
          FROM turns ORDER BY id";
 
 pub(crate) const INSERT_TURN: &str = "INSERT INTO turns
          (git_sha, session, source, model, task,
           calls, prompt_tokens, cached_tokens, completion_tokens, cost,
-          started_at, duration_ms, outcome)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+          started_at, duration_ms, outcome, provider)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 
 /// The build's git revision, injected by the flake at compile time.
 /// `None` in plain `cargo` dev builds, where the env var is unset.
@@ -97,6 +98,9 @@ pub struct UsageLedger {
     /// Operator-supplied prices for the report's savings estimate;
     /// carried here so command sites need no extra config plumbing.
     rates: HashMap<String, ModelRates>,
+    /// Live endpoint-pricing lookups; `None` when the API has no
+    /// pricing endpoint (non-`OpenRouter`, e2e fixtures).
+    pricing: Option<PricingClient>,
 }
 
 impl UsageLedger {
@@ -104,11 +108,55 @@ impl UsageLedger {
         Self {
             conn: db.connection(),
             rates,
+            pricing: None,
+        }
+    }
+
+    pub fn with_pricing(self, pricing: PricingClient) -> Self {
+        Self {
+            pricing: Some(pricing),
+            ..self
         }
     }
 
     pub fn rates(&self) -> &HashMap<String, ModelRates> {
         &self.rates
+    }
+
+    /// Live per-endpoint rates for the models these rows need priced,
+    /// keyed `(model, provider_name)`. Best-effort report garnish: no
+    /// client, a fetch failure, or an unknown model degrades to an
+    /// empty or partial map (the row then falls back to config rates
+    /// or counts as unpriced), never to a failed report.
+    pub async fn live_rates(&self, rows: &[TurnRow]) -> HashMap<(String, String), ModelRates> {
+        let mut out = HashMap::new();
+        let Some(pricing) = &self.pricing else {
+            return out;
+        };
+        // Only models with at least one priceable row: cache data plus
+        // a recorded endpoint, not already covered by config override.
+        let mut models: Vec<&str> = rows
+            .iter()
+            .filter(|r| {
+                r.cached_tokens.is_some()
+                    && r.provider.is_some()
+                    && !self.rates.contains_key(&r.model)
+            })
+            .map(|r| r.model.as_str())
+            .collect();
+        models.sort_unstable();
+        models.dedup();
+        for model in models {
+            match pricing.endpoint_rates(model).await {
+                Ok(endpoints) => {
+                    for e in endpoints {
+                        out.insert((model.to_string(), e.provider_name), e.rates);
+                    }
+                }
+                Err(e) => warn!("Endpoint pricing unavailable for {model}: {e}"),
+            }
+        }
+        out
     }
 
     /// Read every recorded turn, projected to the columns the report
@@ -130,6 +178,7 @@ impl UsageLedger {
                     started_at: r.get::<_, Option<i64>>(6)?.map(i64::cast_unsigned),
                     duration_ms: r.get::<_, Option<i64>>(7)?.map(i64::cast_unsigned),
                     cached_tokens: r.get::<_, Option<i64>>(8)?.map(i64::cast_unsigned),
+                    provider: r.get(9)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -158,6 +207,7 @@ impl UsageLedger {
                 turn.meter.started_at.cast_signed(),
                 duration_ms,
                 turn.meter.outcome,
+                turn.meter.usage.provider.as_deref(),
             ],
         )?;
         Ok(())
@@ -187,6 +237,7 @@ pub struct TurnRow {
     pub started_at: Option<u64>,
     pub duration_ms: Option<u64>,
     pub cached_tokens: Option<u64>,
+    pub provider: Option<String>,
 }
 
 /// Running totals over a group of turns.
@@ -349,14 +400,37 @@ fn write_task_table(out: &mut String, groups: &[(String, TaskAgg)]) {
     out.push('\n');
 }
 
+/// Live endpoint rates keyed by `(model, provider_name)`.
+pub type LiveRates = HashMap<(String, String), ModelRates>;
+
+/// The rate that prices one row. Operator config wins — it exists to
+/// override whatever the live list says — then the recorded serving
+/// endpoint's live rate; a row without a recorded endpoint has no
+/// live identity to price against.
+fn row_rates(
+    row: &TurnRow,
+    config: &HashMap<String, ModelRates>,
+    live: &LiveRates,
+) -> Option<ModelRates> {
+    if let Some(rate) = config.get(&row.model) {
+        return Some(*rate);
+    }
+    let provider = row.provider.as_ref()?;
+    live.get(&(row.model.clone(), provider.clone())).copied()
+}
+
 /// Estimated USD saved by prompt-cache hits: every cached token was
 /// billed at the cache-read rate instead of the input rate. Signed on
 /// purpose — a future policy whose cache costs exceed its savings must
-/// report that, not flatter itself. `None` until rates are configured
-/// and a row has recorded cache details. Rows whose model has no rate
-/// are counted, not skipped: silence would hide a misconfigured map.
-fn cache_savings(rows: &[TurnRow], rates: &HashMap<String, ModelRates>) -> Option<CacheSavings> {
-    if rates.is_empty() || rows.iter().all(|r| r.cached_tokens.is_none()) {
+/// report that, not flatter itself. `None` until any rates exist and a
+/// row has recorded cache details. Rows that resolve no rate are
+/// counted, not skipped: silence would hide a misconfigured map.
+fn cache_savings(
+    rows: &[TurnRow],
+    config: &HashMap<String, ModelRates>,
+    live: &LiveRates,
+) -> Option<CacheSavings> {
+    if (config.is_empty() && live.is_empty()) || rows.iter().all(|r| r.cached_tokens.is_none()) {
         return None;
     }
     let mut savings = CacheSavings::default();
@@ -364,7 +438,7 @@ fn cache_savings(rows: &[TurnRow], rates: &HashMap<String, ModelRates>) -> Optio
         let Some(cached) = row.cached_tokens else {
             continue;
         };
-        match rates.get(&row.model) {
+        match row_rates(row, config, live) {
             // Token sums sit far below f64's 2^53 integer ceiling.
             #[allow(clippy::cast_precision_loss)]
             Some(rate) => {
@@ -406,7 +480,7 @@ impl fmt::Display for CacheSavings {
 /// per-build and per-model breakdowns. By Task answers what a unit of
 /// work cost; By Build attributes a cost shift to the change that
 /// shipped it.
-pub fn report(rows: &[TurnRow], rates: &HashMap<String, ModelRates>) -> String {
+pub fn report(rows: &[TurnRow], rates: &HashMap<String, ModelRates>, live: &LiveRates) -> String {
     if rows.is_empty() {
         return "No usage recorded yet.".to_string();
     }
@@ -428,7 +502,7 @@ pub fn report(rows: &[TurnRow], rates: &HashMap<String, ModelRates>) -> String {
         total.turns,
         fmt_cost(total.cost, total.metered),
     );
-    if let Some(savings) = cache_savings(rows, rates) {
+    if let Some(savings) = cache_savings(rows, rates, live) {
         let _ = writeln!(out, "{savings}");
     }
     out.push('\n');
@@ -587,11 +661,16 @@ mod tests {
                     cached_tokens: Some(1200),
                     completion_tokens: 200,
                     cost: Some(0.0042),
+                    provider: Some("Sail Research".into()),
                 }),
             })
             .unwrap();
 
         let conn = ledger.conn.lock().unwrap();
+        let endpoint: Option<String> = conn
+            .query_row("SELECT provider FROM turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(endpoint.as_deref(), Some("Sail Research"));
         let (session, source, model, calls, prompt, cached, completion, cost): (
             String,
             String,
@@ -751,16 +830,19 @@ mod tests {
                     cached_tokens: None,
                     completion_tokens: 5,
                     cost: None,
+                    provider: None,
                 }),
             })
             .unwrap();
         let conn = ledger.conn.lock().unwrap();
-        let (cost, cached): (Option<f64>, Option<i64>) = conn
-            .query_row("SELECT cost, cached_tokens FROM turns", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+        let (cost, cached, endpoint): (Option<f64>, Option<i64>, Option<String>) = conn
+            .query_row("SELECT cost, cached_tokens, provider FROM turns", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .unwrap();
         assert_eq!(cost, None);
+        // An unnamed endpoint persists as NULL, never a default.
+        assert_eq!(endpoint, None);
         // Unreported cache details persist as NULL, never zero.
         assert_eq!(cached, None);
     }
@@ -797,12 +879,13 @@ mod tests {
             started_at: None,
             duration_ms: None,
             cached_tokens: None,
+            provider: None,
         }
     }
 
     /// The report without configured rates: no savings line.
     fn report_no_rates(rows: &[TurnRow]) -> String {
-        report(rows, &HashMap::new())
+        report(rows, &HashMap::new(), &HashMap::new())
     }
 
     fn glm_rates(input: f64, cache_read: f64) -> HashMap<String, ModelRates> {
@@ -971,6 +1054,7 @@ mod tests {
                     cached_tokens: Some(30),
                     completion_tokens: 8,
                     cost: Some(0.5),
+                    provider: None,
                 }),
             })
             .unwrap();
@@ -1041,7 +1125,7 @@ mod tests {
                 ..row(Some("abcdef1234"), "glm", 600_000, Some(0.2))
             },
         ];
-        let out = report(&rows, &glm_rates(0.4, 0.075));
+        let out = report(&rows, &glm_rates(0.4, 0.075), &HashMap::new());
         assert!(out.contains("Cache savings: $0.6500"), "missing: {out}");
         assert!(!out.contains("unpriced"), "nothing is unpriced: {out}");
     }
@@ -1054,7 +1138,7 @@ mod tests {
             cached_tokens: Some(1_000_000),
             ..row(Some("abcdef1234"), "glm", 1_000_000, None)
         }];
-        let out = report(&rows, &glm_rates(0.4, 0.5));
+        let out = report(&rows, &glm_rates(0.4, 0.5), &HashMap::new());
         assert!(out.contains("Cache savings: -$0.1000"), "missing: {out}");
     }
 
@@ -1072,7 +1156,7 @@ mod tests {
                 ..row(Some("abcdef1234"), "kimi", 200, None)
             },
         ];
-        let out = report(&rows, &glm_rates(0.4, 0.075));
+        let out = report(&rows, &glm_rates(0.4, 0.075), &HashMap::new());
         assert!(
             out.contains("Cache savings: $0.3250 (1 turns unpriced)"),
             "missing: {out}"
@@ -1085,11 +1169,116 @@ mod tests {
                 cache_read_per_mtok: 0.075,
             },
         )]);
-        let none_priced = report(&rows, &other);
+        let none_priced = report(&rows, &other, &HashMap::new());
         assert!(
             none_priced.contains("Cache savings: - (2 turns unpriced)"),
             "missing: {none_priced}"
         );
+    }
+
+    fn live(model: &str, endpoint: &str, input: f64, cache_read: f64) -> LiveRates {
+        HashMap::from([(
+            (model.to_string(), endpoint.to_string()),
+            ModelRates {
+                input_per_mtok: input,
+                cache_read_per_mtok: cache_read,
+            },
+        )])
+    }
+
+    /// Live rates price a row by the endpoint that served it; config,
+    /// when present for the model, overrides the live number.
+    #[test]
+    fn live_rates_price_by_serving_endpoint_config_overrides() {
+        let rows = vec![TurnRow {
+            cached_tokens: Some(1_000_000),
+            provider: Some("Sail Research".into()),
+            ..row(Some("abcdef1234"), "glm", 1_000_000, None)
+        }];
+        let live = live("glm", "Sail Research", 0.5, 0.115);
+        let out = report(&rows, &HashMap::new(), &live);
+        assert!(out.contains("Cache savings: $0.3850"), "live: {out}");
+        // Config says otherwise; config wins.
+        let out = report(&rows, &glm_rates(0.4, 0.075), &live);
+        assert!(out.contains("Cache savings: $0.3250"), "override: {out}");
+    }
+
+    /// A row that never recorded its endpoint has no live identity to
+    /// price against: unpriced, not silently matched to some endpoint.
+    #[test]
+    fn live_rates_skip_rows_without_a_recorded_endpoint() {
+        let rows = vec![TurnRow {
+            cached_tokens: Some(100),
+            provider: None,
+            ..row(Some("abcdef1234"), "glm", 200, None)
+        }];
+        let out = report(
+            &rows,
+            &HashMap::new(),
+            &live("glm", "Sail Research", 0.5, 0.115),
+        );
+        assert!(
+            out.contains("Cache savings: - (1 turns unpriced)"),
+            "missing: {out}"
+        );
+    }
+
+    /// `live_rates` fetches only models that need pricing: cache data,
+    /// a recorded endpoint, and no config override.
+    #[tokio::test]
+    async fn live_rates_fetches_only_unpriced_models() {
+        use crate::clients::openrouter_pricing::PricingClient;
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap();
+        let ledger = UsageLedger::new(&db, glm_rates(0.4, 0.075)).with_pricing(
+            PricingClient::from_fn(|path| async move {
+                assert_eq!(path, "kimi/endpoints", "only kimi needs live rates");
+                Ok(crate::clients::RawResponse {
+                    status: 200,
+                    body: br#"{"data":{"endpoints":[{"provider_name":"Moonshot",
+                        "pricing":{"prompt":"0.000001","input_cache_read":"0.0000001"}}]}}"#
+                        .to_vec(),
+                    retry_after_secs: None,
+                })
+            }),
+        );
+        let rows = vec![
+            // Config-covered: no fetch.
+            TurnRow {
+                cached_tokens: Some(10),
+                provider: Some("Sail Research".into()),
+                ..row(None, "glm", 20, None)
+            },
+            // No endpoint recorded: nothing to price against, no fetch.
+            TurnRow {
+                cached_tokens: Some(10),
+                ..row(None, "local", 20, None)
+            },
+            TurnRow {
+                cached_tokens: Some(10),
+                provider: Some("Moonshot".into()),
+                ..row(None, "kimi", 20, None)
+            },
+        ];
+        let fetched = ledger.live_rates(&rows).await;
+        assert_eq!(fetched.len(), 1);
+        let rate = fetched
+            .get(&("kimi".to_string(), "Moonshot".to_string()))
+            .unwrap();
+        assert!((rate.input_per_mtok - 1.0).abs() < 1e-9);
+    }
+
+    /// Without a pricing client (non-`OpenRouter`, tests), live rates
+    /// are empty and the report falls back to config alone.
+    #[tokio::test]
+    async fn live_rates_empty_without_a_client() {
+        let (_dir, ledger) = open_temp();
+        let rows = vec![TurnRow {
+            cached_tokens: Some(10),
+            provider: Some("Sail Research".into()),
+            ..row(None, "glm", 20, None)
+        }];
+        assert!(ledger.live_rates(&rows).await.is_empty());
     }
 
     /// No rates configured, or no rows with cache data: no line.
@@ -1101,7 +1290,7 @@ mod tests {
         }];
         assert!(!report_no_rates(&cached).contains("Cache savings"));
         let uncached = vec![row(Some("abcdef1234"), "glm", 200, None)];
-        let out = report(&uncached, &glm_rates(0.4, 0.075));
+        let out = report(&uncached, &glm_rates(0.4, 0.075), &HashMap::new());
         assert!(!out.contains("Cache savings"), "no cache-era rows: {out}");
     }
 

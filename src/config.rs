@@ -57,7 +57,7 @@ pub struct UsageConfig {
 
 /// One model's input prices, in USD per million tokens. Rates vary by
 /// upstream endpoint, so these are operator-supplied, not built in.
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRates {
     pub input_per_mtok: f64,
@@ -260,6 +260,16 @@ impl Api {
             Self::Together => "https://api.together.xyz/v1/chat/completions",
             Self::Mistral => "https://api.mistral.ai/v1/chat/completions",
             Self::Custom(url) => url,
+        }
+    }
+
+    /// Root of the model-endpoints pricing API, for APIs that have
+    /// one. `None` includes `Custom`: fixture servers serve chat, not
+    /// pricing, so e2e runs never fetch.
+    pub fn pricing_endpoint(&self) -> Option<&str> {
+        match self {
+            Self::OpenRouter => Some("https://openrouter.ai/api/v1/models"),
+            _ => None,
         }
     }
 }
