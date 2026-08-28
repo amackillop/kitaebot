@@ -48,6 +48,7 @@ The `turns` table in `state/kitaebot.db` (spec 05), migrations
 | `duration_ms` | 0003 | Wall time of the turn; NULL on legacy rows |
 | `outcome` | 0003 | Turn outcome label; NULL on legacy rows |
 | `cached_tokens` | 0004 | Prompt-cache hits, subset of `prompt_tokens`, summed over the calls that reported `prompt_tokens_details`; NULL when none did or on legacy rows |
+| `provider` | 0005 | Upstream endpoint that served the turn (OpenRouter response `provider` field), last seen across its calls; NULL when never named or on legacy rows |
 
 All post-baseline columns are nullable so both eras of rows parse.
 No index on `task`: the report reads the whole ledger by design and

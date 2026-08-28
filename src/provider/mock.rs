@@ -58,7 +58,7 @@ impl Provider for MockProvider {
         *self.last_messages.lock().unwrap() = messages.to_vec();
         self.responses[index].clone().map(|response| ChatOutcome {
             response,
-            usage: self.usage,
+            usage: self.usage.clone(),
         })
     }
 

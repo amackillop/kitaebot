@@ -157,6 +157,10 @@ pub struct ChatResponse {
     /// adds cache details when usage accounting is requested.
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// Upstream endpoint that served the call (`OpenRouter` only) —
+    /// the pricing and quantization identity behind sticky routing.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// Token usage reported by the provider.
@@ -237,6 +241,7 @@ mod tests {
             }],
             citations: Vec::new(),
             usage: None,
+            provider: None,
         })
         .unwrap()
     }

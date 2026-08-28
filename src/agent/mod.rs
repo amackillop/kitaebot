@@ -272,7 +272,7 @@ struct TurnStats {
 /// A turn is many calls (one per tool-round), so a single call's
 /// numbers say nothing about the turn. This is the per-turn total the
 /// ledger records.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct TurnUsage {
     /// Provider calls made during the turn.
     pub calls: u32,
@@ -286,6 +286,10 @@ pub(crate) struct TurnUsage {
     /// Charged cost in USD, summed across calls; `None` when no call
     /// reported a cost (non-`OpenRouter`).
     pub cost: Option<f64>,
+    /// Endpoint that served the turn's calls, last seen wins: sticky
+    /// routing pins a session, so a mid-turn change is failover and
+    /// the newest endpoint is the one to price against.
+    pub provider: Option<String>,
 }
 
 impl TurnUsage {
@@ -300,6 +304,9 @@ impl TurnUsage {
         self.completion_tokens += u64::from(call.completion_tokens);
         if let Some(cost) = call.cost {
             self.cost = Some(self.cost.unwrap_or(0.0) + cost);
+        }
+        if call.provider.is_some() {
+            self.provider = call.provider;
         }
     }
 }
@@ -1110,6 +1117,7 @@ mod tests {
             cached_tokens: Some(80),
             completion_tokens: 20,
             cost: Some(0.001),
+            provider: None,
         });
         // A call with no usage still counts, contributes nothing else.
         usage.add_call(CallUsage::default());
@@ -1118,12 +1126,31 @@ mod tests {
             cached_tokens: Some(0),
             completion_tokens: 10,
             cost: Some(0.002),
+            provider: None,
         });
         assert_eq!(usage.calls, 3);
         assert_eq!(usage.prompt_tokens, 150);
         assert_eq!(usage.cached_tokens, Some(80));
         assert_eq!(usage.completion_tokens, 30);
         assert_eq!(usage.cost, Some(0.003));
+    }
+
+    /// Last seen wins, and a provider-less call (failover retry, or a
+    /// non-OpenRouter response) never erases a known endpoint.
+    #[test]
+    fn turn_usage_provider_keeps_last_seen() {
+        let mut usage = TurnUsage::default();
+        usage.add_call(CallUsage {
+            provider: Some("Sail Research".into()),
+            ..CallUsage::default()
+        });
+        usage.add_call(CallUsage::default());
+        assert_eq!(usage.provider.as_deref(), Some("Sail Research"));
+        usage.add_call(CallUsage {
+            provider: Some("Ambient".into()),
+            ..CallUsage::default()
+        });
+        assert_eq!(usage.provider.as_deref(), Some("Ambient"));
     }
 
     #[test]
@@ -1134,6 +1161,7 @@ mod tests {
             cached_tokens: None,
             completion_tokens: 5,
             cost: None,
+            provider: None,
         });
         assert_eq!(usage.calls, 1);
         assert_eq!(usage.cost, None);

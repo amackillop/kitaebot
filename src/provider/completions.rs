@@ -161,7 +161,14 @@ impl CompletionsProvider {
                 cached_tokens: u.prompt_tokens_details.as_ref().map(|d| d.cached_tokens),
                 completion_tokens: u.completion_tokens,
                 cost: u.cost,
+                provider: None,
             });
+        // The endpoint name rides the response root, not the usage
+        // block: a reply can name its endpoint even without usage.
+        let usage = CallUsage {
+            provider: response.provider.clone(),
+            ..usage
+        };
         Ok(ChatOutcome {
             response: Self::parse_response(response)?,
             usage,
@@ -289,6 +296,7 @@ mod tests {
             }],
             citations: Vec::new(),
             usage: None,
+            provider: None,
         }
     }
 
@@ -456,7 +464,8 @@ mod tests {
                 body: br#"{
                     "choices":[{"message":{"content":"hi"}}],
                     "usage":{"prompt_tokens":42,"completion_tokens":7,"cost":0.0013,
-                             "prompt_tokens_details":{"cached_tokens":30}}
+                             "prompt_tokens_details":{"cached_tokens":30}},
+                    "provider":"Sail Research"
                 }"#
                 .to_vec(),
                 retry_after_secs: None,
@@ -468,6 +477,28 @@ mod tests {
         assert_eq!(outcome.usage.cached_tokens, Some(30));
         assert_eq!(outcome.usage.completion_tokens, 7);
         assert_eq!(outcome.usage.cost, Some(0.0013));
+        assert_eq!(outcome.usage.provider.as_deref(), Some("Sail Research"));
+    }
+
+    /// The endpoint name rides the response root; it must survive
+    /// even when the response carries no usage block at all.
+    #[tokio::test]
+    async fn chat_captures_provider_without_usage() {
+        let client = CompletionsClient::from_fn(|_body| async {
+            Ok(crate::clients::RawResponse {
+                status: 200,
+                body: br#"{
+                    "choices":[{"message":{"content":"hi"}}],
+                    "provider":"Ambient"
+                }"#
+                .to_vec(),
+                retry_after_secs: None,
+            })
+        });
+        let provider = CompletionsProvider::new(client, &ProviderConfig::default());
+        let outcome = provider.chat("s", &[], &[]).await.unwrap();
+        assert_eq!(outcome.usage.prompt_tokens, None);
+        assert_eq!(outcome.usage.provider.as_deref(), Some("Ambient"));
     }
 
     /// Usage without `prompt_tokens_details` must surface cache hits

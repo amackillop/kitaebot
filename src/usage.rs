@@ -33,8 +33,8 @@ pub(crate) const SELECT_TURN_ROWS: &str =
 pub(crate) const INSERT_TURN: &str = "INSERT INTO turns
          (git_sha, session, source, model, task,
           calls, prompt_tokens, cached_tokens, completion_tokens, cost,
-          started_at, duration_ms, outcome)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+          started_at, duration_ms, outcome, provider)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 
 /// The build's git revision, injected by the flake at compile time.
 /// `None` in plain `cargo` dev builds, where the env var is unset.
@@ -158,6 +158,7 @@ impl UsageLedger {
                 turn.meter.started_at.cast_signed(),
                 duration_ms,
                 turn.meter.outcome,
+                turn.meter.usage.provider.as_deref(),
             ],
         )?;
         Ok(())
@@ -587,11 +588,16 @@ mod tests {
                     cached_tokens: Some(1200),
                     completion_tokens: 200,
                     cost: Some(0.0042),
+                    provider: Some("Sail Research".into()),
                 }),
             })
             .unwrap();
 
         let conn = ledger.conn.lock().unwrap();
+        let endpoint: Option<String> = conn
+            .query_row("SELECT provider FROM turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(endpoint.as_deref(), Some("Sail Research"));
         let (session, source, model, calls, prompt, cached, completion, cost): (
             String,
             String,
@@ -751,16 +757,19 @@ mod tests {
                     cached_tokens: None,
                     completion_tokens: 5,
                     cost: None,
+                    provider: None,
                 }),
             })
             .unwrap();
         let conn = ledger.conn.lock().unwrap();
-        let (cost, cached): (Option<f64>, Option<i64>) = conn
-            .query_row("SELECT cost, cached_tokens FROM turns", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+        let (cost, cached, endpoint): (Option<f64>, Option<i64>, Option<String>) = conn
+            .query_row("SELECT cost, cached_tokens, provider FROM turns", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .unwrap();
         assert_eq!(cost, None);
+        // An unnamed endpoint persists as NULL, never a default.
+        assert_eq!(endpoint, None);
         // Unreported cache details persist as NULL, never zero.
         assert_eq!(cached, None);
     }
@@ -971,6 +980,7 @@ mod tests {
                     cached_tokens: Some(30),
                     completion_tokens: 8,
                     cost: Some(0.5),
+                    provider: None,
                 }),
             })
             .unwrap();
