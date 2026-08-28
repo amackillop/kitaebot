@@ -11,7 +11,11 @@ use crate::error::InvalidToolName;
 /// Message in the conversation history.
 ///
 /// Represents one turn in the conversation between user, assistant, and tools.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` is exact byte equality across every field — compaction
+/// relies on it to align a chunk against the last request actually
+/// sent (spec 14 §"Cache-Prefix Riding").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
     /// Assistant text response (no tool calls).
     Assistant { content: String },
@@ -37,7 +41,7 @@ pub enum Message {
 }
 
 /// A request from the LLM to execute a tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub function: ToolFunction,
@@ -50,7 +54,7 @@ impl ToolCall {
 }
 
 /// Function details within a tool call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolFunction {
     /// Name of the tool to execute
     pub name: ToolName,

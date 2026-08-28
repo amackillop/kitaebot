@@ -23,7 +23,7 @@ use std::sync::Arc;
 use crate::error::{EngineError, ProviderError};
 use crate::provider::Provider;
 use crate::tools::Tool;
-use crate::types::{Message, Response};
+use crate::types::{Message, Response, ToolDefinition};
 
 /// Callback for LLM summarization during compaction.
 ///
@@ -117,6 +117,16 @@ pub trait ContextEngine: Send + Sync {
     /// context shrinks (compaction, clear, session switch) — it
     /// describes a request that no longer reflects the session.
     fn observe_tokens(&mut self, prompt_tokens: usize);
+
+    /// Record the exact request most recently sent to the provider
+    /// for the active session: the assembled messages and the tool
+    /// schemas, byte-for-byte. This is the ground truth of what the
+    /// provider's implicit prefix cache holds; engines that compact
+    /// by riding that cache keep it (spec 14 §"Cache-Prefix Riding"),
+    /// others drop it.
+    fn observe_request(&mut self, messages: Vec<Message>, tools: Arc<[ToolDefinition]>) {
+        let _ = (messages, tools);
+    }
 
     /// Blocking compaction when the context is too large to safely
     /// take another completion. Called before every completion, so it

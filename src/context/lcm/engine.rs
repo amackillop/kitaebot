@@ -38,7 +38,7 @@ use tracing::{error, info};
 use crate::config::ContextConfig;
 use crate::error::{EngineError, InvalidToolName};
 use crate::tools::Tool;
-use crate::types::{Message, ToolCall, ToolFunction, estimate_tokens};
+use crate::types::{Message, ToolCall, ToolDefinition, ToolFunction, estimate_tokens};
 
 use super::super::names::{desanitize_name, sanitize_name};
 use super::super::{
@@ -92,6 +92,26 @@ pub struct LcmEngine {
     /// session switch) — a stale high-water mark would re-trigger
     /// compaction forever via `max()`.
     observed_tokens: Option<usize>,
+    /// The last request actually sent to the provider, if any. Never
+    /// cleared: it mirrors the provider's prompt cache, which our
+    /// local rewrites don't touch — compaction guards on session and
+    /// age instead (spec 14 §"Cache-Prefix Riding").
+    last_sent: Option<SentRequest>,
+}
+
+/// Byte-exact copy of the request the agent loop last sent for a
+/// session: what the provider's implicit prefix cache holds.
+// Scaffolding allow: the ride path consuming these fields lands in the
+// next commit.
+#[allow(dead_code)]
+pub(super) struct SentRequest {
+    /// Session the request was routed under (the sticky cache key).
+    pub(super) session: String,
+    pub(super) messages: Vec<Message>,
+    pub(super) tools: Arc<[ToolDefinition]>,
+    /// Send time, for the cache-TTL age guard. `tokio::time` so tests
+    /// can pause the clock.
+    pub(super) at: tokio::time::Instant,
 }
 
 impl LcmEngine {
@@ -132,6 +152,7 @@ impl LcmEngine {
             ctx,
             summarize,
             observed_tokens: None,
+            last_sent: None,
         })
     }
 
@@ -351,6 +372,15 @@ impl ContextEngine for LcmEngine {
 
     fn observe_tokens(&mut self, prompt_tokens: usize) {
         self.observed_tokens = Some(prompt_tokens);
+    }
+
+    fn observe_request(&mut self, messages: Vec<Message>, tools: Arc<[ToolDefinition]>) {
+        self.last_sent = Some(SentRequest {
+            session: self.active_name.clone(),
+            messages,
+            tools,
+            at: tokio::time::Instant::now(),
+        });
     }
 
     async fn compact_if_urgent(
@@ -1979,6 +2009,38 @@ mod tests {
         let span = engine.transcript_since("general", 0, 0).await.unwrap();
         assert_eq!(span.len(), 1);
         assert!(matches!(&span[0], Message::User { content } if content.starts_with("huge")));
+    }
+
+    #[tokio::test]
+    async fn observe_request_tags_snapshot_with_active_session() {
+        let (mut engine, _dir) = temp_engine();
+        engine.observe_request(
+            vec![Message::User {
+                content: "u1".into(),
+            }],
+            Arc::from([]),
+        );
+        let snap = engine.last_sent.as_ref().unwrap();
+        assert_eq!(snap.session, "general");
+        assert_eq!(snap.messages.len(), 1);
+
+        // A later request replaces the snapshot wholesale, under the
+        // session active at send time.
+        engine.switch_session("other").await.unwrap();
+        engine.observe_request(
+            vec![
+                Message::User {
+                    content: "u2".into(),
+                },
+                Message::Assistant {
+                    content: "a2".into(),
+                },
+            ],
+            Arc::from([]),
+        );
+        let snap = engine.last_sent.as_ref().unwrap();
+        assert_eq!(snap.session, "other");
+        assert_eq!(snap.messages.len(), 2);
     }
 
     #[tokio::test]
