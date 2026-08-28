@@ -85,9 +85,10 @@ The reviewer returns prose plus a findings block. You translate it.
   the commented line; the author commits it with one click, so consent
   and authorship stay with them. A replacement spanning more lines
   than you can anchor gets prose with file:line references instead.
-- `body` is the summary and verdict, drawn from the reviewer's
-  explanation. No praise padding; if something is truly remarkable,
-  one line is enough.
+- `body` opens with the verdict line: `Verdict: **correct**` or
+  `Verdict: **incorrect**`, an em dash, and a one-sentence reason.
+  Then the summary, drawn from the reviewer's explanation. No praise
+  padding; if something is truly remarkable, one line is enough.
 - Submit once with `github_pr_review_submit`: `body`, `event`,
   `comments` (path/line/body), `repo_dir` the review checkout. If
   submission fails (usually bad line anchoring), move the affected

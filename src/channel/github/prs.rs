@@ -1651,6 +1651,9 @@ mod tests {
             "the ones it proposes",
             "review_disposition",
             "stays pending until its author answers it",
+            // The verdict line was session-borne before per-PR review
+            // sessions; the prompt is its only home now.
+            "Verdict: **correct**",
         ] {
             assert!(
                 REVIEW_PROTOCOL_SEGMENT.contains(needle),
