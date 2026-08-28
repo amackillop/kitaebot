@@ -287,6 +287,40 @@ pub fn make_summarize_fn<P: Provider + 'static>(provider: Arc<P>) -> SummarizeFn
     })
 }
 
+/// Callback for one raw provider call during cache-prefix riding
+/// (spec 14 §"Cache-Prefix Riding"): session key, full message
+/// vector, tool schemas — the caller controls every byte of the
+/// request, unlike [`SummarizeFn`], which owns the prompt shape.
+///
+/// Always built over the **main** provider: the prompt cache being
+/// ridden lives under the main model, so a summarizer model override
+/// must not apply here.
+pub type RawChatFn = Arc<
+    dyn Fn(
+            String,
+            Vec<Message>,
+            Arc<[ToolDefinition]>,
+        ) -> Pin<Box<dyn Future<Output = Result<String, ProviderError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Build a `RawChatFn` over the given provider.
+pub fn make_raw_chat_fn<P: Provider + 'static>(provider: Arc<P>) -> RawChatFn {
+    Arc::new(
+        move |session: String, messages: Vec<Message>, tools: Arc<[ToolDefinition]>| {
+            let provider = provider.clone();
+            Box::pin(async move {
+                let outcome = provider.chat(&session, &messages, &tools).await?;
+                match outcome.response {
+                    Response::Text(text) => Ok(text),
+                    Response::ToolCalls { content, .. } => Ok(content),
+                }
+            })
+        },
+    )
+}
+
 /// Tail-biased truncation for tool result content.
 ///
 /// Engines that cannot externalize to disk (flat, ephemeral) cap tool
