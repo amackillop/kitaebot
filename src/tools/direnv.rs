@@ -382,7 +382,10 @@ async fn evaluate_direnv(
 
     // A devshell signature var proves the flake evaluated: nix always
     // exports IN_NIX_SHELL and NIX_STORE from a live devshell, and a
-    // failed evaluation has no devshell environment to export.
+    // failed evaluation has no devshell environment to export. The
+    // subprocess env is env_clear()ed to SAFE_ENV_VARS, which contains
+    // neither var, so the export diff can never omit them as already
+    // present in the parent.
     if !has_devshell_signature(&env) {
         // direnv swallows `use flake` failures, exporting a bare
         // environment; nix's `error:` marker on stderr is the tell.
