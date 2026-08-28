@@ -195,8 +195,10 @@ params) but any standard `usage` object they return is still logged.
 Prompt caching itself is implicit on OpenRouter for providers that
 support it; no `cache_control` breakpoints are sent, so Anthropic and
 Qwen models do not get cached. Every request carries the engine's
-session name as OpenRouter's `session_id` (summarization calls use the
-fixed key `summarizer`), which OpenRouter uses directly as the sticky
+session name as OpenRouter's `session_id` (fresh-path summarization
+calls use the fixed key `summarizer`; compaction calls that ride a
+session's cache prefix reuse that session's key — see spec 14
+§"Cache-Prefix Riding"), which OpenRouter uses directly as the sticky
 routing key: a session's requests land on the same upstream replica,
 making cache hits deterministic instead of a property of account-level
 hashing. OpenRouter-only, like the other request extensions.

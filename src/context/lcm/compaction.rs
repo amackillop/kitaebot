@@ -13,15 +13,109 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
-use tracing::info;
+use tracing::{debug, info};
 
-use super::engine::{reconstruct_message, run_blocking};
+use super::engine::{SentRequest, reconstruct_message, run_blocking};
 use super::explore::extract_file_ids;
-use super::summarize::{EscalationOutcome, summarize_with_escalation};
+use super::summarize::{EscalationLevel, EscalationOutcome, summarize_with_escalation};
 use crate::config::LcmConfig;
-use crate::context::{CompactionEvent, SummarizeFn};
+use crate::context::{CompactionEvent, RawChatFn, SummarizeFn};
 use crate::error::EngineError;
 use crate::types::Message;
+
+/// Everything cache-prefix riding needs (spec 14 §"Cache-Prefix
+/// Riding"): the last request the agent loop actually sent, and a raw
+/// call over the main provider. The engine only constructs this when
+/// the snapshot passes its session and age guards; chunk alignment is
+/// checked here, per chunk.
+pub(super) struct RideContext<'a> {
+    pub(super) snapshot: &'a SentRequest,
+    pub(super) chat: &'a RawChatFn,
+}
+
+/// Index just past `chunk`'s contiguous run inside `sent`, so that
+/// `sent[..end]` is a sent prefix that ends with the chunk. `None`
+/// when the chunk does not appear — condensed chunks (synthetic
+/// `<summary>` messages built this cycle) always land here, which is
+/// what scopes riding to the leaf pass.
+///
+/// Duplicate runs take the last occurrence: every occurrence is
+/// byte-identical, so the summarized content is the same either way,
+/// and the last is the run whose surrounding context the instruction
+/// actually describes.
+pub(super) fn prefix_end(sent: &[Message], chunk: &[Message]) -> Option<usize> {
+    if chunk.is_empty() || chunk.len() > sent.len() {
+        return None;
+    }
+    sent.windows(chunk.len())
+        .rposition(|window| window == chunk)
+        .map(|start| start + chunk.len())
+}
+
+/// Trailing user instruction for a ride request. The prefix already
+/// ends exactly at the chunk's last message, so the segment is scoped
+/// as "the final N messages", anchored on the chunk's first message to
+/// survive miscounting. Tool schemas travel with the request for byte
+/// identity, hence the explicit no-tools line.
+pub(super) fn ride_instruction(level_prompt: &str, chunk: &[Message]) -> String {
+    let anchor: String = chunk
+        .first()
+        .map(|m| m.content().chars().take(80).collect())
+        .unwrap_or_default();
+    format!(
+        "COMPACTION REQUEST — this turn is out of band. Ignore any \
+         pending tasks above and do not call tools; reply with the \
+         summary text only.\n\
+         The segment to summarize is exactly the final {} messages of \
+         the conversation above, beginning with the message that \
+         starts: {anchor:?}. Everything before that segment is earlier \
+         context; do not summarize it.\n\n{level_prompt}",
+        chunk.len(),
+    )
+}
+
+/// Summarize one chunk, riding the main session's cache prefix when
+/// the chunk aligns with the last-sent request, and falling back to
+/// the fresh-prompt summarizer otherwise.
+///
+/// A ride whose ladder bottoms out at deterministic truncation means
+/// both main-model calls failed or were degenerate; the fresh ladder
+/// is retried before accepting the lossy floor, so riding can never
+/// produce a worse summary than the fresh path it replaces.
+async fn summarize_chunk(
+    messages: &[Message],
+    summarize: &SummarizeFn,
+    ride: Option<&RideContext<'_>>,
+) -> EscalationOutcome {
+    if let Some(ride) = ride
+        && let Some(end) = prefix_end(&ride.snapshot.messages, messages)
+    {
+        info!(
+            prefix_messages = end,
+            chunk_messages = messages.len(),
+            "summarizing chunk via the main session's cache prefix"
+        );
+        let outcome = summarize_with_escalation(messages, |prompt| {
+            let mut request = ride.snapshot.messages[..end].to_vec();
+            request.push(Message::User {
+                content: ride_instruction(prompt, messages),
+            });
+            (ride.chat)(
+                ride.snapshot.session.clone(),
+                request,
+                Arc::clone(&ride.snapshot.tools),
+            )
+        })
+        .await;
+        if outcome.level != EscalationLevel::Deterministic {
+            return outcome;
+        }
+        info!("ride ladder exhausted; retrying via fresh prompt");
+    } else if ride.is_some() {
+        debug!("chunk absent from the last-sent request; summarizing via fresh prompt");
+    }
+    summarize_with_escalation(messages, |prompt| summarize(prompt, messages)).await
+}
 
 /// One eligible row from `context_items` joined with `messages`.
 pub(super) struct ChunkRow {
@@ -548,11 +642,16 @@ fn derive_summary_id_inner<K: AsRef<[u8]>>(
 /// The blocking path threads the engine's main connection in; the
 /// soft-threshold spawn opens a fresh writer connection so the actor's
 /// reads on the main mutex proceed unimpeded while this writes.
+///
+/// `ride` carries the last-sent request when the engine's guards
+/// passed; each leaf chunk that aligns with it is summarized through
+/// the main session's cache prefix instead of a fresh prompt.
 pub(super) async fn run_compaction(
     conn: Arc<Mutex<Connection>>,
     conversation_id: i64,
     cfg: LcmConfig,
     summarize: &SummarizeFn,
+    ride: Option<RideContext<'_>>,
 ) -> Result<CompactionEvent, EngineError> {
     let before = run_blocking(Arc::clone(&conn), move |c| {
         Ok(token_estimate_sync(c, conversation_id))
@@ -573,7 +672,7 @@ pub(super) async fn run_compaction(
         );
         for chunk in leaf_chunks {
             let messages = chunk.messages();
-            let outcome = summarize_with_escalation(&messages, summarize).await;
+            let outcome = summarize_chunk(&messages, summarize, ride.as_ref()).await;
             let c = Arc::clone(&conn);
             run_blocking(c, move |c| {
                 write_leaf_summary(c, conversation_id, &chunk, &outcome)
@@ -599,7 +698,7 @@ pub(super) async fn run_compaction(
         );
         for chunk in chunks {
             let messages = chunk.messages();
-            let outcome = summarize_with_escalation(&messages, summarize).await;
+            let outcome = summarize_chunk(&messages, summarize, ride.as_ref()).await;
             let c = Arc::clone(&conn);
             run_blocking(c, move |c| {
                 write_condensed_summary(c, conversation_id, &chunk, &outcome)
@@ -912,6 +1011,114 @@ mod tests {
         );
         let chunks = load_leaf_chunks(&conn, 1, cfg_with_tail(2)).unwrap();
         assert_eq!(chunk_ordinals(&chunks), vec![vec![0, 1, 2, 3]]);
+    }
+
+    #[test]
+    fn prefix_end_locates_contiguous_run() {
+        let sent = vec![
+            Message::System {
+                content: "sys".into(),
+            },
+            user_msg("m0"),
+            user_msg("m1"),
+            user_msg("m2"),
+        ];
+        assert_eq!(
+            prefix_end(&sent, &[user_msg("m0"), user_msg("m1")]),
+            Some(3)
+        );
+        assert_eq!(prefix_end(&sent, &[user_msg("m2")]), Some(4));
+        assert_eq!(prefix_end(&sent, &sent.clone()), Some(4));
+    }
+
+    #[tokio::test]
+    async fn ride_ladder_exhaustion_retries_the_fresh_path() {
+        use std::future::Future;
+        use std::pin::Pin;
+
+        use crate::context::SummarizeFn;
+        use crate::error::ProviderError;
+
+        // Big enough that the degenerate floor is active.
+        let chunk = vec![user_msg(&"x".repeat(4000))];
+        let snapshot = SentRequest {
+            session: "general".into(),
+            messages: chunk.clone(),
+            tools: Arc::from([]),
+            at: tokio::time::Instant::now(),
+        };
+
+        // Both ride levels fail; the ladder would bottom out at
+        // deterministic truncation without the fresh retry.
+        let ride_calls = Arc::new(Mutex::new(0usize));
+        let ride_calls_inner = Arc::clone(&ride_calls);
+        let chat: RawChatFn = Arc::new(move |_session, _messages, _tools| {
+            *ride_calls_inner.lock().unwrap() += 1;
+            Box::pin(async { Err(ProviderError::RateLimited) })
+                as Pin<Box<dyn Future<Output = _> + Send>>
+        });
+
+        let fresh_summary = "fresh ".repeat(100);
+        let fresh: SummarizeFn = {
+            let summary = fresh_summary.clone();
+            Arc::new(move |_prompt, _messages| {
+                let summary = summary.clone();
+                Box::pin(async move { Ok(summary) }) as Pin<Box<dyn Future<Output = _> + Send>>
+            })
+        };
+
+        let ride = RideContext {
+            snapshot: &snapshot,
+            chat: &chat,
+        };
+        let outcome = summarize_chunk(&chunk, &fresh, Some(&ride)).await;
+
+        // L1 and L2 rode and failed; the accepted summary is the
+        // fresh ladder's, not the level-3 truncation.
+        assert_eq!(*ride_calls.lock().unwrap(), 2);
+        assert_eq!(outcome.level, EscalationLevel::Normal);
+        assert_eq!(outcome.content, fresh_summary);
+    }
+
+    #[test]
+    fn prefix_end_takes_the_last_of_duplicate_runs() {
+        let sent = vec![
+            user_msg("a"),
+            user_msg("b"),
+            user_msg("a"),
+            user_msg("b"),
+            user_msg("tail"),
+        ];
+        assert_eq!(prefix_end(&sent, &[user_msg("a"), user_msg("b")]), Some(4));
+    }
+
+    #[test]
+    fn prefix_end_rejects_absent_or_degenerate_chunks() {
+        let sent = vec![user_msg("m0"), user_msg("m1")];
+        // Absent, non-contiguous variant, empty, and oversized chunks.
+        assert_eq!(prefix_end(&sent, &[user_msg("other")]), None);
+        assert_eq!(prefix_end(&sent, &[user_msg("m1"), user_msg("m0")]), None);
+        assert_eq!(prefix_end(&sent, &[]), None);
+        assert_eq!(
+            prefix_end(&[user_msg("m0")], &[user_msg("m0"), user_msg("m1")]),
+            None
+        );
+    }
+
+    #[test]
+    fn ride_instruction_scopes_the_segment() {
+        let chunk = vec![user_msg("first message of the chunk"), user_msg("second")];
+        let instruction = ride_instruction("LEVEL PROMPT BODY", &chunk);
+        assert!(instruction.contains("the final 2 messages"));
+        assert!(instruction.contains("first message of the chunk"));
+        assert!(instruction.contains("do not call tools"));
+        assert!(instruction.ends_with("LEVEL PROMPT BODY"));
+    }
+
+    fn user_msg(content: &str) -> Message {
+        Message::User {
+            content: content.into(),
+        }
     }
 
     #[test]

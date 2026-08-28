@@ -13,6 +13,7 @@ pub use handle::AgentHandle;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::sync::Arc;
 
 use futures_util::future::join_all;
 use tokio::sync::mpsc;
@@ -26,7 +27,7 @@ use crate::error::{Error, ToolError};
 use crate::provider::{CallUsage, Provider};
 use crate::safety;
 use crate::tools::{ToolCtx, Tools, truncate_output};
-use crate::types::{Message, Response, ToolCall};
+use crate::types::{Message, Response, ToolCall, ToolDefinition};
 use crate::workspace::Workspace;
 
 /// Byte cap on the error shown in the turn-summary log line. State
@@ -489,7 +490,7 @@ async fn turn_loop(
         })
         .await?;
 
-    let tool_definitions = tools.definitions();
+    let tool_definitions: Arc<[ToolDefinition]> = tools.definitions().into();
 
     let mut repeats = RepeatDetector::new();
     let mut policy_strikes: BTreeMap<String, usize> = BTreeMap::new();
@@ -533,6 +534,8 @@ async fn turn_loop(
         )
         .await?
         .map_err(Error::Provider)?;
+
+        engine.observe_request(assembled.messages, Arc::clone(&tool_definitions));
 
         let call = outcome.usage;
         if let Some(prompt_tokens) = call.prompt_tokens {
@@ -795,6 +798,8 @@ async fn squeeze(
     )
     .await?
     .map_err(Error::Provider)?;
+
+    engine.observe_request(assembled.messages, Arc::from([]));
 
     let call = outcome.usage;
     if let Some(prompt_tokens) = call.prompt_tokens {

@@ -246,12 +246,20 @@ fn build_handle(
             )
         }
         EngineKind::Lcm => {
-            let engine =
-                context::lcm::LcmEngine::new(&workspace.context_dir(), context, summarize.clone())
-                    .unwrap_or_else(|e| {
-                        error!("Failed to initialize LCM engine: {e}");
-                        std::process::exit(1);
-                    });
+            // Raw chat over the main provider, never the summarizer
+            // override: compaction rides the main session's cache,
+            // which lives under the main model.
+            let raw_chat = context::make_raw_chat_fn(provider.clone());
+            let engine = context::lcm::LcmEngine::new(
+                &workspace.context_dir(),
+                context,
+                summarize.clone(),
+                raw_chat,
+            )
+            .unwrap_or_else(|e| {
+                error!("Failed to initialize LCM engine: {e}");
+                std::process::exit(1);
+            });
             spawn_with_engine(
                 workspace,
                 state_db,

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use crate::error::{EngineError, ProviderError};
 use crate::provider::Provider;
 use crate::tools::Tool;
-use crate::types::{Message, Response};
+use crate::types::{Message, Response, ToolDefinition};
 
 /// Callback for LLM summarization during compaction.
 ///
@@ -117,6 +117,16 @@ pub trait ContextEngine: Send + Sync {
     /// context shrinks (compaction, clear, session switch) — it
     /// describes a request that no longer reflects the session.
     fn observe_tokens(&mut self, prompt_tokens: usize);
+
+    /// Record the exact request most recently sent to the provider
+    /// for the active session: the assembled messages and the tool
+    /// schemas, byte-for-byte. This is the ground truth of what the
+    /// provider's implicit prefix cache holds; engines that compact
+    /// by riding that cache keep it (spec 14 §"Cache-Prefix Riding"),
+    /// others drop it.
+    fn observe_request(&mut self, messages: Vec<Message>, tools: Arc<[ToolDefinition]>) {
+        let _ = (messages, tools);
+    }
 
     /// Blocking compaction when the context is too large to safely
     /// take another completion. Called before every completion, so it
@@ -275,6 +285,40 @@ pub fn make_summarize_fn<P: Provider + 'static>(provider: Arc<P>) -> SummarizeFn
             }
         })
     })
+}
+
+/// Callback for one raw provider call during cache-prefix riding
+/// (spec 14 §"Cache-Prefix Riding"): session key, full message
+/// vector, tool schemas — the caller controls every byte of the
+/// request, unlike [`SummarizeFn`], which owns the prompt shape.
+///
+/// Always built over the **main** provider: the prompt cache being
+/// ridden lives under the main model, so a summarizer model override
+/// must not apply here.
+pub type RawChatFn = Arc<
+    dyn Fn(
+            String,
+            Vec<Message>,
+            Arc<[ToolDefinition]>,
+        ) -> Pin<Box<dyn Future<Output = Result<String, ProviderError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Build a `RawChatFn` over the given provider.
+pub fn make_raw_chat_fn<P: Provider + 'static>(provider: Arc<P>) -> RawChatFn {
+    Arc::new(
+        move |session: String, messages: Vec<Message>, tools: Arc<[ToolDefinition]>| {
+            let provider = provider.clone();
+            Box::pin(async move {
+                let outcome = provider.chat(&session, &messages, &tools).await?;
+                match outcome.response {
+                    Response::Text(text) => Ok(text),
+                    Response::ToolCalls { content, .. } => Ok(content),
+                }
+            })
+        },
+    )
 }
 
 /// Tail-biased truncation for tool result content.

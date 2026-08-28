@@ -143,7 +143,7 @@ mod tests {
     use super::super::schema;
     use super::*;
     use crate::config::ContextConfig;
-    use crate::context::{ContextEngine, SummarizeFn};
+    use crate::context::{ContextEngine, RawChatFn, SummarizeFn};
     use crate::types::{ToolCall, ToolFunction};
 
     fn canned_summarize(text: &str) -> SummarizeFn {
@@ -153,6 +153,10 @@ mod tests {
             Box::pin(async move { Ok(text) })
                 as Pin<Box<dyn Future<Output = Result<String, _>> + Send>>
         })
+    }
+
+    fn unused_raw_chat() -> RawChatFn {
+        Arc::new(|_, _, _| panic!("raw chat must not be called without a snapshot"))
     }
 
     #[tokio::test]
@@ -165,6 +169,7 @@ mod tests {
             &dir.path().join("context"),
             ctx,
             canned_summarize("summary"),
+            unused_raw_chat(),
         )
         .unwrap();
 

@@ -33,17 +33,17 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, params};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::config::ContextConfig;
 use crate::error::{EngineError, InvalidToolName};
 use crate::tools::Tool;
-use crate::types::{Message, ToolCall, ToolFunction, estimate_tokens};
+use crate::types::{Message, ToolCall, ToolDefinition, ToolFunction, estimate_tokens};
 
 use super::super::names::{desanitize_name, sanitize_name};
 use super::super::{
-    AssembledContext, CompactionEvent, ContextEngine, ContextStats, SessionInfo, SummarizeFn,
-    ToolScope,
+    AssembledContext, CompactionEvent, ContextEngine, ContextStats, RawChatFn, SessionInfo,
+    SummarizeFn, ToolScope,
 };
 use super::compaction;
 use super::explore;
@@ -87,12 +87,44 @@ pub struct LcmEngine {
     /// plain-text payloads. Injected at construction; compaction
     /// receives its own via method arguments.
     summarize: SummarizeFn,
+    /// Raw call over the **main** provider, for compaction's
+    /// cache-prefix riding. Distinct from `summarize`: that one may
+    /// route to a summarizer model override, whose cache is not the
+    /// one being ridden.
+    raw_chat: RawChatFn,
     /// Provider-reported prompt size of the last request, if any.
     /// Cleared whenever the context shrinks (compaction, clear,
     /// session switch) — a stale high-water mark would re-trigger
     /// compaction forever via `max()`.
     observed_tokens: Option<usize>,
+    /// The last request actually sent to the provider, if any. Never
+    /// cleared: it mirrors the provider's prompt cache, which our
+    /// local rewrites don't touch — compaction guards on session and
+    /// age instead (spec 14 §"Cache-Prefix Riding").
+    last_sent: Option<SentRequest>,
 }
+
+/// Byte-exact copy of the request the agent loop last sent for a
+/// session: what the provider's implicit prefix cache holds.
+pub(super) struct SentRequest {
+    /// Session the request was routed under (the sticky cache key).
+    pub(super) session: String,
+    pub(super) messages: Vec<Message>,
+    pub(super) tools: Arc<[ToolDefinition]>,
+    /// Send time, for the cache-TTL age guard. `tokio::time` so tests
+    /// can pause the clock.
+    pub(super) at: tokio::time::Instant,
+}
+
+/// Oldest snapshot worth riding. The implicit cache's TTL is
+/// unpublished (empirically minutes < TTL < 2h) and hits are
+/// unverifiable per request, so the guard stays well inside the lower
+/// bound: riding a cold cache re-uploads the whole prefix at fresh
+/// rates — dearer than the fresh path it replaces — while a skipped
+/// warm ride only forfeits the discount. Turn-boundary compaction
+/// fires seconds after the last completion, so the normal path always
+/// qualifies.
+const SNAPSHOT_MAX_AGE: std::time::Duration = std::time::Duration::from_mins(2);
 
 impl LcmEngine {
     /// Open or create the LCM database at `db_path`.
@@ -109,6 +141,7 @@ impl LcmEngine {
         context_dir: &Path,
         ctx: ContextConfig,
         summarize: SummarizeFn,
+        raw_chat: RawChatFn,
     ) -> Result<Self, EngineError> {
         // Each engine namespaces its own subdirectory: switching
         // backends can never clobber another engine's files (spec 14).
@@ -131,7 +164,32 @@ impl LcmEngine {
             context_dir,
             ctx,
             summarize,
+            raw_chat,
             observed_tokens: None,
+            last_sent: None,
+        })
+    }
+
+    /// The ride context for a compaction cycle, when the last-sent
+    /// snapshot is trustworthy: same session, and recent enough that
+    /// the provider's cache plausibly still holds it. Chunk alignment
+    /// is per chunk, checked in compaction.
+    fn ride_context(&self) -> Option<compaction::RideContext<'_>> {
+        let snapshot = self.last_sent.as_ref()?;
+        if snapshot.session != self.active_name {
+            debug!(
+                snapshot_session = %snapshot.session,
+                "not riding the cache prefix: last request was for another session"
+            );
+            return None;
+        }
+        if snapshot.at.elapsed() > SNAPSHOT_MAX_AGE {
+            debug!("not riding the cache prefix: last request older than the TTL guard");
+            return None;
+        }
+        Some(compaction::RideContext {
+            snapshot,
+            chat: &self.raw_chat,
         })
     }
 
@@ -353,6 +411,15 @@ impl ContextEngine for LcmEngine {
         self.observed_tokens = Some(prompt_tokens);
     }
 
+    fn observe_request(&mut self, messages: Vec<Message>, tools: Arc<[ToolDefinition]>) {
+        self.last_sent = Some(SentRequest {
+            session: self.active_name.clone(),
+            messages,
+            tools,
+            at: tokio::time::Instant::now(),
+        });
+    }
+
     async fn compact_if_urgent(
         &mut self,
         summarize: &SummarizeFn,
@@ -374,6 +441,7 @@ impl ContextEngine for LcmEngine {
             self.conversation_id,
             self.ctx.lcm,
             summarize,
+            self.ride_context(),
         )
         .await?;
         self.observed_tokens = None;
@@ -394,6 +462,7 @@ impl ContextEngine for LcmEngine {
             self.conversation_id,
             self.ctx.lcm,
             summarize,
+            self.ride_context(),
         )
         .await?;
         self.observed_tokens = None;
@@ -409,6 +478,7 @@ impl ContextEngine for LcmEngine {
             self.conversation_id,
             self.ctx.lcm,
             summarize,
+            self.ride_context(),
         )
         .await?;
         self.observed_tokens = None;
@@ -1269,6 +1339,7 @@ mod tests {
             &dir.path().join("context"),
             ctx,
             canned_summarize("summary"),
+            unused_raw_chat(),
         )
         .unwrap();
         (engine, dir)
@@ -1478,6 +1549,148 @@ mod tests {
         Arc::new(|_prompt, _messages| panic!("summarizer must not be called for tool output"))
     }
 
+    fn unused_raw_chat() -> RawChatFn {
+        Arc::new(|_, _, _| panic!("raw chat must not be called without a matching snapshot"))
+    }
+
+    /// (session, request, tool count) of every raw chat call.
+    type RawChatLog = Arc<std::sync::Mutex<Vec<(String, Vec<Message>, usize)>>>;
+
+    fn recording_raw_chat(response: &'static str) -> (RawChatFn, RawChatLog) {
+        let log: RawChatLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log_inner = log.clone();
+        let f: RawChatFn = Arc::new(move |session, messages, tools| {
+            log_inner
+                .lock()
+                .unwrap()
+                .push((session, messages, tools.len()));
+            Box::pin(async move { Ok(response.to_string()) })
+        });
+        (f, log)
+    }
+
+    fn panicking_fresh() -> SummarizeFn {
+        Arc::new(|_prompt, _messages| panic!("fresh path must not run when the chunk aligns"))
+    }
+
+    /// 32 protected + 3 eligible user messages, the shape
+    /// `force_compact_creates_leaf_summary_for_eligible_messages`
+    /// exercises.
+    async fn push_compactable_history(engine: &mut LcmEngine) {
+        let filler = "x".repeat(200);
+        for i in 0..35 {
+            engine
+                .push_message(Message::User {
+                    content: format!("m{i} {filler}"),
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn force_compact_rides_cache_prefix_when_chunk_aligns() {
+        let (raw_chat, log) = recording_raw_chat("compact");
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = LcmEngine::new(
+            &dir.path().join("context"),
+            ContextConfig::default(),
+            canned_summarize("summary"),
+            raw_chat,
+        )
+        .unwrap();
+        push_compactable_history(&mut engine).await;
+
+        let assembled = engine.assemble("sys").await.unwrap();
+        let sent = assembled.messages.clone();
+        engine.observe_request(assembled.messages, Arc::from([]));
+
+        engine.force_compact(&panicking_fresh()).await.unwrap();
+
+        let calls = log.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (session, request, tool_count) = &calls[0];
+        assert_eq!(session.as_str(), "general");
+        assert_eq!(*tool_count, 0);
+        // Prefix = system + the 3 eligible messages, byte-identical to
+        // the sent request, then one trailing instruction.
+        assert_eq!(request.len(), 5);
+        assert_eq!(request[..4], sent[..4]);
+        match request.last().unwrap() {
+            Message::User { content } => {
+                assert!(content.contains("the final 3 messages"), "{content}");
+            }
+            other => panic!("expected trailing user instruction, got {other:?}"),
+        }
+        drop(calls);
+
+        // The ride response committed as the leaf summary.
+        let conn = engine.conn.lock().unwrap();
+        let (count, content): (i64, String) = conn
+            .query_row("SELECT COUNT(*), MAX(content) FROM summaries", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(content, "compact");
+    }
+
+    #[tokio::test]
+    async fn compaction_falls_back_to_fresh_when_chunk_not_in_snapshot() {
+        // temp_engine's raw chat panics when called: staying on the
+        // fresh path is what this asserts.
+        let (mut engine, _dir) = temp_engine();
+        push_compactable_history(&mut engine).await;
+        engine.observe_request(
+            vec![Message::User {
+                content: "unrelated request".into(),
+            }],
+            Arc::from([]),
+        );
+
+        engine
+            .force_compact(&canned_summarize("compact"))
+            .await
+            .unwrap();
+
+        let conn = engine.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_snapshot_is_not_ridden() {
+        let (mut engine, _dir) = temp_engine();
+        push_compactable_history(&mut engine).await;
+        let assembled = engine.assemble("sys").await.unwrap();
+        engine.observe_request(assembled.messages, Arc::from([]));
+
+        tokio::time::advance(std::time::Duration::from_secs(121)).await;
+        engine
+            .force_compact(&canned_summarize("compact"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_from_another_session_is_not_ridden() {
+        // Identical content in both sessions, so alignment alone
+        // would falsely match — the session guard must reject first.
+        let (mut engine, _dir) = temp_engine();
+        push_compactable_history(&mut engine).await;
+        let assembled = engine.assemble("sys").await.unwrap();
+        engine.observe_request(assembled.messages, Arc::from([]));
+
+        engine.switch_session("other").await.unwrap();
+        push_compactable_history(&mut engine).await;
+        engine
+            .force_compact(&canned_summarize("compact"))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn oversized_tool_output_externalized_without_summarizer() {
         let dir = tempfile::tempdir().unwrap();
@@ -1485,8 +1698,13 @@ mod tests {
             tool_output_tokens: 10,
             ..ContextConfig::default()
         };
-        let mut engine =
-            LcmEngine::new(&dir.path().join("context"), ctx, panicking_summarize()).unwrap();
+        let mut engine = LcmEngine::new(
+            &dir.path().join("context"),
+            ctx,
+            panicking_summarize(),
+            unused_raw_chat(),
+        )
+        .unwrap();
 
         let payload = {
             use std::fmt::Write as _;
@@ -1776,6 +1994,7 @@ mod tests {
                 &context_dir,
                 ContextConfig::default(),
                 canned_summarize("summary"),
+                unused_raw_chat(),
             )
             .unwrap();
             engine.switch_session("kitaebot").await.unwrap();
@@ -1785,6 +2004,7 @@ mod tests {
             &context_dir,
             ContextConfig::default(),
             canned_summarize("summary"),
+            unused_raw_chat(),
         )
         .unwrap();
         assert_eq!(engine.active_session(), "kitaebot");
@@ -1979,6 +2199,38 @@ mod tests {
         let span = engine.transcript_since("general", 0, 0).await.unwrap();
         assert_eq!(span.len(), 1);
         assert!(matches!(&span[0], Message::User { content } if content.starts_with("huge")));
+    }
+
+    #[tokio::test]
+    async fn observe_request_tags_snapshot_with_active_session() {
+        let (mut engine, _dir) = temp_engine();
+        engine.observe_request(
+            vec![Message::User {
+                content: "u1".into(),
+            }],
+            Arc::from([]),
+        );
+        let snap = engine.last_sent.as_ref().unwrap();
+        assert_eq!(snap.session, "general");
+        assert_eq!(snap.messages.len(), 1);
+
+        // A later request replaces the snapshot wholesale, under the
+        // session active at send time.
+        engine.switch_session("other").await.unwrap();
+        engine.observe_request(
+            vec![
+                Message::User {
+                    content: "u2".into(),
+                },
+                Message::Assistant {
+                    content: "a2".into(),
+                },
+            ],
+            Arc::from([]),
+        );
+        let snap = engine.last_sent.as_ref().unwrap();
+        assert_eq!(snap.session, "other");
+        assert_eq!(snap.messages.len(), 2);
     }
 
     #[tokio::test]
