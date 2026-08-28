@@ -697,14 +697,18 @@ Both LCM blocks also instruct the model to preserve file IDs and `<file>`
 reference tags, include timestamps for key decisions, note tool usage and
 outcomes, and omit verbose tool output (already in the immutable store).
 
-The `model` column on the summary records which LLM produced it. If a
-dedicated summarizer model is configured (`provider.model_overrides.summarizer`),
-it is used instead of the agent's primary model. This allows using a
-cheaper/faster model for summarization. Level 3 records
-`level3-truncate` (no LLM). Exception: leaf chunks summarized by
-riding the main session's cache prefix (§"Cache-Prefix Riding") go
-through the **main** model deliberately — the cache being ridden lives
-under it, and a summarizer override does not apply there.
+The `model` column on the summary records the escalation level that
+produced it (`level1`, `level2`, `level3-truncate` — no LLM for the
+last), not a model name; the `/stats` health section counts level-3
+rows from it. Which LLM actually runs is not recorded: the summarizer
+override (`provider.model_overrides.summarizer`) when set, falling
+back to the agent's primary model — summaries are high-volume and
+low-stakes, so they typically run on a cheaper model. Exception: leaf
+chunks summarized by riding the main session's cache prefix
+(§"Cache-Prefix Riding") go through the **main** model deliberately —
+the cache being ridden lives under it, and a summarizer override does
+not apply there. Ridden and fresh-path summaries are indistinguishable
+in the table; the per-chunk ride decision is in the logs.
 
 **Deferred**:
 
