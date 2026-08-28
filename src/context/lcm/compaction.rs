@@ -34,16 +34,21 @@ pub(super) struct RideContext<'a> {
 }
 
 /// Index just past `chunk`'s contiguous run inside `sent`, so that
-/// `sent[..end]` is the shortest sent prefix that ends with the chunk.
-/// `None` when the chunk does not appear — condensed chunks (synthetic
+/// `sent[..end]` is a sent prefix that ends with the chunk. `None`
+/// when the chunk does not appear — condensed chunks (synthetic
 /// `<summary>` messages built this cycle) always land here, which is
 /// what scopes riding to the leaf pass.
+///
+/// Duplicate runs take the last occurrence: every occurrence is
+/// byte-identical, so the summarized content is the same either way,
+/// and the last is the run whose surrounding context the instruction
+/// actually describes.
 pub(super) fn prefix_end(sent: &[Message], chunk: &[Message]) -> Option<usize> {
     if chunk.is_empty() || chunk.len() > sent.len() {
         return None;
     }
     sent.windows(chunk.len())
-        .position(|window| window == chunk)
+        .rposition(|window| window == chunk)
         .map(|start| start + chunk.len())
 }
 
@@ -1024,6 +1029,18 @@ mod tests {
         );
         assert_eq!(prefix_end(&sent, &[user_msg("m2")]), Some(4));
         assert_eq!(prefix_end(&sent, &sent.clone()), Some(4));
+    }
+
+    #[test]
+    fn prefix_end_takes_the_last_of_duplicate_runs() {
+        let sent = vec![
+            user_msg("a"),
+            user_msg("b"),
+            user_msg("a"),
+            user_msg("b"),
+            user_msg("tail"),
+        ];
+        assert_eq!(prefix_end(&sent, &[user_msg("a"), user_msg("b")]), Some(4));
     }
 
     #[test]
