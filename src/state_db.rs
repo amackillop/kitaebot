@@ -152,6 +152,7 @@ mod tests {
             crate::review::INSERT_SELF_FINDING,
             crate::review::INSERT_EXTERNAL_FINDING,
             crate::review::UPDATE_DISPOSITION,
+            crate::review::SELECT_PR_FINDINGS_BY_REF,
             crate::review::SELECT_REVIEWS_BY_GATE,
             crate::review::SELECT_FINDINGS_BY_CATEGORY,
             crate::review::SELECT_DISPOSITIONS_BY_SOURCE,

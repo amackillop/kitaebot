@@ -116,6 +116,11 @@ pub(crate) const UPDATE_DISPOSITION: &str = "UPDATE findings
          disposed_at = datetime('now')
      WHERE id = ?1";
 
+pub(crate) const SELECT_PR_FINDINGS_BY_REF: &str = "SELECT id, severity, category,
+            file, line, note, disposition, disposition_note
+     FROM findings WHERE repo = ?1 AND gate = 'pr' AND git_ref = ?2
+     ORDER BY id";
+
 pub(crate) const SELECT_REVIEWS_BY_GATE: &str = "SELECT gate, COUNT(*),
             SUM(CASE WHEN verdict = 'incorrect' THEN 1 ELSE 0 END)
      FROM reviews GROUP BY gate ORDER BY gate";
@@ -203,6 +208,27 @@ impl ReviewLedger {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Findings recorded for one pr-gate review, by the head SHA it
+    /// judged. Ids and severities never leave the database otherwise,
+    /// and re-review dispatches (spec 20) need both.
+    pub fn pr_findings(&self, repo: &str, git_ref: &str) -> rusqlite::Result<Vec<PrFinding>> {
+        let conn = self.conn.lock().expect("review ledger mutex poisoned");
+        let mut stmt = conn.prepare(SELECT_PR_FINDINGS_BY_REF)?;
+        let rows = stmt.query_map(params![repo, git_ref], |r| {
+            Ok(PrFinding {
+                id: r.get(0)?,
+                severity: r.get(1)?,
+                category: r.get(2)?,
+                file: r.get(3)?,
+                line: r.get(4)?,
+                note: r.get(5)?,
+                disposition: r.get(6)?,
+                disposition_note: r.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Record the parent's decision on a finding. Returns `false` when
     /// no row carries `id` — the caller turns that into a visible tool
     /// error rather than a silent no-op.
@@ -283,6 +309,21 @@ impl ReviewLedger {
         }
         Ok(out)
     }
+}
+
+/// One prior pr-gate finding, read back for a re-review dispatch.
+/// Severity and disposition stay free text: storage never constrains
+/// them (spec 23), so reads must not either.
+#[derive(Debug)]
+pub struct PrFinding {
+    pub id: i64,
+    pub severity: Option<String>,
+    pub category: String,
+    pub file: Option<String>,
+    pub line: Option<i64>,
+    pub note: String,
+    pub disposition: Option<String>,
+    pub disposition_note: Option<String>,
 }
 
 /// Add `column` to `table` when it is not already present.
@@ -698,6 +739,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn pr_findings_scoped_to_repo_gate_and_ref() {
+        let ledger = ledger();
+        let output = parse_findings_block(BLOCK).unwrap();
+        // Same ref at the commit gate: must not leak into the pr read.
+        ledger.record_review(&gate(), &output).unwrap();
+        let ids = ledger
+            .record_review(
+                &GateRecord {
+                    repo: "owner/repo",
+                    gate: "pr",
+                    git_ref: "abc123",
+                },
+                &output,
+            )
+            .unwrap();
+        ledger
+            .set_disposition(ids[0], "fixed", Some("delta drops the guard"))
+            .unwrap();
+
+        let found = ledger.pr_findings("owner/repo", "abc123").unwrap();
+        assert_eq!(found.len(), 1);
+        let f = &found[0];
+        assert_eq!(f.id, ids[0]);
+        assert_eq!(f.severity.as_deref(), Some("must-fix"));
+        assert_eq!(f.category, "swallowed-error");
+        assert_eq!(f.file.as_deref(), Some("src/x.rs"));
+        assert_eq!(f.line, Some(42));
+        assert_eq!(f.disposition.as_deref(), Some("fixed"));
+        assert_eq!(f.disposition_note.as_deref(), Some("delta drops the guard"));
+
+        assert!(
+            ledger
+                .pr_findings("owner/repo", "other")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(ledger.pr_findings("o/other", "abc123").unwrap().is_empty());
     }
 
     #[test]

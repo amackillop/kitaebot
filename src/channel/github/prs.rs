@@ -25,6 +25,7 @@ use crate::clients::github::{
     DiffComment, GithubClient, IssueComment, PrCommit, PrFile, PrReview, SearchIssue,
 };
 use crate::error::GithubError;
+use crate::review::{PrFinding, ReviewLedger};
 use crate::state_db::StateDb;
 use crate::time::now_iso8601;
 use crate::tools::git::GitCli;
@@ -75,6 +76,10 @@ struct TrackedSnapshot {
     pr_number: u32,
     view: TrackedPrView,
     diff_comments: Vec<DiffComment>,
+    /// Ledger findings from the prior review round (gate `pr` at the
+    /// tracked SHA); ids and severities never reach the published
+    /// review, so the dispatch must carry them for dispositions.
+    prior_findings: Vec<PrFinding>,
 }
 
 /// Feedback on one of the bot's own PRs, fetched together.
@@ -459,9 +464,10 @@ async fn tracked_pass(
     state: &mut PollState,
     state_db: &StateDb,
 ) -> usize {
+    let ledger = ReviewLedger::new(state_db);
     let mut snapshots = Vec::new();
     let mut corrupt_keys = Vec::new();
-    for key in state.reviewed.keys() {
+    for (key, prev_sha) in &state.reviewed {
         let Some((nwo, pr_number)) = parse_tracking_key(key) else {
             warn!(key = %key, "Pruning corrupt tracking key");
             corrupt_keys.push(key.clone());
@@ -481,12 +487,19 @@ async fn tracked_pass(
                 continue;
             }
         };
+        // The ledger is telemetry: a failed read costs the turn its
+        // finding ids, never the turn itself.
+        let prior_findings = ledger.pr_findings(nwo, prev_sha).unwrap_or_else(|e| {
+            warn!(pr = %key, "Dispatching without prior findings, ledger read failed: {e}");
+            Vec::new()
+        });
         snapshots.push(TrackedSnapshot {
             key: key.clone(),
             nwo: nwo.to_string(),
             pr_number,
             view,
             diff_comments,
+            prior_findings,
         });
     }
 
@@ -1138,6 +1151,13 @@ fn format_tracked_turn(
         );
     }
 
+    if !s.prior_findings.is_empty() {
+        let _ = writeln!(msg, "\nYour prior review's findings, from the ledger:");
+        for f in &s.prior_findings {
+            let _ = writeln!(msg, "{}", format_prior_finding(f));
+        }
+    }
+
     if !comments.is_empty() {
         let _ = writeln!(msg, "\n{}", comments.join("\n\n"));
     }
@@ -1149,6 +1169,14 @@ fn format_tracked_turn(
              Review checkout: `{checkout}`, detached at {head}; previously \
              reviewed SHA: {prev}.",
         );
+        if !s.prior_findings.is_empty() {
+            let _ = write!(
+                msg,
+                "\nPack the ledger findings above into the reviewer dispatch \
+                 as the outstanding feedback, and record a disposition by id \
+                 for each pending one once the verdict is in.",
+            );
+        }
         if !comments.is_empty() {
             let _ = write!(
                 msg,
@@ -1169,6 +1197,29 @@ fn format_tracked_turn(
     }
 
     msg
+}
+
+/// One ledger finding as a turn-message line: the id leads because it
+/// is the disposition handle, the rest mirrors the published comment.
+fn format_prior_finding(f: &PrFinding) -> String {
+    let mut s = format!("- finding #{}", f.id);
+    let _ = match &f.severity {
+        Some(sev) => write!(s, " [{sev}, {}]", f.category),
+        None => write!(s, " [{}]", f.category),
+    };
+    if let Some(file) = &f.file {
+        let _ = match f.line {
+            Some(line) => write!(s, " {file}:{line}"),
+            None => write!(s, " {file}"),
+        };
+    }
+    let _ = write!(s, " — {}", f.note);
+    let _ = match (&f.disposition, &f.disposition_note) {
+        (Some(d), Some(note)) => write!(s, " ({d}: {note})"),
+        (Some(d), None) => write!(s, " ({d})"),
+        (None, _) => write!(s, " (pending)"),
+    };
+    s
 }
 
 /// Build the turn message for a contributed PR. The PR body is never
@@ -1582,6 +1633,20 @@ mod tests {
                 reviews: Vec::new(),
             },
             diff_comments: Vec::new(),
+            prior_findings: Vec::new(),
+        }
+    }
+
+    fn prior_finding(id: i64, severity: &str, disposition: Option<(&str, &str)>) -> PrFinding {
+        PrFinding {
+            id,
+            severity: Some(severity.to_string()),
+            category: "comment-noise".to_string(),
+            file: Some("src/x.rs".to_string()),
+            line: Some(42),
+            note: "the comment restates the code".to_string(),
+            disposition: disposition.map(|(d, _)| d.to_string()),
+            disposition_note: disposition.map(|(_, n)| n.to_string()),
         }
     }
 
@@ -1664,6 +1729,60 @@ mod tests {
         assert!(d.message.contains("reviewed SHA: old"));
         // No comments, so no discussion block.
         assert!(!d.message.contains("Respond to each comment"));
+    }
+
+    #[test]
+    fn tracked_re_review_carries_prior_findings() {
+        let mut s = snapshot("o/r", 1, "open", "new");
+        s.prior_findings = vec![
+            prior_finding(121, "nit", None),
+            prior_finding(122, "must-fix", Some(("fixed", "guard dropped"))),
+        ];
+
+        let (dispatches, _) = decide_tracked(
+            &[s],
+            &reviewed("o/r#1", "old"),
+            "bot",
+            &trust("alice", &[], &[]),
+            LAST_POLL,
+        );
+
+        assert_eq!(dispatches.len(), 1);
+        let d = &dispatches[0];
+        assert!(d.message.contains("findings, from the ledger:"));
+        assert!(d.message.contains(
+            "- finding #121 [nit, comment-noise] src/x.rs:42 \
+             — the comment restates the code (pending)"
+        ));
+        assert!(d.message.contains(
+            "- finding #122 [must-fix, comment-noise] src/x.rs:42 \
+             — the comment restates the code (fixed: guard dropped)"
+        ));
+        assert!(d.message.contains("record a disposition by id"));
+    }
+
+    #[test]
+    fn tracked_comment_turn_carries_findings_without_dispatch_instruction() {
+        let mut s = snapshot("o/r", 1, "open", "abc");
+        s.prior_findings = vec![prior_finding(121, "nit", None)];
+        s.view
+            .comments
+            .push(pr_comment("alice", "Fair point, fixed.", AFTER_POLL));
+
+        let (dispatches, _) = decide_tracked(
+            &[s],
+            &reviewed("o/r#1", "abc"),
+            "bot",
+            &trust("alice", &[], &[]),
+            LAST_POLL,
+        );
+
+        assert_eq!(dispatches.len(), 1);
+        let d = &dispatches[0];
+        // The ids are what comment follow-ups disposition against.
+        assert!(d.message.contains("- finding #121"));
+        // Packing findings into a reviewer dispatch is re-review-only.
+        assert!(!d.message.contains("record a disposition by id"));
     }
 
     #[test]

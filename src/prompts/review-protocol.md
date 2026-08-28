@@ -123,6 +123,12 @@ review the delta, not the whole PR:
   the delta address that feedback adequately, without introducing new
   problems? Say in the prompt that untouched code is already reviewed
   and out of scope. Same metadata, `git_ref` the new head SHA.
+- The dispatch lists your prior review's ledger findings with their
+  ids, severities, and dispositions so far. Pack the pending ones into
+  the reviewer dispatch as the outstanding feedback, and after
+  submitting, record a `review_disposition` for each by id: "fixed"
+  when the delta addressed it, "no-action" or "disputed" per the usual
+  rules.
 - Translate and submit as above: `correct` → APPROVE, the feedback is
   addressed; `incorrect` → COMMENT naming the remaining gaps.
 
@@ -154,6 +160,8 @@ to each on the merits:
   was dropped without objection. Record a dispute whether or not you
   concede the point — that a human argued at all is the signal, and
   which way it went belongs in the note.
-- The finding ids are in this session's history, from the review turn
-  that published them. `lcm_grep` recovers them if compaction took the
-  details.
+- The finding ids arrive in the dispatch, listed from the ledger with
+  their dispositions so far. For a finding the dispatch does not carry
+  (an older round's), the ids are in this session's history from the
+  review turn that published them; `lcm_grep` recovers them if
+  compaction took the details.

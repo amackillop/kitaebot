@@ -329,7 +329,9 @@ available, rather than in a root turn holding outward-facing tools.
 Once reviewed, a PR stays tracked until it closes — no explicit
 re-request needed. A new head SHA triggers an incremental re-review,
 scoped to the delta in the context of the prior review. The dispatched
-message carries the previously reviewed SHA and instructs the model to:
+message carries the previously reviewed SHA, the ledger's findings for
+the prior round (gate `pr` at that SHA — id, severity, note, and any
+disposition), and instructs the model to:
 
 - Produce the incremental diff, not the whole PR: the channel has
   already prepared the review checkout (same as the initial review —
@@ -340,15 +342,22 @@ message carries the previously reviewed SHA and instructs the model to:
   to the full `gh pr diff` when that fails anyway.
 - Recall the prior review from `gh pr view --json reviews`, which is
   what was actually published. The work session may still carry it, but
-  the API is the source of truth and the session is a cache of it.
+  the API is the source of truth and the session is a cache of it. The
+  ledger findings in the dispatch complement it rather than replace
+  it: ids and severities never appear in the published text, and the
+  per-finding dispositions the protocol demands need the ids. Session
+  history used to be the only source of them, which made dispositions
+  an archaeology exercise after compaction.
 - Dispatch the reviewer with the delta diff, the prior review's
-  substance, and the question the initial review does not ask: does
-  the delta address that feedback adequately and without introducing
-  new problems? A full re-review of untouched code is explicitly not
-  wanted. Same metadata shape, `git_ref` the new head SHA.
+  substance including its pending ledger findings, and the question
+  the initial review does not ask: does the delta address that
+  feedback adequately and without introducing new problems? A full
+  re-review of untouched code is explicitly not wanted. Same metadata
+  shape, `git_ref` the new head SHA.
 - Translate and submit as in the initial review: `correct` →
   `APPROVE` (the feedback is addressed), `incorrect` → `COMMENT`
-  naming the remaining gaps as inline threads.
+  naming the remaining gaps as inline threads. Then disposition each
+  pending finding by its id from the dispatch.
 
 The `reviewed` entry updates to the new SHA on dispatch, so each push
 gets at most one incremental turn.
@@ -389,9 +398,10 @@ the only place the ledger observes a human disputing a finding; the
 self-gates can only ever record the bot disputing itself, which is the
 weakest calibration signal available. `pending` on a `pr` finding
 therefore means awaiting the author, not lapsed discipline. Finding ids
-come from the review turn that published them, in the work session's
-history and recoverable with `lcm_grep`; the ledger holds them
-regardless, keyed by repo and `git_ref`.
+arrive in the dispatch, read back from the ledger by repo and the
+tracked `git_ref`; ids from an older round (a prior head SHA) are in
+the work session's history from the turn that published them,
+recoverable with `lcm_grep`.
 
 ### Contributed PRs
 
