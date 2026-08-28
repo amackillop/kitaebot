@@ -27,7 +27,9 @@ so the size of the change is not your problem and there is nothing to
 shrink.
 
 - **Plan gate** (gate "plan", git_ref: branch) — after writing the
-  plan, before posting it for sign-off or starting to implement. Pack
+  plan, before delivering it for sign-off or starting to implement.
+  Delivering means ending your turn with the plan as your reply — the
+  channel posts it to the thread; never post it through a tool. Pack
   the task statement, the plan, and the repo conventions you were
   given. A plan has no diff; it is packed by value as before.
 - **Commit gate** (gate "commit", git_ref: current HEAD SHA) — after
