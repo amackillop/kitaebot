@@ -573,7 +573,8 @@ pub(super) async fn run_compaction(
         );
         for chunk in leaf_chunks {
             let messages = chunk.messages();
-            let outcome = summarize_with_escalation(&messages, summarize).await;
+            let outcome =
+                summarize_with_escalation(&messages, |prompt| summarize(prompt, &messages)).await;
             let c = Arc::clone(&conn);
             run_blocking(c, move |c| {
                 write_leaf_summary(c, conversation_id, &chunk, &outcome)
@@ -599,7 +600,8 @@ pub(super) async fn run_compaction(
         );
         for chunk in chunks {
             let messages = chunk.messages();
-            let outcome = summarize_with_escalation(&messages, summarize).await;
+            let outcome =
+                summarize_with_escalation(&messages, |prompt| summarize(prompt, &messages)).await;
             let c = Arc::clone(&conn);
             run_blocking(c, move |c| {
                 write_condensed_summary(c, conversation_id, &chunk, &outcome)

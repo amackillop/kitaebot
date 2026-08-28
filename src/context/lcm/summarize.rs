@@ -16,8 +16,8 @@
 //! | 3     | Truncate raw text to a fixed token budget         | no   |
 //!
 //! See spec 14 §"Three-Level Summarization Escalation". This module is
-//! intentionally a pure function over [`SummarizeFn`] — it has no
-//! database plumbing, so unit tests run against canned mocks.
+//! intentionally a pure function over a per-level call closure — it
+//! has no database plumbing, so unit tests run against canned mocks.
 //!
 //! Compaction (3.7) calls into here once per chunk; the result feeds
 //! straight into a leaf or condensed summary node, with the
@@ -26,10 +26,12 @@
 #![allow(dead_code)]
 
 use std::fmt::Write as _;
+use std::future::Future;
 
 use tracing::{debug, warn};
 
-use super::super::{SummarizeFn, format_messages_for_summary};
+use super::super::format_messages_for_summary;
+use crate::error::ProviderError;
 use crate::types::{Message, estimate_tokens};
 
 /// Level-1 (normal) instruction block. Asks for prose that retains
@@ -149,17 +151,23 @@ pub fn estimate_messages_tokens(messages: &[Message]) -> usize {
 /// returns an error or if its output is at least as long as the input
 /// (in estimated tokens). Level 3 always succeeds.
 ///
+/// `call` performs one LLM call for the given level instruction block;
+/// the caller decides how the chunk reaches the model (fresh prompt or
+/// the main session's cache prefix). `messages` stays here for the
+/// acceptance thresholds and level-3 truncation.
+///
 /// This function performs no database I/O. It is the single hand-off
 /// point between compaction (which knows about chunks and the DAG) and
 /// the model (which knows about prose).
-pub async fn summarize_with_escalation(
-    messages: &[Message],
-    summarize: &SummarizeFn,
-) -> EscalationOutcome {
+pub async fn summarize_with_escalation<F, Fut>(messages: &[Message], call: F) -> EscalationOutcome
+where
+    F: Fn(&'static str) -> Fut,
+    Fut: Future<Output = Result<String, ProviderError>> + Send,
+{
     let input_tokens = estimate_messages_tokens(messages);
 
     // Level 1: prose with specifics.
-    match summarize(LEVEL_1_PROMPT, messages).await {
+    match call(LEVEL_1_PROMPT).await {
         Ok(content) => {
             if let Some(output_tokens) = accept(&content, input_tokens) {
                 debug!(input_tokens, output_tokens, "level 1 summary accepted");
@@ -180,7 +188,7 @@ pub async fn summarize_with_escalation(
     }
 
     // Level 2: terse bullets.
-    match summarize(LEVEL_2_PROMPT, messages).await {
+    match call(LEVEL_2_PROMPT).await {
         Ok(content) => {
             if let Some(output_tokens) = accept(&content, input_tokens) {
                 debug!(input_tokens, output_tokens, "level 2 summary accepted");
@@ -267,21 +275,22 @@ mod tests {
         }
     }
 
-    /// Build a `SummarizeFn` whose answers depend on the prompt. Each
+    type BoxedCall = Pin<Box<dyn Future<Output = Result<String, ProviderError>> + Send>>;
+
+    /// Build a call closure whose answers arrive in sequence. Each
     /// call records the prompt it received, so tests can assert which
     /// levels ran.
-    fn programmable_summarize(
+    fn programmable_call(
         responses: Vec<Result<String, ProviderError>>,
-    ) -> (SummarizeFn, Arc<Mutex<Vec<String>>>) {
+    ) -> (impl Fn(&'static str) -> BoxedCall, Arc<Mutex<Vec<String>>>) {
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
         let log_inner = log.clone();
         let responses = Arc::new(Mutex::new(responses.into_iter()));
-        let f: SummarizeFn = Arc::new(move |prompt: &str, _messages: &[Message]| {
+        let f = move |prompt: &'static str| {
             log_inner.lock().unwrap().push(prompt.to_string());
             let next = responses.lock().unwrap().next();
-            Box::pin(async move { next.unwrap_or(Err(ProviderError::RateLimited)) })
-                as Pin<Box<dyn std::future::Future<Output = _> + Send>>
-        });
+            Box::pin(async move { next.unwrap_or(Err(ProviderError::RateLimited)) }) as BoxedCall
+        };
         (f, log)
     }
 
@@ -317,8 +326,8 @@ mod tests {
     async fn level_1_succeeds_when_output_is_smaller() {
         let big_input = "x".repeat(4000); // ~1000 tokens
         let summary = plausible_summary("real summary ");
-        let (summarize, log) = programmable_summarize(vec![Ok(summary.clone())]);
-        let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
+        let (call, log) = programmable_call(vec![Ok(summary.clone())]);
+        let outcome = summarize_with_escalation(&[user(&big_input)], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Normal);
         assert_eq!(outcome.content, summary);
         assert!(outcome.output_tokens < outcome.input_tokens);
@@ -332,8 +341,8 @@ mod tests {
         let big_input = "x".repeat(4000);
         let bloated = "y".repeat(8000); // larger than input
         let bullets = plausible_summary("tight bullets ");
-        let (summarize, log) = programmable_summarize(vec![Ok(bloated), Ok(bullets.clone())]);
-        let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
+        let (call, log) = programmable_call(vec![Ok(bloated), Ok(bullets.clone())]);
+        let outcome = summarize_with_escalation(&[user(&big_input)], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Aggressive);
         assert_eq!(outcome.content, bullets);
         let prompts = log.lock().unwrap().clone();
@@ -344,9 +353,9 @@ mod tests {
     async fn level_1_error_falls_through_to_level_2() {
         let big_input = "x".repeat(4000);
         let recovered = plausible_summary("recovered ");
-        let (summarize, log) =
-            programmable_summarize(vec![Err(ProviderError::RateLimited), Ok(recovered.clone())]);
-        let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
+        let (call, log) =
+            programmable_call(vec![Err(ProviderError::RateLimited), Ok(recovered.clone())]);
+        let outcome = summarize_with_escalation(&[user(&big_input)], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Aggressive);
         assert_eq!(outcome.content, recovered);
         let prompts = log.lock().unwrap().clone();
@@ -357,9 +366,8 @@ mod tests {
     async fn degenerate_level_1_escalates() {
         let big_input = "x".repeat(4000);
         let bullets = plausible_summary("bullets ");
-        let (summarize, log) =
-            programmable_summarize(vec![Ok("stub".to_string()), Ok(bullets.clone())]);
-        let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
+        let (call, log) = programmable_call(vec![Ok("stub".to_string()), Ok(bullets.clone())]);
+        let outcome = summarize_with_escalation(&[user(&big_input)], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Aggressive);
         assert_eq!(outcome.content, bullets);
         let prompts = log.lock().unwrap().clone();
@@ -369,9 +377,8 @@ mod tests {
     #[tokio::test]
     async fn degenerate_both_levels_falls_to_truncation() {
         let big_input = "x".repeat(4000);
-        let (summarize, _log) =
-            programmable_summarize(vec![Ok("a".to_string()), Ok("b".to_string())]);
-        let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
+        let (call, _log) = programmable_call(vec![Ok("a".to_string()), Ok("b".to_string())]);
+        let outcome = summarize_with_escalation(&[user(&big_input)], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Deterministic);
         assert!(outcome.content.contains("[Truncated from"));
     }
@@ -381,8 +388,8 @@ mod tests {
         // Input under DEGENERATE_FLOOR_MIN_INPUT_CHARS: the floor is
         // inactive and a short-but-honest summary passes at level 1.
         let small_input = "x".repeat(1200);
-        let (summarize, _log) = programmable_summarize(vec![Ok("short but honest".to_string())]);
-        let outcome = summarize_with_escalation(&[user(&small_input)], &summarize).await;
+        let (call, _log) = programmable_call(vec![Ok("short but honest".to_string())]);
+        let outcome = summarize_with_escalation(&[user(&small_input)], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Normal);
         assert_eq!(outcome.content, "short but honest");
     }
@@ -392,8 +399,8 @@ mod tests {
         let big_input = "x".repeat(4000);
         let bloated_a = "a".repeat(8000);
         let bloated_b = "b".repeat(8000);
-        let (summarize, _log) = programmable_summarize(vec![Ok(bloated_a), Ok(bloated_b)]);
-        let outcome = summarize_with_escalation(&[user(&big_input)], &summarize).await;
+        let (call, _log) = programmable_call(vec![Ok(bloated_a), Ok(bloated_b)]);
+        let outcome = summarize_with_escalation(&[user(&big_input)], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Deterministic);
         assert!(outcome.content.contains("[Truncated from"));
         assert!(outcome.output_tokens <= LEVEL_3_TOKEN_BUDGET + 32);
@@ -401,11 +408,11 @@ mod tests {
 
     #[tokio::test]
     async fn both_levels_error_falls_to_truncation() {
-        let (summarize, _log) = programmable_summarize(vec![
+        let (call, _log) = programmable_call(vec![
             Err(ProviderError::RateLimited),
             Err(ProviderError::RateLimited),
         ]);
-        let outcome = summarize_with_escalation(&[user(&"x".repeat(4000))], &summarize).await;
+        let outcome = summarize_with_escalation(&[user(&"x".repeat(4000))], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Deterministic);
         assert!(outcome.content.contains("[Truncated from"));
     }
