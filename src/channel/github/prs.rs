@@ -627,8 +627,21 @@ pub(crate) const REVIEW_PROTOCOL_SEGMENT: &str = include_str!("../../prompts/rev
 
 /// Dispatch a turn to the repo's work session. Every GitHub turn lands
 /// there (spec 20); `role` is what distinguishes them, not the session.
+/// Session for a GitHub PR turn. Reviewer turns get a per-PR review
+/// session: the root's orchestration calls then carry ~20k of static
+/// prompt instead of the work session's full history, same-PR rounds
+/// share uncompacted history, and the session dies with the PR. The
+/// work session (`owner/repo`) stays the author/contributor home.
+fn session_for(role: GitHubRole, repo: &str, pr_number: u32) -> String {
+    match role {
+        GitHubRole::Author | GitHubRole::Contributor => repo.to_string(),
+        GitHubRole::Reviewer => format!("review:{repo}#{pr_number}"),
+    }
+}
+
 async fn send(handle: &AgentHandle, pr_number: u32, repo: &str, role: GitHubRole, message: String) {
     let cancel = CancellationToken::new();
+    let session = session_for(role, repo, pr_number);
     let source = ChannelSource::GitHub {
         pr_number,
         repo: repo.to_string(),
@@ -636,7 +649,7 @@ async fn send(handle: &AgentHandle, pr_number: u32, repo: &str, role: GitHubRole
     };
     // Actor switches to this session for the turn.
     match handle
-        .send_message(source, message, Some(repo.to_string()), None, cancel)
+        .send_message(source, message, Some(session), None, cancel)
         .await
     {
         Ok(reply) => info!(pr_number, "GitHub PR #{pr_number}: {}", reply.content),
@@ -1766,6 +1779,26 @@ mod tests {
         assert!(d.message.contains("reviewed SHA: old"));
         // No comments, so no discussion block.
         assert!(!d.message.contains("Respond to each comment"));
+    }
+
+    #[test]
+    fn reviewer_turns_get_a_per_pr_session() {
+        assert_eq!(
+            session_for(GitHubRole::Reviewer, "owner/repo", 42),
+            "review:owner/repo#42"
+        );
+    }
+
+    #[test]
+    fn author_and_contributor_turns_stay_in_the_work_session() {
+        assert_eq!(
+            session_for(GitHubRole::Author, "owner/repo", 42),
+            "owner/repo"
+        );
+        assert_eq!(
+            session_for(GitHubRole::Contributor, "owner/repo", 42),
+            "owner/repo"
+        );
     }
 
     fn tracked_review(login: &str, state: &str, submitted_at: Option<&str>) -> PrReview {

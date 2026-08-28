@@ -68,18 +68,42 @@ channel knows which of its four poll passes produced each item, so the
 role costs nothing to carry. It selects the review protocol segment
 ([spec 06](06-system-prompt.md)) and nothing else.
 
-**All GitHub turns route to the repo's work session** (`owner/repo`,
-the same key as Linear issue routing). `last_poll` advances only after
-a successful poll, and only to the tick's start time: turns run
-inline between passes, so a post-dispatch timestamp would swallow
-feedback that arrived mid-tick on a PR whose snapshot predates it —
-advancing to tick start re-examines such items next tick, trading a
-seconds-scale duplicate window for the absence of silent loss.
+**Author and contributor turns route to the repo's work session**
+(`owner/repo`, the same key as Linear issue routing). **Reviewer turns
+route to a per-PR review session** (`review:{nwo}#{n}`). `last_poll`
+advances only after a successful poll, and only to the tick's start
+time: turns run inline between passes, so a post-dispatch timestamp
+would swallow feedback that arrived mid-tick on a PR whose snapshot
+predates it — advancing to tick start re-examines such items next
+tick, trading a seconds-scale duplicate window for the absence of
+silent loss.
 
-An earlier revision gave reviews their own `review:{nwo}` session, to
-keep prior-review context from compacting in-progress work away and to
-accumulate repo knowledge across reviews. Both justifications have
-since been taken over:
+The review-session split is a cost decision, and the shape matters.
+The root review turn is mechanical, but its calls multiply — anchoring
+retries, resubmissions, dispositions ran one PR #106 re-review to 33
+calls — and in the work session every call hauled that session's full
+history: ~103k prompt tokens per call, ~88k of it history, 3.9M prompt
+tokens and the largest single line item in the review's cost, spent on
+the one participant that judges nothing. A per-PR session holds only
+the static prompt and this PR's own rounds, so the per-call cost stays
+at the ~20k floor for the PR's life. Per-PR rather than per-repo
+because a shared review session drifts into the same compaction band
+the work session lives in (the saving erodes), while same-PR rounds —
+initial review, re-reviews, discussion — are the recall that is
+actually wanted, and they stay uncompacted in a session this small.
+The session stops receiving turns when the PR closes; distillation
+drains it via per-session watermarks like any other, after which it
+sits inert on disk. Nothing prunes the files yet — pruning hooks into
+the tracked pass's close detection if the inert tail ever costs
+anything.
+
+An earlier revision routed reviews to a per-repo `review:{nwo}`
+session, to keep prior-review context from compacting in-progress work
+away and to accumulate repo knowledge across reviews. Those
+justifications did not survive, and their obsolescence is what makes
+the lean session safe — each mechanism that made the work session
+unnecessary for correctness is also why the review session can carry
+nothing:
 
 - **Judgment isolation** belongs to the `reviewer` sub-agent
   ([spec 23](23-self-review.md)). The diff and the code reading happen
@@ -95,20 +119,19 @@ since been taken over:
 - **Prior-review recall** is authoritative on GitHub, not in a
   session: `github_pr_reviews` returns what was actually published,
   where session history is what the bot believes it said after
-  compaction.
+  compaction. The re-review dispatch also carries the prior round's
+  ledger findings, so nothing about a review turn's inputs assumes a
+  session that has seen the repo before.
 
-What a separate session did still buy was narrative isolation, and the
-actor bounds how much that is worth: it consumes envelopes serially and
-awaits each turn to completion, so a review dispatch arriving during an
-implementation turn queues behind it rather than interleaving. A whole
-commit-by-commit implementation is one turn. Interference is therefore
-confined to turn boundaries, where nothing is in flight, and feedback
-on the bot's own PRs has always landed in the work session anyway.
-
-The residual case is an implementation turn that exhausts
-`agent.max_iterations` — root `BudgetPolicy` is `Fail`, so it errors
-with work half-done and continuation becomes a second turn. That is a
-failure mode to handle at the cap, not a reason to shard sessions.
+The prompt segments stay keyed on the dispatch role, not the session
+name — that decision stands from the per-repo retirement; a session is
+where history accumulates, a role is a property of the turn. And the
+reviewer sub-agent keeps no LCM tools: with review turns in their own
+sessions the archive it would read is review history rather than the
+author's context, but at the self-review gates the same agent type
+still runs against the work session, and cross-review knowledge
+reaches the judge through the checklist and memory — curated through
+ledger calibration — not through replaying its own past verdicts.
 
 ### Review checkout
 
@@ -568,7 +591,9 @@ first place. Requires the `github-token` secret.
 ### Does Not Own
 
 - Agent turns — `AgentHandle::send_message`, as everywhere
-- Session routing — the actor routes on the repo hint (spec 14)
+- Session routing — the actor routes on the channel's hint (spec 14):
+  the work session for author/contributor turns, `review:{nwo}#{n}`
+  for reviewer turns
 - GitHub tools (`github_pr_create`, `github_gh`, ...) — spec 03; the
   model drives `gh` through the exec tool during review turns, there is
   no dedicated review tool

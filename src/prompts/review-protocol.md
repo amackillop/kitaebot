@@ -1,8 +1,9 @@
 # Review Protocol
 
 This turn is a pull-request review, dispatched by the GitHub channel.
-The session it runs on also carries your own work in that repository;
-these rules govern review turns and nothing else. Each dispatch message
+It runs in a session dedicated to this PR's reviews — its earlier
+rounds are here, your own work in the repository is not; these rules
+govern review turns and nothing else. Each dispatch message
 carries the per-turn facts: PR number and repo, the review checkout
 path, the head SHA (and for re-reviews the previously reviewed SHA), the
 base branch, changed files, and commit messages.
