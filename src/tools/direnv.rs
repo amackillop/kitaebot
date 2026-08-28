@@ -363,18 +363,6 @@ async fn evaluate_direnv(
         )));
     }
 
-    // direnv swallows `use flake` failures: it exits 0, prints the nix
-    // error to stderr, and exports a bare environment. Detect this by
-    // checking for nix's `error:` marker on stderr (after stripping ANSI
-    // color codes). On success stderr carries only direnv log messages
-    // (prefixed `direnv:`), which never start with `error:`.
-    let stderr = output.stderr.trim();
-    if has_nix_error(stderr) {
-        return Err(DirenvError::Failed(format!(
-            "direnv export json reported an error: {stderr}"
-        )));
-    }
-
     // direnv outputs nothing when there's no .envrc or it's not allowed.
     let stdout = output.stdout.trim();
     if stdout.is_empty() {
@@ -387,13 +375,35 @@ async fn evaluate_direnv(
 
     // Filter out nulls (variables direnv wants to unset — irrelevant since
     // we build the subprocess env from scratch, not from the current process).
-    let env = raw
+    let env: HashMap<String, String> = raw
         .into_iter()
         .filter_map(|(k, v)| v.map(|v| (k, v)))
         .collect();
 
+    // A devshell signature var proves the flake evaluated: nix always
+    // exports IN_NIX_SHELL and NIX_STORE from a live devshell, and a
+    // failed evaluation has no devshell environment to export. The
+    // subprocess env is env_clear()ed to SAFE_ENV_VARS, which contains
+    // neither var, so the export diff can never omit them as already
+    // present in the parent.
+    if !has_devshell_signature(&env) {
+        // direnv swallows `use flake` failures, exporting a bare
+        // environment; nix's `error:` marker on stderr is the tell.
+        let stderr = output.stderr.trim();
+        if has_nix_error(stderr) {
+            return Err(DirenvError::Failed(format!(
+                "direnv export json reported an error: {stderr}"
+            )));
+        }
+    }
+
     debug!(dir = %dir.display(), "Direnv evaluation complete");
     Ok(env)
+}
+
+/// Whether the export carries proof that a nix devshell evaluated.
+fn has_devshell_signature(env: &HashMap<String, String>) -> bool {
+    env.contains_key("IN_NIX_SHELL") || env.contains_key("NIX_STORE")
 }
 
 #[cfg(test)]
@@ -746,6 +756,49 @@ mod tests {
             env.get("PATH").map(String::as_str),
             Some("/nix/store/bin"),
             "direnv log messages on stderr must not cause a false failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_trusts_devshell_export_despite_hook_error_line() {
+        // The #114 incident: a devshell evaluates fully (signature
+        // vars exported) but its shellHook contains a non-fatal
+        // failing step whose tool prints an `error:`-prefixed line
+        // (just's recipe format). The working export must win.
+        let fake = FakeDirenv::install(
+            "echo 'error: recipe `pnpm-install` failed on line 19 with exit code 1' >&2\necho '{\"IN_NIX_SHELL\": \"impure\", \"NIX_STORE\": \"/nix/store\", \"PATH\": \"/nix/store/bin\"}'",
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
+
+        let cache = fake.cache();
+        let env = cache.get(dir.path()).await.unwrap().unwrap();
+        assert_eq!(
+            env.get("PATH").map(String::as_str),
+            Some("/nix/store/bin"),
+            "a signature-bearing export must not be failed on shellHook noise"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_fails_manual_export_without_signature_and_nix_error() {
+        // An .envrc that sets variables before a failing `use flake`
+        // (the `export NIX_CONFIG=...` pattern) exports non-empty but
+        // carries no devshell signature — the nix error must still
+        // classify it Failed (#41 semantics preserved).
+        let fake = FakeDirenv::install(
+            "echo 'error: Failed to fetch git repository' >&2\necho '{\"NIX_CONFIG\": \"extra-experimental-features =\"}'",
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".envrc"), "use flake").unwrap();
+
+        let cache = fake.cache();
+        let err = cache.get(dir.path()).await.unwrap_err();
+        assert!(
+            matches!(&err, DirenvError::Failed(m) if m.contains("Failed to fetch")),
+            "signature-less export with a nix error must stay Failed: {err}"
         );
     }
 }

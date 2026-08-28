@@ -517,11 +517,15 @@ parallel tool calls each trigger a full `nix print-dev-env` evaluation.
    timeout
 4. **Detect silent flake failures** — `direnv export json` exits 0
    even when `use flake` fails, printing the nix error to stderr and
-   exporting a bare environment. The cache checks stderr for nix's
-   `error:` marker (after stripping ANSI color codes) and treats a
-   match as a failure carrying the stderr, so the real error surfaces
-   in the duty outcome rather than as a `command not found` from bare
-   PATH.
+   exporting a bare environment. The cache classifies by the export
+   first: an export carrying a nix devshell signature (`IN_NIX_SHELL`
+   or `NIX_STORE`) proves the flake evaluated and succeeds regardless
+   of stderr noise, since shellHook steps (just, pnpm, cargo) also
+   print `error:`-prefixed lines without breaking the devshell. A
+   signature-less export falls back to checking stderr for nix's
+   `error:` marker (after stripping ANSI color codes); a match is a
+   failure carrying the stderr, so the real error surfaces in the
+   duty outcome rather than as a `command not found` from bare PATH.
 5. **Graceful degradation** — if direnv fails, exec runs without the devshell
 6. **Warm on clone** — `git_clone` pre-populates the cache in the background
 7. **Trust before evaluate** — `git_clone` runs `direnv allow` synchronously
