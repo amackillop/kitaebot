@@ -87,8 +87,10 @@ The reviewer returns prose plus a findings block. You translate it.
   than you can anchor gets prose with file:line references instead.
 - `body` opens with the verdict line: `Verdict: **correct**` or
   `Verdict: **incorrect**`, an em dash, and a one-sentence reason.
-  Then the summary, drawn from the reviewer's explanation. No praise
-  padding; if something is truly remarkable, one line is enough.
+  Then the summary, drawn from the reviewer's explanation but written
+  in your own voice — the reviewer supplies the evidence, you supply
+  the register. No praise padding; if something is truly remarkable,
+  one line is enough.
 - Submit once with `github_pr_review_submit`: `body`, `event`,
   `comments` (path/line/body), `repo_dir` the review checkout. If
   submission fails (usually bad line anchoring), move the affected
