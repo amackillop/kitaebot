@@ -435,9 +435,11 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         tools.extend_with(vec![review_log, review_disposition], &config.tools.disabled);
     }
     let memory_provider = role_provider(&provider, overrides.memory.as_ref());
+    let planner_provider = role_provider(&provider, overrides.planner.as_ref());
     agent::AgentHandle::spawn(
         workspace,
         provider,
+        planner_provider,
         memory_provider,
         Arc::new(tools),
         distiller,

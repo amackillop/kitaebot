@@ -86,6 +86,16 @@ dispatch waived it (the waiver covers settled ground only; the bot can
 raise its own hand). The label is read at announcement time; adding it
 later changes nothing.
 
+**Plan turns think on the planner model.** A plan announcement
+dispatches with the planner turn role, served by
+`model_overrides.planner` when set (spec 02); execution, discussion,
+and post-plan comment turns — revisions included — ride the default.
+This is the plan/execute split: the thinking phase gets the strong
+model, and a strong reviewed plan is what lets the default be cheap.
+Revisions run on the default deliberately; a revised plan still passes
+the plan gate, and the channel cannot tell approval from feedback
+before dispatch. Unset, every turn routes identically.
+
 **Plan revisions edit in place.** The channel records the announcement
 reply's comment id (that comment is the plan) and hands it to
 revision turns, which are instructed to engage with feedback as a

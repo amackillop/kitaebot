@@ -100,12 +100,23 @@ pub(super) enum Envelope {
     Greeting(oneshot::Sender<String>),
 }
 
+/// Which root provider serves a turn. Channels choose per dispatch:
+/// plan turns think on the planner override, everything else on the
+/// default (spec 25 plan/execute split).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TurnRole {
+    #[default]
+    Default,
+    Planner,
+}
+
 /// Payload for a normal input turn.
 pub(super) struct InputEnvelope {
     pub source: ChannelSource,
     pub input: String,
     /// Target session override. `None` means use the active session.
     pub session_hint: Option<String>,
+    pub role: TurnRole,
     pub reply_tx: oneshot::Sender<Result<Reply, String>>,
     pub activity_tx: Option<mpsc::Sender<Activity>>,
     pub cancel: CancellationToken,

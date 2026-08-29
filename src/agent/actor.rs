@@ -25,7 +25,7 @@ use crate::workspace::Workspace;
 use tokio::sync::mpsc;
 
 use super::PromptConfig;
-use super::envelope::{ChannelSource, Envelope, InputEnvelope};
+use super::envelope::{ChannelSource, Envelope, InputEnvelope, TurnRole};
 
 /// The actor that processes envelopes sequentially.
 ///
@@ -34,6 +34,9 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     rx: mpsc::Receiver<Envelope>,
     workspace: Arc<Workspace>,
     provider: Arc<P>,
+    /// Serves [`TurnRole::Planner`] turns; the default provider when
+    /// no `model_overrides.planner` is configured.
+    planner_provider: Arc<P>,
     memory_provider: Arc<P>,
     tools: Arc<Tools>,
     distiller: Arc<Distiller>,
@@ -55,6 +58,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         rx: mpsc::Receiver<Envelope>,
         workspace: Arc<Workspace>,
         provider: Arc<P>,
+        planner_provider: Arc<P>,
         memory_provider: Arc<P>,
         tools: Arc<Tools>,
         distiller: Arc<Distiller>,
@@ -71,6 +75,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             rx,
             workspace,
             provider,
+            planner_provider,
             memory_provider,
             tools,
             distiller,
@@ -282,12 +287,18 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         // Derived once for both the ToolCtx and the ledger row, so the
         // sub-agent inheritance and the root attribution cannot diverge.
         let task = TaskKey::for_source(&envelope.source);
+        // Selected once for both the turn and the ledger row, so the
+        // billed model can never disagree with the one that ran.
+        let provider: &P = match envelope.role {
+            TurnRole::Default => &self.provider,
+            TurnRole::Planner => &self.planner_provider,
+        };
         let metered = super::process_message_metered(
             &mut self.engine,
             &self.summarize,
             &self.workspace,
             &tagged,
-            &*self.provider,
+            provider,
             &self.tools,
             self.max_iterations,
             &self.prompt,
@@ -309,7 +320,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             &TurnRecord {
                 session: target,
                 source: &source,
-                model: self.provider.model(),
+                model: provider.model(),
                 task: Some(&task),
                 meter,
             },
@@ -998,6 +1009,47 @@ mod tests {
 
         assert_eq!(result.unwrap().content, "Distillation gate closed.");
         assert_eq!(root.call_count(), 0);
+    }
+
+    /// Planner turns run on the planner provider, default turns on the
+    /// root — the selection the spec 25 plan/execute split rides on.
+    #[tokio::test]
+    async fn turn_role_selects_the_provider() {
+        let (_dir, ws) = crate::test_support::workspace();
+        let root = Arc::new(MockProvider::new(vec![Ok(Response::Text("root".into()))]));
+        let planner = Arc::new(MockProvider::new(vec![Ok(Response::Text("plan".into()))]));
+        let handle = TestAgent::new(ws, root.clone())
+            .planner(planner.clone())
+            .spawn();
+
+        let reply = handle
+            .send_message_with_role(
+                ChannelSource::Socket,
+                "plan this".into(),
+                None,
+                None,
+                CancellationToken::new(),
+                crate::agent::envelope::TurnRole::Planner,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.content, "plan");
+        assert_eq!(planner.call_count(), 1);
+        assert_eq!(root.call_count(), 0);
+
+        let reply = handle
+            .send_message(
+                ChannelSource::Socket,
+                "do it".into(),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.content, "root");
+        assert_eq!(root.call_count(), 1);
+        assert_eq!(planner.call_count(), 1);
     }
 
     #[tokio::test]

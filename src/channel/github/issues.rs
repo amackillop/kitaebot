@@ -28,7 +28,7 @@ use tracing::{error, info, warn};
 
 use super::trust::Trust;
 use crate::agent::AgentHandle;
-use crate::agent::envelope::ChannelSource;
+use crate::agent::envelope::{ChannelSource, TurnRole};
 use crate::channel::execution_checkout;
 use crate::clients::github::{GithubClient, IssueComment, SearchIssue};
 use crate::config::GithubConfig;
@@ -227,7 +227,21 @@ async fn dispatch(
     // Route per-repo: all of a repo's tickets — and its PRs, which use
     // the same key — share one session.
     let body = match handle
-        .send_message(source, message, Some(d.nwo.clone()), None, cancel)
+        .send_message_with_role(
+            source,
+            message,
+            Some(d.nwo.clone()),
+            None,
+            cancel,
+            // Plan turns think on the planner override (spec 25);
+            // execution and discussion ride the default, including
+            // post-plan revision comments — a revised plan still
+            // passes the plan gate.
+            match d.kind {
+                TurnKind::Plan => TurnRole::Planner,
+                TurnKind::Discussion | TurnKind::Execution => TurnRole::Default,
+            },
+        )
         .await
     {
         Ok(reply) => {

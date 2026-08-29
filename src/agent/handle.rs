@@ -23,7 +23,7 @@ use crate::workspace::Workspace;
 
 use super::PromptConfig;
 use super::actor::Agent;
-use super::envelope::{ChannelSource, Envelope, InputEnvelope};
+use super::envelope::{ChannelSource, Envelope, InputEnvelope, TurnRole};
 
 /// Cloneable handle to the agent actor.
 ///
@@ -42,6 +42,7 @@ impl AgentHandle {
     pub fn spawn<P: Provider + 'static, E: ContextEngine + 'static>(
         workspace: Arc<Workspace>,
         provider: Arc<P>,
+        planner_provider: Arc<P>,
         memory_provider: Arc<P>,
         tools: Arc<Tools>,
         distiller: Arc<Distiller>,
@@ -59,6 +60,7 @@ impl AgentHandle {
             rx,
             workspace,
             provider,
+            planner_provider,
             memory_provider,
             tools,
             distiller,
@@ -93,11 +95,35 @@ impl AgentHandle {
         activity_tx: Option<mpsc::Sender<Activity>>,
         cancel: CancellationToken,
     ) -> Result<Reply, String> {
+        self.send_message_with_role(
+            source,
+            input,
+            session_hint,
+            activity_tx,
+            cancel,
+            TurnRole::default(),
+        )
+        .await
+    }
+
+    /// [`Self::send_message`] with an explicit turn role. Channels
+    /// that distinguish phases (plan vs execute, spec 25) use this;
+    /// everything else defaults.
+    pub async fn send_message_with_role(
+        &self,
+        source: ChannelSource,
+        input: String,
+        session_hint: Option<String>,
+        activity_tx: Option<mpsc::Sender<Activity>>,
+        cancel: CancellationToken,
+        role: TurnRole,
+    ) -> Result<Reply, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let envelope = Envelope::Input(InputEnvelope {
             source,
             input,
             session_hint,
+            role,
             reply_tx,
             activity_tx,
             cancel,

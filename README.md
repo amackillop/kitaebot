@@ -258,6 +258,7 @@ kitaebot = {
         worker.model = "mid/model";
         summarizer.model = "cheap/model";          # Fresh-path summaries only; live compaction rides the main model's cache (spec 14)
         reviewer.model = "strong/model";           # Judges the bot's own work and others' PRs
+        planner.model = "strong/model";            # Plan turns think here; keep distinct from reviewer (the judge must not be the author)
         memory = {                                 # Distilled facts persist and inject every turn; don't skimp
           model = "strong/model";
           reasoning.effort = "low";                # Reasoning spirals starve content room; bound the thinking

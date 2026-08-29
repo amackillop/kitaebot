@@ -176,6 +176,7 @@ Configuration via `config.toml` under `[provider]`:
 | `model_overrides.reviewer` | unset | Override for `reviewer` sub-agents (spec 23) |
 | `model_overrides.summarizer` | unset | Override for compaction summaries |
 | `model_overrides.memory` | unset | Override for memory distillation turns |
+| `model_overrides.planner` | unset | Override for plan turns (spec 25 plan/execute split); unset routes them to the default like every other turn |
 
 Each `model_overrides.*` value is a table setting `model`,
 `reasoning`, or both (`worker = { model = "cheap/model" }`;

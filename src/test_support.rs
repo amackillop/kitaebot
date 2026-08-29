@@ -33,6 +33,9 @@ pub(crate) fn workspace() -> (TempDir, Arc<Workspace>) {
 pub(crate) struct TestAgent {
     ws: Arc<Workspace>,
     provider: Arc<MockProvider>,
+    /// `None` mirrors an unset `model_overrides.planner`: the root
+    /// provider serves planner turns too.
+    planner_provider: Option<Arc<MockProvider>>,
     memory_provider: Arc<MockProvider>,
     tools: Tools,
     notifier: Option<Arc<Notifier>>,
@@ -48,11 +51,17 @@ impl TestAgent {
             memory_provider: provider.clone(),
             ws,
             provider,
+            planner_provider: None,
             tools: Tools::default(),
             notifier: None,
             max_iterations: 1,
             duty_trigger: None,
         }
+    }
+
+    pub(crate) fn planner(mut self, provider: Arc<MockProvider>) -> Self {
+        self.planner_provider = Some(provider);
+        self
     }
 
     pub(crate) fn tools(mut self, tools: Tools) -> Self {
@@ -89,9 +98,13 @@ impl TestAgent {
             1,
             8192,
         ));
+        let planner = self
+            .planner_provider
+            .unwrap_or_else(|| self.provider.clone());
         AgentHandle::spawn(
             self.ws,
             self.provider,
+            planner,
             self.memory_provider,
             Arc::new(self.tools),
             distiller,
