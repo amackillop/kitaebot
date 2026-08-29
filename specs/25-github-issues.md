@@ -96,6 +96,16 @@ Revisions run on the default deliberately; a revised plan still passes
 the plan gate, and the channel cannot tell approval from feedback
 before dispatch. Unset, every turn routes identically.
 
+**The plan rides the dispatch.** When the recorded plan comment is in
+the tick's fetched thread, post-plan dispatches embed its body
+verbatim. Session history is not relied on: after compaction the
+assembled prompt holds a summary of the plan, not the plan (LCM keeps
+the bytes but recovery is a tool round the model must initiate; flat
+summarizes lossily), and the execution turn — the cheap-default half
+of the plan/execute split — must see the gate-reviewed text
+unconditionally. A plan past the fetch cap or deleted degrades to the
+id reference alone.
+
 **Plan revisions edit in place.** The channel records the announcement
 reply's comment id (that comment is the plan) and hands it to
 revision turns, which are instructed to engage with feedback as a

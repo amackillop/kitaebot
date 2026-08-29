@@ -671,6 +671,17 @@ fn format_comment(view: &IssueView, author: &str, body: &str, plan_comment: Opti
         view.issue.title,
     );
     let _ = writeln!(s, "\n{body}");
+    // The plan rides the dispatch so the execution turn never depends
+    // on it surviving session compaction; the comments were fetched
+    // this tick, so the lookup is free. A plan past the 100-comment
+    // fetch cap (or deleted) degrades to the id reference below.
+    if let Some(plan) = plan_comment.and_then(|id| view.comments.iter().find(|c| c.id == id)) {
+        let _ = writeln!(
+            s,
+            "\nYour current plan (comment id {}):\n\n{}",
+            plan.id, plan.body
+        );
+    }
     let _ = writeln!(
         s,
         "\nIf this approves your plan, execute it end-to-end: create a \
@@ -1062,6 +1073,42 @@ mod tests {
         assert!(msg.contains("disagree"), "revision must license pushback");
         // The id survives into the next state while the issue is open.
         assert_eq!(next.plan_comments.get("owner/repo#1"), Some(&77));
+    }
+
+    /// The dispatch embeds the plan body when the recorded comment is
+    /// in the fetched thread, so execution never depends on the plan
+    /// surviving session compaction. An id outside the thread (fetch
+    /// cap, deletion) degrades to the id-only reference.
+    #[test]
+    fn dispatch_embeds_the_recorded_plan_body() {
+        let plan = IssueComment {
+            id: 77,
+            user: UserRef { login: BOT.into() },
+            body: "## The Plan\n1. do the thing".into(),
+            created_at: "2026-08-04T12:10:00Z".into(),
+        };
+        let mut views = [view(
+            1,
+            "2026-08-04T12:30:00Z",
+            vec![
+                plan,
+                comment("2026-08-04T12:30:00Z", "alice", "LGTM, proceed"),
+            ],
+        )];
+        let mut st = state("2026-08-04T12:00:00Z", &["owner/repo#1"]);
+        st.plan_comments.insert("owner/repo#1".into(), 77);
+
+        let (dispatches, _) = decide(&views, &st);
+        let msg = &dispatches[0].message;
+        assert!(msg.contains("Your current plan (comment id 77)"), "{msg}");
+        assert!(msg.contains("1. do the thing"), "{msg}");
+
+        // Same state, plan comment missing from the thread: id only.
+        views[0].comments.remove(0);
+        let (dispatches, _) = decide(&views, &st);
+        let msg = &dispatches[0].message;
+        assert!(!msg.contains("Your current plan"), "{msg}");
+        assert!(msg.contains("comment id 77"), "{msg}");
     }
 
     #[test]
