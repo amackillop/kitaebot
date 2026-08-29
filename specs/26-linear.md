@@ -51,10 +51,13 @@ issues channel ([spec 25](25-github-issues.md)): an issue carrying
 `linear.plan_label` (default `needs-plan`, case-insensitive) gets
 plan-first; without it the announcement is a direct execution turn,
 with the same judgment backstop. The label is read at announcement
-time. Plan announcements dispatch with the planner turn role, exactly
-as on GitHub (spec 25's plan/execute split): both ticket channels'
-plans think on `model_overrides.planner`, everything else on the
-default.
+time. Plan announcements dispatch with the planner turn role, as on
+GitHub (spec 25's plan/execute split): both ticket channels' plans
+think on `model_overrides.planner`, everything else on the default.
+Routing parity only: GitHub's other half — the recorded plan comment
+embedded verbatim in post-plan dispatches — is not yet ported, so a
+Linear execution turn still relies on the plan surviving session
+context.
 
 **Repo selection**: the target repository comes from a label on the issue —
 a label named like `owner/repo` (contains exactly one `/`). Issues without
