@@ -58,7 +58,9 @@ in
     };
     settings = {
       provider = {
-        model = "z-ai/glm-5.3";
+        # The execution default (spec 25 plan/execute split): plan
+        # turns think on model_overrides.planner below.
+        model = "z-ai/glm-5.3-flash";
         max_tokens = 32768;
         # Unset lets glm-5.3 free-run its thinking: 5.4x the output
         # tokens per call that 5.2 produced, on every iteration.
@@ -68,7 +70,12 @@ in
           worker.model = "deepseek/deepseek-v4-pro";
           reviewer.model = "moonshotai/kimi-k3";
           summarizer.model = "deepseek/deepseek-v4-flash";
+          # Distilled facts persist and inject into every future turn;
+          # they must not inherit the flash default.
+          memory.model = "z-ai/glm-5.3";
           memory.reasoning.effort = "low";
+          # Not kimi: the plan gate's judge must not be the author.
+          planner.model = "z-ai/glm-5.3";
         };
       };
 
