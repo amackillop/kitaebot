@@ -94,7 +94,12 @@ This is the plan/execute split: the thinking phase gets the strong
 model, and a strong reviewed plan is what lets the default be cheap.
 Revisions run on the default deliberately; a revised plan still passes
 the plan gate, and the channel cannot tell approval from feedback
-before dispatch. Unset, every turn routes identically.
+before dispatch. Unset, every turn routes identically. The plan
+format ends with an executor-facing "Implementation notes" section —
+files, verify commands, ordering constraints, landmines — because the
+executing model may be weaker than the planning one and must not be
+left re-deriving what the planner already knew; reviewers can stop
+reading above that line, and the plan gate reviews it with the rest.
 
 **The plan rides the dispatch.** When the recorded plan comment is in
 the tick's fetched thread, post-plan dispatches embed its body
