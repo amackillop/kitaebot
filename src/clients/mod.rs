@@ -22,6 +22,8 @@ pub struct RawResponse {
 pub(crate) fn http_client(builder: reqwest::ClientBuilder) -> reqwest::Client {
     #[cfg(feature = "mock-network")]
     let builder = builder.tls_certs_only(Vec::<reqwest::Certificate>::new());
+    #[allow(clippy::expect_used)]
+    // TLS backend init; fails only on a broken host, at first client build
     builder.build().expect("failed to build HTTP client")
 }
 

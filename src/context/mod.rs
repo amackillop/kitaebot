@@ -335,19 +335,15 @@ pub(crate) fn truncate_tool_output(content: &str, max_tokens: usize) -> std::bor
     // Bytes kept per side; over-threshold content is strictly longer
     // than both sides combined, so the slices never overlap.
     let keep = max_tokens * 4 / 2;
-    let mut head_end = keep;
-    while !content.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
-    let mut tail_start = content.len() - keep;
-    while !content.is_char_boundary(tail_start) {
-        tail_start += 1;
-    }
-    let omitted = crate::types::estimate_tokens(&content[head_end..tail_start]);
+    let head = crate::text::prefix(content, keep);
+    let tail = crate::text::suffix(content, keep);
+    let omitted = crate::types::estimate_tokens(
+        content
+            .get(head.len()..content.len() - tail.len())
+            .unwrap_or(""),
+    );
     std::borrow::Cow::Owned(format!(
-        "{}\n... [~{omitted} tokens truncated] ...\n{}",
-        &content[..head_end],
-        &content[tail_start..],
+        "{head}\n... [~{omitted} tokens truncated] ...\n{tail}"
     ))
 }
 

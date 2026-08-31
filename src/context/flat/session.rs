@@ -5,7 +5,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -95,11 +94,7 @@ struct Timestamp(u64);
 
 impl Timestamp {
     fn now() -> Self {
-        let secs = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("system clock before Unix epoch")
-            .as_secs();
-        Self(secs)
+        Self(crate::time::now_epoch())
     }
 }
 

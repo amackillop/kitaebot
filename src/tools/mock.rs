@@ -36,7 +36,7 @@ impl Tool for MockTool {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+        crate::tools::schema_of::<Args>()
     }
 
     fn execute(
@@ -79,7 +79,7 @@ impl Tool for MockBlockedTool {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+        crate::tools::schema_of::<Args>()
     }
 
     fn execute(
@@ -129,7 +129,7 @@ impl Tool for MockFailingTool {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+        crate::tools::schema_of::<Args>()
     }
 
     fn execute(

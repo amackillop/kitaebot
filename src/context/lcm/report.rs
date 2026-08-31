@@ -65,7 +65,7 @@ fn health_section(conn: &Connection) -> Result<String, EngineError> {
     } else {
         out.push_str("Summaries by depth:\n");
         for (depth, count) in depths {
-            writeln!(out, "  depth {depth}: {count}").unwrap();
+            let _ = writeln!(out, "  depth {depth}: {count}");
         }
     }
 
@@ -75,7 +75,7 @@ fn health_section(conn: &Connection) -> Result<String, EngineError> {
         [],
         |r| r.get(0),
     )?;
-    writeln!(out, "Failed summarizations (truncated): {truncated}").unwrap();
+    let _ = writeln!(out, "Failed summarizations (truncated): {truncated}");
 
     // Raw stored tokens vs what assemble would send today.
     let compression: Vec<(String, i64, i64)> = conn
@@ -94,27 +94,24 @@ fn health_section(conn: &Connection) -> Result<String, EngineError> {
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
-    writeln!(
+    let _ = writeln!(
         out,
         "\n{:<20} {:>12}   {:>14}",
         "Conversation", "Raw Tokens", "Context Tokens"
-    )
-    .unwrap();
-    writeln!(
+    );
+    let _ = writeln!(
         out,
         "{:<20} {:>12}   {:>14}",
         "------------", "----------", "--------------"
-    )
-    .unwrap();
+    );
     for (name, raw, context) in compression {
-        writeln!(
+        let _ = writeln!(
             out,
             "{:<20} {:>12}   {:>14}",
             desanitize_name(&name),
             raw,
             context,
-        )
-        .unwrap();
+        );
     }
 
     // Externalized payloads.
@@ -124,12 +121,11 @@ fn health_section(conn: &Connection) -> Result<String, EngineError> {
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let file_bytes = u64::try_from(file_bytes).unwrap_or(0);
-    writeln!(
+    let _ = writeln!(
         out,
         "\nLarge files: {file_count} ({})",
         crate::context::stats::format_bytes(file_bytes),
-    )
-    .unwrap();
+    );
 
     Ok(out)
 }

@@ -70,7 +70,12 @@ pub(crate) async fn ensure_cloned(
                 source: e,
             })?;
     }
-    let parent = dir.parent().expect("rel path has parent components");
+    let Some(parent) = dir.parent() else {
+        return Err(ToolError::InvalidArguments(format!(
+            "clone destination {} has no parent directory",
+            dir.display()
+        )));
+    };
     tokio::fs::create_dir_all(parent)
         .await
         .map_err(|e| ToolError::Io {
@@ -78,7 +83,7 @@ pub(crate) async fn ensure_cloned(
             path: parent.to_path_buf(),
             source: e,
         })?;
-    let name = rel.rsplit('/').next().expect("rsplit yields at least one");
+    let name = rel.rsplit('/').next().unwrap_or(rel);
     if let Err(e) = run(git, &["clone", url, name], parent, true).await {
         // A failed clone must not leave a partial .git either.
         let _ = tokio::fs::remove_dir_all(&dir).await;

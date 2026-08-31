@@ -303,17 +303,16 @@ pub(crate) fn render_tee(report: &TeeReport) -> String {
         out.push_str("No tool failures or blocked commands recorded.\n");
     }
     if !report.failures.is_empty() {
-        writeln!(
+        let _ = writeln!(
             out,
             "{:<20} {:<16} {:<9} {:>5}",
             "Tool", "Kind", "Origin", "Count"
-        )
-        .unwrap();
+        );
         let mut rows: Vec<_> = report.failures.iter().collect();
         rows.sort_by_key(|(_, count)| Reverse(**count));
         for ((tool, kind, sub_agent), count) in rows {
             let origin = if *sub_agent { "sub-agent" } else { "root" };
-            writeln!(out, "{tool:<20} {kind:<16} {origin:<9} {count:>5}").unwrap();
+            let _ = writeln!(out, "{tool:<20} {kind:<16} {origin:<9} {count:>5}");
         }
     }
     if !report.blocked.is_empty() {
@@ -321,11 +320,11 @@ pub(crate) fn render_tee(report: &TeeReport) -> String {
         let mut rows: Vec<_> = report.blocked.iter().collect();
         rows.sort_by_key(|(_, count)| Reverse(**count));
         for (cmd, count) in rows {
-            writeln!(out, "  {count:>3}x {cmd}").unwrap();
+            let _ = writeln!(out, "  {count:>3}x {cmd}");
         }
     }
     if report.skipped > 0 {
-        writeln!(out, "\n({} unparseable tee lines skipped)", report.skipped).unwrap();
+        let _ = writeln!(out, "\n({} unparseable tee lines skipped)", report.skipped);
     }
     out
 }
@@ -392,7 +391,7 @@ fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max - 3])
+        format!("{}...", crate::text::prefix(s, max.saturating_sub(3)))
     }
 }
 
@@ -419,15 +418,14 @@ fn format_table(out: &mut String, rows: &[(String, ToolStats)]) {
             .total_output_bytes
             .checked_div(stats.calls)
             .unwrap_or(0);
-        writeln!(
+        let _ = writeln!(
             out,
             "{:<20} {:>6}   {:>14}   {:>10}",
             name,
             stats.calls,
             format_bytes(stats.total_output_bytes),
             format_bytes(avg),
-        )
-        .unwrap();
+        );
     }
 }
 
@@ -435,60 +433,55 @@ fn format_report(report: &Report) -> String {
     let mut out = String::new();
     let sessions = report.session_count;
 
-    writeln!(
+    let _ = writeln!(
         out,
         "Tool Usage ({sessions} session{}; persistent sessions only — \
          sub-agent activity appears in the Error Tee section)\n",
         if sessions == 1 { "" } else { "s" }
-    )
-    .unwrap();
+    );
 
-    writeln!(
+    let _ = writeln!(
         out,
         "{:<20} {:>6}   {:>14}   {:>10}",
         "Tool", "Calls", "Total Output", "Avg Output"
-    )
-    .unwrap();
-    writeln!(
+    );
+    let _ = writeln!(
         out,
         "{:<20} {:>6}   {:>14}   {:>10}",
         "----", "-----", "------------", "----------"
-    )
-    .unwrap();
+    );
     format_table(&mut out, &report.by_tool);
 
     if !report.by_exec_cmd.is_empty() {
-        writeln!(out, "\nExec Breakdown\n").unwrap();
-        writeln!(
+        let _ = writeln!(out, "\nExec Breakdown\n");
+        let _ = writeln!(
             out,
             "{:<20} {:>6}   {:>14}   {:>10}",
             "Command", "Calls", "Total Output", "Avg Output"
-        )
-        .unwrap();
-        writeln!(
+        );
+        let _ = writeln!(
             out,
             "{:<20} {:>6}   {:>14}   {:>10}",
             "-------", "-----", "------------", "----------"
-        )
-        .unwrap();
+        );
         format_table(&mut out, &report.by_exec_cmd);
     }
 
     if !report.blocked_cmds.is_empty() {
-        writeln!(out, "\nBlocked Commands\n").unwrap();
-        writeln!(out, "{:<60} {:>6}", "Command", "Count").unwrap();
-        writeln!(out, "{:<60} {:>6}", "-------", "-----").unwrap();
+        let _ = writeln!(out, "\nBlocked Commands\n");
+        let _ = writeln!(out, "{:<60} {:>6}", "Command", "Count");
+        let _ = writeln!(out, "{:<60} {:>6}", "-------", "-----");
         for (cmd, count) in &report.blocked_cmds {
-            writeln!(out, "{cmd:<60} {count:>6}").unwrap();
+            let _ = writeln!(out, "{cmd:<60} {count:>6}");
         }
     }
 
     if !report.tool_errors.is_empty() {
-        writeln!(out, "\nTool Errors\n").unwrap();
-        writeln!(out, "{:<20} {:<20} {:>6}", "Tool", "Error", "Count").unwrap();
-        writeln!(out, "{:<20} {:<20} {:>6}", "----", "-----", "-----").unwrap();
+        let _ = writeln!(out, "\nTool Errors\n");
+        let _ = writeln!(out, "{:<20} {:<20} {:>6}", "Tool", "Error", "Count");
+        let _ = writeln!(out, "{:<20} {:<20} {:>6}", "----", "-----", "-----");
         for (key, count) in &report.tool_errors {
-            writeln!(out, "{:<20} {:<20} {:>6}", key.tool, key.kind, count).unwrap();
+            let _ = writeln!(out, "{:<20} {:<20} {:>6}", key.tool, key.kind, count);
         }
     }
 

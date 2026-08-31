@@ -594,7 +594,10 @@ mod tests {
                 let mut visit = SessionField(None);
                 values.record(&mut visit);
                 if let Some(s) = visit.0 {
-                    self.0.lock().unwrap().push(s);
+                    self.0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(s);
                 }
             }
         }
@@ -663,7 +666,10 @@ mod tests {
             .await
             .unwrap();
 
-        let sessions = recorded.lock().unwrap().clone();
+        let sessions = recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         assert!(
             !sessions.is_empty(),
             "no session field was recorded onto a turn span"
@@ -739,7 +745,9 @@ mod tests {
             .await;
         assert_eq!(result.unwrap().content, "done");
 
-        let calls = sent.lock().unwrap();
+        let calls = sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["text"], "ping");
         assert_eq!(calls[0]["chat_id"], 42);
@@ -774,7 +782,9 @@ mod tests {
             .await;
         assert!(result.is_err());
 
-        let calls = sent.lock().unwrap();
+        let calls = sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["text"], "ping");
     }
@@ -832,7 +842,9 @@ mod tests {
             .await;
         assert!(result.unwrap().content.contains("halted automatically"));
 
-        let calls = sent.lock().unwrap();
+        let calls = sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(calls.len(), 1);
         let text = calls[0]["text"].as_str().unwrap();
         assert!(text.contains("GitHub PR #7"), "got: {text}");
@@ -862,7 +874,11 @@ mod tests {
             .await;
         assert!(result.unwrap().content.contains("halted automatically"));
 
-        assert!(sent.lock().unwrap().is_empty());
+        assert!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -955,7 +971,9 @@ mod tests {
             .await;
         assert!(result.is_err());
 
-        let calls = sent.lock().unwrap();
+        let calls = sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(calls.len(), 1);
         let text = calls[0]["text"].as_str().unwrap();
         assert!(text.contains("GitHub PR #7"), "got: {text}");
@@ -984,7 +1002,11 @@ mod tests {
             .await;
         assert!(result.is_err());
 
-        assert!(sent.lock().unwrap().is_empty());
+        assert!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
     }
 
     #[tokio::test]

@@ -155,6 +155,12 @@ pub trait Tool: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>>;
 }
 
+/// JSON schema for a tool's argument type, for [`Tool::parameters`].
+#[allow(clippy::expect_used)] // derive'd schemas serialize infallibly: string keys, plain values
+pub(crate) fn schema_of<T: schemars::JsonSchema>() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(T)).expect("JsonSchema serialization is infallible")
+}
+
 /// Collection of available tools.
 ///
 /// Uses `Vec` with linear scan for lookup. For small tool counts (<50),
@@ -267,6 +273,7 @@ impl Tools {
         ]
     }
 
+    #[allow(clippy::expect_used)] // new/extend_with reject invalid names at registration
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.0
             .iter()
@@ -386,11 +393,10 @@ pub(crate) fn truncate_output(s: &str, max_bytes: usize) -> Cow<'_, str> {
     if s.len() <= max_bytes {
         Cow::Borrowed(s)
     } else {
-        let end = s.floor_char_boundary(max_bytes);
+        let kept = crate::text::prefix(s, max_bytes);
         Cow::Owned(format!(
-            "{}...\n[truncated {} bytes]",
-            &s[..end],
-            s.len() - end
+            "{kept}...\n[truncated {} bytes]",
+            s.len() - kept.len()
         ))
     }
 }
@@ -402,12 +408,10 @@ pub(crate) fn truncate_head(s: &str, max_bytes: usize) -> Cow<'_, str> {
     if s.len() <= max_bytes {
         Cow::Borrowed(s)
     } else {
-        let start = s.len() - max_bytes;
-        let start = s.ceil_char_boundary(start);
+        let kept = crate::text::suffix(s, max_bytes);
         Cow::Owned(format!(
-            "[truncated {} leading bytes]\n{}",
-            start,
-            &s[start..]
+            "[truncated {} leading bytes]\n{kept}",
+            s.len() - kept.len()
         ))
     }
 }
@@ -534,7 +538,7 @@ mod tests {
         assert!(result.starts_with("[truncated "));
         assert!(result.contains(" leading bytes]"));
         // The tail is the last 10 bytes of the string.
-        assert!(result.ends_with(&long[long.len() - 10..]));
+        assert!(result.ends_with(crate::text::suffix(&long, 10)));
     }
 
     #[test]

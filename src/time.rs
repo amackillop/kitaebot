@@ -7,10 +7,11 @@ use std::time::SystemTime;
 
 /// Current Unix epoch in seconds.
 pub fn now_epoch() -> u64 {
+    // A pre-epoch clock is broken hardware; epoch 0 beats dying.
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_secs()
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
 }
 
 /// Current time as `YYYY-MM-DDTHH:MM:SSZ`.
@@ -36,7 +37,8 @@ pub fn format_iso8601(epoch: u64) -> String {
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
-    let doe = u32::try_from(z.rem_euclid(146_097)).expect("day-of-era fits in u32");
+    // rem_euclid(146_097) lands in [0, 146_096]; the fallback is unreachable.
+    let doe = u32::try_from(z.rem_euclid(146_097)).unwrap_or(0);
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
     let y = i64::from(yoe) + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);

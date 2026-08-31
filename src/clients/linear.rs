@@ -519,7 +519,9 @@ mod tests {
             async move {
                 let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 let is_update = req["query"].as_str().unwrap().contains("issueUpdate");
-                sent.lock().unwrap().push(req);
+                sent.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(req);
                 let payload = if is_update { update } else { STATES_JSON };
                 Ok(RawResponse {
                     status: 200,
@@ -545,7 +547,9 @@ mod tests {
                 state: "In Progress".into()
             }
         );
-        let sent = sent.lock().unwrap();
+        let sent = sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(sent.len(), 2);
         // The update targets the resolved UUID and the matched state id.
         assert_eq!(sent[1]["variables"]["id"], "uuid-1");
@@ -566,7 +570,12 @@ mod tests {
             }
         );
         // Only the lookup ran — no issueUpdate.
-        assert_eq!(sent.lock().unwrap().len(), 1);
+        assert_eq!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

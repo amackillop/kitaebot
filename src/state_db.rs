@@ -74,7 +74,10 @@ impl StateDb {
     /// Read the named state document. `None` if never written.
     pub fn get_doc(&self, name: &str) -> rusqlite::Result<Option<String>> {
         use rusqlite::OptionalExtension;
-        let conn = self.conn.lock().expect("state db mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         conn.query_row("SELECT value FROM docs WHERE name = ?1", [name], |r| {
             r.get(0)
         })
@@ -121,7 +124,10 @@ impl StateDb {
 
     /// Write (upsert) the named state document.
     pub fn put_doc(&self, name: &str, value: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().expect("state db mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         conn.execute(
             "INSERT INTO docs (name, value, updated_at)
              VALUES (?1, ?2, datetime('now'))
@@ -145,7 +151,9 @@ mod tests {
     fn all_ledger_queries_prepare_against_migrated_schema() {
         let db = StateDb::open_in_memory().unwrap();
         let conn = db.connection();
-        let conn = conn.lock().unwrap();
+        let conn = conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for sql in [
             crate::usage::INSERT_TURN,
             crate::usage::SELECT_TURN_ROWS,
@@ -187,7 +195,9 @@ mod tests {
     fn open_migrates_to_current_version() {
         let db = StateDb::open_in_memory().unwrap();
         let conn = db.connection();
-        let conn = conn.lock().unwrap();
+        let conn = conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();

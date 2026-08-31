@@ -5,6 +5,10 @@
 //! fixture server. Runs in `nix flake check`; `just test-e2e` runs
 //! it alone.
 
+// Integration tests compile without cfg(test), so the
+// clippy.toml test exemptions do not reach them.
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 mod harness;
 
 use harness::{

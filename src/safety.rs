@@ -70,15 +70,14 @@ const PATTERNS: &[LeakPattern] = &[
 ];
 
 /// Compiled pattern set for the single-pass clean-output fast path.
-static LEAK_SET: LazyLock<RegexSet> = LazyLock::new(|| {
-    RegexSet::new(PATTERNS.iter().map(|p| p.regex)).expect("invalid leak pattern")
-});
+static LEAK_SET: LazyLock<RegexSet> =
+    LazyLock::new(|| crate::text::static_regex_set(PATTERNS.iter().map(|p| p.regex)));
 
 /// Per-pattern regexes for span replacement; only run on a set hit.
 static LEAK_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     PATTERNS
         .iter()
-        .map(|p| Regex::new(p.regex).expect("invalid leak pattern"))
+        .map(|p| crate::text::static_regex(p.regex))
         .collect()
 });
 

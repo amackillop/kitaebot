@@ -217,7 +217,10 @@ impl LcmEngine {
     /// `COUNT` under WAL is sub-millisecond; the `spawn_blocking`
     /// overhead would dominate.
     fn context_stats_query(&self) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.conn.lock().expect("LCM connection mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         conn.query_row(
             "SELECT COUNT(*), \
                     COALESCE(SUM(m.token_count), 0) + COALESCE(SUM(s.token_count), 0) \
@@ -647,7 +650,9 @@ where
     T: Send + 'static,
 {
     tokio::task::spawn_blocking(move || {
-        let mut guard = conn.lock().expect("LCM connection mutex poisoned");
+        let mut guard = conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&mut guard)
     })
     .await
@@ -1358,7 +1363,10 @@ mod tests {
     }
 
     fn stored_content(engine: &LcmEngine, seq: i64) -> String {
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         conn.query_row(
             "SELECT content FROM messages WHERE conversation_id = ?1 AND seq = ?2",
             params![engine.conversation_id, seq],
@@ -1387,7 +1395,10 @@ mod tests {
         assert!(!content.contains(&payload));
 
         let (file_id, path, byte_size, token_count): (String, String, i64, i64) = {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine
+                .conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             conn.query_row(
                 "SELECT file_id, path, byte_size, token_count FROM large_files",
                 [],
@@ -1417,7 +1428,10 @@ mod tests {
         // Stored message token count reflects the reference, not the
         // original payload.
         let msg_tokens: i64 = {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine
+                .conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             conn.query_row("SELECT token_count FROM messages", [], |r| r.get(0))
                 .unwrap()
         };
@@ -1436,7 +1450,10 @@ mod tests {
 
         assert_eq!(stored_content(&engine, 0), "short");
         let count: i64 = {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine
+                .conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             conn.query_row("SELECT COUNT(*) FROM large_files", [], |r| r.get(0))
                 .unwrap()
         };
@@ -1473,7 +1490,10 @@ mod tests {
         assert!(content.contains("path=\"data/big.json\""));
 
         let (path, mime): (String, String) = {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine
+                .conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             conn.query_row("SELECT path, mime_type FROM large_files", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })
@@ -1607,7 +1627,9 @@ mod tests {
 
         engine.force_compact(&panicking_fresh()).await.unwrap();
 
-        let calls = log.lock().unwrap();
+        let calls = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(calls.len(), 1);
         let (session, request, tool_count) = &calls[0];
         assert_eq!(session.as_str(), "general");
@@ -1625,7 +1647,10 @@ mod tests {
         drop(calls);
 
         // The ride response committed as the leaf summary.
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (count, content): (i64, String) = conn
             .query_row("SELECT COUNT(*), MAX(content) FROM summaries", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -1653,7 +1678,10 @@ mod tests {
             .await
             .unwrap();
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))
             .unwrap();
@@ -1732,7 +1760,10 @@ mod tests {
         // The excerpt is the stored exploration summary, so
         // lcm_describe surfaces it.
         let summary: String = {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine
+                .conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             conn.query_row("SELECT exploration_summary FROM large_files", [], |r| {
                 r.get(0)
             })
@@ -1795,7 +1826,10 @@ mod tests {
             .await
             .unwrap();
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
@@ -1819,7 +1853,10 @@ mod tests {
                 .unwrap();
         }
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let seqs: Vec<i64> = conn
             .prepare("SELECT seq FROM messages ORDER BY seq")
             .unwrap()
@@ -1856,7 +1893,10 @@ mod tests {
             .await
             .unwrap();
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parts: Vec<(String, String, Option<String>)> = conn
             .prepare(
                 "SELECT part_type, COALESCE(text_content,''), tool_name \
@@ -2631,7 +2671,10 @@ mod tests {
             .unwrap();
         assert!(event.before > 0);
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let summary_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))
             .unwrap();
@@ -2821,7 +2864,10 @@ mod tests {
 
         engine.force_compact(&canned_summarize("c")).await.unwrap();
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let leaf_count: i64 = conn
             .query_row(

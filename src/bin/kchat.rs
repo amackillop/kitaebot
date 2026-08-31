@@ -79,7 +79,7 @@ fn repl(reader: &mut io::BufReader<UnixStream>, writer: &mut UnixStream) {
     let mut input = String::new();
     loop {
         print!("> ");
-        io::stdout().flush().unwrap();
+        let _ = io::stdout().flush();
 
         input.clear();
         match io::stdin().read_line(&mut input) {
@@ -120,7 +120,10 @@ fn print_final(msg: &ServerMsg) -> i32 {
 // ── Wire helpers ────────────────────────────────────────────────────
 
 fn send(writer: &mut UnixStream, msg: &ClientMsg) {
-    let mut buf = serde_json::to_string(msg).expect("ClientMsg is always serializable");
+    let mut buf = serde_json::to_string(msg).unwrap_or_else(|e| {
+        eprintln!("Serialize error: {e}");
+        std::process::exit(1);
+    });
     buf.push('\n');
     writer.write_all(buf.as_bytes()).unwrap_or_else(|e| {
         eprintln!("Write error: {e}");

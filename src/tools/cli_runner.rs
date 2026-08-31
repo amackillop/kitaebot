@@ -270,7 +270,10 @@ async fn spawn_child(
         }
     };
     if let Some(input) = stdin {
-        let mut pipe = child.stdin.take().expect("stdin was piped");
+        let mut pipe = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("child stdin not piped despite stdin input"))?;
         pipe.write_all(input.as_bytes()).await?;
         drop(pipe);
     }
@@ -296,7 +299,10 @@ impl PipeReader {
             loop {
                 match pipe.read(&mut chunk).await {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => sink.lock().expect("reader buffer").extend(&chunk[..n]),
+                    Ok(n) => sink
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .extend(&chunk[..n]),
                 }
             }
         });
@@ -307,7 +313,12 @@ impl PipeReader {
     /// whatever arrived — partial output beats none.
     async fn finish(self) -> Vec<u8> {
         let _ = timeout(READER_GRACE, self.task).await;
-        std::mem::take(&mut self.buf.lock().expect("reader buffer"))
+        std::mem::take(
+            &mut self
+                .buf
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 }
 

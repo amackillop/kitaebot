@@ -164,7 +164,10 @@ impl UsageLedger {
     /// consumes it). The ledger is prunable, so an unbounded read is
     /// fine.
     pub fn rows(&self) -> rusqlite::Result<Vec<TurnRow>> {
-        let conn = self.conn.lock().expect("usage ledger mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut stmt = conn.prepare(SELECT_TURN_ROWS)?;
         let rows = stmt
             .query_map([], |r| {
@@ -187,7 +190,10 @@ impl UsageLedger {
 
     /// Append one turn.
     pub fn record(&self, turn: &TurnRecord) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().expect("usage ledger mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Total conversion: a duration that overflows i64 milliseconds
         // is a clock bug, not a reason to lose the row.
         let duration_ms = i64::try_from(turn.meter.duration.as_millis()).unwrap_or(i64::MAX);
@@ -666,7 +672,10 @@ mod tests {
             })
             .unwrap();
 
-        let conn = ledger.conn.lock().unwrap();
+        let conn = ledger
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let endpoint: Option<String> = conn
             .query_row("SELECT provider FROM turns", [], |r| r.get(0))
             .unwrap();
@@ -778,7 +787,10 @@ mod tests {
                 meter: meter(TurnUsage::default()),
             })
             .unwrap();
-        let conn = ledger.conn.lock().unwrap();
+        let conn = ledger
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stored: Option<String> = conn
             .query_row("SELECT task FROM turns", [], |r| r.get(0))
             .unwrap();
@@ -802,7 +814,10 @@ mod tests {
                 },
             })
             .unwrap();
-        let conn = ledger.conn.lock().unwrap();
+        let conn = ledger
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (started_at, duration_ms, outcome): (i64, i64, String) = conn
             .query_row(
                 "SELECT started_at, duration_ms, outcome FROM turns",
@@ -834,7 +849,10 @@ mod tests {
                 }),
             })
             .unwrap();
-        let conn = ledger.conn.lock().unwrap();
+        let conn = ledger
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (cost, cached, endpoint): (Option<f64>, Option<i64>, Option<String>) = conn
             .query_row("SELECT cost, cached_tokens, provider FROM turns", [], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -861,7 +879,10 @@ mod tests {
                 })
                 .unwrap();
         }
-        let conn = ledger.conn.lock().unwrap();
+        let conn = ledger
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
             .unwrap();

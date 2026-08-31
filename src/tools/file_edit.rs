@@ -61,7 +61,7 @@ impl FileEdit {
         let attempts = self
             .history
             .lock()
-            .expect("edit history mutex poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .record_futile(path, fingerprint);
         if attempts >= FUTILE_LIMIT {
             return Err(ToolError::EditLoop {
@@ -87,7 +87,7 @@ impl Tool for FileEdit {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+        crate::tools::schema_of::<Args>()
     }
 
     fn execute(
@@ -155,7 +155,7 @@ impl Tool for FileEdit {
 
             self.history
                 .lock()
-                .expect("edit history mutex poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clear(&args.path);
             std::fs::write(&resolved, &result).map_err(|e| ToolError::Io {
                 operation: "write",
@@ -483,10 +483,8 @@ fn splice_all(content: &str, spans: &[Span], replacement: &str) -> String {
 
 /// Replace `len` bytes at `pos` with `replacement`.
 fn splice(content: &str, pos: usize, len: usize, replacement: &str) -> String {
-    let mut result = String::with_capacity(content.len() - len + replacement.len());
-    result.push_str(&content[..pos]);
-    result.push_str(replacement);
-    result.push_str(&content[pos + len..]);
+    let mut result = content.to_string();
+    result.replace_range(pos..pos + len, replacement);
     result
 }
 

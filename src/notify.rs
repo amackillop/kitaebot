@@ -120,14 +120,22 @@ impl Notifier {
     /// Reset the rate counter and batch. Called by the actor before
     /// each turn.
     pub fn begin_turn(&self) {
-        *self.state.lock().unwrap() = NotifyState::default();
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = NotifyState::default();
     }
 
     /// Deliver the batched low-urgency messages as one Telegram
     /// message. Best-effort: the turn is already over, so a failure
     /// is logged and dropped.
     pub async fn flush(&self) {
-        let Some(text) = self.state.lock().unwrap().drain() else {
+        let Some(text) = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+        else {
             return;
         };
         if let Err(e) = self.send(&text).await {
@@ -145,7 +153,10 @@ impl Notifier {
     }
 
     fn record(&self, message: String, urgency: Urgency) -> NotifyAction {
-        self.state.lock().unwrap().record(message, urgency)
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(message, urgency)
     }
 
     /// Plain-text, single-attempt send, truncated to fit Telegram's
@@ -188,7 +199,7 @@ impl Tool for NotifyTool {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+        crate::tools::schema_of::<Args>()
     }
 
     fn execute(
@@ -295,7 +306,14 @@ mod tests {
             notifier.record("z".into(), Urgency::Low),
             NotifyAction::Buffered
         ));
-        assert_eq!(notifier.state.lock().unwrap().batch, vec!["z".to_string()]);
+        assert_eq!(
+            notifier
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .batch,
+            vec!["z".to_string()]
+        );
     }
 
     // -- Tool via fake client --
@@ -344,7 +362,9 @@ mod tests {
             .unwrap();
         assert_eq!(result, "Notification sent.");
 
-        let calls = sent.lock().unwrap();
+        let calls = sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(calls.len(), 1);
         let (method, body) = &calls[0];
         assert_eq!(method, "sendMessage");
@@ -363,11 +383,17 @@ mod tests {
                 .await
                 .unwrap();
         }
-        assert!(sent.lock().unwrap().is_empty());
+        assert!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
 
         tool.0.flush().await;
 
-        let calls = sent.lock().unwrap();
+        let calls = sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1["text"], "first\n\nsecond");
     }
@@ -377,7 +403,11 @@ mod tests {
         let sent = sent();
         let tool = tool(&sent);
         tool.0.flush().await;
-        assert!(sent.lock().unwrap().is_empty());
+        assert!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -460,7 +490,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Precondition(_)));
-        assert_eq!(sent.lock().unwrap().len(), 5);
+        assert_eq!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            5
+        );
     }
 
     #[tokio::test]
@@ -476,7 +511,11 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
-        assert!(sent.lock().unwrap().is_empty());
+        assert!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -492,7 +531,9 @@ mod tests {
         .await
         .unwrap();
 
-        let calls = sent.lock().unwrap();
+        let calls = sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let text = calls[0].1["text"].as_str().unwrap();
         assert!(text.len() < MAX_MESSAGE_BYTES + 100);
         assert!(text.contains("[truncated"));

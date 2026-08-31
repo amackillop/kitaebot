@@ -330,8 +330,11 @@ impl McpServer {
     /// alone — the server answered, it just said no.
     async fn call(&self, tool: &str, args: Value) -> Result<String, McpError> {
         let mut state = self.state.lock().await;
-        if state.live.is_none() {
-            if let Some(until) = state.dead_until
+        let ServerState { live, dead_until } = &mut *state;
+        let live = if let Some(live) = live {
+            live
+        } else {
+            if let Some(until) = *dead_until
                 && Instant::now() < until
             {
                 return Err(McpError::Transport(
@@ -339,17 +342,16 @@ impl McpServer {
                 ));
             }
             match Self::spawn(&self.spec, self.startup_timeout).await {
-                Ok(live) => {
-                    state.live = Some(live);
-                    state.dead_until = None;
+                Ok(spawned) => {
+                    *dead_until = None;
+                    live.insert(spawned)
                 }
                 Err(e) => {
-                    state.dead_until = Some(Instant::now() + RESPAWN_BACKOFF);
+                    *dead_until = Some(Instant::now() + RESPAWN_BACKOFF);
                     return Err(e);
                 }
             }
-        }
-        let live = state.live.as_mut().expect("ensured above");
+        };
         match timeout(self.call_timeout, live.conn.call_tool(tool, args.clone())).await {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(McpError::Transport(first))) => {

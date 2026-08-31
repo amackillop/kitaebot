@@ -72,10 +72,9 @@ pub struct Finding {
 /// the caller warns and moves on; a review never fails on its
 /// telemetry.
 pub fn parse_findings_block(text: &str) -> Option<ReviewOutput> {
-    let start = text.rfind("```findings")?;
-    let body = &text[start + "```findings".len()..];
-    let end = body.find("```")?;
-    serde_json::from_str(body[..end].trim()).ok()
+    let (_, body) = text.rsplit_once("```findings")?;
+    let (json, _) = body.split_once("```")?;
+    serde_json::from_str(json.trim()).ok()
 }
 
 /// The review-gates segment appended to root system prompts when the
@@ -159,7 +158,10 @@ impl ReviewLedger {
         gate: &GateRecord,
         output: &ReviewOutput,
     ) -> rusqlite::Result<Vec<i64>> {
-        let mut conn = self.conn.lock().expect("review ledger mutex poisoned");
+        let mut conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tx = conn.transaction()?;
         tx.execute(
             INSERT_REVIEW,
@@ -198,7 +200,10 @@ impl ReviewLedger {
     /// self-review signals. Returns the inserted finding id so the
     /// caller can surface it for disposition.
     pub fn record_finding(&self, f: &ExternalFinding) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().expect("review ledger mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         conn.execute(
             INSERT_EXTERNAL_FINDING,
             params![
@@ -212,7 +217,10 @@ impl ReviewLedger {
     /// judged. Ids and severities never leave the database otherwise,
     /// and re-review dispatches (spec 20) need both.
     pub fn pr_findings(&self, repo: &str, git_ref: &str) -> rusqlite::Result<Vec<PrFinding>> {
-        let conn = self.conn.lock().expect("review ledger mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut stmt = conn.prepare(SELECT_PR_FINDINGS_BY_REF)?;
         let rows = stmt.query_map(params![repo, git_ref], |r| {
             Ok(PrFinding {
@@ -238,7 +246,10 @@ impl ReviewLedger {
         disposition: &str,
         note: Option<&str>,
     ) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().expect("review ledger mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let updated = conn.execute(UPDATE_DISPOSITION, params![id, disposition, note])?;
         Ok(updated > 0)
     }
@@ -247,7 +258,10 @@ impl ReviewLedger {
     /// finding counts by category split self vs external, then
     /// dispositions by source.
     pub fn report(&self) -> rusqlite::Result<String> {
-        let conn = self.conn.lock().expect("review ledger mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let reviews: Vec<(String, i64, i64)> = {
             let mut stmt = conn.prepare(SELECT_REVIEWS_BY_GATE)?;
@@ -390,7 +404,7 @@ impl Tool for ReviewLogTool {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(LogArgs)).expect("schema serialization failed")
+        crate::tools::schema_of::<LogArgs>()
     }
 
     fn execute(
@@ -491,8 +505,7 @@ impl Tool for ReviewDispositionTool {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(DispositionArgs))
-            .expect("schema serialization failed")
+        crate::tools::schema_of::<DispositionArgs>()
     }
 
     fn execute(
@@ -619,7 +632,10 @@ mod tests {
             ledger.record_review(&gate(), &output).unwrap();
         }
         let ledger = ReviewLedger::new(&crate::state_db::StateDb::open(&path).unwrap());
-        let conn = ledger.conn.lock().unwrap();
+        let conn = ledger
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM findings", [], |r| r.get(0))
             .unwrap();
@@ -633,7 +649,10 @@ mod tests {
         let ids = ledger.record_review(&gate(), &output).unwrap();
         assert_eq!(ids.len(), output.findings.len());
 
-        let conn = ledger.conn.lock().unwrap();
+        let conn = ledger
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let category: String = conn
             .query_row(
                 "SELECT category FROM findings WHERE id = ?1",
@@ -659,7 +678,10 @@ mod tests {
                 note: "n",
             })
             .unwrap();
-        let conn = ledger.conn.lock().unwrap();
+        let conn = ledger
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let note: String = conn
             .query_row("SELECT note FROM findings WHERE id = ?1", [id], |r| {
                 r.get(0)
@@ -713,7 +735,10 @@ mod tests {
         assert!(report.contains("swallowed-error"), "{report}");
         // The external column carries it, not self.
         let row: (i64, i64) = {
-            let conn = ledger.conn.lock().unwrap();
+            let conn = ledger
+                .conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             conn.query_row(
                 "SELECT SUM(source = 'self'), SUM(source != 'self') FROM findings",
                 [],
@@ -789,7 +814,10 @@ mod tests {
 
         assert!(ledger.set_disposition(ids[0], "fixed", None).unwrap());
 
-        let conn = ledger.conn.lock().unwrap();
+        let conn = ledger
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (disposition, disposed_at): (String, Option<String>) = conn
             .query_row(
                 "SELECT disposition, disposed_at FROM findings WHERE id = ?1",
@@ -836,7 +864,10 @@ mod tests {
         .await
         .unwrap();
 
-        let conn = ledger.conn.lock().unwrap();
+        let conn = ledger
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (disposition, note): (String, String) = conn
             .query_row(
                 "SELECT disposition, disposition_note FROM findings WHERE id = ?1",

@@ -26,6 +26,13 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 # Cargo exceptions (transitive deps outside our control)
 multiple_crate_versions = "allow"
+# Panic-free production code (tests exempt via clippy.toml)
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+string_slice = "deny"
 
 [[bin]]
 name = "kitaebot"

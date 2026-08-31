@@ -260,7 +260,7 @@ async fn parse_line(line: &str, writer: &mut OwnedWriteHalf, verbose: &mut bool)
 
 /// Serialize a server message as a single NDJSON line.
 async fn send(writer: &mut OwnedWriteHalf, msg: &ServerMsg) -> Result<(), std::io::Error> {
-    let mut buf = serde_json::to_string(msg).expect("ServerMsg is always serializable");
+    let mut buf = serde_json::to_string(msg).map_err(std::io::Error::other)?;
     buf.push('\n');
     writer.write_all(buf.as_bytes()).await
 }

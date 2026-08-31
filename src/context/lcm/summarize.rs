@@ -246,14 +246,9 @@ fn truncate_messages(messages: &[Message], max_tokens: usize, input_tokens: usiz
     if formatted.len() <= max_chars {
         return formatted;
     }
-    // Cut at a UTF-8 boundary. `floor_char_boundary` is unstable, so
-    // walk back manually.
-    let mut end = max_chars;
-    while end > 0 && !formatted.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut out = String::with_capacity(end + 64);
-    out.push_str(&formatted[..end]);
+    let kept = crate::text::prefix(&formatted, max_chars);
+    let mut out = String::with_capacity(kept.len() + 64);
+    out.push_str(kept);
     let _ = write!(
         out,
         "\n\n[Truncated from {input_tokens} tokens; {max_tokens} tokens preserved.]"
@@ -287,8 +282,14 @@ mod tests {
         let log_inner = log.clone();
         let responses = Arc::new(Mutex::new(responses.into_iter()));
         let f = move |prompt: &'static str| {
-            log_inner.lock().unwrap().push(prompt.to_string());
-            let next = responses.lock().unwrap().next();
+            log_inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(prompt.to_string());
+            let next = responses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .next();
             Box::pin(async move { next.unwrap_or(Err(ProviderError::RateLimited)) }) as BoxedCall
         };
         (f, log)
@@ -331,7 +332,10 @@ mod tests {
         assert_eq!(outcome.level, EscalationLevel::Normal);
         assert_eq!(outcome.content, summary);
         assert!(outcome.output_tokens < outcome.input_tokens);
-        let prompts = log.lock().unwrap().clone();
+        let prompts = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0], LEVEL_1_PROMPT);
     }
@@ -345,7 +349,10 @@ mod tests {
         let outcome = summarize_with_escalation(&[user(&big_input)], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Aggressive);
         assert_eq!(outcome.content, bullets);
-        let prompts = log.lock().unwrap().clone();
+        let prompts = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         assert_eq!(prompts, vec![LEVEL_1_PROMPT, LEVEL_2_PROMPT]);
     }
 
@@ -358,7 +365,10 @@ mod tests {
         let outcome = summarize_with_escalation(&[user(&big_input)], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Aggressive);
         assert_eq!(outcome.content, recovered);
-        let prompts = log.lock().unwrap().clone();
+        let prompts = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         assert_eq!(prompts.len(), 2);
     }
 
@@ -370,7 +380,10 @@ mod tests {
         let outcome = summarize_with_escalation(&[user(&big_input)], &call).await;
         assert_eq!(outcome.level, EscalationLevel::Aggressive);
         assert_eq!(outcome.content, bullets);
-        let prompts = log.lock().unwrap().clone();
+        let prompts = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         assert_eq!(prompts, vec![LEVEL_1_PROMPT, LEVEL_2_PROMPT]);
     }
 

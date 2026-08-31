@@ -46,7 +46,7 @@ impl Tool for Fixup {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+        crate::tools::schema_of::<Args>()
     }
 
     fn execute(
@@ -130,7 +130,7 @@ impl Fixup {
             .await?;
         let (target_sha, subject) = line.split_once(' ').unwrap_or((line.as_str(), ""));
         let (target_sha, subject) = (target_sha.to_string(), subject.to_string());
-        let short = &target_sha[..target_sha.len().min(12)];
+        let short = crate::text::prefix(&target_sha, 12);
 
         let on_branch = self
             .git(cwd, &["merge-base", "--is-ancestor", &target_sha, "HEAD"])
@@ -159,7 +159,7 @@ impl Fixup {
     async fn run(&self, repo_dir: &str, target: &str) -> Result<String, ToolError> {
         let cwd = self.0.resolve_repo_dir(repo_dir)?;
         let (branch, target_sha, subject) = self.preflight(&cwd, target).await?;
-        let short = &target_sha[..target_sha.len().min(12)];
+        let short = crate::text::prefix(&target_sha, 12);
 
         // Signed like any commit; pre-commit hooks validate the tweak.
         let commit = self.git(&cwd, &["commit", "--fixup", &target_sha]).await?;

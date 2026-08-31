@@ -86,14 +86,16 @@ enum NewCommits {
     /// Head unchanged: nothing to review.
     Closed,
     /// Head moved: dispatch, and advance the cursor on success.
-    Open,
+    Open { cursor: String },
 }
 
 fn new_commits_decision(cursor: Option<&str>, head: &str) -> NewCommits {
     match cursor {
         None => NewCommits::Prime,
         Some(c) if c == head => NewCommits::Closed,
-        Some(_) => NewCommits::Open,
+        Some(c) => NewCommits::Open {
+            cursor: c.to_string(),
+        },
     }
 }
 
@@ -485,8 +487,7 @@ async fn probe_new_commits(
             info!(duty = %duty.name, "new-commits gate closed");
             None
         }
-        NewCommits::Open => {
-            let cursor = state.cursor(&duty.name).expect("Open requires a cursor");
+        NewCommits::Open { cursor } => {
             let input = format!("{input}\n\n[new commits: {cursor}..{head}]");
             Some((input, Some(head)))
         }
@@ -575,7 +576,12 @@ mod tests {
     fn new_commits_decision_matrix() {
         assert_eq!(new_commits_decision(None, "abc"), NewCommits::Prime);
         assert_eq!(new_commits_decision(Some("abc"), "abc"), NewCommits::Closed);
-        assert_eq!(new_commits_decision(Some("abc"), "def"), NewCommits::Open);
+        assert_eq!(
+            new_commits_decision(Some("abc"), "def"),
+            NewCommits::Open {
+                cursor: "abc".to_string()
+            }
+        );
     }
 
     fn duties() -> Vec<Duty> {

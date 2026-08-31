@@ -64,7 +64,9 @@ where
 {
     Box::pin(async move {
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().expect("LCM tool connection poisoned");
+            let guard = conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&guard)
         })
         .await
@@ -84,7 +86,7 @@ fn snippet(s: &str) -> String {
             .char_indices()
             .nth(SNIPPET_CHARS)
             .map_or(cleaned.len(), |(i, _)| i);
-        format!("{}...", &cleaned[..cut])
+        format!("{}...", crate::text::prefix(&cleaned, cut))
     }
 }
 
@@ -137,7 +139,7 @@ impl Tool for LcmGrep {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(GrepArgs)).expect("lcm_grep schema")
+        crate::tools::schema_of::<GrepArgs>()
     }
 
     fn execute(
@@ -379,7 +381,7 @@ impl Tool for LcmDescribe {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(DescribeArgs)).expect("lcm_describe schema")
+        crate::tools::schema_of::<DescribeArgs>()
     }
 
     fn execute(
@@ -641,7 +643,7 @@ impl Tool for LcmExpand {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(ExpandArgs)).expect("lcm_expand schema")
+        crate::tools::schema_of::<ExpandArgs>()
     }
 
     fn execute(
@@ -857,15 +859,12 @@ fn append_payload(
         let _ = write!(out, "### {file_id} (externalized payload)\n{payload}\n\n");
         PayloadAppend::Fit(tokens)
     } else {
-        let mut cut = remaining_chars;
-        while !payload.is_char_boundary(cut) {
-            cut -= 1;
-        }
+        let kept = crate::text::prefix(&payload, remaining_chars);
         let _ = write!(
             out,
-            "### {file_id} (externalized payload, first {cut} of {} bytes)\n{}\n",
+            "### {file_id} (externalized payload, first {} of {} bytes)\n{kept}\n",
+            kept.len(),
             payload.len(),
-            &payload[..cut],
         );
         let _ = writeln!(out, "[truncated at token_cap={cap}]");
         PayloadAppend::CapReached

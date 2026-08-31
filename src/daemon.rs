@@ -18,7 +18,7 @@ use std::future::Future;
 use std::path::Path;
 
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::agent::AgentHandle;
 use crate::channel::github::{issues, prs};
@@ -154,8 +154,18 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
 async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
 
-    let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
-    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    // First poll happens at startup; a daemon that cannot hear
+    // SIGTERM must not run at all.
+    let (mut sigint, mut sigterm) = match (
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::terminate()),
+    ) {
+        (Ok(sigint), Ok(sigterm)) => (sigint, sigterm),
+        (Err(e), _) | (_, Err(e)) => {
+            error!("failed to install shutdown signal handlers: {e}");
+            std::process::exit(1);
+        }
+    };
 
     tokio::select! {
         _ = sigint.recv() => {}

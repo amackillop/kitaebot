@@ -9,6 +9,10 @@
 //! Skipped where the kernel does not expose Landlock (e.g. the nix
 //! build sandbox); the VM smoke is the authoritative live check.
 
+// Integration tests compile without cfg(test), so the
+// clippy.toml test exemptions do not reach them.
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 use std::path::Path;
 use std::process::{Command, Output};
 

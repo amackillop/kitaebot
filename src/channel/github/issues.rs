@@ -1451,7 +1451,12 @@ mod tests {
                 sent.lock()
                     .unwrap()
                     .push(req["body"].as_str().unwrap().to_string());
-                match results.lock().unwrap().pop_front().unwrap() {
+                match results
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop_front()
+                    .unwrap()
+                {
                     Ok(()) => Ok(RawResponse {
                         status: 201,
                         body: br#"{"id":7,"user":{"login":"kitaebot"},"body":"x",
@@ -1485,7 +1490,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(sent.lock().unwrap().len(), 3);
+        assert_eq!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]
@@ -1503,7 +1513,12 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(sent.lock().unwrap().len(), 1);
+        assert_eq!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
         assert!(matches!(err, GithubError::Api { status: 404, .. }));
     }
 
@@ -1542,7 +1557,9 @@ mod tests {
         )
         .await;
 
-        let sent = sent.lock().unwrap();
+        let sent = sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0], "a plan");
         // The announcement reply is the plan; its id gets recorded.

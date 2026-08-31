@@ -51,7 +51,7 @@ impl Tool for WebFetch {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+        crate::tools::schema_of::<Args>()
     }
 
     fn execute(
@@ -138,8 +138,8 @@ fn validate_url(url: &str) -> Result<(), ToolError> {
     }
 }
 
-static TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]*>").expect("static regex"));
-static WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expect("static regex"));
+static TAG_RE: LazyLock<Regex> = LazyLock::new(|| crate::text::static_regex(r"<[^>]*>"));
+static WS_RE: LazyLock<Regex> = LazyLock::new(|| crate::text::static_regex(r"\s+"));
 
 /// Strip HTML tags and collapse whitespace into clean text.
 fn strip_html(html: &str) -> String {

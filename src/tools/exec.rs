@@ -463,9 +463,8 @@ static ALL_DENY_RULES: LazyLock<Vec<DenyRule>> = LazyLock::new(|| {
 
 /// Compiled deny list. `RegexSet` for fast matching, indexed into
 /// [`ALL_DENY_RULES`] for per-rule guidance.
-static DENY_SET: LazyLock<RegexSet> = LazyLock::new(|| {
-    RegexSet::new(ALL_DENY_RULES.iter().map(|r| r.pattern)).expect("invalid deny pattern")
-});
+static DENY_SET: LazyLock<RegexSet> =
+    LazyLock::new(|| crate::text::static_regex_set(ALL_DENY_RULES.iter().map(|r| r.pattern)));
 
 /// A payload-store file path as handed to the model in `<file>`
 /// references (spec 14). Exact file-id form only, so traversal like
@@ -473,10 +472,9 @@ static DENY_SET: LazyLock<RegexSet> = LazyLock::new(|| {
 /// captured so redirects into the store can be left for the deny rules.
 static PAYLOAD_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
     use crate::workspace::{CONTEXT_DIR, LCM_DIR, LCM_PAYLOADS_DIR};
-    Regex::new(&format!(
+    crate::text::static_regex(&format!(
         r"(>\s*)?(\./)?{CONTEXT_DIR}/{LCM_DIR}/{LCM_PAYLOADS_DIR}/file_[0-9a-fA-F]{{16}}\b"
     ))
-    .expect("invalid payload ref pattern")
 });
 
 /// Blank out sanctioned payload-store reads so the deny rules don't
@@ -622,7 +620,7 @@ impl Tool for Exec {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+        crate::tools::schema_of::<Args>()
     }
 
     fn execute(

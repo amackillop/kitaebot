@@ -783,7 +783,12 @@ mod tests {
                 sent.lock()
                     .unwrap()
                     .push(req["variables"]["body"].as_str().unwrap().to_string());
-                match results.lock().unwrap().pop_front().unwrap() {
+                match results
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop_front()
+                    .unwrap()
+                {
                     Ok(()) => Ok(RawResponse {
                         status: 200,
                         body: br#"{"data":{"commentCreate":{"success":true}}}"#.to_vec(),
@@ -827,7 +832,12 @@ mod tests {
 
         ch.post_comment("i1", "plan").await.unwrap();
 
-        assert_eq!(sent.lock().unwrap().len(), 3);
+        assert_eq!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]
@@ -840,7 +850,12 @@ mod tests {
 
         let err = ch.post_comment("i1", "plan").await.unwrap_err();
 
-        assert_eq!(sent.lock().unwrap().len(), 1);
+        assert_eq!(
+            sent.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
         assert!(matches!(err, LinearError::Api(_)));
     }
 
@@ -871,7 +886,9 @@ mod tests {
         )
         .await;
 
-        let sent = sent.lock().unwrap();
+        let sent = sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0], "a plan");
     }

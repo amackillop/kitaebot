@@ -3,6 +3,10 @@
 //! Each test spins up a minimal NDJSON echo server on a Unix socket,
 //! runs the kchat binary against it, and asserts on stdout/stderr.
 
+// Integration tests compile without cfg(test), so the
+// clippy.toml test exemptions do not reach them.
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;

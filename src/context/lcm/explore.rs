@@ -65,12 +65,15 @@ pub fn mime_hint(kind: FileKind) -> &'static str {
 /// payloads dedupe to the same id.
 pub fn file_id(content: &str) -> String {
     let digest = Sha256::digest(content.as_bytes());
-    let prefix: [u8; 8] = digest[..8].try_into().expect("sha256 digest is 32 bytes");
-    format!("file_{:016x}", u64::from_be_bytes(prefix))
+    let prefix = digest
+        .iter()
+        .take(8)
+        .fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+    format!("file_{prefix:016x}")
 }
 
 static FILE_ID_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\bfile_[a-fA-F0-9]{16}\b").expect("file id regex"));
+    LazyLock::new(|| crate::text::static_regex(r"\bfile_[a-fA-F0-9]{16}\b"));
 
 /// Extract every `file_xxx` id referenced in `content`, deduplicated
 /// in order of first appearance and normalized to lowercase.
@@ -115,22 +118,29 @@ pub fn mechanical_excerpt(content: &str) -> String {
         .take(EXCERPT_LINES_PER_SIDE)
         .map(str::len)
         .sum();
-    let head = prefix_at_char_boundary(&content[..head_end], EXCERPT_BYTES_PER_SIDE);
+    let head = crate::text::prefix(
+        crate::text::prefix(content, head_end),
+        EXCERPT_BYTES_PER_SIDE,
+    );
     let tail_len: usize = content
         .split_inclusive('\n')
         .rev()
         .take(EXCERPT_LINES_PER_SIDE)
         .map(str::len)
         .sum();
-    let tail =
-        suffix_at_char_boundary(&content[content.len() - tail_len..], EXCERPT_BYTES_PER_SIDE);
+    let tail = crate::text::suffix(
+        crate::text::suffix(content, tail_len),
+        EXCERPT_BYTES_PER_SIDE,
+    );
 
     // Head and tail meeting or overlapping means nothing would be
     // omitted; keep the content whole.
     if head.len() + tail.len() >= content.len() {
         return content.to_string();
     }
-    let omitted = &content[head.len()..content.len() - tail.len()];
+    let omitted = content
+        .get(head.len()..content.len() - tail.len())
+        .unwrap_or("");
     format!(
         "Tool output excerpt ({} lines, {} bytes total):\n{}\n... [{} lines / {} bytes omitted] ...\n{}",
         content.lines().count(),
@@ -142,12 +152,11 @@ pub fn mechanical_excerpt(content: &str) -> String {
     )
 }
 
-static FILE_READ_TRAILER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\(\d+ lines shown, \d+ total, \d+ bytes\)$").expect("valid regex")
-});
+static FILE_READ_TRAILER_RE: LazyLock<Regex> =
+    LazyLock::new(|| crate::text::static_regex(r"^\(\d+ lines shown, \d+ total, \d+ bytes\)$"));
 
 static TOOL_OUTPUT_OPEN_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^<tool_output name="[^"]+">$"#).expect("valid regex"));
+    LazyLock::new(|| crate::text::static_regex(r#"^<tool_output name="[^"]+">$"#));
 
 /// Undo tool result framing so dispatchers see the underlying file
 /// content. Tool results reach the engine wrapped in
@@ -288,33 +297,9 @@ fn extension(path: Option<&str>) -> Option<String> {
 /// payload as binary. Message content is already valid UTF-8, so this
 /// catches embedded NULs and similar, not arbitrary byte soup.
 fn looks_binary(content: &str) -> bool {
-    prefix_at_char_boundary(content, BINARY_SNIFF_BYTES)
+    crate::text::prefix(content, BINARY_SNIFF_BYTES)
         .chars()
         .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t' | '\u{1b}'))
-}
-
-/// Longest prefix of at most `max_bytes` that ends on a char boundary.
-fn prefix_at_char_boundary(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
-/// Longest suffix of at most `max_bytes` that starts on a char boundary.
-fn suffix_at_char_boundary(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut start = s.len() - max_bytes;
-    while !s.is_char_boundary(start) {
-        start += 1;
-    }
-    &s[start..]
 }
 
 /// Collapse whitespace and truncate to `max_bytes`, appending `...`
@@ -324,7 +309,7 @@ fn normalize_line(text: &str, max_bytes: usize) -> String {
     if compact.len() <= max_bytes {
         return compact;
     }
-    format!("{}...", prefix_at_char_boundary(&compact, max_bytes))
+    format!("{}...", crate::text::prefix(&compact, max_bytes))
 }
 
 fn unique_ordered(values: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -421,7 +406,7 @@ fn explore_delimited(content: &str, delimiter: char, kind: &str) -> String {
 }
 
 static YAML_KEY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^([A-Za-z0-9_.-]+):").expect("valid regex"));
+    LazyLock::new(|| crate::text::static_regex(r"^([A-Za-z0-9_.-]+):"));
 
 fn explore_yaml(content: &str) -> String {
     let keys = unique_ordered(
@@ -441,7 +426,7 @@ fn explore_yaml(content: &str) -> String {
 }
 
 static XML_TAG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<([A-Za-z0-9_:-]+)[\s>]").expect("valid regex"));
+    LazyLock::new(|| crate::text::static_regex(r"<([A-Za-z0-9_:-]+)[\s>]"));
 
 fn explore_xml(content: &str) -> String {
     let mut tags = XML_TAG_RE.captures_iter(content).map(|c| c[1].to_string());
@@ -460,11 +445,12 @@ fn explore_xml(content: &str) -> String {
 }
 
 static SQL_TABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_."\[\]]+)"#)
-        .expect("valid regex")
+    crate::text::static_regex(
+        r#"(?i)\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_."\[\]]+)"#,
+    )
 });
 static SQL_INSERT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bINSERT\s+INTO\b").expect("valid regex"));
+    LazyLock::new(|| crate::text::static_regex(r"(?i)\bINSERT\s+INTO\b"));
 
 fn explore_sql(content: &str) -> String {
     let tables = unique_ordered(
@@ -485,14 +471,12 @@ fn explore_sql(content: &str) -> String {
 }
 
 static IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\s*(use\s|import\s|from\s+\S+\s+import\s|#include\s|require\s*\()")
-        .expect("valid regex")
+    crate::text::static_regex(r"^\s*(use\s|import\s|from\s+\S+\s+import\s|#include\s|require\s*\()")
 });
 static SIGNATURE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
+    crate::text::static_regex(
         r"^(?:pub(?:\([^)]*\))?\s+)?(?:export\s+)?(?:async\s+)?(?:unsafe\s+)?(?:fn|def|class|struct|enum|trait|impl|interface|function|func|type)\s",
     )
-    .expect("valid regex")
 });
 
 fn explore_code(content: &str, path: Option<&str>) -> String {
@@ -548,9 +532,9 @@ fn explore_binary(content: &str) -> String {
 // ── plain-text dispatcher (LLM with deterministic fallback) ───────
 
 static MARKDOWN_HEADER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^#{1,6}\s+").expect("valid regex"));
+    LazyLock::new(|| crate::text::static_regex(r"^#{1,6}\s+"));
 static CAPS_HEADER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Z0-9][A-Z0-9 :_-]{6,}$").expect("valid regex"));
+    LazyLock::new(|| crate::text::static_regex(r"^[A-Z0-9][A-Z0-9 :_-]{6,}$"));
 
 fn extract_text_headers(content: &str) -> Vec<String> {
     unique_ordered(
@@ -570,13 +554,13 @@ fn build_text_sample(content: &str) -> String {
     if content.len() <= TEXT_SLICE_BYTES * 2 {
         return content.to_string();
     }
-    let head = prefix_at_char_boundary(content, TEXT_SLICE_BYTES);
-    let tail = suffix_at_char_boundary(content, TEXT_SLICE_BYTES);
-    let mut mid_start = (content.len() - TEXT_SLICE_BYTES) / 2;
-    while !content.is_char_boundary(mid_start) {
-        mid_start += 1;
-    }
-    let mid = prefix_at_char_boundary(&content[mid_start..], TEXT_SLICE_BYTES);
+    let head = crate::text::prefix(content, TEXT_SLICE_BYTES);
+    let tail = crate::text::suffix(content, TEXT_SLICE_BYTES);
+    let mid_start = (content.len() - TEXT_SLICE_BYTES) / 2;
+    let mid = crate::text::prefix(
+        crate::text::suffix(content, content.len() - mid_start),
+        TEXT_SLICE_BYTES,
+    );
     format!("[Document Start]\n\n{head}\n\n[Document Middle]\n\n{mid}\n\n[Document End]\n\n{tail}")
 }
 
@@ -621,8 +605,8 @@ fn explore_text_fallback(content: &str, path: Option<&str>) -> String {
         } else {
             headers.join(" | ")
         },
-        normalize_line(prefix_at_char_boundary(content, 500), 500),
-        normalize_line(suffix_at_char_boundary(content, 500), 500),
+        normalize_line(crate::text::prefix(content, 500), 500),
+        normalize_line(crate::text::suffix(content, 500), 500),
     )
 }
 
@@ -671,7 +655,8 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.starts_with("file_"));
         assert_eq!(a.len(), 5 + 16);
-        assert!(a[5..].chars().all(|c| c.is_ascii_hexdigit()));
+        let hex = a.strip_prefix("file_").unwrap();
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, file_id("world"));
     }
 

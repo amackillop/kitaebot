@@ -311,16 +311,25 @@ mod tests {
         }
 
         fn with_poll_results(self: Arc<Self>, results: Vec<Vec<Update>>) -> Arc<Self> {
-            *self.poll_results.lock().unwrap() = results.into();
+            *self
+                .poll_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = results.into();
             self
         }
 
         fn sent_messages(&self) -> Vec<SentMessage> {
-            self.sent.lock().unwrap().clone()
+            self.sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
 
         fn last_poll_timeout(&self) -> Option<u64> {
-            *self.last_poll_timeout.lock().unwrap()
+            *self
+                .last_poll_timeout
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         }
 
         fn ok_json(result: &impl serde::Serialize) -> Vec<u8> {
@@ -356,8 +365,16 @@ mod tests {
                 match method.as_str() {
                     "getUpdates" => {
                         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                        *state.last_poll_timeout.lock().unwrap() = body["timeout"].as_u64();
-                        let next = state.poll_results.lock().unwrap().pop_front();
+                        *state
+                            .last_poll_timeout
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            body["timeout"].as_u64();
+                        let next = state
+                            .poll_results
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .pop_front();
                         match next {
                             Some(updates) => Ok(RawResponse {
                                 status: 200,
@@ -373,11 +390,15 @@ mod tests {
                         let text = msg["text"].as_str().unwrap().to_string();
                         let parse_mode = msg["parse_mode"].as_str().map(str::to_string);
                         let index = state.send_index.fetch_add(1, Ordering::SeqCst);
-                        state.sent.lock().unwrap().push(SentMessage {
-                            chat_id,
-                            text: text.clone(),
-                            parse_mode,
-                        });
+                        state
+                            .sent
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(SentMessage {
+                                chat_id,
+                                text: text.clone(),
+                                parse_mode,
+                            });
 
                         match &state.send_results[index] {
                             Ok(()) => Ok(RawResponse {

@@ -437,10 +437,13 @@ pub(super) fn load_condensed_chunks(
                  depth: &mut Option<i64>,
                  tokens: &mut i64,
                  out: &mut Vec<CondensedChunk>| {
-        if rows.len() >= min_fanout && *tokens <= leaf_budget {
+        if rows.len() >= min_fanout
+            && *tokens <= leaf_budget
+            && let Some(depth) = *depth
+        {
             out.push(CondensedChunk {
                 rows: std::mem::take(rows),
-                depth: depth.expect("depth set when rows non-empty"),
+                depth,
             });
         } else {
             rows.clear();
@@ -1053,7 +1056,9 @@ mod tests {
         let ride_calls = Arc::new(Mutex::new(0usize));
         let ride_calls_inner = Arc::clone(&ride_calls);
         let chat: RawChatFn = Arc::new(move |_session, _messages, _tools| {
-            *ride_calls_inner.lock().unwrap() += 1;
+            *ride_calls_inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
             Box::pin(async { Err(ProviderError::RateLimited) })
                 as Pin<Box<dyn Future<Output = _> + Send>>
         });
@@ -1075,7 +1080,12 @@ mod tests {
 
         // L1 and L2 rode and failed; the accepted summary is the
         // fresh ladder's, not the level-3 truncation.
-        assert_eq!(*ride_calls.lock().unwrap(), 2);
+        assert_eq!(
+            *ride_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            2
+        );
         assert_eq!(outcome.level, EscalationLevel::Normal);
         assert_eq!(outcome.content, fresh_summary);
     }

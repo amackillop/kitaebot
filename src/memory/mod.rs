@@ -55,14 +55,8 @@ pub fn index_segment(memory_dir: &Path, cap_bytes: usize) -> Option<String> {
 /// Truncate `s` to at most `cap` bytes without splitting a UTF-8
 /// character. Returns the kept prefix and whether truncation happened.
 fn truncate_on_boundary(s: &str, cap: usize) -> (&str, bool) {
-    if s.len() <= cap {
-        return (s, false);
-    }
-    let mut end = cap;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    (&s[..end], true)
+    let kept = crate::text::prefix(s, cap);
+    (kept, kept.len() < s.len())
 }
 
 #[cfg(test)]

@@ -42,7 +42,10 @@ impl MockProvider {
     /// The messages sent to the most recent `chat` call, or `None`
     /// before the first call.
     pub fn last_request(&self) -> Option<Vec<Message>> {
-        let held = self.last_messages.lock().unwrap();
+        let held = self
+            .last_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         (!held.is_empty()).then(|| held.clone())
     }
 }
@@ -55,7 +58,10 @@ impl Provider for MockProvider {
         _tools: &[ToolDefinition],
     ) -> Result<ChatOutcome, ProviderError> {
         let index = self.call_count.fetch_add(1, Ordering::SeqCst);
-        *self.last_messages.lock().unwrap() = messages.to_vec();
+        *self
+            .last_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = messages.to_vec();
         self.responses[index].clone().map(|response| ChatOutcome {
             response,
             usage: self.usage.clone(),

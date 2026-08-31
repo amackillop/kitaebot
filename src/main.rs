@@ -26,6 +26,7 @@ mod sqlite;
 mod state_db;
 #[cfg(test)]
 mod test_support;
+mod text;
 mod time;
 mod tools;
 mod types;
@@ -296,8 +297,12 @@ fn duty_trigger_channel(
 /// (spec 24 phase 1).
 fn build_duties(config: &Config) -> Vec<duty::Duty> {
     // Validated by Config::validate; parse cannot fail here.
-    let parse =
-        |s: &crate::config::ScheduleConfig| s.parse().expect("validated schedule failed to parse");
+    let parse = |s: &crate::config::ScheduleConfig| {
+        s.parse().unwrap_or_else(|e| {
+            error!("validated schedule failed to parse: {e}");
+            std::process::exit(1);
+        })
+    };
     let mut duties = vec![duty::Duty {
         name: "distill".into(),
         action: duty::Action::Dispatch {

@@ -291,7 +291,7 @@ impl<P: Provider> Tool for TaskTool<P> {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Args)).expect("schema serialization failed")
+        crate::tools::schema_of::<Args>()
     }
 
     fn execute(
@@ -531,7 +531,9 @@ mod tests {
 
         let rows: Vec<(String, String, Option<String>)> = {
             let conn = db.connection();
-            let conn = conn.lock().unwrap();
+            let conn = conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut stmt = conn
                 .prepare("SELECT session, source, task FROM turns")
                 .unwrap();
@@ -572,7 +574,9 @@ mod tests {
             .unwrap();
 
         let conn = db.connection();
-        let conn = conn.lock().unwrap();
+        let conn = conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stored: Option<String> = conn
             .query_row("SELECT task FROM turns", [], |r| r.get(0))
             .unwrap();
