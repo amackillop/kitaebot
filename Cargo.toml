@@ -61,6 +61,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 nix = { version = "0.31.3", features = ["signal"] }
 tracing-appender = "0.2.5"
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+memchr = "2.8.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "test-util"] }

@@ -401,9 +401,9 @@ fn excerpt_around(content: &str, center: usize) -> String {
     out
 }
 
-/// 1-based line number of a byte position.
+/// 1-based line number of a byte position; `pos` may fall mid-char.
 fn line_of(content: &str, pos: usize) -> usize {
-    content[..pos].bytes().filter(|&b| b == b'\n').count() + 1
+    memchr::memchr_iter(b'\n', &content.as_bytes()[..pos]).count() + 1
 }
 
 /// Context lines on each side of an edited region in the success echo.
@@ -648,6 +648,16 @@ mod tests {
         let result = edit(&tool, "l1", "first").await.unwrap();
         assert!(result.contains("1\tfirst"), "{result}");
         assert!(result.contains("2\tl2"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn echo_survives_multibyte_region_end() {
+        let (dir, tool) = setup("l1\nl2\nl3\n");
+        // new_string ends mid-line in a multi-byte char, so the echo's
+        // last-byte position is not a char boundary.
+        let result = edit(&tool, "l2", "dash —").await.unwrap();
+        assert_eq!(read(&dir), "l1\ndash —\nl3\n");
+        assert!(result.contains("2\tdash —"), "{result}");
     }
 
     #[tokio::test]
