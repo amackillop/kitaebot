@@ -20,7 +20,7 @@ use tracing::{error, info, warn};
 
 use super::execution_checkout;
 use crate::agent::AgentHandle;
-use crate::agent::envelope::ChannelSource;
+use crate::agent::envelope::{ChannelSource, TurnRole};
 use crate::clients::linear::{Issue, LinearClient};
 use crate::error::LinearError;
 use crate::state_db::StateDb;
@@ -181,7 +181,7 @@ async fn dispatch(channel: &LinearChannel, handle: &AgentHandle, d: Dispatch) {
     // to that session for the turn, so all of a repo's tickets — and its
     // GitHub PRs, which use the same key — share one session.
     let body = match handle
-        .send_message(source, message, Some(d.repo.clone()), None, cancel)
+        .send_message_with_role(source, message, Some(d.repo.clone()), None, cancel, d.role)
         .await
     {
         Ok(reply) => {
@@ -255,6 +255,9 @@ pub struct Dispatch {
     /// True for comment turns (which may execute), false for the
     /// plan-only new-issue announcement.
     pub needs_checkout: bool,
+    /// Plan announcements think on the planner override (spec 25's
+    /// plan/execute split applies to both ticket channels alike).
+    pub role: TurnRole,
 }
 
 /// Decide what to dispatch for one poll tick.
@@ -296,6 +299,11 @@ pub fn decide_events(
                     format_new_issue_execute(issue, repo)
                 },
                 needs_checkout: !plan_first,
+                role: if plan_first {
+                    TurnRole::Planner
+                } else {
+                    TurnRole::Default
+                },
             });
             announced.insert(issue.identifier.clone());
             continue;
@@ -327,6 +335,7 @@ pub fn decide_events(
                 repo: repo.to_string(),
                 message: format_comment(issue, repo, &user.name, &user.email, &comment.body),
                 needs_checkout: true,
+                role: TurnRole::Default,
             });
         }
     }
@@ -528,6 +537,8 @@ mod tests {
         assert_eq!(dispatches[0].repo, "owner/repo");
         assert!(dispatches[0].message.contains("assigned to you"));
         assert!(!dispatches[0].needs_checkout);
+        // Plan turns think on the planner override (spec 25).
+        assert_eq!(dispatches[0].role, TurnRole::Planner);
         assert!(next.announced_issues.contains("MDK-1"));
         assert_eq!(next.last_poll, NOW);
 
@@ -548,6 +559,7 @@ mod tests {
             dispatches[0].needs_checkout,
             "direct execution needs a checkout"
         );
+        assert_eq!(dispatches[0].role, TurnRole::Default);
         let msg = &dispatches[0].message;
         assert!(msg.contains("direct execution"), "{msg}");
         assert!(msg.contains("kitaebot_mdk-1_<short-summary>"));
@@ -634,6 +646,7 @@ mod tests {
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0].repo, "owner/repo");
         assert!(dispatches[0].needs_checkout);
+        assert_eq!(dispatches[0].role, TurnRole::Default);
         let msg = &dispatches[0].message;
         assert!(msg.contains("approved, go ahead"));
         assert!(msg.contains("kitaebot_mdk-1_<short-summary>"));
@@ -853,6 +866,7 @@ mod tests {
                 repo: "owner/repo".into(),
                 message: "new issue".into(),
                 needs_checkout: false,
+                role: TurnRole::Planner,
             },
         )
         .await;
@@ -873,6 +887,7 @@ mod tests {
             repo: "owner/repo".into(),
             message: "plan".into(),
             needs_checkout: false,
+            role: TurnRole::Planner,
         };
         assert!(checkout_note(&ch, &plan).await.is_none());
 

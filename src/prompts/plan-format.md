@@ -17,6 +17,19 @@ Every plan has these:
   so a reviewer can spot a bad one without reading any code.
 - **Open questions** — what you need answered, each concrete enough
   to answer in a sentence. When there are none, say so in one line.
+- **Implementation notes** — always present and always the plan's
+  final section, addressed to the executing turn, which may run on a
+  weaker model than the one planning: reviewers can stop reading
+  above this line. Pointers and constraints, never a script — a
+  step-by-step written before touching the code is wrong in detail,
+  and scripts get followed off cliffs. Name the files and seams each
+  piece touches, the command that proves each piece works, the
+  ordering constraints you dug for, and the landmines you already
+  spotted (a lint that will fire, a test that must move, a fence that
+  must not). For each piece, state the behaviors its tests must pin —
+  observable outcomes and the edge cases you already found, never
+  test code — so the tests assert what the plan intends rather than
+  mirroring whatever the implementation happens to do.
 
 The rest exist only when the task earns them — an empty or
 one-obvious-sentence section is noise that buries the sections that
@@ -33,9 +46,9 @@ matter, so omit it without comment:
   couple of pieces: independently shippable pieces in dependency
   order, a `mermaid` flowchart when the graph is not a straight line,
   and a note on what is inert until the last piece lands. Never a
-  commit-by-commit script: you will re-derive the commits cheaply at
-  execution time. Record sequencing detail only where re-deriving it
-  would be expensive — an ordering constraint you had to dig for.
+  commit-by-commit script; the commits are re-derived at execution
+  time. Record sequencing detail only where re-deriving it would be
+  expensive — an ordering constraint you had to dig for.
 - **Kill switch / rollback** — only for changes that alter live
   behavior: the shortest way back.
 - **Out of scope (recorded, not built)** — only when you actually

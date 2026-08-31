@@ -208,6 +208,11 @@ pub struct ModelOverrides {
     pub summarizer: Option<ModelSpec>,
     /// Override for memory distillation turns.
     pub memory: Option<ModelSpec>,
+    /// Override for plan turns (spec 25): plan-first announcements
+    /// think on a stronger model than the execution default. Keep it
+    /// distinct from `reviewer` — the plan gate's judge must not be
+    /// the plan's author.
+    pub planner: Option<ModelSpec>,
 }
 
 impl ModelOverrides {
@@ -216,6 +221,7 @@ impl ModelOverrides {
         [
             ("explore", &self.explore),
             ("memory", &self.memory),
+            ("planner", &self.planner),
             ("reviewer", &self.reviewer),
             ("summarizer", &self.summarizer),
             ("worker", &self.worker),
