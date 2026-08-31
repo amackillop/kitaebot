@@ -161,6 +161,12 @@ impl Policy {
                 rationale: "System config — read-only (resolv.conf, CA certs)",
             },
             Rule {
+                path: PathBuf::from("/lib64"),
+                access: read_files,
+                presence: Presence::Optional,
+                rationale: "Loader dir — direnv evaluates foreign devshell hooks whose build tooling scandirs it (prisma postinstall)",
+            },
+            Rule {
                 path: PathBuf::from("/run"),
                 access: read_files,
                 presence: Presence::Optional,
@@ -668,6 +674,20 @@ mod tests {
     }
 
     #[test]
+    fn lib64_is_read_only_no_execute() {
+        // Foreign devshell hooks (prisma postinstall) scandir /lib64;
+        // the direnv subprocess inherits this ruleset (confine: None).
+        let policy = test_policy();
+        let rule = policy
+            .rules()
+            .iter()
+            .find(|r| r.path == Path::new("/lib64"))
+            .expect("/lib64 rule must exist");
+        assert_eq!(rule.access, AccessFs::ReadFile | AccessFs::ReadDir);
+        assert!(!rule.access.contains(AccessFs::Execute));
+    }
+
+    #[test]
     fn socket_dir_derived_from_path() {
         let policy = Policy::new(
             Path::new("/workspace"),
@@ -712,9 +732,9 @@ mod tests {
     #[test]
     fn expected_rule_count() {
         let policy = test_policy();
-        // workspace, /nix/store, /tmp, /etc, /run, /dev, /proc,
+        // workspace, /nix/store, /tmp, /etc, /lib64, /run, /dev, /proc,
         // /sys/fs/cgroup, socket_dir
-        assert_eq!(policy.rules().len(), 9);
+        assert_eq!(policy.rules().len(), 10);
     }
 
     #[test]
