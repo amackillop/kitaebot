@@ -122,7 +122,8 @@ commands (exec tier), and every `GitCli` call including hooks (git
 tier). Fixed-argv, hook-free git calls (origin lookup, current-branch)
 stay unconfined by design — they run no repo code. **Not yet covered:**
 direnv flake-devshell evaluation still runs under the daemon's
-inherited grant; confining it needs the tier threaded through
+inherited grant (now including `/lib64`, which foreign devshell hooks'
+build tooling scandirs); confining it needs the tier threaded through
 `DirenvCache`, a planned follow-up.
 
 ### Architecture
@@ -152,6 +153,7 @@ The per-child tiers are tabulated under Per-child confinement above.
 | `/nix/store` | Read + execute | Optional |
 | `/tmp` | Read, write, mkdir, symlink, unlink, execute, truncate. No `MakeChar`, `MakeBlock`, `MakeSock`, `MakeFifo`. | Optional |
 | `/etc` | `ReadFile`, `ReadDir` | Optional |
+| `/lib64` | `ReadFile`, `ReadDir` | Optional |
 | `/run` | `ReadFile`, `ReadDir` | Optional |
 | `/dev` | `ReadFile`, `ReadDir`, `WriteFile` | Optional |
 | `/proc` | `ReadFile`, `ReadDir` | Optional |
