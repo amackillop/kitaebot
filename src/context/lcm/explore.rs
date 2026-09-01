@@ -8,6 +8,7 @@
 //! deterministic. Mirrors `large-files.ts` in the reference
 //! implementation.
 
+use std::fmt::Write as _;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -97,6 +98,68 @@ pub fn format_file_reference(
         "<file id=\"{file_id}\" path=\"{path}\" tokens=\"{token_count}\">\n{}\n</file>",
         summary.trim()
     )
+}
+
+/// Reformat a payload for on-disk storage so line-based tools work:
+/// a valid JSON payload is pretty-printed (grep, `file_read` ranges,
+/// and `lcm_grep` regex mode all operate per line, and a minified
+/// blob makes every one of them return the whole file — issue #119).
+/// Wrapped or line-numbered tool framing is pretty-printed underneath
+/// and re-wrapped; anything unparseable is returned unchanged.
+pub fn normalize_payload(content: &str) -> std::borrow::Cow<'_, str> {
+    let unwrapped = strip_tool_framing(content);
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&unwrapped) else {
+        return std::borrow::Cow::Borrowed(content);
+    };
+    // Round-trip fidelity: object keys are re-sorted (Map is a
+    // BTreeMap by default) and >64-bit integers approximate to f64;
+    // harmless for API payloads.
+    let Ok(pretty) = serde_json::to_string_pretty(&parsed) else {
+        // Unreachable: serializing a parsed Value cannot fail. Return
+        // the original rather than wrap garbage in fresh framing.
+        return std::borrow::Cow::Borrowed(content);
+    };
+    // Re-emit the framing only for line-numbered file_read results,
+    // keeping file_read parity; any other framing is dropped so the
+    // stored body stays a plain pretty JSON.
+    let Some(open) = framed_numbering(content) else {
+        return std::borrow::Cow::Owned(pretty);
+    };
+    let mut rebuilt = String::with_capacity(pretty.len() + (content.len() - unwrapped.len()));
+    rebuilt.push_str(open);
+    rebuilt.push('\n');
+    for (i, line) in pretty.lines().enumerate() {
+        let _ = writeln!(rebuilt, "{}\t{line}", i + 1);
+    }
+    // Fresh stats over the stored body: strip_line_numbering requires
+    // the trailer, so omitting it would leave invalid file_read
+    // framing.
+    let lines = pretty.lines().count();
+    let _ = writeln!(
+        rebuilt,
+        "({lines} lines shown, {lines} total, {} bytes)",
+        pretty.len()
+    );
+    rebuilt.push_str("</tool_output>");
+    std::borrow::Cow::Owned(rebuilt)
+}
+
+/// The framing of a line-numbered `file_read` result: the
+/// `<tool_output>` open line, re-emitted around the pretty body so
+/// the stored copy keeps `file_read` parity. Unnumbered framing is
+/// not rebuilt — the body gets no line numbers of its own, so
+/// re-wrapping would wrap a bare pretty JSON and inject nothing.
+fn framed_numbering(content: &str) -> Option<&str> {
+    let (first, rest) = content.split_once('\n')?;
+    if !TOOL_OUTPUT_OPEN_RE.is_match(first) {
+        return None;
+    }
+    let inner = rest.trim_end().strip_suffix("</tool_output>")?;
+    let numbered = inner.trim_end().lines().next().is_some_and(|l| {
+        l.split_once('\t')
+            .is_some_and(|(n, _)| n.parse::<u64>().is_ok())
+    });
+    numbered.then_some(first)
 }
 
 /// Lines kept at each end of a [`mechanical_excerpt`].
@@ -667,6 +730,66 @@ mod tests {
             r,
             "<file id=\"file_0123456789abcdef\" path=\"data/out.json\" tokens=\"42\">\nsum\n</file>"
         );
+    }
+
+    // ── payload normalization ─────────────────────────────────────
+
+    #[test]
+    fn normalize_pretty_prints_minified_json() {
+        let raw = r#"{"a":1,"b":[2,3]}"#;
+        let out = normalize_payload(raw);
+        assert!(matches!(out, std::borrow::Cow::Owned(_)));
+        assert_eq!(
+            out.trim(),
+            "{\n  \"a\": 1,\n  \"b\": [\n    2,\n    3\n  ]\n}"
+        );
+    }
+
+    #[test]
+    fn normalize_leaves_non_json_untouched() {
+        let raw = "just a log line\nwith two lines";
+        assert!(matches!(
+            normalize_payload(raw),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn normalize_rebuilds_framed_line_numbering() {
+        // A line-numbered file_read of a JSON file: 1\t{ ... — the
+        // stored copy must keep the numbering (file_read parity) and
+        // the wrapper, but pretty-print the JSON body.
+        let framed = "<tool_output name=\"file_read\">\n\
+                      1\t{\"k\":[1,2]}\n\n\
+                      (1 lines shown, 1 total, 13 bytes)\n\
+                      </tool_output>";
+        let out = normalize_payload(framed);
+        assert!(out.starts_with("<tool_output name=\"file_read\">\n1\t{"));
+        assert!(out.contains("2\t  \"k\": ["));
+        assert!(out.contains("(6 lines shown, 6 total,"), "{out}");
+        assert!(out.ends_with("</tool_output>"));
+        // file_read parity: the stored copy must survive the exact
+        // same strip that parsed the original.
+        let round = strip_tool_framing(&out);
+        assert!(serde_json::from_str::<serde_json::Value>(&round).is_ok());
+    }
+
+    #[test]
+    fn normalize_skips_framing_when_unnumbered() {
+        // A wrapped tool output without line numbers: the rebuild
+        // path would inject bogus numbers, so framing is dropped
+        // and the pretty JSON is stored bare.
+        let wrapped = "<tool_output name=\"github_api\">\n{\"a\":1}\n</tool_output>";
+        let out = normalize_payload(wrapped);
+        assert!(out.trim_start().starts_with('{'));
+        assert!(!out.contains("<tool_output"));
+        assert!(out.contains("  \"a\": 1"));
+    }
+
+    #[test]
+    fn normalize_skips_empty_frame() {
+        let out = normalize_payload("");
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]
