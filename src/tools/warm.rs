@@ -167,8 +167,11 @@ async fn run(
             WarmOutcome::Ready
         }
         Ok(out) => {
-            let stderr = crate::tools::truncate_output(out.stderr.trim(), 500);
-            warn!(dir = %dir.display(), exit = out.exit_code, %stderr, "warm command failed");
+            // Build tools put the verdict at the end (and tsc/vitest
+            // put it on stdout), so keep both tails.
+            let stdout = crate::tools::truncate_head(out.stdout.trim(), 500);
+            let stderr = crate::tools::truncate_head(out.stderr.trim(), 500);
+            warn!(dir = %dir.display(), exit = out.exit_code, %stdout, %stderr, "warm command failed");
             WarmOutcome::Failed
         }
         Err(e) => {
