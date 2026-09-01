@@ -66,10 +66,10 @@ in
         # tokens per call that 5.2 produced, on every iteration.
         reasoning.effort = "high";
         model_overrides = {
-          explore.model = "deepseek/deepseek-v4-pro";
-          worker.model = "deepseek/deepseek-v4-pro";
+          explore.model = "openai/gpt-5.6-luna";
+          worker.model = "openai/gpt-5.6-luna";
           reviewer.model = "moonshotai/kimi-k3";
-          summarizer.model = "deepseek/deepseek-v4-flash";
+          summarizer.model = "deepseek/deepseek-v4-flash-0731";
           # Distilled facts persist and inject into every future turn;
           # they must not inherit the flash default.
           memory.model = "z-ai/glm-5.3";
