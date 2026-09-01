@@ -42,7 +42,7 @@ comments(first: 100) { nodes { body createdAt user { id name email } } } \
 
 const COMMENT_CREATE_MUTATION: &str = "\
 mutation($issueId: String!, $body: String!) { \
-commentCreate(input: { issueId: $issueId, body: $body }) { success } }";
+commentCreate(input: { issueId: $issueId, body: $body }) { success comment { id } } }";
 
 /// Resolve an issue (by UUID or human identifier) to its internal id
 /// and its team's workflow states.
@@ -140,18 +140,20 @@ impl LinearClient {
         Ok(data.viewer.assigned_issues.nodes)
     }
 
-    /// Post a comment on an issue.
-    pub async fn create_comment(&self, issue_id: &str, body: &str) -> Result<(), LinearError> {
+    /// Post a comment on an issue; returns the created comment's id.
+    pub async fn create_comment(&self, issue_id: &str, body: &str) -> Result<String, LinearError> {
         let variables = serde_json::json!({ "issueId": issue_id, "body": body });
         let data: CommentCreateData = self
             .request(COMMENT_CREATE_MUTATION, Some(variables))
             .await?;
-        if data.comment_create.success {
-            Ok(())
-        } else {
-            Err(LinearError::Api(
+        match (data.comment_create.success, data.comment_create.comment) {
+            (true, Some(comment)) => Ok(comment.id),
+            (true, None) => Err(LinearError::Api(
+                "commentCreate succeeded without returning the comment id".into(),
+            )),
+            (false, _) => Err(LinearError::Api(
                 "commentCreate returned success=false".into(),
-            ))
+            )),
         }
     }
 
@@ -279,6 +281,12 @@ struct CommentCreateData {
 #[derive(Debug, Deserialize)]
 struct CommentCreatePayload {
     success: bool,
+    comment: Option<CreatedComment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatedComment {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -474,11 +482,26 @@ mod tests {
             assert_eq!(req["variables"]["body"], "a plan");
             Ok(RawResponse {
                 status: 200,
+                body: br#"{"data":{"commentCreate":{"success":true,"comment":{"id":"c-9"}}}}"#
+                    .to_vec(),
+                retry_after_secs: None,
+            })
+        });
+        let id = client.create_comment("i1", "a plan").await.unwrap();
+        assert_eq!(id, "c-9");
+    }
+
+    #[tokio::test]
+    async fn client_create_comment_success_without_id_is_api_error() {
+        let client = LinearClient::from_fn(|_body| async {
+            Ok(RawResponse {
+                status: 200,
                 body: br#"{"data":{"commentCreate":{"success":true}}}"#.to_vec(),
                 retry_after_secs: None,
             })
         });
-        client.create_comment("i1", "a plan").await.unwrap();
+        let err = client.create_comment("i1", "a plan").await.unwrap_err();
+        assert!(matches!(err, LinearError::Api(m) if m.contains("comment id")));
     }
 
     #[tokio::test]

@@ -64,16 +64,17 @@ impl LinearChannel {
         }
     }
 
-    /// Post a comment with retries on transient failures.
+    /// Post a comment with retries on transient failures; returns the
+    /// created comment's id.
     ///
     /// Retries up to [`POST_RETRIES`] times with exponential backoff
     /// (1s, 2s, 4s) on network errors; 429/5xx surface as
     /// [`LinearError::Network`] from the client.
-    async fn post_comment(&self, issue_id: &str, body: &str) -> Result<(), LinearError> {
+    async fn post_comment(&self, issue_id: &str, body: &str) -> Result<String, LinearError> {
         let mut attempts = 0u32;
         loop {
             match self.client.create_comment(issue_id, body).await {
-                Ok(()) => return Ok(()),
+                Ok(id) => return Ok(id),
                 Err(e) if attempts < POST_RETRIES && is_transient(&e) => {
                     let delay = Duration::from_secs(u64::from(1u32 << attempts));
                     attempts += 1;
@@ -791,7 +792,9 @@ mod tests {
                 {
                     Ok(()) => Ok(RawResponse {
                         status: 200,
-                        body: br#"{"data":{"commentCreate":{"success":true}}}"#.to_vec(),
+                        body:
+                            br#"{"data":{"commentCreate":{"success":true,"comment":{"id":"c-9"}}}}"#
+                                .to_vec(),
                         retry_after_secs: None,
                     }),
                     Err(e) => Err(e),

@@ -299,7 +299,11 @@ async fn linear_graphql(State(state): State<SharedState>, body: String) -> Respo
     if query.contains("commentCreate") {
         let mut state = state.lock().unwrap();
         state.linear_comments.push(request["variables"].clone());
-        return axum::Json(json!({"data": {"commentCreate": {"success": true}}})).into_response();
+        let id = format!("created-{}", state.linear_comments.len());
+        return axum::Json(json!({
+            "data": {"commentCreate": {"success": true, "comment": {"id": id}}},
+        }))
+        .into_response();
     }
     if query.contains("assignedIssues") {
         let issues = state.lock().unwrap().linear_issues.clone();
