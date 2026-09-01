@@ -153,7 +153,7 @@ pub async fn poll_loop(channel: &LinearChannel, handle: &AgentHandle, state_db: 
 /// Prepare a fresh base checkout for an execution turn and describe it
 /// for the agent, or `None` when the turn needs no checkout.
 async fn checkout_note(channel: &LinearChannel, d: &Dispatch) -> Option<String> {
-    if !d.needs_checkout {
+    if d.kind != TurnKind::Execution {
         return None;
     }
     let Some(git) = &channel.git else {
@@ -182,7 +182,17 @@ async fn dispatch(channel: &LinearChannel, handle: &AgentHandle, d: Dispatch) {
     // to that session for the turn, so all of a repo's tickets — and its
     // GitHub PRs, which use the same key — share one session.
     let body = match handle
-        .send_message_with_role(source, message, Some(d.repo.clone()), None, cancel, d.role)
+        .send_message_with_role(
+            source,
+            message,
+            Some(d.repo.clone()),
+            None,
+            cancel,
+            match d.kind {
+                TurnKind::Execution => TurnRole::Default,
+                TurnKind::Plan => TurnRole::Planner,
+            },
+        )
         .await
     {
         Ok(reply) => {
@@ -239,6 +249,17 @@ pub fn save_state(db: &StateDb, state: &PollState) {
 // Event detection (pure core)
 // ---------------------------------------------------------------------------
 
+/// What a dispatched turn is for; each kind gets different plumbing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnKind {
+    /// May implement: a fresh base checkout is prepared first.
+    Execution,
+    /// Plan-first announcement: no checkout, thinks on the planner
+    /// override (spec 25's plan/execute split applies to both ticket
+    /// channels alike).
+    Plan,
+}
+
 /// One agent turn to run: message in, reply posted as a comment.
 #[derive(Debug)]
 pub struct Dispatch {
@@ -252,13 +273,7 @@ pub struct Dispatch {
     pub repo: String,
     /// Message for the agent.
     pub message: String,
-    /// Whether a fresh base checkout is prepared before the turn.
-    /// True for comment turns (which may execute), false for the
-    /// plan-only new-issue announcement.
-    pub needs_checkout: bool,
-    /// Plan announcements think on the planner override (spec 25's
-    /// plan/execute split applies to both ticket channels alike).
-    pub role: TurnRole,
+    pub kind: TurnKind,
 }
 
 /// Decide what to dispatch for one poll tick.
@@ -299,11 +314,10 @@ pub fn decide_events(
                 } else {
                     format_new_issue_execute(issue, repo)
                 },
-                needs_checkout: !plan_first,
-                role: if plan_first {
-                    TurnRole::Planner
+                kind: if plan_first {
+                    TurnKind::Plan
                 } else {
-                    TurnRole::Default
+                    TurnKind::Execution
                 },
             });
             announced.insert(issue.identifier.clone());
@@ -335,8 +349,7 @@ pub fn decide_events(
                 identifier: issue.identifier.clone(),
                 repo: repo.to_string(),
                 message: format_comment(issue, repo, &user.name, &user.email, &comment.body),
-                needs_checkout: true,
-                role: TurnRole::Default,
+                kind: TurnKind::Execution,
             });
         }
     }
@@ -537,9 +550,7 @@ mod tests {
         assert_eq!(dispatches[0].issue_id, "id-MDK-1");
         assert_eq!(dispatches[0].repo, "owner/repo");
         assert!(dispatches[0].message.contains("assigned to you"));
-        assert!(!dispatches[0].needs_checkout);
-        // Plan turns think on the planner override (spec 25).
-        assert_eq!(dispatches[0].role, TurnRole::Planner);
+        assert_eq!(dispatches[0].kind, TurnKind::Plan);
         assert!(next.announced_issues.contains("MDK-1"));
         assert_eq!(next.last_poll, NOW);
 
@@ -556,11 +567,11 @@ mod tests {
         let (dispatches, next) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
 
         assert_eq!(dispatches.len(), 1);
-        assert!(
-            dispatches[0].needs_checkout,
+        assert_eq!(
+            dispatches[0].kind,
+            TurnKind::Execution,
             "direct execution needs a checkout"
         );
-        assert_eq!(dispatches[0].role, TurnRole::Default);
         let msg = &dispatches[0].message;
         assert!(msg.contains("direct execution"), "{msg}");
         assert!(msg.contains("kitaebot_mdk-1_<short-summary>"));
@@ -579,7 +590,7 @@ mod tests {
 
         let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
 
-        assert!(!dispatches[0].needs_checkout);
+        assert_eq!(dispatches[0].kind, TurnKind::Plan);
         assert!(
             dispatches[0]
                 .message
@@ -646,8 +657,7 @@ mod tests {
         let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0].repo, "owner/repo");
-        assert!(dispatches[0].needs_checkout);
-        assert_eq!(dispatches[0].role, TurnRole::Default);
+        assert_eq!(dispatches[0].kind, TurnKind::Execution);
         let msg = &dispatches[0].message;
         assert!(msg.contains("approved, go ahead"));
         assert!(msg.contains("kitaebot_mdk-1_<short-summary>"));
@@ -883,8 +893,7 @@ mod tests {
                 identifier: "MDK-1".into(),
                 repo: "owner/repo".into(),
                 message: "new issue".into(),
-                needs_checkout: false,
-                role: TurnRole::Planner,
+                kind: TurnKind::Plan,
             },
         )
         .await;
@@ -906,13 +915,12 @@ mod tests {
             identifier: "MDK-1".into(),
             repo: "owner/repo".into(),
             message: "plan".into(),
-            needs_checkout: false,
-            role: TurnRole::Planner,
+            kind: TurnKind::Plan,
         };
         assert!(checkout_note(&ch, &plan).await.is_none());
 
         let exec = Dispatch {
-            needs_checkout: true,
+            kind: TurnKind::Execution,
             ..plan
         };
         // No git wired: the agent is told to clone for itself.
