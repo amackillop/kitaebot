@@ -453,7 +453,7 @@ directory, never a repo.
 
 | Tool | Description |
 |------|-------------|
-| `github_api` | Generic REST escape hatch. Paths are forced under `repos/<owner>/<repo>/` and the first segment must be one of `actions` (GET only — writing dispatches, re-runs, or cancels workflows, a human decision), `dependabot` (GET only — writing dismisses alerts, a human decision), `issues`, `labels`, `milestones`, `pulls`, `releases`. |
+| `github_api` | Generic REST escape hatch. Paths are forced under `repos/<owner>/<repo>/` and the first segment must be one of `actions` (GET only — writing dispatches, re-runs, or cancels workflows, a human decision), `dependabot` (GET only — writing dismisses alerts, a human decision), `issues` (comment paths GET only — the channels post the turn's reply as the thread comment, and a tool-written comment duplicates it and steals the plan anchor, spec 25), `labels`, `milestones`, `pulls`, `releases`. |
 | `github_ci_status` | Report the latest CI run on a branch (pending, green, or red), with failure logs when it failed. |
 | `github_pr_create` | Create a pull request. |
 | `github_pr_list` | List pull requests (open/closed/all). |

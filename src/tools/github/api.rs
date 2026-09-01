@@ -58,8 +58,9 @@ struct Args {
     method: Method,
     /// Path under `repos/<owner>/<repo>/`, e.g. `issues/42/comments`
     /// or `pulls?state=open`. Must start with one of: actions (GET
-    /// only), dependabot (GET only), issues, labels, milestones,
-    /// pulls, releases.
+    /// only), dependabot (GET only), issues (comment paths GET only —
+    /// the channel posts your final reply as the thread comment),
+    /// labels, milestones, pulls, releases.
     path: String,
     /// JSON body for POST/PATCH.
     #[serde(default, deserialize_with = "string_or_value")]
@@ -111,6 +112,20 @@ fn validate_path(path: &str, method: Method) -> Result<(), ToolError> {
         return Err(ToolError::Blocked {
             operation: format!("github_api {} {path}", method.as_str()),
             guidance: format!("{resource} is read-only through this tool: use GET"),
+        });
+    }
+    // Covers `issues/{n}/comments` and `issues/comments/{id}`. The
+    // channels post the turn's reply as the comment; a comment written
+    // here duplicates it and steals the plan anchor (issue #116).
+    if resource == "issues"
+        && !matches!(method, Method::Get)
+        && path.split(['/', '?']).any(|segment| segment == "comments")
+    {
+        return Err(ToolError::Blocked {
+            operation: format!("github_api {} {path}", method.as_str()),
+            guidance: "issue comments are read-only through this tool: your final \
+                       reply is posted to the thread by the channel"
+                .into(),
         });
     }
     // '%' is blocked wholesale: percent-encoding can smuggle a '/'
@@ -220,13 +235,35 @@ mod tests {
         }
     }
 
+    /// Writing a comment duplicates the channel's reply posting and
+    /// steals the plan anchor (#116); reading stays open, and label
+    /// writes on the same resource are untouched.
+    #[test]
+    fn issue_comment_writes_are_blocked() {
+        for path in [
+            "issues/42/comments",
+            "issues/comments/123",
+            "issues/42/comments?x=1",
+        ] {
+            for method in [Method::Delete, Method::Patch, Method::Post] {
+                assert!(
+                    matches!(validate_path(path, method), Err(ToolError::Blocked { .. })),
+                    "{} should be blocked on {path}",
+                    method.as_str(),
+                );
+            }
+            assert!(validate_path(path, Method::Get).is_ok(), "GET {path}");
+        }
+        assert!(validate_path("issues/42/labels", Method::Post).is_ok());
+    }
+
     #[tokio::test]
     async fn prefixes_the_origin_repo() {
         let api = stub_api_with_repo("owner/repo", |method, path, body| {
             assert_eq!(method, "POST");
-            assert_eq!(path, "repos/owner/repo/issues/42/comments");
+            assert_eq!(path, "repos/owner/repo/issues/42/labels");
             let payload: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
-            assert_eq!(payload["body"], "done");
+            assert_eq!(payload["labels"][0], "bug");
             br#"{"id":1}"#.to_vec()
         });
         let tool = Api(api);
@@ -234,8 +271,8 @@ mod tests {
             .run(&Args {
                 repo_dir: "projects/r".into(),
                 method: Method::Post,
-                path: "issues/42/comments".into(),
-                body: Some(serde_json::json!({"body": "done"})),
+                path: "issues/42/labels".into(),
+                body: Some(serde_json::json!({"labels": ["bug"]})),
             })
             .await
             .unwrap();
@@ -250,7 +287,7 @@ mod tests {
             // The raw bytes must be a JSON object, not a JSON string.
             assert_eq!(raw[0], b'{', "body must start with '{{', got: {raw:?}");
             let payload: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-            assert_eq!(payload["body"], "done");
+            assert_eq!(payload["labels"][0], "bug");
             br#"{"id":1}"#.to_vec()
         });
         let tool = Api(api);
@@ -258,8 +295,8 @@ mod tests {
         let args: Args = serde_json::from_value(serde_json::json!({
             "repo_dir": "projects/r",
             "method": "POST",
-            "path": "issues/42/comments",
-            "body": "{\"body\": \"done\"}"
+            "path": "issues/42/labels",
+            "body": "{\"labels\": [\"bug\"]}"
         }))
         .unwrap();
         let out = tool.run(&args).await.unwrap();
@@ -273,15 +310,15 @@ mod tests {
             let raw = body.unwrap();
             assert_eq!(raw[0], b'{', "body must start with '{{', got: {raw:?}");
             let payload: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-            assert_eq!(payload["body"], "done");
+            assert_eq!(payload["labels"][0], "bug");
             br#"{"id":1}"#.to_vec()
         });
         let tool = Api(api);
         let args: Args = serde_json::from_value(serde_json::json!({
             "repo_dir": "projects/r",
             "method": "POST",
-            "path": "issues/42/comments",
-            "body": {"body": "done"}
+            "path": "issues/42/labels",
+            "body": {"labels": ["bug"]}
         }))
         .unwrap();
         let out = tool.run(&args).await.unwrap();

@@ -1,7 +1,9 @@
 Analyze the task and reply with a review-ready plan brief in markdown,
 written so a human can assess it in one read. Your reply is
 posted verbatim as a comment on the ticket — start directly with the
-plan: no preamble, no narration.
+plan: no preamble, no narration. Never post the plan to the ticket
+yourself; replying is the posting, and a tool-posted copy duplicates
+the thread.
 
 Every plan has these:
 
