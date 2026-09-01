@@ -58,8 +58,9 @@ struct Args {
     method: Method,
     /// Path under `repos/<owner>/<repo>/`, e.g. `issues/42/comments`
     /// or `pulls?state=open`. Must start with one of: actions (GET
-    /// only), dependabot (GET only), issues, labels, milestones,
-    /// pulls, releases.
+    /// only), dependabot (GET only), issues (comment paths GET only —
+    /// the channel posts your final reply as the thread comment),
+    /// labels, milestones, pulls, releases.
     path: String,
     /// JSON body for POST/PATCH.
     #[serde(default, deserialize_with = "string_or_value")]
