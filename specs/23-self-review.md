@@ -142,7 +142,7 @@ class of mistake — a wrong approach found at commit 5 costs a branch,
 found at the plan it costs one call.
 
 **2. Commit review** — after staging, before every `git_commit`. The
-parent redirects the staged diff to a file under `.diffs/` at the
+parent redirects the staged diff to a file under `diffs/` at the
 workspace root (never inside the repo, which would dirty the tree
 about to be committed from) and packs the path plus the proposed
 commit message; the reviewer reads the diff with `file_read`. The
@@ -152,7 +152,7 @@ staged diff before committing — history never contains the mistake and
 no amend is needed.
 
 **3. Series review** — before `git_push` of a branch that will become a
-PR. The parent writes the branch diff against the base to `.diffs/`
+PR. The parent writes the branch diff against the base to `diffs/`
 the same way and packs the path plus the commit list (subjects). The
 reviewer checks what per-commit review cannot see: does the sum solve
 the task; dead ends left behind (commit 4 quietly reverting half of

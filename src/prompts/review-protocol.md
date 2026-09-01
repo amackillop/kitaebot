@@ -33,13 +33,13 @@ judge per review.
 
 - Write the whole diff to a file instead of reading it into your
   context. With `working_dir` at the workspace root:
-  `mkdir -p .diffs && git -C reviews/<owner>/<repo> diff
-  origin/<base>...HEAD > .diffs/pr-<n>-<head SHA>.diff`.
+  `mkdir -p diffs && git -C reviews/<owner>/<repo> diff
+  origin/<base>...HEAD > diffs/pr-<n>-<head SHA>.diff`.
   The redirect means no diff text comes back through exec, so the size
   of the PR is not your problem and there is nothing to shrink.
 - Write the base branch's conventions out too:
   `git -C reviews/<owner>/<repo> show origin/<base>:AGENTS.md >
-  .diffs/conventions-<n>.md`. From the base, never from HEAD: the
+  diffs/conventions-<n>.md`. From the base, never from HEAD: the
   conventions a PR is judged against are the ones already agreed, not
   the ones it proposes. `AGENTS.md` is the only name to look up; if the
   repo has none, skip this and say so in the dispatch. If the output is
@@ -114,7 +114,7 @@ review the delta, not the whole PR:
 
 - Write the delta to a file the same way, with the SHAs from the
   dispatch: `git -C reviews/<owner>/<repo> diff <prev>...HEAD >
-  .diffs/pr-<n>-<head SHA>.diff`. Three dots, so a force push
+  diffs/pr-<n>-<head SHA>.diff`. Three dots, so a force push
   diffs from the merge base rather than producing nonsense. Fall back
   to the full PR diff against `origin/<base>` if it fails anyway.
 - `git -C reviews/<owner>/<repo> log <prev>..HEAD` for the new commit

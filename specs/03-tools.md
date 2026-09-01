@@ -99,7 +99,12 @@ hardcoded, so typos are caught by tests instead.
   by `job_logs` (CI logs); `github_api`'s raw path uses head-keeping
   `truncate_output` (generic API responses are not tail-weighted).
 - **`PathGuard`** — workspace-confined path resolution. Rejects null bytes,
-  `../`, and absolute paths. Canonicalizes and verifies the result is under the
+  `../`, and absolute paths outside the workspace; an absolute path under
+  the root is accepted as the relative spelling it names (the prompt
+  advertises the root, so models echo it — refusing the unambiguous form
+  only burned iterations). Normalization happens before the daemon-owned
+  write fence, which compares components and must never see the absolute
+  spelling. Canonicalizes and verifies the result is under the
   workspace root. Provides `resolve()` for existing files and `resolve_new()`
   for files that don't exist yet; the `resolve_writable*` variants add the
   daemon-owned fence: `config.toml`, `context/`, and `state/` are readable but

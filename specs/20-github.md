@@ -173,11 +173,17 @@ have them:
   adjacency: the separate clone kept PR content in a directory the
   working tree could not reach.
 
-Diffs packed by reference go to `.diffs/` at the workspace root, not
+Diffs packed by reference go to `diffs/` at the workspace root, not
 under `reviews/`. They are not review-specific — spec 23's open question
 has the self gates packing the same way — and `reviews/` now holds
 worktrees of other repositories, which is the wrong parent for a scratch
-directory.
+directory. The directory is deliberately not hidden: the layout is
+model-facing, models learn it from `ls`, and the dotted original
+(`.diffs/`) was invisible enough that turns re-derived their own
+locations (`projects/` dumps, an invented `.diff/run.sh`) instead of
+finding the convention. Workspace root, outside every checkout, is the
+load-bearing part — a diff written inside a repo dirties the tree
+about to be committed from.
 
 Both the review-request and tracked passes prepare the checkout this
 way. Preparation failure logs a warning and skips the PR for the tick
@@ -303,7 +309,7 @@ available, rather than in a root turn holding outward-facing tools.
   Review checkout). Read-only: git only to read; never a checkout
   over it. The working checkout under `projects/` is not involved.
 - The root produces the diff by redirecting
-  `git diff origin/<base>...HEAD` to a file under `.diffs/`,
+  `git diff origin/<base>...HEAD` to a file under `diffs/`,
   and packs its **path** into the reviewer dispatch together with the
   PR's stated intent (title, body, commit messages), the checkout
   root, and review metadata `{repo, gate: "pr", git_ref: <head SHA>}`
@@ -359,7 +365,7 @@ disposition), and instructs the model to:
 - Produce the incremental diff, not the whole PR: the channel has
   already prepared the review checkout (same as the initial review —
   new head detached, read-only), so `git diff {prev}...HEAD` in it, to
-  the same `.diffs/` path convention. Three dots: after a force
+  the same `diffs/` path convention. Three dots: after a force
   push `{prev}` is no longer an ancestor, and diffing from the merge
   base degrades better than diffing against a diverged tip. Falls back
   to the full `gh pr diff` when that fails anyway.

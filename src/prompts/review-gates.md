@@ -10,7 +10,7 @@ in-context: the reviewer sees the artifact cold, which is the point.
 
 The reviewer does not read repo conventions for itself, so hand them
 over: `git -C projects/<owner>/<repo> show origin/HEAD:AGENTS.md >
-.diffs/conventions.md`, and name the path in the prompt. From
+diffs/conventions.md`, and name the path in the prompt. From
 `origin/HEAD` rather than the working tree, because if your own change
 edits the conventions then the working copy is part of the artifact,
 and an artifact does not get to state the rules it is judged by.
@@ -19,7 +19,7 @@ none. A single line naming another file means `AGENTS.md` is a symlink
 and git gave you the link target — write the file it names.
 
 Diffs are packed by reference, exactly as PR reviews pack them: write
-the diff to a file under `.diffs/` at the workspace root — never
+the diff to a file under `diffs/` at the workspace root — never
 inside the repo, which would dirty the tree you are about to commit
 from — pack the path, and tell the reviewer to read it with
 `file_read`. The redirect means no diff text comes back through exec,
@@ -35,13 +35,13 @@ shrink.
 - **Commit gate** (gate "commit", git_ref: current HEAD SHA) — after
   staging, before every git_commit. Write the staged diff out:
   `git -C projects/<owner>/<repo> diff --cached >
-  .diffs/commit-<HEAD SHA>.diff`. Pack the path and the proposed
+  diffs/commit-<HEAD SHA>.diff`. Pack the path and the proposed
   commit message. Fix must-fix findings in the staged diff, then
   commit: history never contains the mistake.
 - **Series gate** (gate "series", git_ref: branch head SHA) — before
   pushing a branch that will become a pull request. Write the branch
   diff out: `git -C projects/<owner>/<repo> diff origin/<base>...HEAD >
-  .diffs/series-<head SHA>.diff`. Pack the path and the commit list
+  diffs/series-<head SHA>.diff`. Pack the path and the commit list
   (subjects). This catches what per-commit review cannot: dead ends,
   naming drift, a sum that does not solve the task.
 

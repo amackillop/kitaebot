@@ -1,8 +1,10 @@
 //! Workspace-confined path resolution.
 //!
 //! `PathGuard` ensures all tool file operations stay within the workspace root.
-//! Rejects null bytes, `../` traversal, and absolute paths. Canonicalizes the
-//! result and verifies it is under the workspace.
+//! Rejects null bytes, `../` traversal, and absolute paths outside the
+//! workspace; absolute paths under the root are accepted as the relative
+//! spelling they name. Canonicalizes the result and verifies it is under
+//! the workspace.
 
 use std::path::{Path, PathBuf};
 
@@ -50,14 +52,32 @@ impl PathGuard {
 
     /// Like [`PathGuard::resolve`], for tools that modify the file.
     pub fn resolve_writable(&self, path: &str) -> Result<PathBuf, ToolError> {
-        deny_daemon_owned(path)?;
+        deny_daemon_owned(self.workspace_relative(path)?)?;
         self.resolve(path)
     }
 
     /// Like [`PathGuard::resolve_new`], for tools that write the file.
     pub fn resolve_writable_new(&self, path: &str) -> Result<PathBuf, ToolError> {
-        deny_daemon_owned(path)?;
+        deny_daemon_owned(self.workspace_relative(path)?)?;
         self.resolve_new(path)
+    }
+
+    /// The workspace-relative form of `path`: an absolute path under
+    /// the root is stripped to the relative spelling it names; other
+    /// absolute paths are refused. Every consumer (the daemon-owned
+    /// write fence, the join) must see this form, or an absolute
+    /// spelling would sidestep component-based checks.
+    fn workspace_relative<'a>(&self, path: &'a str) -> Result<&'a Path, ToolError> {
+        match Path::new(path).strip_prefix(&self.root) {
+            Ok(stripped) => Ok(stripped),
+            Err(_) if Path::new(path).is_absolute() => Err(ToolError::Blocked {
+                operation: path.to_string(),
+                guidance: "absolute path outside the workspace; paths are \
+                           relative to the workspace root"
+                    .into(),
+            }),
+            Err(_) => Ok(Path::new(path)),
+        }
     }
 
     fn validate_and_join(&self, path: &str) -> Result<PathBuf, ToolError> {
@@ -73,13 +93,7 @@ impl PathGuard {
                 guidance: "path traversal detected".into(),
             });
         }
-        if Path::new(path).is_absolute() {
-            return Err(ToolError::Blocked {
-                operation: path.to_string(),
-                guidance: "absolute paths not allowed".into(),
-            });
-        }
-        Ok(self.root.join(path))
+        Ok(self.root.join(self.workspace_relative(path)?))
     }
 
     fn ensure_under_root(&self, resolved: &Path, original: &str) -> Result<PathBuf, ToolError> {
@@ -95,13 +109,14 @@ impl PathGuard {
 }
 
 /// Reject writes into daemon-owned paths (the `workspace` layout consts:
-/// config, engine context, state). `path` is already validated
-/// (relative, no traversal), so component comparison suffices. The
-/// reviewer escape checklist is the one model-maintained exception.
-fn deny_daemon_owned(path: &str) -> Result<(), ToolError> {
+/// config, engine context, state). `path` is the workspace-relative
+/// form ([`PathGuard::workspace_relative`]) with no traversal, so
+/// component comparison suffices. The reviewer escape checklist is the
+/// one model-maintained exception.
+fn deny_daemon_owned(path: &Path) -> Result<(), ToolError> {
     use crate::workspace::{CONFIG_FILE, CONTEXT_DIR, REVIEW_CHECKLIST, STATE_DIR};
 
-    let components: Vec<&str> = Path::new(path)
+    let components: Vec<&str> = path
         .components()
         .filter_map(|c| match c {
             std::path::Component::Normal(name) => name.to_str(),
@@ -116,7 +131,7 @@ fn deny_daemon_owned(path: &str) -> Result<(), ToolError> {
     }
     if [CONFIG_FILE, CONTEXT_DIR, STATE_DIR].contains(&first) {
         return Err(ToolError::Blocked {
-            operation: format!("write {path}"),
+            operation: format!("write {}", path.display()),
             guidance: format!("{first} is daemon-owned; file tools may read it but not modify it"),
         });
     }
@@ -219,6 +234,56 @@ mod tests {
         let guard = PathGuard::new(dir.path());
         let err = guard.resolve("/etc/passwd").unwrap_err();
         assert!(matches!(err, ToolError::Blocked { .. }));
+    }
+
+    /// The prompt advertises the workspace root, so models echo it;
+    /// the absolute spelling of an in-workspace path names the same
+    /// file and must resolve like its relative form (#129).
+    #[test]
+    fn absolute_path_under_root_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo.txt"), "hello").unwrap();
+
+        let guard = PathGuard::new(dir.path());
+        let root = dir.path().canonicalize().unwrap();
+        let absolute = root.join("foo.txt");
+        assert_eq!(
+            guard.resolve(absolute.to_str().unwrap()).unwrap(),
+            guard.resolve("foo.txt").unwrap(),
+        );
+    }
+
+    /// The daemon-owned write fence compares path components; the
+    /// absolute spelling must be normalized before that comparison or
+    /// it would sidestep the fence.
+    #[test]
+    fn absolute_spelling_cannot_bypass_daemon_owned_fence() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = PathGuard::new(dir.path());
+        let root = dir.path().canonicalize().unwrap();
+        let absolute = root.join("state/hack.txt");
+        let err = guard
+            .resolve_writable_new(absolute.to_str().unwrap())
+            .unwrap_err();
+        assert!(
+            matches!(&err, ToolError::Blocked { guidance, .. } if guidance.contains("daemon-owned")),
+            "{err}"
+        );
+    }
+
+    /// Traversal hides in absolute spellings too; the check runs on
+    /// the original string, before prefix stripping.
+    #[test]
+    fn absolute_path_with_traversal_still_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = PathGuard::new(dir.path());
+        let root = dir.path().canonicalize().unwrap();
+        let sneaky = format!("{}/a/../foo.txt", root.display());
+        let err = guard.resolve(&sneaky).unwrap_err();
+        assert!(
+            matches!(&err, ToolError::Blocked { guidance, .. } if guidance.contains("traversal")),
+            "{err}"
+        );
     }
 
     #[test]

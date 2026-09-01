@@ -1644,7 +1644,7 @@ mod tests {
             "reviewer call fails",
             // The diff is packed by reference, and pr-gate findings
             // are dispositioned on the follow-up turn, not at submit.
-            ".diffs/pr-",
+            "diffs/pr-",
             "Do not read the diff yourself",
             // Conventions come from the base, not the PR head.
             "origin/<base>:AGENTS.md",
