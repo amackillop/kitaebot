@@ -15,8 +15,9 @@ pub struct MockProvider {
     responses: Vec<Result<Response, ProviderError>>,
     usage: CallUsage,
     call_count: Arc<AtomicUsize>,
-    /// Messages of the most recent `chat` call, for request assertions.
-    last_messages: Arc<Mutex<Vec<Message>>>,
+    /// Messages of every `chat` call in order, for request assertions.
+    /// `last_request` reads the tail; per-call assertions index this.
+    last_messages: Arc<Mutex<Vec<Vec<Message>>>>,
 }
 
 impl MockProvider {
@@ -39,14 +40,17 @@ impl MockProvider {
         self.call_count.load(Ordering::SeqCst)
     }
 
-    /// The messages sent to the most recent `chat` call, or `None`
-    /// before the first call.
-    pub fn last_request(&self) -> Option<Vec<Message>> {
+    /// The messages sent to the `index`th `chat` call (0-based), or
+    /// `None` when that call has not happened yet.
+    pub fn request(&self, index: usize) -> Option<Vec<Message>> {
         let held = self
             .last_messages
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (!held.is_empty()).then(|| held.clone())
+        if held.is_empty() {
+            return None;
+        }
+        held.get(index).cloned()
     }
 }
 
@@ -58,10 +62,10 @@ impl Provider for MockProvider {
         _tools: &[ToolDefinition],
     ) -> Result<ChatOutcome, ProviderError> {
         let index = self.call_count.fetch_add(1, Ordering::SeqCst);
-        *self
-            .last_messages
+        self.last_messages
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = messages.to_vec();
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(messages.to_vec());
         self.responses[index].clone().map(|response| ChatOutcome {
             response,
             usage: self.usage.clone(),
