@@ -113,34 +113,43 @@ pub fn normalize_payload(content: &str) -> std::borrow::Cow<'_, str> {
     };
     // Round-trip fidelity: object keys are re-sorted (Map is a
     // BTreeMap by default) and >64-bit integers approximate to f64;
-    // harmless for API payloads. Serialization of a parsed Value
-    // cannot fail, so fall back to verbatim on the impossible.
-    let pretty = serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| content.to_string());
-    // Re-emit the framing (with fresh sequential numbers) only for
-    // line-numbered file_read results, keeping file_read parity; any
-    // other framing is dropped so the stored body stays a plain
-    // pretty JSON.
-    let Some((open, close)) = framed_numbering(content) else {
+    // harmless for API payloads.
+    let Ok(pretty) = serde_json::to_string_pretty(&parsed) else {
+        // Unreachable: serializing a parsed Value cannot fail. Return
+        // the original rather than wrap garbage in fresh framing.
+        return std::borrow::Cow::Borrowed(content);
+    };
+    // Re-emit the framing only for line-numbered file_read results,
+    // keeping file_read parity; any other framing is dropped so the
+    // stored body stays a plain pretty JSON.
+    let Some(open) = framed_numbering(content) else {
         return std::borrow::Cow::Owned(pretty);
     };
     let mut rebuilt = String::with_capacity(pretty.len() + (content.len() - unwrapped.len()));
     rebuilt.push_str(open);
-    if !open.is_empty() {
-        rebuilt.push('\n');
-    }
+    rebuilt.push('\n');
     for (i, line) in pretty.lines().enumerate() {
         let _ = writeln!(rebuilt, "{}\t{line}", i + 1);
     }
-    rebuilt.push_str(close);
+    // Fresh stats over the stored body: strip_line_numbering requires
+    // the trailer, so omitting it would leave invalid file_read
+    // framing.
+    let lines = pretty.lines().count();
+    let _ = writeln!(
+        rebuilt,
+        "({lines} lines shown, {lines} total, {} bytes)",
+        pretty.len()
+    );
+    rebuilt.push_str("</tool_output>");
     std::borrow::Cow::Owned(rebuilt)
 }
 
 /// The framing of a line-numbered `file_read` result: the
-/// `<tool_output>` open line and its close tag, re-emitted around the
-/// pretty body so the stored copy keeps `file_read` parity. Unnumbered
-/// framing is not rebuilt — the body gets no line numbers of its own,
-/// so re-wrapping would wrap a bare pretty JSON and inject nothing.
-fn framed_numbering(content: &str) -> Option<(&str, &str)> {
+/// `<tool_output>` open line, re-emitted around the pretty body so
+/// the stored copy keeps `file_read` parity. Unnumbered framing is
+/// not rebuilt — the body gets no line numbers of its own, so
+/// re-wrapping would wrap a bare pretty JSON and inject nothing.
+fn framed_numbering(content: &str) -> Option<&str> {
     let (first, rest) = content.split_once('\n')?;
     if !TOOL_OUTPUT_OPEN_RE.is_match(first) {
         return None;
@@ -150,7 +159,7 @@ fn framed_numbering(content: &str) -> Option<(&str, &str)> {
         l.split_once('\t')
             .is_some_and(|(n, _)| n.parse::<u64>().is_ok())
     });
-    numbered.then_some((first, "\n</tool_output>"))
+    numbered.then_some(first)
 }
 
 /// Lines kept at each end of a [`mechanical_excerpt`].
@@ -757,7 +766,12 @@ mod tests {
         let out = normalize_payload(framed);
         assert!(out.starts_with("<tool_output name=\"file_read\">\n1\t{"));
         assert!(out.contains("2\t  \"k\": ["));
+        assert!(out.contains("(6 lines shown, 6 total,"), "{out}");
         assert!(out.ends_with("</tool_output>"));
+        // file_read parity: the stored copy must survive the exact
+        // same strip that parsed the original.
+        let round = strip_tool_framing(&out);
+        assert!(serde_json::from_str::<serde_json::Value>(&round).is_ok());
     }
 
     #[test]
