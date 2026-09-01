@@ -48,7 +48,7 @@ Backup and restore ([spec 09](09-vm.md)) turns on this split:
 
 | Durable | Derived |
 |---------|---------|
-| `context/` — whatever the engine keeps there | `projects/`, `reviews/`, `.diffs/` — re-cloned or regenerated |
+| `context/` — whatever the engine keeps there | `projects/`, `reviews/`, `diffs/` — re-cloned or regenerated |
 | `state/` — `kitaebot.db`, the `.md` logs | build caches (`.cargo`, `.npm`, `.cache`, `.local`) |
 | `memory/` | |
 | | Nix-provisioned symlinks (`SOUL.md`, `AGENTS.md`, `USER.md`, `config.toml`) |
