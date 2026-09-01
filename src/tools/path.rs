@@ -62,13 +62,11 @@ impl PathGuard {
         self.resolve_new(path)
     }
 
-    /// The workspace-relative form of `path`. An absolute path under
-    /// the root names the same file as its relative spelling — the
-    /// prompt advertises the root, so models echo it (#129) — and is
-    /// stripped to that spelling; other absolute paths are refused.
-    /// Every consumer (the daemon-owned write fence, the join) must
-    /// see this form, or an absolute spelling would sidestep
-    /// component-based checks.
+    /// The workspace-relative form of `path`: an absolute path under
+    /// the root is stripped to the relative spelling it names; other
+    /// absolute paths are refused. Every consumer (the daemon-owned
+    /// write fence, the join) must see this form, or an absolute
+    /// spelling would sidestep component-based checks.
     fn workspace_relative<'a>(&self, path: &'a str) -> Result<&'a Path, ToolError> {
         match Path::new(path).strip_prefix(&self.root) {
             Ok(stripped) => Ok(stripped),
