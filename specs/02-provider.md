@@ -84,14 +84,20 @@ All backends use the same wire format. Switching backend requires only changing
 Transport failures (connection, timeout, reading the body) map to `Network`.
 `ProviderError::is_transient()` classifies retryability: `Network`,
 `ServerError`, and `RateLimited` may succeed if the identical request is
-resent; everything else is a defect in the request or credentials and must
-never be retried.
+resent; `MalformedToolCall` and `EmptyResponse` are bad draws, not bad
+requests — generation is not deterministic, and a fresh draw is the
+remedy. Everything else is a defect in the request or credentials and
+must never be retried.
 
 ### Retry
 
 `CompletionsProvider::chat` retries transient errors up to 3 times with
-exponential backoff: 1s/2s/4s, or 5s/10s/20s when rate limited. Constants,
-not config. Fatal errors return immediately. Each retry logs a warning.
+exponential backoff: 1s/2s/4s, or 5s/10s/20s when rate limited; empty
+responses get a tighter budget of 2 retries, so a provider that burns a
+minute per empty draw still fails through in bounded time while a
+sub-agent's built-up context survives the common one-off glitch (#120).
+Constants, not config. Fatal errors return immediately. Each retry logs
+a warning.
 
 The loop itself is a generic combinator (`retry::retry(op, policy)`,
 reusable by other IO layers); the provider owns only the pure policy
@@ -149,14 +155,15 @@ The provider is split into two layers:
 | Malformed response (valid HTTP, bad JSON) | `ProviderError::InvalidResponse` |
 | Empty choices array | `ProviderError::InvalidResponse` |
 | No content, no tool calls, `finish_reason = "length"` | `ProviderError::Truncated` — generation hit `provider.max_tokens` before any output (reasoning models can burn the whole budget on reasoning); the fix is a `reasoning` bound or a larger `provider.max_tokens` |
-| No content, no tool calls, other finish reason | `ProviderError::EmptyResponse` |
+| No content, no tool calls, other finish reason | `ProviderError::EmptyResponse` — redrawn inside the retry unit (see Retry) |
 | Partial text, `finish_reason = "length"` | Surfaced as a normal reply with `[truncated at max_tokens]` appended, so readers and the model (next turn) see the cut |
 | Transport failure (connect, timeout, body read) | `ProviderError::Network` |
 | HTTP 5xx | `ProviderError::ServerError` with status and body |
 | HTTP 4xx (other than 401/403/429) | `ProviderError::BadRequest` with status and body |
 
-Transient failures (`Network`, `ServerError`, `RateLimited`) are retried
-inside the provider (see Retry). Once retries are exhausted, and for all
+Transient failures (`Network`, `ServerError`, `RateLimited`,
+`MalformedToolCall`, `EmptyResponse`) are retried inside the provider
+(see Retry). Once retries are exhausted, and for all
 other failures, the agent loop surfaces the error to the user and saves
 the session.
 

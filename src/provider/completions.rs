@@ -20,12 +20,22 @@ use super::{CallUsage, ChatOutcome, Provider};
 /// Retries after the initial attempt for transient failures.
 const MAX_RETRIES: u32 = 3;
 
+/// Empty responses get a tighter budget: a wedged provider that burns
+/// a minute per empty draw must fail through in bounded time (the
+/// half of 532e000's fail-fast rationale that still holds).
+const EMPTY_RETRIES: u32 = 2;
+
 /// Retry policy for chat requests: exponential backoff for transient
 /// errors, starting at 1s, or 5s when rate limited (the window is
 /// typically seconds, not milliseconds). No jitter: one daemon, no
 /// thundering herd.
 fn retry_policy(e: &ProviderError, attempt: u32) -> Option<Duration> {
-    if !e.is_transient() || attempt >= MAX_RETRIES {
+    let max = if matches!(e, ProviderError::EmptyResponse) {
+        EMPTY_RETRIES
+    } else {
+        MAX_RETRIES
+    };
+    if !e.is_transient() || attempt >= max {
         return None;
     }
     let base = if matches!(e, ProviderError::RateLimited) {
@@ -626,6 +636,37 @@ mod tests {
         )
     }
 
+    /// An empty draw is redrawn, not surfaced: parsing lives inside
+    /// the retry unit precisely so a bad draw costs one request, not a
+    /// sub-agent's whole context (#120).
+    #[tokio::test(start_paused = true)]
+    async fn chat_redraws_empty_responses() {
+        use std::sync::atomic::Ordering;
+        let (provider, calls) = faulty_body_provider(1, EMPTY_CONTENT_BODY);
+        let outcome = provider.chat("s", &[], &[]).await.unwrap();
+        assert!(matches!(outcome.response, Response::Text(t) if t == "hi"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A provider that only produces empty draws fails through on the
+    /// tighter empty budget, not the full retry budget.
+    #[tokio::test(start_paused = true)]
+    async fn chat_bounds_empty_redraws() {
+        use std::sync::atomic::Ordering;
+        let (provider, calls) = faulty_body_provider(usize::MAX, EMPTY_CONTENT_BODY);
+        let err = provider.chat("s", &[], &[]).await.unwrap_err();
+        assert!(matches!(err, ProviderError::EmptyResponse));
+        assert_eq!(calls.load(Ordering::SeqCst), 1 + EMPTY_RETRIES as usize);
+    }
+
+    #[test]
+    fn policy_empty_response_capped_below_max_retries() {
+        let e = ProviderError::EmptyResponse;
+        assert_eq!(retry_policy(&e, 0), Some(Duration::from_secs(1)));
+        assert_eq!(retry_policy(&e, 1), Some(Duration::from_secs(2)));
+        assert_eq!(retry_policy(&e, EMPTY_RETRIES), None);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn chat_retries_transient_errors_until_success() {
         use std::sync::atomic::Ordering;
@@ -658,6 +699,10 @@ mod tests {
 
     /// A 200 with nothing in it.
     const EMPTY_CONTENT_BODY: &str = r#"{"choices":[{"message":{"content":""}}]}"#;
+
+    /// A 200 whose generation hit `max_tokens` before any output.
+    const TRUNCATED_BODY: &str =
+        r#"{"choices":[{"message":{"content":""},"finish_reason":"length"}]}"#;
 
     /// Provider whose client answers 200 with `faulty` for the first
     /// `failures` calls and a usable text response after, counting
@@ -722,13 +767,15 @@ mod tests {
     }
 
     /// Parsing moved inside the retry unit; that must not make every
-    /// parse failure retryable. Only the policy decides.
+    /// parse failure retryable. Only the policy decides: truncation is
+    /// structural (the same request starves the same way), so it is
+    /// never redrawn.
     #[tokio::test(start_paused = true)]
-    async fn chat_does_not_redraw_an_empty_response() {
+    async fn chat_does_not_redraw_a_truncated_response() {
         use std::sync::atomic::Ordering;
-        let (provider, calls) = faulty_body_provider(usize::MAX, EMPTY_CONTENT_BODY);
+        let (provider, calls) = faulty_body_provider(usize::MAX, TRUNCATED_BODY);
         let err = provider.chat("s", &[], &[]).await.unwrap_err();
-        assert!(matches!(err, ProviderError::EmptyResponse));
+        assert!(matches!(err, ProviderError::Truncated));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 

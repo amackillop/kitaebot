@@ -153,7 +153,8 @@ impl ProviderError {
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
-            Self::MalformedToolCall { .. }
+            Self::EmptyResponse
+                | Self::MalformedToolCall { .. }
                 | Self::Network(_)
                 | Self::RateLimited
                 | Self::ServerError(_)
