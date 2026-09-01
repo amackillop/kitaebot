@@ -27,6 +27,9 @@ pub const LCM_PAYLOADS_DIR: &str = "payloads";
 pub const PROJECTS_DIR: &str = "projects";
 /// Review worktrees prepared by the GitHub channel live here.
 pub const REVIEWS_DIR: &str = "reviews";
+/// Packed review diffs and conventions, written by exec redirects
+/// (spec 20); outside every checkout so they never dirty a tree.
+pub const DIFFS_DIR: &str = "diffs";
 pub const STATE_DIR: &str = "state";
 /// Ephemeral `GIT_ASKPASS` helpers, relative to [`STATE_DIR`]. Under
 /// `state/` so the exec tier kernel-denies it; the git tier grants it
@@ -84,6 +87,10 @@ impl Workspace {
         mk(&path.join(PROJECTS_DIR))?;
         // The git tier's Landlock rule can only grant an existing path.
         mk(&path.join(REVIEWS_DIR))?;
+        // Same constraint for the exec tier's diffs grant — and the
+        // root is list-only for exec children, so only the daemon can
+        // create it.
+        mk(&path.join(DIFFS_DIR))?;
         mk(&path.join(STATE_DIR))?;
         seed_review_checklist(&path)?;
 

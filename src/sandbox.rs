@@ -248,7 +248,8 @@ impl Policy {
     /// evaluate.
     pub fn child_exec(workspace: &Path) -> Self {
         use crate::workspace::{
-            CONTEXT_DIR, LCM_DIR, LCM_PAYLOADS_DIR, PROJECTS_DIR, REVIEW_CHECKLIST, STATE_DIR,
+            CONTEXT_DIR, DIFFS_DIR, LCM_DIR, LCM_PAYLOADS_DIR, PROJECTS_DIR, REVIEW_CHECKLIST,
+            STATE_DIR,
         };
 
         let all = AccessFs::from_all(ABI_VERSION);
@@ -266,6 +267,14 @@ impl Policy {
                 access: all,
                 presence: Presence::Optional,
                 rationale: "Projects — full access for builds and checkouts",
+            },
+            // Optional like every child rule (a missing path skips the
+            // grant, never aborts the spawn); workspace init creates it.
+            Rule {
+                path: workspace.join(DIFFS_DIR),
+                access: all,
+                presence: Presence::Optional,
+                rationale: "Packed review diffs — exec redirects write here (spec 20)",
             },
             Rule {
                 path: workspace.join(STATE_DIR).join(REVIEW_CHECKLIST),
@@ -949,10 +958,10 @@ mod tests {
     #[test]
     fn child_expected_rule_count() {
         let policy = child_policy();
-        // workspace root, projects, review checklist, payload store,
-        // 5 build caches, /nix/store, /tmp, /etc, /lib64, /run, /dev,
-        // /proc
-        assert_eq!(policy.rules().len(), 16);
+        // workspace root, projects, diffs, review checklist, payload
+        // store, 5 build caches, /nix/store, /tmp, /etc, /lib64, /run,
+        // /dev, /proc
+        assert_eq!(policy.rules().len(), 17);
     }
 
     #[test]
