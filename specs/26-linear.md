@@ -37,9 +37,10 @@ Comments authored by the viewer are skipped to prevent self-reply loops.
   markdown plan and not implement anything yet. Issues announced in a tick
   skip the comment pass for that tick (no double dispatch).
 - *New comment* — `createdAt > last_poll`, not authored by the viewer, from
-  a trusted user. The message carries identifier, repo, author, and body,
-  plus an instruction: if the comment approves the plan, execute
-  end-to-end — clone the repo, create a branch named
+  a trusted user. The message carries identifier, repo, author, body, and
+  the recorded plan (see below), plus an instruction: if the comment
+  approves the plan, execute end-to-end — clone the repo, create a branch
+  named
   `kitaebot_<ticket-id>_<summary>` (the ticket id links the PR to the issue
   automatically), implement, test, commit, push, and open a PR. On success
   the reply is one line at most (the PR attaches itself to the ticket);
@@ -54,10 +55,18 @@ with the same judgment backstop. The label is read at announcement
 time. Plan announcements dispatch with the planner turn role, as on
 GitHub (spec 25's plan/execute split): both ticket channels' plans
 think on `model_overrides.planner`, everything else on the default.
-Routing parity only: GitHub's other half — the recorded plan comment
-embedded verbatim in post-plan dispatches — is not yet ported, so a
-Linear execution turn still relies on the plan surviving session
-context.
+
+**The plan rides the dispatch**, as on GitHub (spec 25). A plan
+announcement's reply comment is the plan; its id (returned by
+`commentCreate`) is recorded per issue identifier. Post-plan comment
+dispatches look that comment up in the issue's comments fetched the
+same tick — a pure lookup, never a new fetch — and embed its body
+ahead of the execute/revise instructions, so the execution turn never
+depends on the plan surviving session compaction. A plan past the
+100-comment fetch cap (or deleted) degrades honestly to an id-only
+reference; a failed dispatch or post records nothing. Unlike GitHub
+there is no comment-update tool, so revisions are posted as new
+comments and the recorded id keeps pointing at the original plan.
 
 **Repo selection**: the target repository comes from a label on the issue —
 a label named like `owner/repo` (contains exactly one `/`). Issues without
@@ -74,20 +83,22 @@ listed.
 database (spec 05):
 
 ```json
-{"last_poll": "2026-07-05T12:00:00Z", "announced_issues": ["MDK-123"]}
+{"last_poll": "2026-07-05T12:00:00Z", "announced_issues": ["MDK-123"],
+ "plan_comments": {"MDK-123": "comment-uuid"}}
 ```
 
 Missing or corrupt state defaults to `last_poll = now` with an empty
 announced set — assigned issues are announced fresh, old comments are not
 replayed. Announced identifiers absent from the fetched set (completed,
-cancelled, or unassigned) are pruned. `last_poll` only advances after a
-successful fetch.
+cancelled, or unassigned) are pruned; plan comment ids follow the same
+lifetime. `last_poll` only advances after a successful fetch.
 
 **API**: GraphQL over HTTPS POST to `{linear.api_base}/graphql`,
 authorized with a personal API key in the `Authorization` header (no
-`Bearer` prefix). Three operations: `viewer`, `assignedIssues`, and
-`commentCreate`. Raw query strings, no GraphQL client library. No
-pagination: first 50 assigned issues, first 100 comments per issue.
+`Bearer` prefix). Three operations: `viewer`, `assignedIssues` (comments
+carry their ids), and `commentCreate` (returns the created comment's id).
+Raw query strings, no GraphQL client library. No pagination: first 50
+assigned issues, first 100 comments per issue.
 
 **Send retries**: comment posting retries up to 3 times with exponential
 backoff (1s, 2s, 4s) for transient errors.
@@ -112,7 +123,7 @@ Requires the `linear-api-key` secret.
 - The Linear poll loop, event detection, and announcement/execution
   message formatting
 - Repo selection from `owner/repo` labels
-- The plan-label choreography
+- The plan-label choreography and plan-comment id tracking
 - Poll state persistence (`linear_poll`)
 - Comment posting with retries
 

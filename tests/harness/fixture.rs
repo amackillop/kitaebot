@@ -348,6 +348,7 @@ pub fn linear_issue(
 /// strictly newer than any poll cursor the daemon has already saved.
 pub fn linear_comment(email: &str, body: &str) -> serde_json::Value {
     json!({
+        "id": format!("comment-{email}:{body}"),
         "body": body,
         "createdAt": future_timestamp(1),
         "user": {"id": format!("user-{email}"), "name": email, "email": email},

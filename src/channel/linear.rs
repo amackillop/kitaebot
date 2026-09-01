@@ -9,7 +9,7 @@
 //! formatting, and poll-state persistence. The poll loop is the thin
 //! effectful shell on top.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::time::Duration;
 
@@ -140,8 +140,12 @@ pub async fn poll_loop(channel: &LinearChannel, handle: &AgentHandle, state_db: 
             &now_iso8601(),
         );
         let count = dispatches.len();
+        let mut next = next;
         for d in dispatches {
-            dispatch(channel, handle, d).await;
+            let key = d.identifier.clone();
+            if let Some(plan_id) = dispatch(channel, handle, d).await {
+                next.plan_comments.insert(key, plan_id);
+            }
         }
         info!(count, "Linear poll: dispatched {count} items");
 
@@ -169,7 +173,9 @@ async fn checkout_note(channel: &LinearChannel, d: &Dispatch) -> Option<String> 
 }
 
 /// Run one agent turn and post the reply (or error) as a comment.
-async fn dispatch(channel: &LinearChannel, handle: &AgentHandle, d: Dispatch) {
+/// Returns the posted comment's id for plan announcements — that
+/// comment is the plan, and post-plan dispatches embed it.
+async fn dispatch(channel: &LinearChannel, handle: &AgentHandle, d: Dispatch) -> Option<String> {
     let cancel = CancellationToken::new();
     let source = ChannelSource::Linear {
         issue: d.identifier.clone(),
@@ -204,8 +210,12 @@ async fn dispatch(channel: &LinearChannel, handle: &AgentHandle, d: Dispatch) {
             e
         }
     };
-    if let Err(e) = channel.post_comment(&d.issue_id, &body).await {
-        error!("Linear {}: failed to post comment: {e}", d.identifier);
+    match channel.post_comment(&d.issue_id, &body).await {
+        Ok(posted) => (d.kind == TurnKind::Plan).then_some(posted),
+        Err(e) => {
+            error!("Linear {}: failed to post comment: {e}", d.identifier);
+            None
+        }
     }
 }
 
@@ -220,6 +230,11 @@ pub struct PollState {
     pub last_poll: String,
     /// Issue identifiers already announced to the agent.
     pub announced_issues: BTreeSet<String>,
+    /// The bot's plan comment per issue, keyed by identifier — the
+    /// announcement reply's comment id, embedded in post-plan
+    /// dispatches so execution never depends on session context.
+    #[serde(default)]
+    pub plan_comments: BTreeMap<String, String>,
 }
 
 impl PollState {
@@ -228,6 +243,7 @@ impl PollState {
         Self {
             last_poll: now_iso8601(),
             announced_issues: BTreeSet::new(),
+            plan_comments: BTreeMap::new(),
         }
     }
 }
@@ -348,7 +364,17 @@ pub fn decide_events(
                 issue_id: issue.id.clone(),
                 identifier: issue.identifier.clone(),
                 repo: repo.to_string(),
-                message: format_comment(issue, repo, &user.name, &user.email, &comment.body),
+                message: format_comment(
+                    issue,
+                    repo,
+                    &user.name,
+                    &user.email,
+                    &comment.body,
+                    state
+                        .plan_comments
+                        .get(&issue.identifier)
+                        .map(String::as_str),
+                ),
                 kind: TurnKind::Execution,
             });
         }
@@ -357,7 +383,14 @@ pub fn decide_events(
     let next = PollState {
         last_poll: now.to_string(),
         // Identifiers absent from the fetch (completed, cancelled,
-        // unassigned) are pruned by rebuilding from fetched issues only.
+        // unassigned) are pruned by rebuilding from fetched issues
+        // only; plan ids follow the same lifetime.
+        plan_comments: state
+            .plan_comments
+            .iter()
+            .filter(|(k, _)| announced.contains(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         announced_issues: announced,
     };
     (dispatches, next)
@@ -461,7 +494,14 @@ fn format_new_issue_execute(issue: &Issue, repo: &str) -> String {
     s
 }
 
-fn format_comment(issue: &Issue, repo: &str, author: &str, email: &str, body: &str) -> String {
+fn format_comment(
+    issue: &Issue,
+    repo: &str,
+    author: &str,
+    email: &str,
+    body: &str,
+    plan_comment: Option<&str>,
+) -> String {
     let branch = format!(
         "kitaebot_{}_<short-summary>",
         issue.identifier.to_lowercase()
@@ -473,6 +513,23 @@ fn format_comment(issue: &Issue, repo: &str, author: &str, email: &str, body: &s
         issue.identifier, issue.title,
     );
     let _ = writeln!(s, "\n{body}");
+    // The plan rides the dispatch so the execution turn never depends
+    // on it surviving session compaction; the comments were fetched
+    // this tick, so the lookup is free. A plan past the 100-comment
+    // fetch cap (or deleted) degrades to the id reference.
+    match plan_comment.map(|id| (id, issue.comments.nodes.iter().find(|c| c.id == id))) {
+        Some((id, Some(plan))) => {
+            let _ = writeln!(s, "\nYour current plan (comment {id}):\n\n{}", plan.body);
+        }
+        Some((id, None)) => {
+            let _ = writeln!(
+                s,
+                "\nYou posted a plan earlier (comment {id}), but it is not \
+                 among the comments fetched this tick."
+            );
+        }
+        None => {}
+    }
     let _ = writeln!(
         s,
         "\nIf this approves your plan, execute it end-to-end: move the ticket \
@@ -506,6 +563,7 @@ mod tests {
 
     fn comment(created_at: &str, user: Option<CommentUser>, body: &str) -> Comment {
         Comment {
+            id: format!("c-{created_at}"),
             body: body.into(),
             created_at: created_at.into(),
             user,
@@ -529,6 +587,7 @@ mod tests {
         PollState {
             last_poll: last_poll.into(),
             announced_issues: announced.iter().map(|s| (*s).into()).collect(),
+            plan_comments: BTreeMap::new(),
         }
     }
 
@@ -664,6 +723,67 @@ mod tests {
         assert!(msg.contains("in-progress state with the linear_set_state tool"));
     }
 
+    /// The dispatch embeds the plan body when the recorded comment is
+    /// in the fetched thread, so execution never depends on the plan
+    /// surviving session compaction. An id outside the thread (fetch
+    /// cap, deletion) degrades to the id-only reference.
+    #[test]
+    fn dispatch_embeds_the_recorded_plan_body() {
+        let plan = Comment {
+            id: "plan-77".into(),
+            body: "## The Plan\n1. do the thing".into(),
+            created_at: "2026-07-05T12:10:00Z".into(),
+            user: Some(user("bot", "Kitaebot", "bot@example.com")),
+        };
+        let mut issues = [issue(
+            "MDK-1",
+            &["owner/repo"],
+            vec![
+                plan,
+                comment(
+                    "2026-07-05T12:30:00Z",
+                    Some(user("u2", "Alice", TRUSTED)),
+                    "LGTM, proceed",
+                ),
+            ],
+        )];
+        let mut st = state("2026-07-05T12:00:00Z", &["MDK-1"]);
+        st.plan_comments.insert("MDK-1".into(), "plan-77".into());
+
+        let (dispatches, next) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
+        let msg = &dispatches[0].message;
+        assert!(msg.contains("Your current plan (comment plan-77)"), "{msg}");
+        assert!(msg.contains("1. do the thing"), "{msg}");
+        // The id survives into the next state while the issue is open.
+        assert_eq!(
+            next.plan_comments.get("MDK-1").map(String::as_str),
+            Some("plan-77")
+        );
+
+        // Same state, plan comment missing from the thread: id only.
+        issues[0].comments.nodes.remove(0);
+        let (dispatches, _) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
+        let msg = &dispatches[0].message;
+        assert!(!msg.contains("Your current plan"), "{msg}");
+        assert!(msg.contains("(comment plan-77)"), "{msg}");
+    }
+
+    #[test]
+    fn plan_comments_are_pruned_with_their_issues() {
+        let issues = [issue("MDK-2", &["owner/repo"], vec![])];
+        let mut st = state("2026-07-05T12:00:00Z", &["MDK-1", "MDK-2"]);
+        st.plan_comments.insert("MDK-1".into(), "plan-77".into());
+        st.plan_comments.insert("MDK-2".into(), "plan-88".into());
+
+        let (_, next) = decide_events(&issues, &st, "bot", &trusted(), "needs-plan", NOW);
+
+        assert_eq!(next.plan_comments.get("MDK-1"), None);
+        assert_eq!(
+            next.plan_comments.get("MDK-2").map(String::as_str),
+            Some("plan-88")
+        );
+    }
+
     #[test]
     fn old_comments_are_skipped() {
         let issues = [issue(
@@ -752,11 +872,32 @@ mod tests {
     fn state_round_trip() {
         let db = crate::state_db::StateDb::open_in_memory().unwrap();
 
-        let st = state("2026-07-05T12:00:00Z", &["MDK-1"]);
+        let mut st = state("2026-07-05T12:00:00Z", &["MDK-1"]);
+        st.plan_comments.insert("MDK-1".into(), "plan-77".into());
         save_state(&db, &st);
         let loaded = load_state(&db);
         assert_eq!(loaded.last_poll, "2026-07-05T12:00:00Z");
         assert!(loaded.announced_issues.contains("MDK-1"));
+        assert_eq!(
+            loaded.plan_comments.get("MDK-1").map(String::as_str),
+            Some("plan-77")
+        );
+    }
+
+    #[test]
+    fn state_without_plan_comments_still_loads() {
+        // Deployed state predates the field; serde default must cover it.
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        db.put_doc(
+            DOC,
+            r#"{"last_poll":"2026-07-05T12:00:00Z","announced_issues":["MDK-1"]}"#,
+        )
+        .unwrap();
+
+        let loaded = load_state(&db);
+
+        assert!(loaded.announced_issues.contains("MDK-1"));
+        assert!(loaded.plan_comments.is_empty());
     }
 
     #[test]
@@ -885,7 +1026,7 @@ mod tests {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let ch = channel(comment_client(vec![Ok(())], sent.clone()));
 
-        dispatch(
+        let plan_id = dispatch(
             &ch,
             &handle,
             Dispatch {
@@ -903,6 +1044,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0], "a plan");
+        // The announcement reply is the plan; its id gets recorded.
+        assert_eq!(plan_id.as_deref(), Some("c-9"));
     }
 
     #[tokio::test]

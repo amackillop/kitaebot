@@ -37,7 +37,7 @@ filter: { state: { type: { nin: [\"completed\", \"canceled\"] } } }\
 ) { nodes { \
 id identifier title description \
 labels { nodes { name } } \
-comments(first: 100) { nodes { body createdAt user { id name email } } } \
+comments(first: 100) { nodes { id body createdAt user { id name email } } } \
 } } } }";
 
 const COMMENT_CREATE_MUTATION: &str = "\
@@ -357,6 +357,7 @@ pub struct Label {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Comment {
+    pub id: String,
     pub body: String,
     /// RFC 3339 timestamp.
     pub created_at: String,
@@ -396,7 +397,7 @@ mod tests {
     const ISSUES_JSON: &str = r#"{"data":{"viewer":{"assignedIssues":{"nodes":[{
         "id":"i1","identifier":"MDK-123","title":"Fix login","description":"Broken",
         "labels":{"nodes":[{"name":"owner/repo"}]},
-        "comments":{"nodes":[{"body":"looks good","createdAt":"2026-07-05T12:00:00.000Z",
+        "comments":{"nodes":[{"id":"c1","body":"looks good","createdAt":"2026-07-05T12:00:00.000Z",
         "user":{"id":"u2","name":"Alice","email":"alice@example.com"}}]}
     }]}}}}"#;
 
@@ -425,7 +426,7 @@ mod tests {
         let json = r#"{"data":{"viewer":{"assignedIssues":{"nodes":[{
             "id":"i1","identifier":"MDK-1","title":"T","description":null,
             "labels":{"nodes":[]},
-            "comments":{"nodes":[{"body":"bot","createdAt":"2026-01-01T00:00:00.000Z","user":null}]}
+            "comments":{"nodes":[{"id":"c1","body":"bot","createdAt":"2026-01-01T00:00:00.000Z","user":null}]}
         }]}}}}"#;
         let data: AssignedIssuesData = interpret_response(&raw(200, json)).unwrap();
         assert!(
