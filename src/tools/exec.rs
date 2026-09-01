@@ -762,14 +762,23 @@ fn resolve_working_dir(workspace_root: &Path, dir: Option<&str>) -> Result<PathB
             guidance: "working_dir: path traversal detected".into(),
         });
     }
-    if std::path::Path::new(dir).is_absolute() {
-        return Err(ToolError::Blocked {
-            operation: dir.to_string(),
-            guidance: "working_dir: absolute paths not allowed".into(),
-        });
-    }
+    // Same rule as PathGuard::workspace_relative: the absolute
+    // spelling of an in-workspace dir names the same place.
+    let dir_path = std::path::Path::new(dir);
+    let dir_path = match dir_path.strip_prefix(workspace_root) {
+        Ok(stripped) => stripped,
+        Err(_) if dir_path.is_absolute() => {
+            return Err(ToolError::Blocked {
+                operation: dir.to_string(),
+                guidance: "working_dir: absolute path outside the workspace; \
+                           paths are relative to the workspace root"
+                    .into(),
+            });
+        }
+        Err(_) => dir_path,
+    };
 
-    let resolved = workspace_root.join(dir);
+    let resolved = workspace_root.join(dir_path);
     if !resolved.starts_with(workspace_root) {
         return Err(ToolError::Blocked {
             operation: dir.to_string(),
@@ -1421,6 +1430,22 @@ mod tests {
         let root = Path::new("/workspace");
         assert!(matches!(
             resolve_working_dir(root, Some("/etc")),
+            Err(ToolError::Blocked { .. }),
+        ));
+    }
+
+    /// The absolute spelling of an in-workspace dir names the same
+    /// place (models echo the advertised root, #129); traversal hiding
+    /// in the absolute spelling is still checked first.
+    #[test]
+    fn resolve_working_dir_accepts_absolute_under_root() {
+        let root = Path::new("/workspace");
+        assert_eq!(
+            resolve_working_dir(root, Some("/workspace/projects/myrepo")).unwrap(),
+            Path::new("/workspace/projects/myrepo"),
+        );
+        assert!(matches!(
+            resolve_working_dir(root, Some("/workspace/a/../escape")),
             Err(ToolError::Blocked { .. }),
         ));
     }
