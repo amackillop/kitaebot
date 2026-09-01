@@ -311,6 +311,12 @@ in
         "d /var/lib/kitaebot/context 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/memory 0750 kitaebot kitaebot -"
         "d /var/lib/kitaebot/projects 0750 kitaebot kitaebot -"
+        # Age-clean incremental session dirs on the shared cargo target:
+        # cargo-sweep never touches them, they grow per crate per
+        # fingerprint across every repo (14G by 2026-09-01), and the
+        # shared dir is platform property, not any one repo's justfile's.
+        # systemd-tmpfiles-clean.timer applies this daily.
+        "e /var/lib/kitaebot/projects/target/debug/incremental - - - 3d"
         "d /var/lib/kitaebot/state 0750 kitaebot kitaebot -"
         "L+ /var/lib/kitaebot/config.toml - - - - ${configFile}"
         "L+ /var/lib/kitaebot/USER.md - - - - ${cfg.promptsDir}/USER.md"
