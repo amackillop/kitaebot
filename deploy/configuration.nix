@@ -212,9 +212,13 @@ in
               fix every alert in that directory with native pnpm or
               cargo bumps, run just fix-deps and just check, and open
               ONE pull request for the directory listing the alert
-              numbers it fixes. Push nothing that fails just check
-              locally. End your reply with the number of alerts still
-              open repo-wide.
+              numbers it fixes. Write every alert reference as a
+              markdown link to
+              https://github.com/CumuloGlobal/lightning-node/security/dependabot/<n>
+              — a bare #n in a PR body autolinks to an unrelated issue
+              or PR. Push nothing that fails just check locally. End
+              your reply with the number of alerts still open
+              repo-wide.
 
               Hard rules: one PR or one directory per run. Never touch
               anything under .github/workflows. Never force-push.
