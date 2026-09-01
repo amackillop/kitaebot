@@ -30,6 +30,9 @@ const DERIVED: &[&str] = &[
     // Checkouts and their artifacts — re-cloned or regenerated.
     "projects",
     "reviews",
+    crate::workspace::DIFFS_DIR,
+    // Legacy spelling; deployed workspaces keep it until the hygiene
+    // sweep exists.
     ".diffs",
     // Nix-provisioned symlinks.
     crate::workspace::CONFIG_FILE,
