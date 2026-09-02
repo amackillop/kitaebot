@@ -90,13 +90,8 @@ const FINDINGS_RETRY_PROMPT: &str = "Your previous response had no parseable ```
 block (exactly one fenced block holding a single JSON object). Re-emit your review's \
 verdict and findings as exactly one such block, unchanged in substance, nothing else.";
 
-/// The corrective turn runs with no tool definitions and one
-/// iteration: it can only answer with text, at most one provider call
-/// plus one `FinalAnswer` squeeze. Session histories that hold tool
-/// rounds still carry their `tool_calls` and providers like GLM reject
-/// such a history when the tools are absent from the request; the
-/// failure is soft — a warning and the unparseable trailer, the
-/// parent's text survives.
+/// Toolless and single-iteration: the corrective turn can only
+/// answer with text (see the commit for the GLM tool-history caveat).
 const FINDINGS_RETRY_MAX_ITERATIONS: usize = 1;
 
 /// A sub-agent type: system prompt plus prebuilt tool set.
