@@ -165,6 +165,15 @@ Executes commands via `bash -c` within the workspace.
 These are defense-in-depth heuristics with friendly error messages. The real
 filesystem boundary is the Landlock sandbox (see [spec 15](15-sandbox.md)).
 
+**Guidance policy** (issue #136): the block message is what the model
+reads after a strike, so every rule class with a remediation states it
+(recursive rm to single-file rm, chmod +x to running the interpreter,
+raw git verbs to the git tools, nix mutations to "the operator deploys",
+signal sweeps to the automatic child cleanup). Only classes where any
+hint would be a how-to keep the bare `command blocked by policy`:
+exfiltration, pipe-to-shell, reverse shells, recon, secret and keyring
+harvesting, library injection, namespace escape, firewall tampering.
+
 **Environment scrubbing:**
 
 Child processes run with only allowlisted env vars forwarded:
