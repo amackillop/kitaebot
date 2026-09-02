@@ -63,6 +63,9 @@
           ];
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.sqlite ];
+          # Nix builders run on a pty, so cargo bakes ANSI codes into the
+          # stored log; keep `nix log` grep-able.
+          CARGO_TERM_COLOR = "never";
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;

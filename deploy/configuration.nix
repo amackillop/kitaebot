@@ -66,10 +66,10 @@ in
         # tokens per call that 5.2 produced, on every iteration.
         reasoning.effort = "high";
         model_overrides = {
-          explore.model = "deepseek/deepseek-v4-pro";
-          worker.model = "deepseek/deepseek-v4-pro";
+          explore.model = "openai/gpt-5.6-luna";
+          worker.model = "openai/gpt-5.6-luna";
           reviewer.model = "moonshotai/kimi-k3";
-          summarizer.model = "deepseek/deepseek-v4-flash";
+          summarizer.model = "deepseek/deepseek-v4-flash-0731";
           # Distilled facts persist and inject into every future turn;
           # they must not inherit the flash default.
           memory.model = "z-ai/glm-5.3";
@@ -212,9 +212,13 @@ in
               fix every alert in that directory with native pnpm or
               cargo bumps, run just fix-deps and just check, and open
               ONE pull request for the directory listing the alert
-              numbers it fixes. Push nothing that fails just check
-              locally. End your reply with the number of alerts still
-              open repo-wide.
+              numbers it fixes. Write every alert reference as a
+              markdown link to
+              https://github.com/CumuloGlobal/lightning-node/security/dependabot/<n>
+              — a bare #n in a PR body autolinks to an unrelated issue
+              or PR. Push nothing that fails just check locally. End
+              your reply with the number of alerts still open
+              repo-wide.
 
               Hard rules: one PR or one directory per run. Never touch
               anything under .github/workflows. Never force-push.

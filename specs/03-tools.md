@@ -128,29 +128,37 @@ Executes commands via `bash -c` within the workspace.
 
 **Safety guards — two-layer deny system:**
 
-1. **Regex layer** — a compiled `RegexSet` of ~70+ patterns covering:
-   destructive file ops (`rm -rf`, `shred`, `find -delete`), internal state
+1. **Regex layer** — a compiled `RegexSet` of ~60+ patterns covering:
+   destructive file ops (`rm -rf`, `find -delete`), internal state
    (workspace-root `context/` references except reads of
    `context/lcm/payloads/<file_id>`, which `<file>` references hand to the
    model and the sandbox grants; redirection into `state/`),
-   disk/filesystem (`mkfs`, `dd`, `fdisk`, `mount`), system power
-   (`shutdown`, `reboot`, `systemctl`), privilege escalation (`sudo`, `su`,
-   `chmod`, `chown`),
+   disk/filesystem (`mkfs`, `dd if=`, `fdisk`), system power (`init 0-6`,
+   `systemctl`), privilege escalation (`sudo`, `chmod`, `chown`),
    network exfiltration (`curl -T`, `nc -l`, `socat`), pipe-to-shell
    (`curl|sh`, `wget|sh`), reverse shells (`/dev/tcp/`, python/ruby/perl
    socket), port scanning (`nmap`, `masscan`), secret harvesting
    (`~/.ssh/id_*`, `~/.aws/`), GPG keyring access, process control
-   (`kill -9`), cron persistence, kernel modules, firewall manipulation,
-   injection/escape (`LD_PRELOAD`, `nsenter`), credential probing
-   (`~/.git-credentials`, `credential.helper=` injection), and git
-   operations that must use dedicated tools.
+   (`kill -9`), cron persistence (`crontab`), kernel modules, firewall
+   manipulation, injection/escape (`LD_PRELOAD`, `nsenter`), credential
+   probing (`~/.git-credentials`, `credential.helper=` injection), git
+   operations that must use dedicated tools, and the Nix fences
+   (`nixos-rebuild`, `nix-env`, `nix store delete/gc/optimise`,
+   `nix-channel`, `nix copy --to`, remote flake refs).
 
-2. **Shell-aware structural layer** — tokenizes with `shlex`, strips env var
-   prefixes and path prefixes, matches binary+subcommand. Catches bypass
-   patterns like `VAR=x git commit`, `/usr/bin/git clone`, and
-   piped/chained commands. Includes a full Nix deny list (`nixos-rebuild`,
-   `nix-env`, `nix profile`, `nix store delete/gc`, `nix-collect-garbage`,
-   remote flake refs).
+2. **Shell-aware structural layer** — splits the raw string into
+   simple-command segments on unquoted `|`, `;`, `&`, and newline
+   (a separator inside quotes or after a backslash is an argument),
+   tokenizes each segment with `shlex`, strips env var and path
+   prefixes, and matches binary+subcommand. Catches bypass patterns
+   like `VAR=x git commit`, `/usr/bin/git clone`, and piped/chained
+   commands. Owns every deny rule that is just a binary name in
+   command position (`shred`, `wipe`, `truncate`, `mount`, `umount`,
+   `shutdown`, `reboot`, `poweroff`, `halt`, `su`, `at`): those names
+   double as English prose and grep-pattern text, so command position
+   must be decided with real quoting rules — a regex over the raw
+   string blocked `grep "a\|truncate"` (#135). Also blocks `gh auth`
+   and `nix profile`.
 
 These are defense-in-depth heuristics with friendly error messages. The real
 filesystem boundary is the Landlock sandbox (see [spec 15](15-sandbox.md)).

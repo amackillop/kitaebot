@@ -24,6 +24,24 @@ pub struct ChatOutcome {
     pub response: Response,
     /// Usage as reported by the provider for this call.
     pub usage: CallUsage,
+    /// Usage billed by failed attempts before this reply, in order.
+    /// The draws happened and were billed; the ledger records them
+    /// whether or not one finally parsed (#128).
+    pub failed: Vec<CallUsage>,
+}
+
+/// A chat failure plus the usage its failed attempts billed.
+///
+/// Mirrors [`ChatOutcome`]: exhausting the retry budget does not
+/// unbill the draws, so the usage rides beside the error the same
+/// way it rides beside a reply.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct ChatError {
+    /// The failure that ended the chat.
+    pub error: ProviderError,
+    /// Usage billed by the failed attempts, in order.
+    pub failed: Vec<CallUsage>,
 }
 
 /// Per-call usage reported by the provider, when it reports any.
@@ -64,12 +82,13 @@ pub trait Provider: Send + Sync {
     ///
     /// # Returns
     /// Either a text response or tool call requests, with usage metadata.
+    /// Both arms carry the usage billed by failed attempts along the way.
     fn chat(
         &self,
         session: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> impl Future<Output = Result<ChatOutcome, ProviderError>> + Send;
+    ) -> impl Future<Output = Result<ChatOutcome, ChatError>> + Send;
 
     /// The model this provider sends requests as; recorded per turn in
     /// the usage ledger.

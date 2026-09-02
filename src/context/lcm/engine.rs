@@ -313,7 +313,12 @@ impl LcmEngine {
                 source: e,
             })?;
         let payload_path = payload_dir.join(&file_id);
-        tokio::fs::write(&payload_path, content)
+        // Stored line-oriented (JSON pretty-printed, framing kept) so
+        // grep and file_read ranges stay usable; recovery in
+        // `lcm_expand` re-reads this same copy. The id is derived
+        // from the raw content, so dedupe is unaffected.
+        let stored = explore::normalize_payload(content);
+        tokio::fs::write(&payload_path, stored.as_ref())
             .await
             .map_err(|e| EngineError::Io {
                 operation: "write",
@@ -321,10 +326,9 @@ impl LcmEngine {
                 source: e,
             })?;
 
-        // The payload on disk stays a verbatim copy of the tool
-        // result, but detection and exploration see the underlying
-        // file content: `file_read` line numbering would otherwise
-        // break every structured parser.
+        // Detection and exploration see the underlying file content:
+        // `file_read` line numbering would otherwise break every
+        // structured parser.
         let unframed = explore::strip_tool_framing(content);
         let kind = explore::detect_kind(path_hint.as_deref(), &unframed);
         let summary = match strategy {
@@ -1414,7 +1418,8 @@ mod tests {
         assert_eq!(path, format!("context/lcm/payloads/{file_id}"));
         assert!(content.contains(&format!("path=\"{path}\"")));
 
-        // Raw payload is on disk, lossless.
+        // Raw payload is on disk, pretty-printed. `"z".repeat(400)` is not
+        // valid JSON, so the store leaves it byte-identical.
         let on_disk = fs::read_to_string(
             dir.path()
                 .join("context")
@@ -1550,7 +1555,8 @@ mod tests {
         assert!(!content.contains("<tool_output"));
         assert!(!content.contains("1\t{"));
 
-        // The disk copy stays verbatim, framing intact.
+        // The disk copy is pretty-printed underneath, framing intact
+        // (line numbers restart at 1 over the pretty lines).
         let file_id = explore::file_id(&framed);
         let on_disk = fs::read_to_string(
             dir.path()
@@ -1560,7 +1566,9 @@ mod tests {
                 .join(&file_id),
         )
         .unwrap();
-        assert_eq!(on_disk, framed);
+        assert!(on_disk.starts_with("<tool_output name=\"file_read\">\n1\t{"));
+        assert!(on_disk.contains("\"users\": ["));
+        assert!(on_disk.ends_with("</tool_output>"));
     }
 
     /// A `SummarizeFn` that panics when called, proving a code path

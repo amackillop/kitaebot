@@ -266,6 +266,8 @@ struct TurnStats {
     squeezed: bool,
     /// A text response was held for the [`ReplyPolicy::Confirm`] round.
     nudged: bool,
+    /// The midpoint checkpoint directive was injected.
+    checkpointed: bool,
 }
 
 /// Billed usage for one turn, summed across its provider calls.
@@ -328,6 +330,13 @@ impl TurnUsage {
         };
         if other.provider.is_some() {
             self.provider.clone_from(&other.provider);
+        }
+    }
+
+    /// Failed draws are billed draws; they count like any other call.
+    fn add_failed(&mut self, failed: Vec<CallUsage>) {
+        for call in failed {
+            self.add_call(call);
         }
     }
 }
@@ -460,6 +469,7 @@ pub(crate) async fn run_turn_metered(
             cost = stats.usage.cost,
             squeezed = stats.squeezed,
             nudged = stats.nudged,
+            checkpointed = stats.checkpointed,
             ?elapsed,
             "Turn summary"
         ),
@@ -476,6 +486,7 @@ pub(crate) async fn run_turn_metered(
             cost = stats.usage.cost,
             squeezed = stats.squeezed,
             nudged = stats.nudged,
+            checkpointed = stats.checkpointed,
             ?elapsed,
             "Turn summary"
         ),
@@ -548,9 +559,19 @@ async fn turn_loop(
             );
         }
 
+        // An append, not a rewrite: the prompt-cache prefix survives.
+        if iteration == max_iterations / 2 && iteration > 0 {
+            stats.checkpointed = true;
+            engine
+                .push_message(Message::System {
+                    content: MIDPOINT_CHECKPOINT_DIRECTIVE.to_string(),
+                })
+                .await?;
+        }
+
         let assembled = engine.assemble(system_prompt).await?;
 
-        let outcome = cancellable(
+        let outcome = match cancellable(
             provider.chat(
                 engine.active_session(),
                 &assembled.messages,
@@ -560,11 +581,22 @@ async fn turn_loop(
             activity_tx,
         )
         .await?
-        .map_err(Error::Provider)?;
+        {
+            Ok(outcome) => outcome,
+            // The turn dies, but its failed draws were billed; the
+            // meter records them on the way out (#128).
+            Err(e) => {
+                stats.usage.add_failed(e.failed);
+                return Err(Error::Provider(e.error));
+            }
+        };
 
         engine.observe_request(assembled.messages, Arc::clone(&tool_definitions));
 
+        stats.usage.add_failed(outcome.failed);
         let call = outcome.usage;
+        // Only the successful draw's prompt size is live context;
+        // failed draws must not inflate it.
         if let Some(prompt_tokens) = call.prompt_tokens {
             engine.observe_tokens(prompt_tokens as usize);
             stats.prompt_tokens = Some(prompt_tokens as usize);
@@ -729,6 +761,18 @@ const CONFIRM_REPLY_DIRECTIVE: &str = "Your previous message was not \
     to publish: what was done, what remains, and any branch or PR \
     created.";
 
+/// Injected once at half the iteration budget (spec 01): the forced
+/// restatement that breaks fixation, said while the turn can still act
+/// on it instead of only in the exhaustion squeeze.
+const MIDPOINT_CHECKPOINT_DIRECTIVE: &str = "Half the iteration budget \
+    for this task is spent. In your next reasoning, restate the \
+    objective, list what is verified done, and name the current \
+    obstacle. If you are debugging a failing check, derive the \
+    expected value from first principles before suspecting the code: \
+    your own expectation may be the bug. If an approach has failed \
+    twice, drop it and take a different one. Then continue with tool \
+    calls; do not end the turn with a status summary.";
+
 /// The budget-exhausted directive for the final-answer squeeze.
 const FINAL_ANSWER_DIRECTIVE: &str = "Your tool-call budget for this task is \
     exhausted; no further tool calls will be executed. Reply now with your \
@@ -818,16 +862,23 @@ async fn squeeze(
         })
         .await?;
     let assembled = engine.assemble(system_prompt).await?;
-    let outcome = cancellable(
+    let outcome = match cancellable(
         provider.chat(engine.active_session(), &assembled.messages, &[]),
         &ctx.cancel,
         ctx.activity.as_ref(),
     )
     .await?
-    .map_err(Error::Provider)?;
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            stats.usage.add_failed(e.failed);
+            return Err(Error::Provider(e.error));
+        }
+    };
 
     engine.observe_request(assembled.messages, Arc::from([]));
 
+    stats.usage.add_failed(outcome.failed);
     let call = outcome.usage;
     if let Some(prompt_tokens) = call.prompt_tokens {
         engine.observe_tokens(prompt_tokens as usize);
@@ -1194,6 +1245,24 @@ mod tests {
         assert_eq!(usage.cached_tokens, None);
     }
 
+    #[test]
+    fn turn_usage_failed_draws_count_as_calls() {
+        let mut usage = TurnUsage::default();
+        usage.add_failed(vec![
+            CallUsage {
+                prompt_tokens: Some(100),
+                completion_tokens: 7,
+                cost: Some(0.002),
+                ..CallUsage::default()
+            },
+            CallUsage::default(),
+        ]);
+        assert_eq!(usage.calls, 2);
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 7);
+        assert_eq!(usage.cost, Some(0.002));
+    }
+
     fn text(s: &str) -> Response {
         Response::Text(s.to_string())
     }
@@ -1339,6 +1408,81 @@ mod tests {
         assert_eq!(provider.call_count(), 3);
     }
 
+    /// Issue #136 turns 19 and 23 each burned a full 200-iteration
+    /// budget inside a debugging fixation; the restatement that broke
+    /// it arrived only in the exhaustion squeeze. The checkpoint says
+    /// it at the midpoint, exactly once.
+    #[tokio::test]
+    async fn checkpoint_directive_lands_once_at_half_budget() {
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(mock_tool_calls(&["c1"])),
+            Ok(mock_tool_calls(&["c2"])),
+            Ok(mock_tool_calls(&["c3"])),
+            Ok(text("done")),
+        ]));
+        let tools = mock_tools("mock output");
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let result = run_turn(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Fix the bug",
+            &*provider,
+            &tools,
+            4,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap().into_text(), "done");
+        let directives = provider
+            .last_request()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                matches!(m, Message::System { content }
+                    if content == MIDPOINT_CHECKPOINT_DIRECTIVE)
+            })
+            .count();
+        assert_eq!(directives, 1, "checkpoint must fire exactly once");
+    }
+
+    /// A cap of 1 has midpoint 0; injecting before the first call
+    /// would lecture a turn that has not done anything yet.
+    #[tokio::test]
+    async fn no_checkpoint_when_the_midpoint_is_iteration_zero() {
+        let provider = Arc::new(MockProvider::new(vec![Ok(text("done"))]));
+        let tools = Tools::default();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let result = run_turn(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Fix the bug",
+            &*provider,
+            &tools,
+            1,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap().into_text(), "done");
+        let directives = provider
+            .last_request()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                matches!(m, Message::System { content }
+                    if content == MIDPOINT_CHECKPOINT_DIRECTIVE)
+            })
+            .count();
+        assert_eq!(directives, 0);
+    }
+
     /// A nudge on the last iteration would push the turn past the cap
     /// and lose it under `BudgetPolicy::Fail`; the text is accepted.
     #[tokio::test]
@@ -1364,6 +1508,85 @@ mod tests {
 
         assert_eq!(result.unwrap().into_text(), "only response");
         assert_eq!(provider.call_count(), 1);
+    }
+
+    /// A redraw's billed usage reaches the meter alongside the
+    /// successful call (#128).
+    #[tokio::test]
+    async fn meter_bills_failed_draws_on_success() {
+        let provider = Arc::new(
+            MockProvider::new(vec![Ok(text("hi"))])
+                .with_prompt_tokens(200)
+                .with_failed_usage(vec![CallUsage {
+                    prompt_tokens: Some(100),
+                    completion_tokens: 7,
+                    cost: Some(0.002),
+                    ..CallUsage::default()
+                }]),
+        );
+        let tools = Tools::default();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let (result, meter) = run_turn_metered(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Hello",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            BudgetPolicy::Fail,
+            ReplyPolicy::Accept,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(meter.usage.calls, 2);
+        assert_eq!(meter.usage.prompt_tokens, 300);
+        assert_eq!(meter.usage.completion_tokens, 7);
+        assert_eq!(meter.usage.cost, Some(0.002));
+    }
+
+    /// A turn that dies on an exhausted provider still bills the
+    /// draws that failed it — the incident behind #128.
+    #[tokio::test]
+    async fn meter_bills_failed_draws_when_the_turn_dies() {
+        let provider = Arc::new(
+            MockProvider::new(vec![Err(ProviderError::EmptyResponse)]).with_failed_usage(vec![
+                CallUsage {
+                    completion_tokens: 3317,
+                    cost: Some(0.004),
+                    ..CallUsage::default()
+                },
+            ]),
+        );
+        let tools = Tools::default();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let (result, meter) = run_turn_metered(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Hello",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            BudgetPolicy::Fail,
+            ReplyPolicy::Accept,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::Provider(ProviderError::EmptyResponse))
+        ));
+        assert_eq!(meter.usage.calls, 1);
+        assert_eq!(meter.usage.completion_tokens, 3317);
+        assert_eq!(meter.usage.cost, Some(0.004));
     }
 
     #[tokio::test]
