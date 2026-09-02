@@ -85,6 +85,11 @@ impl TestAgent {
     }
 
     pub(crate) fn spawn(self) -> AgentHandle {
+        self.spawn_with_task().0
+    }
+
+    /// [`Self::spawn`] keeping the actor's task, for shutdown tests.
+    pub(crate) fn spawn_with_task(self) -> (AgentHandle, tokio::task::JoinHandle<()>) {
         let engine = FlatSession::new(&self.ws.context_dir(), ContextConfig::default()).unwrap();
         let summarize = make_summarize_fn(self.provider.clone());
         // Threshold far above any test transcript, so a duty turn

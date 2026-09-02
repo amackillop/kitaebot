@@ -281,6 +281,18 @@ hint for display formatting.
 
 If the actor has shut down, `send_message` returns a synthetic error string.
 
+**Shutdown drains.** `AgentHandle::spawn` also returns the actor task's
+`JoinHandle`. On SIGINT/SIGTERM the daemon stops the channel loops, calls
+`begin_drain()`, drops its handle, and awaits the task. The actor finishes the
+turn it is on (sub-agents are awaited inside the turn, so they finish with it),
+answers every envelope already queued with `Err("Agent draining")` instead of
+running it, and exits when the last sender is gone. Refusing the queue matters:
+its reply channels are dead, so running it would do the work, post nothing, and
+re-dispatch the same event on the next boot into a session that already
+contains it. Channel events lost this way re-dispatch because a dropped poll
+tick never saved its cursor. The systemd unit's `TimeoutStopSec` bounds the
+drain (spec 09); a hung turn still dies there.
+
 ### ChannelSource
 
 Messages are tagged with their origin before entering the session:

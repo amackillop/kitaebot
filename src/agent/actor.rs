@@ -23,6 +23,7 @@ use crate::tools::Tools;
 use crate::usage::{self, TaskKey, TurnRecord, UsageLedger};
 use crate::workspace::Workspace;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::PromptConfig;
 use super::envelope::{ChannelSource, Envelope, InputEnvelope, TurnRole};
@@ -32,6 +33,8 @@ use super::envelope::{ChannelSource, Envelope, InputEnvelope, TurnRole};
 /// Owns all dependencies so the run loop has no borrows and is `'static`.
 pub(super) struct Agent<P: Provider, E: ContextEngine> {
     rx: mpsc::Receiver<Envelope>,
+    /// Cancelled once shutdown begins; queued input is then refused.
+    drain: CancellationToken,
     workspace: Arc<Workspace>,
     provider: Arc<P>,
     /// Serves [`TurnRole::Planner`] turns; the default provider when
@@ -56,6 +59,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         rx: mpsc::Receiver<Envelope>,
+        drain: CancellationToken,
         workspace: Arc<Workspace>,
         provider: Arc<P>,
         planner_provider: Arc<P>,
@@ -73,6 +77,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
     ) -> Self {
         Self {
             rx,
+            drain,
             workspace,
             provider,
             planner_provider,
@@ -91,10 +96,18 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         }
     }
 
-    /// Consume envelopes until all handles are dropped.
+    /// Consume envelopes until all handles are dropped. Once draining,
+    /// queued input is refused: its reply channel is dead by then, and
+    /// the channel re-dispatches the event on the next boot.
     pub async fn run(mut self) {
         while let Some(envelope) = self.rx.recv().await {
             match envelope {
+                Envelope::Greeting(reply_tx) => {
+                    let _ = reply_tx.send(self.format_greeting());
+                }
+                Envelope::Input(input) if self.drain.is_cancelled() => {
+                    let _ = input.reply_tx.send(Err("Agent draining".into()));
+                }
                 Envelope::Input(input) => {
                     // Every event inside the turn inherits this span;
                     // `session` is recorded once the target is known.
@@ -130,9 +143,6 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
                     } else {
                         tracing::debug!("mailbox non-empty; deferring between-turns compaction");
                     }
-                }
-                Envelope::Greeting(reply_tx) => {
-                    let _ = reply_tx.send(self.format_greeting());
                 }
             }
         }
@@ -390,7 +400,6 @@ mod tests {
     use crate::provider::MockProvider;
     use crate::test_support::{TestAgent, workspace};
     use crate::types::Response;
-    use tokio_util::sync::CancellationToken;
 
     fn spawn_agent(ws: Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
         spawn_agent_with(ws, provider, Tools::default(), None, 1)
@@ -1124,5 +1133,54 @@ mod tests {
             reply.content
         );
         assert!(rx.try_recv().is_err(), "unknown names must not queue");
+    }
+
+    /// Drain: the in-flight turn completes, the queued one is refused
+    /// without running, and the actor exits once the handle is gone.
+    #[tokio::test]
+    async fn drain_finishes_in_flight_turn_and_refuses_queued() {
+        use tokio::sync::Semaphore;
+
+        let (_dir, ws) = workspace();
+        let gate = Arc::new(Semaphore::new(0));
+        let provider = Arc::new(
+            MockProvider::new(vec![
+                Ok(Response::Text("first".into())),
+                Ok(Response::Text("second".into())),
+            ])
+            .gated(gate.clone()),
+        );
+        let (handle, actor) = TestAgent::new(ws, provider.clone()).spawn_with_task();
+
+        let send = |h: AgentHandle, text: &str| {
+            let text = text.to_string();
+            tokio::spawn(async move {
+                h.send_message(
+                    ChannelSource::Socket,
+                    text,
+                    None,
+                    None,
+                    CancellationToken::new(),
+                )
+                .await
+            })
+        };
+        let first = send(handle.clone(), "one");
+        while provider.call_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        let second = send(handle.clone(), "two");
+        // Current-thread runtime: one yield runs the spawned send, so
+        // "two" sits in the mailbox before the drain begins.
+        tokio::task::yield_now().await;
+
+        handle.begin_drain();
+        drop(handle);
+        gate.add_permits(1);
+
+        assert_eq!(first.await.unwrap().unwrap().content, "first");
+        assert_eq!(second.await.unwrap().unwrap_err(), "Agent draining");
+        actor.await.unwrap();
+        assert_eq!(provider.call_count(), 1);
     }
 }

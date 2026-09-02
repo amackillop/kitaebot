@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::activity::Activity;
@@ -32,10 +33,14 @@ use super::envelope::{ChannelSource, Envelope, InputEnvelope, TurnRole};
 #[derive(Clone)]
 pub struct AgentHandle {
     tx: mpsc::Sender<Envelope>,
+    /// Cancelled by [`Self::begin_drain`]; the actor then refuses
+    /// queued input instead of running it.
+    drain: CancellationToken,
 }
 
 impl AgentHandle {
-    /// Spawn the agent actor and return a handle to it.
+    /// Spawn the agent actor and return a handle to it plus the
+    /// actor's task, for a shutdown that waits on the in-flight turn.
     ///
     /// The actor task runs until all handles are dropped.
     #[allow(clippy::too_many_arguments)]
@@ -54,10 +59,12 @@ impl AgentHandle {
         usage_ledger: Option<Arc<UsageLedger>>,
         review_ledger: Option<Arc<ReviewLedger>>,
         duty_trigger: Option<TriggerHandle>,
-    ) -> Self {
+    ) -> (Self, JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(32);
+        let drain = CancellationToken::new();
         let actor = Agent::new(
             rx,
+            drain.clone(),
             workspace,
             provider,
             planner_provider,
@@ -73,14 +80,24 @@ impl AgentHandle {
             review_ledger,
             duty_trigger,
         );
-        tokio::spawn(actor.run());
-        Self { tx }
+        let task = tokio::spawn(actor.run());
+        (Self { tx, drain }, task)
     }
 
     /// Create a handle wrapping an existing sender.
     #[cfg(test)]
     pub(super) fn new(tx: mpsc::Sender<Envelope>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            drain: CancellationToken::new(),
+        }
+    }
+
+    /// Stop accepting work: the in-flight turn completes, envelopes
+    /// already queued are answered with an error, nothing new runs.
+    /// Drop every handle afterwards so the actor's task exits.
+    pub fn begin_drain(&self) {
+        self.drain.cancel();
     }
 
     /// Send a message to the agent and await the reply.
