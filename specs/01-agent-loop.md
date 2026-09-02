@@ -171,6 +171,27 @@ under `BudgetPolicy::Fail` a nudge into the cap loses the turn, which is
 worse than publishing possible narration. The turn summary logs `nudged`
 so leak frequency is measurable.
 
+### Midpoint Checkpoint
+
+A turn deep in a debugging fixation spends iterations confirming its
+own assumption instead of questioning it. Two consecutive turns on
+issue #136 (2026-09-02) each burned a full 200-iteration budget this
+way — and both exhaustion squeezes, forced to restate the problem,
+immediately spotted the wrong assumption ("wait — 300 < 570, so None
+is CORRECT"). The restatement works; it just fired after the turn was
+already dead.
+
+So the loop injects one system directive at `max_iterations / 2`
+(skipped when that midpoint is iteration 0): restate the objective,
+list what is verified, derive the expected value of whatever is being
+debugged from first principles, and abandon any approach that has
+failed twice. The injection is an append, so the prompt-cache prefix
+survives, and it costs no extra completion (unlike the squeeze). The
+directive explicitly says to continue with tool calls: under
+`ReplyPolicy::Accept` a bare status summary would end the turn. The
+turn summary logs `checkpointed` so effectiveness is measurable
+against `max_iterations` outcomes.
+
 ### Budget Exhaustion
 
 Hitting `agent.max_iterations` emits `Activity::MaxIterations`, then

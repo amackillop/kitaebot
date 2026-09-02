@@ -266,6 +266,8 @@ struct TurnStats {
     squeezed: bool,
     /// A text response was held for the [`ReplyPolicy::Confirm`] round.
     nudged: bool,
+    /// The midpoint checkpoint directive was injected.
+    checkpointed: bool,
 }
 
 /// Billed usage for one turn, summed across its provider calls.
@@ -447,6 +449,7 @@ pub(crate) async fn run_turn_metered(
             cost = stats.usage.cost,
             squeezed = stats.squeezed,
             nudged = stats.nudged,
+            checkpointed = stats.checkpointed,
             ?elapsed,
             "Turn summary"
         ),
@@ -463,6 +466,7 @@ pub(crate) async fn run_turn_metered(
             cost = stats.usage.cost,
             squeezed = stats.squeezed,
             nudged = stats.nudged,
+            checkpointed = stats.checkpointed,
             ?elapsed,
             "Turn summary"
         ),
@@ -533,6 +537,16 @@ async fn turn_loop(
                     after: event.after,
                 },
             );
+        }
+
+        // An append, not a rewrite: the prompt-cache prefix survives.
+        if iteration == max_iterations / 2 && iteration > 0 {
+            stats.checkpointed = true;
+            engine
+                .push_message(Message::System {
+                    content: MIDPOINT_CHECKPOINT_DIRECTIVE.to_string(),
+                })
+                .await?;
         }
 
         let assembled = engine.assemble(system_prompt).await?;
@@ -726,6 +740,18 @@ const CONFIRM_REPLY_DIRECTIVE: &str = "Your previous message was not \
     continue with tool calls. Otherwise reply with exactly the comment \
     to publish: what was done, what remains, and any branch or PR \
     created.";
+
+/// Injected once at half the iteration budget (spec 01): the forced
+/// restatement that breaks fixation, said while the turn can still act
+/// on it instead of only in the exhaustion squeeze.
+const MIDPOINT_CHECKPOINT_DIRECTIVE: &str = "Half the iteration budget \
+    for this task is spent. In your next reasoning, restate the \
+    objective, list what is verified done, and name the current \
+    obstacle. If you are debugging a failing check, derive the \
+    expected value from first principles before suspecting the code: \
+    your own expectation may be the bug. If an approach has failed \
+    twice, drop it and take a different one. Then continue with tool \
+    calls; do not end the turn with a status summary.";
 
 /// The budget-exhausted directive for the final-answer squeeze.
 const FINAL_ANSWER_DIRECTIVE: &str = "Your tool-call budget for this task is \
@@ -1360,6 +1386,81 @@ mod tests {
 
         assert_eq!(result.unwrap().into_text(), "Done: edit applied.");
         assert_eq!(provider.call_count(), 3);
+    }
+
+    /// Issue #136 turns 19 and 23 each burned a full 200-iteration
+    /// budget inside a debugging fixation; the restatement that broke
+    /// it arrived only in the exhaustion squeeze. The checkpoint says
+    /// it at the midpoint, exactly once.
+    #[tokio::test]
+    async fn checkpoint_directive_lands_once_at_half_budget() {
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(mock_tool_calls(&["c1"])),
+            Ok(mock_tool_calls(&["c2"])),
+            Ok(mock_tool_calls(&["c3"])),
+            Ok(text("done")),
+        ]));
+        let tools = mock_tools("mock output");
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let result = run_turn(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Fix the bug",
+            &*provider,
+            &tools,
+            4,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap().into_text(), "done");
+        let directives = provider
+            .last_request()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                matches!(m, Message::System { content }
+                    if content == MIDPOINT_CHECKPOINT_DIRECTIVE)
+            })
+            .count();
+        assert_eq!(directives, 1, "checkpoint must fire exactly once");
+    }
+
+    /// A cap of 1 has midpoint 0; injecting before the first call
+    /// would lecture a turn that has not done anything yet.
+    #[tokio::test]
+    async fn no_checkpoint_when_the_midpoint_is_iteration_zero() {
+        let provider = Arc::new(MockProvider::new(vec![Ok(text("done"))]));
+        let tools = Tools::default();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let result = run_turn(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Fix the bug",
+            &*provider,
+            &tools,
+            1,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap().into_text(), "done");
+        let directives = provider
+            .last_request()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                matches!(m, Message::System { content }
+                    if content == MIDPOINT_CHECKPOINT_DIRECTIVE)
+            })
+            .count();
+        assert_eq!(directives, 0);
     }
 
     /// A nudge on the last iteration would push the turn past the cap
