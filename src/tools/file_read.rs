@@ -71,9 +71,12 @@ impl Tool for FileRead {
     fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: ToolCtx,
+        ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
+            // Sub-agent engines run a higher inline cap (spec 19); the
+            // clamp must match the engine that will judge the result.
+            let inline_tokens = ctx.tool_output_tokens.unwrap_or(self.inline_tokens);
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
@@ -116,8 +119,7 @@ impl Tool for FileRead {
                 .map(|(i, line)| (i + 1, line))
                 .collect();
 
-            let budget_bytes = self
-                .inline_tokens
+            let budget_bytes = inline_tokens
                 .saturating_sub(CLAMP_RESERVE_TOKENS)
                 .saturating_mul(4);
             let mut used = 0usize;
@@ -332,6 +334,25 @@ mod tests {
                 .starts_with(&format!("{next}\t")),
             "continuation must resume at the advertised offset: {cont}"
         );
+    }
+
+    /// Sub-agent contexts carry their own higher inline cap; the same
+    /// read that clamps for the root must pass whole for them.
+    #[tokio::test]
+    async fn ctx_threshold_override_lifts_the_clamp() {
+        let content = "0123456789\n".repeat(100);
+        let threshold = u32::try_from(CLAMP_RESERVE_TOKENS).unwrap() + 50;
+        let (_dir, tool) = setup_with_threshold(&content, threshold);
+        let ctx = ToolCtx {
+            tool_output_tokens: Some(20_000),
+            ..ToolCtx::default()
+        };
+        let result = tool
+            .execute(serde_json::json!({"path": "test.txt"}), ctx)
+            .await
+            .unwrap();
+        assert!(result.contains("100 lines shown, 100 total"), "{result}");
+        assert!(!result.contains("continue with offset"), "{result}");
     }
 
     /// A single line over budget cannot be windowed by lines; the read

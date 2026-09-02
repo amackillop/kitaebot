@@ -134,6 +134,10 @@ pub struct ToolCtx {
     /// their ledger rows fold into the parent's task. `None` where no
     /// dispatch identity exists (tests, the distiller's ephemeral turn).
     pub task: Option<TaskKey>,
+    /// Inline tool-output threshold for this turn's engine, when it
+    /// differs from the root config (sub-agents run a 20k cap, spec
+    /// 19). `None` means the tool's constructed default applies.
+    pub tool_output_tokens: Option<usize>,
 }
 
 impl Default for ToolCtx {
@@ -143,6 +147,7 @@ impl Default for ToolCtx {
             activity: None,
             cancel: CancellationToken::new(),
             task: None,
+            tool_output_tokens: None,
         }
     }
 }
