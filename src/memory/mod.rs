@@ -209,6 +209,16 @@ mod tests {
         assert!(marker.contains("(+3 more)"), "{marker}");
     }
 
+    /// The cut splits a `##` header mid-line: the partial header is
+    /// not shown whole, so it must be named as dropped.
+    #[test]
+    fn truncation_marker_names_a_split_header() {
+        let kept = "# Memory\n\n## To";
+        let full = "# Memory\n\n## Tooling\n- a\n";
+        let marker = truncation_marker(full, kept, kept.len());
+        assert!(marker.contains("sections not shown: Tooling"), "{marker}");
+    }
+
     #[test]
     fn truncation_marker_without_sections_is_bare() {
         let marker = truncation_marker("x".repeat(50).as_str(), "x".repeat(10).as_str(), 10);
