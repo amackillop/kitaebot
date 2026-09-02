@@ -158,6 +158,17 @@ impl PollState {
             in_flight: None,
         }
     }
+
+    /// Undo the `reviewed` insert of a turn that never returned, so the
+    /// normal passes dispatch it again.
+    fn roll_back_in_flight(&mut self) -> Option<InFlight> {
+        let turn = self.in_flight.take()?;
+        match &turn.prev_sha {
+            None => self.reviewed.remove(&turn.key),
+            Some(sha) => self.reviewed.insert(turn.key.clone(), sha.clone()),
+        };
+        Some(turn)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +198,10 @@ pub async fn poll_loop(
     };
 
     let mut state = load_state(state_db);
+    if let Some(turn) = state.roll_back_in_flight() {
+        warn!(pr = %turn.key, "Rolling back reviewer turn interrupted by shutdown");
+        save_state(state_db, &state);
+    }
     info!(last_poll = %state.last_poll, "GitHub channel starting");
 
     let mut tick = time::interval(Duration::from_secs(config.poll_interval_secs));
@@ -1552,6 +1567,52 @@ mod tests {
     #[test]
     fn starting_now_has_no_in_flight() {
         assert_eq!(PollState::starting_now().in_flight, None);
+    }
+
+    fn in_flight_state(prev_sha: Option<&str>) -> PollState {
+        PollState {
+            last_poll: "2025-01-15T10:00:00Z".to_string(),
+            reviewed: BTreeMap::from([("o/r#1".to_string(), "new".to_string())]),
+            in_flight: Some(InFlight {
+                key: "o/r#1".to_string(),
+                prev_sha: prev_sha.map(str::to_string),
+            }),
+        }
+    }
+
+    #[test]
+    fn roll_back_first_review_forgets_the_key() {
+        let mut state = in_flight_state(None);
+        let turn = state.roll_back_in_flight();
+        assert_eq!(turn.map(|t| t.key), Some("o/r#1".to_string()));
+        assert!(state.reviewed.is_empty());
+        assert_eq!(state.in_flight, None);
+    }
+
+    #[test]
+    fn roll_back_re_review_restores_prev_sha() {
+        let mut state = in_flight_state(Some("old"));
+        assert!(state.roll_back_in_flight().is_some());
+        assert_eq!(state.reviewed, reviewed("o/r#1", "old"));
+        assert_eq!(state.in_flight, None);
+    }
+
+    #[test]
+    fn roll_back_comment_only_turn_keeps_sha() {
+        let mut state = in_flight_state(Some("new"));
+        assert!(state.roll_back_in_flight().is_some());
+        assert_eq!(state.reviewed, reviewed("o/r#1", "new"));
+    }
+
+    #[test]
+    fn roll_back_without_in_flight_is_noop() {
+        let mut state = PollState {
+            last_poll: "2025-01-15T10:00:00Z".to_string(),
+            reviewed: reviewed("o/r#1", "abc"),
+            in_flight: None,
+        };
+        assert_eq!(state.roll_back_in_flight(), None);
+        assert_eq!(state.reviewed, reviewed("o/r#1", "abc"));
     }
 
     #[test]
