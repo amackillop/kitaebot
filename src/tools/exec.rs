@@ -875,38 +875,58 @@ fn is_env_assignment(token: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Shell operators that separate simple commands.
-const SHELL_OPERATORS: &[&str] = &["&&", "||", "|", ";"];
+/// Quote state while scanning a raw command string.
+#[derive(PartialEq)]
+enum QuoteState {
+    Double,
+    None,
+    Single,
+}
 
-/// Split a token list on shell operators into individual simple commands.
-fn parse_simple_commands(tokens: &[String]) -> Vec<&[String]> {
-    let mut commands = Vec::new();
-    let mut start = 0;
-    for (i, tok) in tokens.iter().enumerate() {
-        if SHELL_OPERATORS.contains(&tok.as_str()) {
-            if start < i {
-                commands.push(&tokens[start..i]);
+/// Split a command string into simple-command segments on unquoted
+/// separators (`|`, `;`, `&`, newline). Quoting and escapes survive
+/// intact inside each segment for `shlex` to parse; a separator inside
+/// quotes or after a backslash is an argument, not a split point.
+fn split_unquoted_separators(cmd: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut state = QuoteState::None;
+    let mut escaped = false;
+    for c in cmd.chars() {
+        if escaped {
+            escaped = false;
+        } else {
+            match (&state, c) {
+                (QuoteState::Double, '"') | (QuoteState::Single, '\'') => {
+                    state = QuoteState::None;
+                }
+                (QuoteState::Double | QuoteState::None, '\\') => escaped = true,
+                (QuoteState::None, '"') => state = QuoteState::Double,
+                (QuoteState::None, '\'') => state = QuoteState::Single,
+                (QuoteState::None, '|' | ';' | '&' | '\n') => {
+                    segments.push(std::mem::take(&mut current));
+                    continue;
+                }
+                _ => {}
             }
-            start = i + 1;
         }
+        current.push(c);
     }
-    if start < tokens.len() {
-        commands.push(&tokens[start..]);
-    }
-    commands
+    segments.push(current);
+    segments
 }
 
 /// Check a command string against structural deny rules.
 ///
 /// Returns guidance for the first matching rule, or `None`.
 fn command_blocked(cmd: &str) -> Option<&'static str> {
-    let Some(tokens) = shlex::split(cmd) else {
-        return Some("unparseable shell syntax");
-    };
+    for segment in split_unquoted_separators(cmd) {
+        let Some(tokens) = shlex::split(&segment) else {
+            return Some("unparseable shell syntax");
+        };
 
-    for segment in parse_simple_commands(&tokens) {
         // Skip leading KEY=VALUE tokens
-        let rest: Vec<&str> = segment
+        let rest: Vec<&str> = tokens
             .iter()
             .map(String::as_str)
             .skip_while(|t| is_env_assignment(t))
@@ -1663,34 +1683,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_simple_commands() {
-        let tokens: Vec<String> = vec!["echo", "hello", "&&", "git", "commit"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let cmds = parse_simple_commands(&tokens);
-        assert_eq!(cmds.len(), 2);
-        assert_eq!(
-            cmds[0].iter().map(String::as_str).collect::<Vec<_>>(),
-            ["echo", "hello"]
-        );
-        assert_eq!(
-            cmds[1].iter().map(String::as_str).collect::<Vec<_>>(),
-            ["git", "commit"]
-        );
-    }
-
-    #[test]
-    fn test_parse_simple_commands_pipe_and_semicolon() {
-        let tokens: Vec<String> = vec!["a", "|", "b", ";", "c", "||", "d"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let cmds = parse_simple_commands(&tokens);
-        assert_eq!(cmds.len(), 4);
-    }
-
-    #[test]
     fn test_command_blocked_env_prefix_git_commit() {
         assert_blocked("GIT_CONFIG_GLOBAL=/dev/null git commit -m 'msg'");
     }
@@ -1732,5 +1724,42 @@ mod tests {
         // directly: shlex treats the quoted string as a single token,
         // so `command_blocked` alone should not flag it.
         assert!(command_blocked("echo 'git commit'").is_none());
+    }
+
+    #[test]
+    fn split_unquoted_separators_splits_on_bare_operators() {
+        assert_eq!(
+            split_unquoted_separators("a | b; c && d"),
+            vec!["a ", " b", " c ", "", " d"]
+        );
+        assert_eq!(split_unquoted_separators("a\nb"), vec!["a", "b"]);
+        assert_eq!(split_unquoted_separators("a|b"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn split_unquoted_separators_keeps_quoted_and_escaped() {
+        assert_eq!(
+            split_unquoted_separators(r#"grep "a\|b" f"#),
+            vec![r#"grep "a\|b" f"#]
+        );
+        assert_eq!(split_unquoted_separators("echo 'a;b'"), vec!["echo 'a;b'"]);
+        assert_eq!(split_unquoted_separators(r"echo \| x"), vec![r"echo \| x"]);
+    }
+
+    #[test]
+    fn test_command_blocked_unspaced_operators() {
+        // Separators split even without surrounding whitespace; shlex
+        // alone would fold `x|git` into one token and miss these.
+        assert!(command_blocked("echo x|git commit -m hi").is_some());
+        assert!(command_blocked("true;gh auth status").is_some());
+        assert!(command_blocked("echo hi\ngit push origin main").is_some());
+    }
+
+    #[test]
+    fn test_command_allowed_quoted_operators_stay_arguments() {
+        // A quoted operator is data, not a separator: what follows it
+        // is not command position.
+        assert!(command_blocked("echo 'x | git commit'").is_none());
+        assert!(command_blocked(r#"grep "a\|b" f | head"#).is_none());
     }
 }
