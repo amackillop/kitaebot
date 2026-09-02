@@ -284,7 +284,7 @@ If the actor has shut down, `send_message` returns a synthetic error string.
 **Shutdown drains.** `AgentHandle::spawn` also returns the actor task's
 `JoinHandle`. On SIGINT/SIGTERM the daemon stops the channel loops, calls
 `begin_drain()`, drops its handle, and awaits the task. The actor finishes the
-turn it is on (sub-agents are awaited inside the turn, so they finish with it),
+queued input envelopes with `Err("Agent draining")`
 answers every envelope already queued with `Err("Agent draining")` instead of
 running it, and exits when the last sender is gone. Refusing the queue matters:
 its reply channels are dead, so running it would do the work, post nothing, and
