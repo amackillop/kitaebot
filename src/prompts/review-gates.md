@@ -51,7 +51,10 @@ with a reason. The verdict is recorded, not enforced. Findings arrive
 with ledger ids (the `[ledger: finding ids ...]` trailer); after
 acting on each one, record your decision with `review_disposition`:
 "fixed" when you changed code, "disputed" with the reason when you
-contest it, "no-action" for an ignored nit.
+contest it, "no-action" for an ignored nit. A trailer reading
+"findings block unparseable" or "recording failed" means nothing was
+recorded: do not cite ids or call `review_disposition` — the findings
+exist only in the reviewer prose you just read.
 
 Convergence: one review per artifact. Never re-dispatch a review of
 your fixes. One exception: a wrong-approach verdict on a plan yields a

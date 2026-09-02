@@ -27,7 +27,7 @@ use crate::tools::mcp::McpTools;
 use crate::tools::{Tool, ToolCtx, Tools, string_or_value};
 use crate::usage::{self, TurnRecord, UsageLedger};
 
-use super::{BudgetPolicy, ReplyPolicy, run_turn_metered};
+use super::{BudgetPolicy, ReplyPolicy, TurnMeter, run_turn_metered};
 
 /// Allowlist for the `explore` type: read-only research.
 ///
@@ -82,6 +82,13 @@ const EXPLORE_PROMPT: &str = include_str!("../prompts/explore.md");
 const WORKER_PROMPT: &str = include_str!("../prompts/worker.md");
 
 const REVIEWER_PROMPT: &str = include_str!("../prompts/reviewer.md");
+
+/// The corrective turn after an unparseable findings block: the
+/// reviewer sees its own prior text in the session and re-emits the
+/// block; one attempt, no new analysis.
+const FINDINGS_RETRY_PROMPT: &str = "Your previous response had no parseable ```findings \
+block (exactly one fenced block holding a single JSON object). Re-emit your review's \
+verdict and findings as exactly one such block, unchanged in substance, nothing else.";
 
 /// A sub-agent type: system prompt plus prebuilt tool set.
 pub(crate) struct AgentType {
@@ -339,8 +346,55 @@ impl<P: Provider> Tool for TaskTool<P> {
             .instrument(tracing::info_span!("subagent", agent = label))
             .await;
             // Bill before propagating: a sub-agent that errored still
-            // spent its calls. No conversation of its own, so the row is
-            // tagged by agent type.
+            // spent its calls. The reviewer branch's retry spend is
+            // already folded into the meter, so one row bills it all.
+            let output = match result {
+                Ok(output) => output,
+                Err(e) => {
+                    usage::record_turn(
+                        self.usage_ledger.as_deref(),
+                        &TurnRecord {
+                            // Inherited from the parent: sub-agent spend
+                            // folds into the task that delegated it
+                            // (spec 27).
+                            task: ctx.task.as_ref(),
+                            session: "subagent",
+                            source: label,
+                            model: provider.model(),
+                            meter,
+                        },
+                    );
+                    return Err(ToolError::SubAgent {
+                        source: Box::new(e),
+                    });
+                }
+            };
+            let mut text = output.into_text();
+            let mut meter = meter;
+            if args.agent_type == AgentKind::Reviewer {
+                let (recorded, retry_meter) = self
+                    .record_review_with_retry(
+                        ReviewRetry {
+                            engine: &mut engine,
+                            meta: args.review.as_ref(),
+                            provider,
+                            system_prompt: &agent.system_prompt,
+                            tools: &agent.tools,
+                            max_iterations: self.max_iterations,
+                            ctx: &child_ctx,
+                        },
+                        &text,
+                    )
+                    .instrument(tracing::info_span!("subagent", agent = "reviewer-retry"))
+                    .await;
+                append_recording_trailer(&mut text, &recorded);
+                // The retry's spend folds into this gate invocation's
+                // single usage row (spec 27).
+                if let Some(retry) = retry_meter {
+                    meter.usage.add_turn(&retry.usage);
+                    meter.duration += retry.duration;
+                }
+            }
             usage::record_turn(
                 self.usage_ledger.as_deref(),
                 &TurnRecord {
@@ -353,37 +407,119 @@ impl<P: Provider> Tool for TaskTool<P> {
                     meter,
                 },
             );
-            let output = result.map_err(|e| ToolError::SubAgent {
-                source: Box::new(e),
-            })?;
-            let mut text = output.into_text();
-            if args.agent_type == AgentKind::Reviewer {
-                let ids = record_review(self.review_ledger.as_deref(), args.review.as_ref(), &text);
-                if !ids.is_empty() {
-                    let list = ids
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let _ = write!(text, "\n\n[ledger: finding ids {list}]");
-                }
-            }
             Ok(text)
         })
     }
 }
 
-/// Parse a reviewer response's findings block and record it —
-/// mechanically, no model cooperation required. Telemetry only: every
-/// failure is a warning, never a review failure. Returns the recorded
-/// finding ids so the parent can disposition them.
-fn record_review(ledger: Option<&ReviewLedger>, meta: Option<&ReviewMeta>, text: &str) -> Vec<i64> {
-    let Some(ledger) = ledger else {
-        return Vec::new();
+/// How a reviewer's findings block landed in the ledger. `Disabled` is
+/// a ledger-off no-op, `Recorded` an empty vec on a clean review.
+enum ReviewRecording {
+    Disabled,
+    Recorded(Vec<i64>),
+    Unparseable,
+    WriteFailed,
+}
+
+/// Everything the corrective retry turn needs, borrowed from the
+/// reviewer invocation.
+struct ReviewRetry<'a, P: Provider> {
+    engine: &'a mut EphemeralSession,
+    meta: Option<&'a ReviewMeta>,
+    provider: &'a P,
+    system_prompt: &'a str,
+    tools: &'a Tools,
+    max_iterations: usize,
+    ctx: &'a ToolCtx,
+}
+
+/// A failure trailer means nothing was recorded: the parent must not
+/// cite ids or call `review_disposition` for them. A clean review
+/// (empty `Recorded`) and `Disabled` get no trailer at all.
+fn append_recording_trailer(text: &mut String, recorded: &ReviewRecording) {
+    let trailer = match recorded {
+        ReviewRecording::Recorded(ids) if !ids.is_empty() => {
+            let list = ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("\n\n[ledger: finding ids {list}]")
+        }
+        ReviewRecording::Unparseable => {
+            "\n\n[ledger: findings block unparseable; nothing recorded]".to_string()
+        }
+        ReviewRecording::WriteFailed => {
+            "\n\n[ledger: recording failed; nothing recorded]".to_string()
+        }
+        ReviewRecording::Recorded(_) | ReviewRecording::Disabled => return,
     };
+    let _ = write!(text, "{trailer}");
+}
+
+impl<P: Provider> TaskTool<P> {
+    /// Parse a reviewer response's findings block and record it —
+    /// mechanically, no model cooperation required. Telemetry only:
+    /// every failure is a warning, never a review failure. An
+    /// unparseable block gets one corrective turn on the same session
+    /// (the reviewer sees its own text) before giving up; that turn's
+    /// meter comes back for folding into the invocation's usage row.
+    async fn record_review_with_retry(
+        &self,
+        retry: ReviewRetry<'_, P>,
+        text: &str,
+    ) -> (ReviewRecording, Option<TurnMeter>) {
+        let Some(ledger) = self.review_ledger.as_deref() else {
+            return (ReviewRecording::Disabled, None);
+        };
+        match record_parse(ledger, retry.meta, text) {
+            recording @ (ReviewRecording::Recorded(_) | ReviewRecording::WriteFailed) => {
+                (recording, None)
+            }
+            ReviewRecording::Unparseable => {
+                warn!("reviewer response has no parseable findings block; retrying once");
+                let ReviewRetry {
+                    engine,
+                    provider,
+                    system_prompt,
+                    tools,
+                    max_iterations,
+                    ctx,
+                    ..
+                } = retry;
+                let (result, meter) = run_turn_metered(
+                    engine,
+                    &self.summarize,
+                    system_prompt,
+                    FINDINGS_RETRY_PROMPT,
+                    provider,
+                    tools,
+                    max_iterations,
+                    BudgetPolicy::FinalAnswer,
+                    ReplyPolicy::Accept,
+                    ctx,
+                )
+                .await;
+                match result {
+                    Ok(output) => {
+                        let retry_text = output.into_text();
+                        (record_parse(ledger, retry.meta, &retry_text), Some(meter))
+                    }
+                    Err(e) => {
+                        warn!("findings retry turn failed: {e}");
+                        (ReviewRecording::Unparseable, Some(meter))
+                    }
+                }
+            }
+            ReviewRecording::Disabled => (ReviewRecording::Disabled, None),
+        }
+    }
+}
+
+/// Parse `text`'s findings block and write it to the ledger.
+fn record_parse(ledger: &ReviewLedger, meta: Option<&ReviewMeta>, text: &str) -> ReviewRecording {
     let Some(output) = review::parse_findings_block(text) else {
-        warn!("reviewer response has no parseable findings block");
-        return Vec::new();
+        return ReviewRecording::Unparseable;
     };
     // A missing meta mislabels the rows but must not drop them: the
     // category counts are the point.
@@ -399,10 +535,10 @@ fn record_review(ledger: Option<&ReviewLedger>, meta: Option<&ReviewMeta>, text:
         git_ref,
     };
     match ledger.record_review(&record, &output) {
-        Ok(ids) => ids,
+        Ok(ids) => ReviewRecording::Recorded(ids),
         Err(e) => {
             warn!("failed to record review: {e}");
-            Vec::new()
+            ReviewRecording::WriteFailed
         }
     }
 }
@@ -930,6 +1066,170 @@ mod tests {
         assert!(report.contains("swallowed-error"), "{report}");
     }
 
+    /// The incident's real bad shape (issue #113): a dispatch prompt
+    /// respec'd the block into plain verdict/findings prose.
+    const BAD_SHAPE_RESPONSE: &str =
+        "Looks broken.\nverdict: incorrect\nfindings:\n- id: 1\n  note: drops err\n";
+
+    fn malformed_response_provider() -> Arc<MockProvider> {
+        Arc::new(MockProvider::new(vec![
+            Ok(Response::Text(BAD_SHAPE_RESPONSE.to_string())),
+            Ok(Response::Text(REVIEW_RESPONSE.to_string())),
+        ]))
+    }
+
+    #[tokio::test]
+    async fn unparseable_block_retried_once_and_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let provider = malformed_response_provider();
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        // Two calls: the review, then the corrective re-emit. The
+        // parent sees the original prose plus the recorded ids.
+        assert_eq!(provider.call_count(), 2, "{result}");
+        assert!(
+            result.contains("verdict: incorrect"),
+            "original prose must reach the parent: {result}"
+        );
+        assert!(result.contains("[ledger: finding ids 1]"), "{result}");
+        let report = ledger.report().unwrap();
+        assert!(report.contains("swallowed-error"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn unparseable_after_retry_carries_the_trailer() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text(BAD_SHAPE_RESPONSE.to_string())),
+            Ok(Response::Text(BAD_SHAPE_RESPONSE.to_string())),
+        ]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.call_count(), 2);
+        assert!(
+            result.contains("[ledger: findings block unparseable; nothing recorded]"),
+            "{result}"
+        );
+        assert_eq!(ledger.report().unwrap(), "No reviews recorded.");
+    }
+
+    #[tokio::test]
+    async fn failed_retry_turn_still_delivers_the_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text(BAD_SHAPE_RESPONSE.to_string())),
+            Err(ProviderError::RateLimited),
+        ]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.contains("[ledger: findings block unparseable; nothing recorded]"),
+            "a failed retry must not fail the task: {result}"
+        );
+        assert!(result.contains("verdict: incorrect"), "{result}");
+        assert_eq!(ledger.report().unwrap(), "No reviews recorded.");
+    }
+
+    #[tokio::test]
+    async fn disabled_ledger_makes_no_retry() {
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            BAD_SHAPE_RESPONSE.to_string(),
+        ))]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            None,
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({"prompt": "review this", "agent_type": "reviewer"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.call_count(), 1, "no retry without a ledger");
+        assert!(!result.contains("[ledger:"), "{result}");
+    }
+
     #[tokio::test]
     async fn clean_review_gets_no_id_trailer() {
         let dir = tempfile::tempdir().unwrap();
@@ -1209,6 +1509,12 @@ mod tests {
         assert!(REVIEWER_PROMPT.contains("```findings"));
         assert!(REVIEWER_PROMPT.contains("verdict"));
         assert!(REVIEWER_PROMPT.contains("must-fix"));
+    }
+
+    #[test]
+    fn findings_retry_prompt_reemits_without_new_analysis() {
+        assert!(FINDINGS_RETRY_PROMPT.contains("```findings"));
+        assert!(FINDINGS_RETRY_PROMPT.contains("unchanged in substance"));
     }
 
     /// A convention file inside the artifact is the author's claim, so

@@ -101,7 +101,10 @@ The reviewer returns prose plus a findings block. You translate it.
   `[ledger: finding ids ...]` trailer. Say which id went with which
   published comment, then leave them undispositioned: a pr-gate finding
   stays pending until its author answers it, and that is not a lapse of
-  yours. Dispositioning happens on the follow-up turn, below.
+  yours. Dispositioning happens on the follow-up turn, below. A trailer
+  reading "findings block unparseable" or "recording failed" means
+  nothing was recorded — publish the findings from the prose alone and
+  cite no ids.
 - If the reviewer call fails, judge the diff yourself and say so in
   the review body. A review the human takes for a second pair of eyes,
   when it never had one, is a lie of omission.
