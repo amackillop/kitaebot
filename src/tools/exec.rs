@@ -75,22 +75,6 @@ const DENY_RULES: &[DenyRule] = &[
         pattern: r"\bfind\b.*-exec\s+rm\b",
         guidance: BLOCKED,
     },
-    // Bare-name commands are anchored to command position (start or
-    // after a separator): \b alone matches the same names as English
-    // prose inside quoted arguments — a self-analysis turn was once
-    // halted for echoing "not at workspace root".
-    DenyRule {
-        pattern: r"(^|[|;&\n])\s*shred\b",
-        guidance: BLOCKED,
-    },
-    DenyRule {
-        pattern: r"(^|[|;&\n])\s*wipe\b",
-        guidance: BLOCKED,
-    },
-    DenyRule {
-        pattern: r"(^|[|;&\n])\s*truncate\b",
-        guidance: BLOCKED,
-    },
     // Disk / filesystem
     DenyRule {
         pattern: r"\bmkfs\b",
@@ -109,34 +93,10 @@ const DENY_RULES: &[DenyRule] = &[
         guidance: BLOCKED,
     },
     DenyRule {
-        pattern: r"(^|[|;&\n])\s*mount\b",
-        guidance: BLOCKED,
-    },
-    DenyRule {
-        pattern: r"(^|[|;&\n])\s*umount\b",
-        guidance: BLOCKED,
-    },
-    DenyRule {
         pattern: r"(^|[^0-9])>\s*/dev/",
         guidance: BLOCKED,
     },
     // System power
-    DenyRule {
-        pattern: r"(^|[|;&\n])\s*shutdown\b",
-        guidance: BLOCKED,
-    },
-    DenyRule {
-        pattern: r"(^|[|;&\n])\s*reboot\b",
-        guidance: BLOCKED,
-    },
-    DenyRule {
-        pattern: r"(^|[|;&\n])\s*poweroff\b",
-        guidance: BLOCKED,
-    },
-    DenyRule {
-        pattern: r"(^|[|;&\n])\s*halt\b",
-        guidance: BLOCKED,
-    },
     DenyRule {
         pattern: r"\binit\s+[0-6]\b",
         guidance: BLOCKED,
@@ -148,10 +108,6 @@ const DENY_RULES: &[DenyRule] = &[
     // Privilege escalation
     DenyRule {
         pattern: r"\bsudo\b",
-        guidance: BLOCKED,
-    },
-    DenyRule {
-        pattern: r"(^|[|;&\n])\s*su\s",
         guidance: BLOCKED,
     },
     DenyRule {
@@ -330,10 +286,6 @@ const DENY_RULES: &[DenyRule] = &[
     // Cron / persistence
     DenyRule {
         pattern: r"\bcrontab\b",
-        guidance: BLOCKED,
-    },
-    DenyRule {
-        pattern: r"(^|[|;&\n])\s*at\s",
         guidance: BLOCKED,
     },
     // Git operations that must go through their dedicated tools
@@ -859,6 +811,64 @@ const COMMAND_DENY_RULES: &[CommandDeny] = &[
         binary: "nix",
         subcommand: Some("profile"),
         guidance: "use nix develop or nix-shell for ephemeral environments",
+    },
+    // Binaries whose names double as English prose (or grep patterns
+    // naming them): denied here, where command position is decided
+    // with real quoting, not by a regex over the raw string.
+    CommandDeny {
+        binary: "at",
+        subcommand: None,
+        guidance: BLOCKED,
+    },
+    CommandDeny {
+        binary: "halt",
+        subcommand: None,
+        guidance: BLOCKED,
+    },
+    CommandDeny {
+        binary: "mount",
+        subcommand: None,
+        guidance: BLOCKED,
+    },
+    CommandDeny {
+        binary: "poweroff",
+        subcommand: None,
+        guidance: BLOCKED,
+    },
+    CommandDeny {
+        binary: "reboot",
+        subcommand: None,
+        guidance: BLOCKED,
+    },
+    CommandDeny {
+        binary: "shred",
+        subcommand: None,
+        guidance: BLOCKED,
+    },
+    CommandDeny {
+        binary: "shutdown",
+        subcommand: None,
+        guidance: BLOCKED,
+    },
+    CommandDeny {
+        binary: "su",
+        subcommand: None,
+        guidance: BLOCKED,
+    },
+    CommandDeny {
+        binary: "truncate",
+        subcommand: None,
+        guidance: BLOCKED,
+    },
+    CommandDeny {
+        binary: "umount",
+        subcommand: None,
+        guidance: BLOCKED,
+    },
+    CommandDeny {
+        binary: "wipe",
+        subcommand: None,
+        guidance: BLOCKED,
     },
 ];
 
@@ -1753,6 +1763,30 @@ mod tests {
         assert!(command_blocked("echo x|git commit -m hi").is_some());
         assert!(command_blocked("true;gh auth status").is_some());
         assert!(command_blocked("echo hi\ngit push origin main").is_some());
+    }
+
+    #[test]
+    fn quoted_alternations_never_trip_bare_name_rules() {
+        // #135 verbatim: grepping our own source for these words was
+        // blocked because the quoted \| matched the separator anchor.
+        assert_allowed(
+            r#"grep -n "index_over_cap\|compaction\|truncate\|marker" src/memory/mod.rs"#,
+        );
+        // Every bare-name denied binary in one alternation, BRE and ERE.
+        assert_allowed(
+            r#"grep "shred\|wipe\|truncate\|mount\|umount\|shutdown\|reboot\|poweroff\|halt\|su\|at\|dd" f"#,
+        );
+        assert_allowed(
+            r#"grep -E "shred|wipe|truncate|mount|umount|shutdown|reboot|poweroff|halt|su|at|dd" f"#,
+        );
+    }
+
+    #[test]
+    fn bare_name_rules_catch_prefix_bypasses() {
+        // The command-position regexes missed both of these shapes; the
+        // structural rules strip env and path prefixes.
+        assert_blocked("FOO=bar truncate -s 0 file");
+        assert_blocked("/usr/bin/shred secret.txt");
     }
 
     #[test]
