@@ -19,6 +19,7 @@ pub(crate) mod mcp;
 mod mock;
 #[cfg(not(feature = "mock-network"))]
 pub(crate) mod network;
+mod test_evidence;
 pub(crate) mod warm;
 
 pub mod path;
@@ -299,7 +300,16 @@ impl Tools {
     pub async fn execute(&self, call: &ToolCall, ctx: ToolCtx) -> Result<String, ToolError> {
         tracing::debug!(tool = %call.function.name, call_id = %call.id, "Tool started");
         let started = std::time::Instant::now();
-        let result = self.dispatch(call, ctx).await;
+        let mut result = self.dispatch(call, ctx).await;
+        // Exec output recognized as a failing test run gets the parsed
+        // verdict appended, surviving whatever the command's own
+        // pipeline filtered away (issue #145).
+        if call.function.name.as_str() == "exec"
+            && let Ok(output) = &result
+            && let Some(trailer) = test_evidence::trailer(output)
+        {
+            result = Ok(format!("{output}\n\n{trailer}"));
+        }
         let elapsed = started.elapsed();
         match &result {
             Ok(output) => tracing::debug!(

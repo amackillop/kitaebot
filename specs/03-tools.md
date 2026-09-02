@@ -225,6 +225,20 @@ build's last words and the pressure it died under are the diagnosis
 through `cli_runner` (git, warm). Descendants that call `setsid` escape
 the group and the sweep; nothing short of cgroups catches those.
 
+**Test-evidence trailer** (issue #145): exec output recognized as a
+failing test run gets a mechanical trailer appended at dispatch —
+summed pass/fail counts, failed test names (bounded), and the first
+panic block with its assertion values. The model reads results through
+self-authored filters and discards the decisive lines (a 200-iteration
+turn piped seven test runs through `grep -A2 panicked | head -5` while
+debugging a wrong expectation the left/right values would have
+refuted); the trailer preserves the verdict regardless. Recognition is
+a per-format registry — libtest and pytest today — that degrades to no
+trailer on unrecognized output, never to an error, and passing runs get
+none: it exists to preserve failure evidence, not restate green
+summaries. The remaining half of #145, guidance against piping test
+commands at all, waits on the #136 deny-guidance work it builds on.
+
 ---
 
 ### `file_read` — Read File Contents
