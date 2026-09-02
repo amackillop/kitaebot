@@ -215,8 +215,11 @@ pub fn mechanical_excerpt(content: &str) -> String {
     )
 }
 
-static FILE_READ_TRAILER_RE: LazyLock<Regex> =
-    LazyLock::new(|| crate::text::static_regex(r"^\(\d+ lines shown, \d+ total, \d+ bytes\)$"));
+static FILE_READ_TRAILER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    crate::text::static_regex(
+        r"^\(\d+ lines shown, \d+ total, \d+ bytes(; continue with offset=\d+)?\)$",
+    )
+});
 
 static TOOL_OUTPUT_OPEN_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::text::static_regex(r#"^<tool_output name="[^"]+">$"#));
@@ -863,6 +866,13 @@ mod tests {
     #[test]
     fn strip_tool_framing_preserves_offset_reads() {
         let framed = "500\tfoo\n501\tbar\n\n(2 lines shown, 900 total, 9000 bytes)";
+        assert_eq!(strip_tool_framing(framed), "foo\nbar");
+    }
+
+    #[test]
+    fn strip_tool_framing_accepts_clamped_continuation_trailer() {
+        let framed =
+            "1\tfoo\n2\tbar\n\n(2 lines shown, 900 total, 9000 bytes; continue with offset=3)";
         assert_eq!(strip_tool_framing(framed), "foo\nbar");
     }
 

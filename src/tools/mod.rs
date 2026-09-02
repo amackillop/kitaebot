@@ -269,7 +269,10 @@ impl Tools {
                 direnv,
                 config.git.trusted_repos(),
             )),
-            Arc::new(FileRead::new(guard.clone())),
+            Arc::new(FileRead::new(
+                guard.clone(),
+                config.context.tool_output_tokens,
+            )),
             Arc::new(FileWrite::new(guard.clone())),
             Arc::new(FileEdit::new(guard.clone())),
             Arc::new(GlobSearch::new(workspace.path())),
