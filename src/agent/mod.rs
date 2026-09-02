@@ -310,6 +310,13 @@ impl TurnUsage {
             self.provider = call.provider;
         }
     }
+
+    /// Failed draws are billed draws; they count like any other call.
+    fn add_failed(&mut self, failed: Vec<CallUsage>) {
+        for call in failed {
+            self.add_call(call);
+        }
+    }
 }
 
 /// Everything the ledger records about one finished turn (spec 27):
@@ -530,7 +537,7 @@ async fn turn_loop(
 
         let assembled = engine.assemble(system_prompt).await?;
 
-        let outcome = cancellable(
+        let outcome = match cancellable(
             provider.chat(
                 engine.active_session(),
                 &assembled.messages,
@@ -540,11 +547,22 @@ async fn turn_loop(
             activity_tx,
         )
         .await?
-        .map_err(Error::Provider)?;
+        {
+            Ok(outcome) => outcome,
+            // The turn dies, but its failed draws were billed; the
+            // meter records them on the way out (#128).
+            Err(e) => {
+                stats.usage.add_failed(e.failed);
+                return Err(Error::Provider(e.error));
+            }
+        };
 
         engine.observe_request(assembled.messages, Arc::clone(&tool_definitions));
 
+        stats.usage.add_failed(outcome.failed);
         let call = outcome.usage;
+        // Only the successful draw's prompt size is live context;
+        // failed draws must not inflate it.
         if let Some(prompt_tokens) = call.prompt_tokens {
             engine.observe_tokens(prompt_tokens as usize);
             stats.prompt_tokens = Some(prompt_tokens as usize);
@@ -798,16 +816,23 @@ async fn squeeze(
         })
         .await?;
     let assembled = engine.assemble(system_prompt).await?;
-    let outcome = cancellable(
+    let outcome = match cancellable(
         provider.chat(engine.active_session(), &assembled.messages, &[]),
         &ctx.cancel,
         ctx.activity.as_ref(),
     )
     .await?
-    .map_err(Error::Provider)?;
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            stats.usage.add_failed(e.failed);
+            return Err(Error::Provider(e.error));
+        }
+    };
 
     engine.observe_request(assembled.messages, Arc::from([]));
 
+    stats.usage.add_failed(outcome.failed);
     let call = outcome.usage;
     if let Some(prompt_tokens) = call.prompt_tokens {
         engine.observe_tokens(prompt_tokens as usize);
@@ -1174,6 +1199,24 @@ mod tests {
         assert_eq!(usage.cached_tokens, None);
     }
 
+    #[test]
+    fn turn_usage_failed_draws_count_as_calls() {
+        let mut usage = TurnUsage::default();
+        usage.add_failed(vec![
+            CallUsage {
+                prompt_tokens: Some(100),
+                completion_tokens: 7,
+                cost: Some(0.002),
+                ..CallUsage::default()
+            },
+            CallUsage::default(),
+        ]);
+        assert_eq!(usage.calls, 2);
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 7);
+        assert_eq!(usage.cost, Some(0.002));
+    }
+
     fn text(s: &str) -> Response {
         Response::Text(s.to_string())
     }
@@ -1344,6 +1387,85 @@ mod tests {
 
         assert_eq!(result.unwrap().into_text(), "only response");
         assert_eq!(provider.call_count(), 1);
+    }
+
+    /// A redraw's billed usage reaches the meter alongside the
+    /// successful call (#128).
+    #[tokio::test]
+    async fn meter_bills_failed_draws_on_success() {
+        let provider = Arc::new(
+            MockProvider::new(vec![Ok(text("hi"))])
+                .with_prompt_tokens(200)
+                .with_failed_usage(vec![CallUsage {
+                    prompt_tokens: Some(100),
+                    completion_tokens: 7,
+                    cost: Some(0.002),
+                    ..CallUsage::default()
+                }]),
+        );
+        let tools = Tools::default();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let (result, meter) = run_turn_metered(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Hello",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            BudgetPolicy::Fail,
+            ReplyPolicy::Accept,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(meter.usage.calls, 2);
+        assert_eq!(meter.usage.prompt_tokens, 300);
+        assert_eq!(meter.usage.completion_tokens, 7);
+        assert_eq!(meter.usage.cost, Some(0.002));
+    }
+
+    /// A turn that dies on an exhausted provider still bills the
+    /// draws that failed it — the incident behind #128.
+    #[tokio::test]
+    async fn meter_bills_failed_draws_when_the_turn_dies() {
+        let provider = Arc::new(
+            MockProvider::new(vec![Err(ProviderError::EmptyResponse)]).with_failed_usage(vec![
+                CallUsage {
+                    completion_tokens: 3317,
+                    cost: Some(0.004),
+                    ..CallUsage::default()
+                },
+            ]),
+        );
+        let tools = Tools::default();
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let (result, meter) = run_turn_metered(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Hello",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            BudgetPolicy::Fail,
+            ReplyPolicy::Accept,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::Provider(ProviderError::EmptyResponse))
+        ));
+        assert_eq!(meter.usage.calls, 1);
+        assert_eq!(meter.usage.completion_tokens, 3317);
+        assert_eq!(meter.usage.cost, Some(0.004));
     }
 
     #[tokio::test]

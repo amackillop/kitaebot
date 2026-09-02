@@ -4,13 +4,14 @@ Autonomous programming agent in Rust. Runs in a NixOS VM with Landlock sandboxin
 
 ## Overview
 
-Kitaebot is a long-running daemon that accepts messages via Telegram, Unix socket, GitHub PR comments, GitHub issues, or Linear issues, routes them through an LLM agent loop with tool use, and persists conversation state through a pluggable context engine. A duty scheduler runs recurring work on its own schedule.
+Kitaebot is a long-running daemon that accepts messages via Telegram, Unix socket, GitHub PR comments, GitHub issues, or Linear issues, routes them through an LLM agent loop with tool use, and persists conversation state through a pluggable context engine. A duty scheduler runs recurring work on its own schedule. The agent keeps durable cross-session knowledge in a memory subsystem, reviews its own work through gated reviewer sub-agents, and can consume external MCP tool servers.
 
 Two binaries:
 
 | Binary | Purpose | Lifecycle |
 |--------|---------|-----------|
 | `kitaebot run` | Daemon (Telegram + socket + duties + GitHub PRs/issues + Linear) | systemd service |
+| `kitaebot backup <dir>` | Stage durable workspace state into `<dir>` for archiving | On-demand |
 | `kchat <socket>` | Socket client REPL | On-demand |
 
 ## Architecture
@@ -39,6 +40,22 @@ Conversation state lives behind the `ContextEngine` trait, selected via `context
 
 Sub-agents run on an ephemeral in-memory engine that never compacts.
 
+### Memory
+
+Durable cross-session knowledge lives in `memory/` (spec 21). The index file `memory/MEMORY.md` is read fresh each root turn and appended to the system prompt, so the agent always sees what it knows without a tool call; detail lives in `memory/topics/*.md`, reached with the ordinary file tools. A distillation duty folds recent session history into memory on a schedule, gated by a mechanical token counter (per-session watermarks track what has already been distilled) so a pass only spends an LLM turn when enough new material has accumulated.
+
+### Sub-agents and self-review
+
+The `task` tool delegates to sub-agents: `explore` (read-only research), `worker` (can write files and execute commands), and `reviewer` (read-only judge). Each can run on its own model override.
+
+The review pipeline (spec 23) prompts the agent to have a reviewer sub-agent judge its work at four gates: `plan`, `commit`, `series`, and `pr`. The reviewer ends its response with a fenced `findings` block; the task tool parses it and records verdicts and findings in a review ledger (`/findings` reads it back). Gates are prompted, not enforced — `review.enabled` only controls the recording.
+
+### Duties
+
+The duty scheduler (spec 24) dispatches named units of scheduled work through the agent actor. Schedules are wall-clock with persisted `last_run`, so cadence survives restarts and an overdue duty fires once at startup instead of bursting. Built-ins: `distill` (memory distillation, token-gated), `warm` (re-warms build caches for repos whose HEAD moved), and `self_analysis` (mines the bot's own error tee and journal, proposes fixes as GitHub issues). Operators add `prompt` duties — arbitrary watch-tasks against a trusted repo, optionally gated on `new-commits` so they only fire when the remote head moved.
+
+WARN and ERROR tracing events are mirrored as JSON lines under `state/errors/` (daily rolling files, bounded retention) so the self-analysis duty can read back symptoms that otherwise exist only in journald.
+
 ### Tools
 
 Typed tools replace a generic shell. The LLM declares intent via parameters instead of reasoning about shell syntax.
@@ -65,21 +82,28 @@ Typed tools replace a generic shell. The LLM declares intent via parameters inst
 | `github_pr_reviews` | Fetch PR reviews |
 | `github_pr_diff_comments` | Fetch PR diff comments |
 | `github_pr_diff_reply` | Reply to a PR diff comment |
+| `github_pr_review_submit` | Submit a PR review (approve / request changes / comment) |
+| `github_comment_update` | Edit a previously posted comment |
 | `github_ci_status` | Check CI status for a ref |
 | `github_api` | GitHub REST escape hatch, scoped to the repo |
-| `task` | Delegate to a sub-agent (`explore` read-only research, `worker` implementation) |
+| `linear_set_state` | Move a Linear issue to a named workflow state |
+| `task` | Delegate to a sub-agent (`explore` research, `worker` implementation, `reviewer` judge) |
 | `notify` | Push a message to the user via Telegram (batched by priority) |
 | `lcm_grep` | Search compacted history (LCM engine) |
 | `lcm_describe` | Inspect a compacted node (LCM engine) |
 | `lcm_expand` | Re-expand compacted history (LCM engine, sub-agents only) |
 
-Git and GitHub tools are gated on `git.enabled` and `github.enabled` respectively; `notify` on `telegram.enabled`; the `lcm_*` tools on `context.engine = "lcm"`. Tools can be individually disabled via `tools.disabled`.
+Git and GitHub tools are gated on `git.enabled` and `github.enabled` respectively; `linear_set_state` on `linear.enabled`; `notify` on `telegram.enabled`; the `lcm_*` tools on `context.engine = "lcm"`. Tools can be individually disabled via `tools.disabled`.
 
 All tool outputs pass through `safety::check_tool_output` and execute inside the Landlock sandbox.
 
+### MCP servers
+
+External tool servers speaking MCP (JSON-RPC 2.0 over stdio) can be attached via `mcp.servers` (spec 22). Each server is spawned as a child process; its advertised tools register namespaced as `<server>_<tool>` alongside the built-ins. Per server: an optional `tools` allowlist bounds schema size, `env_credentials` maps environment variables to systemd credentials so secrets never appear in `config.toml`, and `explore = true` admits the server's tools to the read-only sub-agent sets (the operator asserting it has no side effects). The implemented protocol subset is `initialize`, `tools/list`, and `tools/call`.
+
 ### Security model
 
-1. **Landlock sandbox** — Filesystem access restricted to workspace, `/nix/store` (ro), `/tmp`, `/etc` (ro), `/dev`. Applied at startup, inherited by child processes. Every same-uid child that runs repo-influenced code (the exec tool, build-warm commands, and git) additionally re-enforces a tighter tier on itself via the hidden `confine` subcommand: `projects/` stays fully writable, but `state/`, `context/`, `memory/` are neither readable nor writable (one carve-out: `context/lcm/payloads/` is readable, since `<file>` references hand those paths to the model), and the signing keyring lives outside the workspace so no exec child names it at all. The `git` tier additionally grants the keyring and a private askpass helper for signing and authenticated fetches.
+1. **Landlock sandbox** — Filesystem access restricted to workspace, `/nix/store` (ro), `/tmp`, `/etc` (ro), `/dev`. Applied at startup, inherited by child processes. Every same-uid child that runs repo-influenced code (the exec tool, build-warm commands, and git) additionally re-enforces a tighter tier on itself via the hidden `confine` subcommand: `projects/` stays fully writable, but `state/`, `context/`, `memory/` are neither readable nor writable (one carve-out: `context/lcm/payloads/` is readable, since `<file>` references hand those paths to the model), and the signing keyring lives outside the workspace so no exec child names it at all. The `git` tier additionally grants the keyring and a private askpass helper for signing and authenticated fetches. `tools.exec.sandbox` selects the per-child mechanism for exec: `landlock` (default), `bwrap` (bubblewrap namespace view masking daemon-owned paths; needs mount/userns syscalls loosened on the unit), or `none` (children inherit the daemon's Landlock).
 2. **Proxy-based egress filter** — nftables restricts the kitaebot uid to loopback; all outbound HTTP(S) goes through a local tinyproxy that allows CONNECT only to allowlisted hostnames. Prevents prompt-injection-driven exfiltration.
 3. **Leak detection** — Regex scan on tool outputs before they enter the context window.
 4. **Credential isolation** — Secrets loaded via systemd `LoadCredential` before Landlock enforcement. Inaccessible to child processes.
@@ -91,11 +115,14 @@ All tool outputs pass through `safety::check_tool_output` and execute inside the
 
 Any OpenAI-compatible chat completions API. Supported endpoints:
 
-- OpenRouter (default)
+- OpenRouter (default; per-endpoint pricing fetched live for `/usage`)
 - OpenAI
 - Groq
 - Together
 - Mistral
+- Any URL (`provider.api = "https://..."` hits a custom OpenAI-compatible endpoint)
+
+Per-role model overrides route sub-agents, summarization, memory distillation, review, and planning to different models (see `model_overrides` below). Every turn is metered into a per-task usage ledger (spec 27): cost, turns, and wall time, with sub-agent usage rolled up into the parent task; `/usage` reports it.
 
 ## Development
 
@@ -131,10 +158,14 @@ just vm-run --fresh     # Wipe state and restart
 just vm-run --rebuild   # Rebuild and restart
 just chat               # Connect to daemon via SSH socket forwarding
 just ask "message"      # Send one message, print the reply, exit
+just findings           # Show the review ledger (/findings)
 just vm-ssh             # SSH into running VM
 just vm-shell           # Shell as kitaebot daemon user (debugging)
 just vm-logs            # Tail daemon, tinyproxy (refused CONNECTs), and kernel (egress drops) logs
+just vm-logs-dump [n]   # Dump the last n log lines and exit (non-interactive)
 just vm-journal [topic] # Show the bot's work journal (state/JOURNAL.md), optionally one topic
+just vm-backup          # Stage durable state via `kitaebot backup`, tar to backups/ on the host
+just vm-restore FILE    # Restore durable state from a vm-backup artifact
 just vm-stop            # Shut down VM gracefully (pkill fallback)
 ```
 
@@ -225,6 +256,25 @@ kitaebot = {
       trusted_users = [ "user@example.com" ];    # Emails allowed to drive issues
       plan_label = "needs-plan";                 # Labeled issues get plan-first; unlabeled execute directly
     };
+    mcp = {                                      # External MCP tool servers (spec 22)
+      startup_timeout_secs = 30;                 # Spawn + handshake + tools/list budget
+      call_timeout_secs = 60;
+      servers = {
+        bkb = {                                  # Tools register as bkb_*
+          command = "bkb-mcp";                   # Resolved via PATH (add the package to `tools`)
+          args = [ ];
+          env = { };                             # Literal env vars
+          env_credentials = {                    # Env var -> credential file in secretsDir
+            BKB_API_KEY = "bkb-api-key";
+          };
+          tools = [ "search" "lookup_bip" ];     # Allowlist; unset registers all advertised tools
+          explore = true;                        # Admit to read-only sub-agents (asserts no side effects)
+        };
+      };
+    };
+    review = {
+      enabled = true;                            # Record reviewer findings in the review ledger (spec 23)
+    };
     duties = {                                   # Duty scheduler (spec 24)
       distill = { every = "1h"; };                # Token gate still applies
       warm = { every = "24h"; };                  # Build-warm duty; warms repos whose HEAD moved (spec 24)
@@ -277,6 +327,7 @@ kitaebot = {
       disabled = [ "web_search" ];               # Disable specific tools by name
       exec = {
         timeout_secs = 600;
+        sandbox = "landlock";                    # landlock | bwrap | none (per-child confinement)
       };
       web_fetch = {
         timeout_secs = 30;
@@ -314,6 +365,7 @@ Secrets are loaded via systemd `LoadCredential` from `kitaebot.secretsDir`. One 
 | `github-token` | When `git.enabled = true` or `github.enabled = true` |
 | `linear-api-key` | When `linear.enabled = true` |
 | `gpg-signing-key` | When `gitConfig.signingKey` is set |
+| `<name>` | Per `mcp.servers.*.env_credentials` value |
 
 ## Project layout
 
@@ -329,8 +381,10 @@ src/
 │   └── envelope.rs      Envelope, ChannelSource types
 ├── clients/             HTTP client abstractions
 │   ├── chat_completion.rs  OpenAI-compatible API
+│   ├── github.rs           GitHub REST API
 │   ├── telegram.rs         Telegram Bot API
-│   └── linear.rs           Linear GraphQL API
+│   ├── linear.rs           Linear GraphQL API
+│   └── openrouter_pricing.rs  Live per-endpoint rates for /usage
 ├── context/             Context engines (ContextEngine trait)
 │   ├── flat/            Per-name JSON sessions, whole-history compaction
 │   ├── ephemeral.rs     In-memory engine for sub-agents (never compacts)
@@ -342,13 +396,19 @@ src/
 │   ├── file_*.rs        File read/write/edit with PathGuard
 │   ├── glob_search.rs   File pattern matching
 │   ├── grep.rs          Content search (ripgrep backend)
-│   ├── git/             Clone, commit, push, URL validation
-│   ├── github/          PR ops, CI status, REST escape hatch
+│   ├── git/             Clone, commit, push, fixup, rebase, URL validation
+│   ├── github/          PR ops, reviews, CI status, REST escape hatch
+│   ├── linear.rs        linear_set_state
+│   ├── mcp.rs           MCP client (JSON-RPC over stdio) + dynamic tool registration
 │   ├── network/         web_fetch, web_search (Perplexity)
+│   ├── bwrap.rs         Bubblewrap per-child view for exec (sandbox = "bwrap")
+│   ├── warm.rs          Build-cache warmer (spec 03)
 │   ├── cli_runner.rs    Subprocess boundary for git
 │   ├── direnv.rs        Dev environment cache
 │   └── path.rs          PathGuard (traversal rejection)
+├── memory/              Memory subsystem (spec 21): MEMORY.md index + distillation
 ├── sandbox.rs           Landlock policy
+├── confine.rs           Hidden subcommand: per-child Landlock tier, then exec
 ├── safety.rs            Leak detection
 ├── secrets.rs           systemd credential loading
 ├── config.rs            TOML config with validation
@@ -364,9 +424,14 @@ src/
 ├── commands.rs          Slash commands (/new, /project, /context, /compact, /duties, /duty, /distill, /stats, /usage, /findings)
 ├── usage.rs             Usage ledger: per-task cost, turns, wall time (spec 27)
 ├── review.rs            Review ledger: verdicts and findings (spec 23)
-├── state_db.rs          Operational DB handle + migrations (ledgers, cursor docs)
+├── state_db.rs          Operational DB handle (ledgers, cursor docs)
+├── state_db/migrations  Numbered SQL migrations for the state DB
 ├── sqlite.rs            Shared migration ladder mechanics
-├── duty/                Duty scheduler (mod, schedule, state)
+├── duty/                Duty scheduler (schedule, state, self-analysis)
+├── errlog.rs            Error tee: WARN/ERROR events as JSON lines under state/errors/
+├── backup.rs            Durable-state staging for `kitaebot backup` (spec 05)
+├── conventions.rs       Worked repo's AGENTS.md appended to the system prompt
+├── retry.rs             Generic async retry combinator
 ├── runtime.rs           Provider/tools/channels assembly
 ├── activity.rs          Structured turn events for observability
 ├── workspace.rs         Workspace init + system prompt assembly
@@ -375,15 +440,21 @@ src/
 ├── error.rs             Algebraic error types
 └── prompts/             Compiled in via include_str!:
                          SOUL.md, AGENTS.md (root system prompt)
+                         developer-workflow.md, plan-format.md (segments)
                          explore.md, worker.md, reviewer.md (sub-agents)
                          review-gates.md, review-protocol.md (segments)
                          distill.md
 vm/
 ├── configuration.nix    NixOS module (systemd service, egress filter, hardening)
+├── backup.sh            In-VM script: `kitaebot backup` + tar to stdout (fed over ssh)
+├── restore.sh           In-VM script: untar a backup into the workspace
 ├── test-egress.nix      NixOS VM integration test for egress filter
+├── test-backup.nix      NixOS VM integration test for backup/restore
+├── test-flakes.nix      NixOS VM integration test for the daemon's nix toolchain
 ├── test-fixtures/       Test fixture data
 └── prompts/             USER.md (operator file, provisioned)
 nix/
+├── bkb-mcp.nix          Bitcoin knowledge base MCP server package
 └── lightpanda.nix       Headless browser package
 deploy/
 ├── configuration.nix    Host-specific settings (SSH keys, secrets, tools)

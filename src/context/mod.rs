@@ -278,7 +278,13 @@ pub fn make_summarize_fn<P: Provider + 'static>(provider: Arc<P>) -> SummarizeFn
         ];
 
         Box::pin(async move {
-            let outcome = provider.chat("summarizer", &prompt_messages, &[]).await?;
+            // Failed-attempt usage is dropped here, as success usage
+            // already is — ledger attribution for summarizer calls is
+            // #139.
+            let outcome = provider
+                .chat("summarizer", &prompt_messages, &[])
+                .await
+                .map_err(|e| e.error)?;
             match outcome.response {
                 Response::Text(text) => Ok(text),
                 Response::ToolCalls { content, .. } => Ok(content),
@@ -311,7 +317,10 @@ pub fn make_raw_chat_fn<P: Provider + 'static>(provider: Arc<P>) -> RawChatFn {
         move |session: String, messages: Vec<Message>, tools: Arc<[ToolDefinition]>| {
             let provider = provider.clone();
             Box::pin(async move {
-                let outcome = provider.chat(&session, &messages, &tools).await?;
+                let outcome = provider
+                    .chat(&session, &messages, &tools)
+                    .await
+                    .map_err(|e| e.error)?;
                 match outcome.response {
                     Response::Text(text) => Ok(text),
                     Response::ToolCalls { content, .. } => Ok(content),

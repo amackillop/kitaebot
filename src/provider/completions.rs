@@ -15,7 +15,15 @@ use crate::types::{Message, Response, ToolCall, ToolDefinition, ToolFunction};
 
 use super::wire::WireMessage;
 
-use super::{CallUsage, ChatOutcome, Provider};
+use super::{CallUsage, ChatError, ChatOutcome, Provider};
+
+/// One failed round trip and whatever the provider billed for it.
+/// Parse failures keep the usage the response carried; transport
+/// failures billed nothing.
+struct AttemptError {
+    error: ProviderError,
+    usage: Option<CallUsage>,
+}
 
 /// Retries after the initial attempt for transient failures.
 const MAX_RETRIES: u32 = 3;
@@ -151,8 +159,15 @@ impl CompletionsProvider {
     /// This is the unit the retry policy operates on. Parsing belongs
     /// inside it because a response can be faulty in ways the request
     /// is not to blame for, and only a fresh draw fixes those.
-    async fn attempt(&self, request: &ChatRequest<'_>) -> Result<ChatOutcome, ProviderError> {
-        let response = self.client.chat_completions(request).await?;
+    async fn attempt(
+        &self,
+        request: &ChatRequest<'_>,
+    ) -> Result<(Response, CallUsage), AttemptError> {
+        let response = self
+            .client
+            .chat_completions(request)
+            .await
+            .map_err(|error| AttemptError { error, usage: None })?;
         if let Some(usage) = &response.usage {
             debug!(
                 model = %self.model,
@@ -181,10 +196,15 @@ impl CompletionsProvider {
             provider: response.provider.clone(),
             ..usage
         };
-        Ok(ChatOutcome {
-            response: Self::parse_response(response)?,
-            usage,
-        })
+        // A parse failure keeps the usage: the draw was billed even
+        // when nothing usable came back (#128).
+        match Self::parse_response(response) {
+            Ok(response) => Ok((response, usage)),
+            Err(error) => Err(AttemptError {
+                error,
+                usage: Some(usage),
+            }),
+        }
     }
 }
 
@@ -194,7 +214,7 @@ impl Provider for CompletionsProvider {
         session: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<ChatOutcome, ProviderError> {
+    ) -> Result<ChatOutcome, ChatError> {
         let wire_messages: Vec<WireMessage> = messages.iter().map(WireMessage::from).collect();
         let request = ChatRequest {
             model: &self.model,
@@ -216,7 +236,39 @@ impl Provider for CompletionsProvider {
         debug!(model = %self.model, message_count = messages.len(), "Sending chat request");
         trace!(request = %serde_json::to_string(&request).unwrap_or_default(), "Request body");
 
-        crate::retry::retry(|| self.attempt(&request), retry_policy).await
+        // Failed-attempt usage is collected here, outside the retry
+        // unit, so the policy and combinator stay on plain
+        // `ProviderError`. A Mutex only because the future must be
+        // Send; attempts run strictly in sequence.
+        let failed = std::sync::Mutex::new(Vec::new());
+        let failed_ref = &failed;
+        let request = &request;
+        let result = crate::retry::retry(
+            || async move {
+                self.attempt(request).await.map_err(|e| {
+                    if let Some(usage) = e.usage {
+                        failed_ref
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(usage);
+                    }
+                    e.error
+                })
+            },
+            retry_policy,
+        )
+        .await;
+        let failed = failed
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match result {
+            Ok((response, usage)) => Ok(ChatOutcome {
+                response,
+                usage,
+                failed,
+            }),
+            Err(error) => Err(ChatError { error, failed }),
+        }
     }
 
     fn model(&self) -> &str {
@@ -638,7 +690,8 @@ mod tests {
 
     /// An empty draw is redrawn, not surfaced: parsing lives inside
     /// the retry unit precisely so a bad draw costs one request, not a
-    /// sub-agent's whole context (#120).
+    /// sub-agent's whole context (#120). The failed draw's billed
+    /// usage rides the outcome (#128).
     #[tokio::test(start_paused = true)]
     async fn chat_redraws_empty_responses() {
         use std::sync::atomic::Ordering;
@@ -646,17 +699,24 @@ mod tests {
         let outcome = provider.chat("s", &[], &[]).await.unwrap();
         assert!(matches!(outcome.response, Response::Text(t) if t == "hi"));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(outcome.failed[0].prompt_tokens, Some(100));
+        assert_eq!(outcome.failed[0].completion_tokens, 7);
+        assert_eq!(outcome.failed[0].cost, Some(0.002));
     }
 
     /// A provider that only produces empty draws fails through on the
-    /// tighter empty budget, not the full retry budget.
+    /// tighter empty budget, not the full retry budget — and the error
+    /// carries every draw's billed usage (#128).
     #[tokio::test(start_paused = true)]
     async fn chat_bounds_empty_redraws() {
         use std::sync::atomic::Ordering;
         let (provider, calls) = faulty_body_provider(usize::MAX, EMPTY_CONTENT_BODY);
         let err = provider.chat("s", &[], &[]).await.unwrap_err();
-        assert!(matches!(err, ProviderError::EmptyResponse));
+        assert!(matches!(err.error, ProviderError::EmptyResponse));
         assert_eq!(calls.load(Ordering::SeqCst), 1 + EMPTY_RETRIES as usize);
+        assert_eq!(err.failed.len(), 1 + EMPTY_RETRIES as usize);
+        assert!(err.failed.iter().all(|u| u.cost == Some(0.002)));
     }
 
     #[test]
@@ -681,28 +741,30 @@ mod tests {
         use std::sync::atomic::Ordering;
         let (provider, calls) = flaky_provider(usize::MAX, ProviderError::BadRequest("400".into()));
         let err = provider.chat("s", &[], &[]).await.unwrap_err();
-        assert!(matches!(err, ProviderError::BadRequest(_)));
+        assert!(matches!(err.error, ProviderError::BadRequest(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    /// Transport failures bill nothing; the error must not fabricate
+    /// usage for them.
     #[tokio::test(start_paused = true)]
     async fn chat_gives_up_after_max_retries() {
         use std::sync::atomic::Ordering;
         let (provider, calls) = flaky_provider(usize::MAX, ProviderError::Network("reset".into()));
         let err = provider.chat("s", &[], &[]).await.unwrap_err();
-        assert!(matches!(err, ProviderError::Network(_)));
+        assert!(matches!(err.error, ProviderError::Network(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1 + MAX_RETRIES as usize);
+        assert!(err.failed.is_empty());
     }
 
     /// A 200 whose tool name cannot be transmitted back.
     const MALFORMED_NAME_BODY: &str = r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"c1","function":{"name":"review_disposition</arg_key>","arguments":"{}"}}]}}]}"#;
 
-    /// A 200 with nothing in it.
-    const EMPTY_CONTENT_BODY: &str = r#"{"choices":[{"message":{"content":""}}]}"#;
+    /// A 200 with nothing in it — but billed usage, like the real ones.
+    const EMPTY_CONTENT_BODY: &str = r#"{"choices":[{"message":{"content":""}}],"usage":{"prompt_tokens":100,"completion_tokens":7,"cost":0.002}}"#;
 
     /// A 200 whose generation hit `max_tokens` before any output.
-    const TRUNCATED_BODY: &str =
-        r#"{"choices":[{"message":{"content":""},"finish_reason":"length"}]}"#;
+    const TRUNCATED_BODY: &str = r#"{"choices":[{"message":{"content":""},"finish_reason":"length"}],"usage":{"prompt_tokens":100,"completion_tokens":50,"cost":0.01}}"#;
 
     /// Provider whose client answers 200 with `faulty` for the first
     /// `failures` calls and a usable text response after, counting
@@ -762,8 +824,11 @@ mod tests {
         use std::sync::atomic::Ordering;
         let (provider, calls) = faulty_body_provider(usize::MAX, MALFORMED_NAME_BODY);
         let err = provider.chat("s", &[], &[]).await.unwrap_err();
-        assert!(matches!(err, ProviderError::MalformedToolCall { .. }));
+        assert!(matches!(err.error, ProviderError::MalformedToolCall { .. }));
         assert_eq!(calls.load(Ordering::SeqCst), 1 + MAX_RETRIES as usize);
+        // Usage-less 200s still count their draws, contributing nothing.
+        assert_eq!(err.failed.len(), 1 + MAX_RETRIES as usize);
+        assert!(err.failed.iter().all(|u| u.cost.is_none()));
     }
 
     /// Parsing moved inside the retry unit; that must not make every
@@ -775,8 +840,11 @@ mod tests {
         use std::sync::atomic::Ordering;
         let (provider, calls) = faulty_body_provider(usize::MAX, TRUNCATED_BODY);
         let err = provider.chat("s", &[], &[]).await.unwrap_err();
-        assert!(matches!(err, ProviderError::Truncated));
+        assert!(matches!(err.error, ProviderError::Truncated));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Not retried, but still billed: the one draw's usage is kept.
+        assert_eq!(err.failed.len(), 1);
+        assert_eq!(err.failed[0].completion_tokens, 50);
     }
 
     #[tokio::test(start_paused = true)]

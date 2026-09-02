@@ -40,7 +40,7 @@ The `turns` table in `state/kitaebot.db` (spec 05), migrations
 | `session` | 0001 | Session the turn ran in; `subagent` for children |
 | `source` | 0001 | `ChannelSource` Display or sub-agent label — display vocabulary, never a grouping key |
 | `model` | 0001 | Provider model id |
-| `calls` | 0001 | Provider calls in the turn |
+| `calls` | 0001 | Billed provider draws in the turn, failed ones included (#128); transport failures billed nothing and don't count |
 | `prompt_tokens`, `completion_tokens` | 0001 | Summed over calls |
 | `cost` | 0001 | USD from the wire (OpenRouter); NULL when unmetered |
 | `task` | 0002 | Task key (below); NULL on legacy rows |
