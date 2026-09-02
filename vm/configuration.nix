@@ -372,6 +372,12 @@ in
             ExecStart = "${config.kitaebot.package}/bin/kitaebot run";
             Restart = "on-failure";
             RestartSec = "10s";
+            # SIGTERM drains the in-flight turn; give one long turn room
+            # to finish. Only the daemon gets the signal: its tool
+            # children and MCP servers must outlive it, and systemd
+            # SIGKILLs whatever remains once it exits.
+            TimeoutStopSec = "30min";
+            KillMode = "mixed";
             User = "kitaebot";
             Group = "kitaebot";
             WorkingDirectory = "/var/lib/kitaebot";
