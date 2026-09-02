@@ -87,17 +87,58 @@ pub fn extract_file_ids(content: &str) -> Vec<String> {
 }
 
 /// Render the `<file>` reference stored in `messages.content` in
-/// place of the raw payload.
+/// place of the raw payload. `next_step` is the content-aware
+/// dereference instruction; empty renders the bare reference.
 pub fn format_file_reference(
     file_id: &str,
     path: &str,
     token_count: usize,
     summary: &str,
+    next_step: &str,
 ) -> String {
-    format!(
-        "<file id=\"{file_id}\" path=\"{path}\" tokens=\"{token_count}\">\n{}\n</file>",
-        summary.trim()
-    )
+    let body = if next_step.is_empty() {
+        summary.trim().to_string()
+    } else {
+        format!("{}\n{next_step}", summary.trim())
+    };
+    format!("<file id=\"{file_id}\" path=\"{path}\" tokens=\"{token_count}\">\n{body}\n</file>")
+}
+
+/// Test-runner output shape, any ecosystem: the payloads a model most
+/// often answers by re-running the command instead of searching.
+pub fn looks_like_test_run(content: &str) -> bool {
+    content.contains("test result:")
+        || content.contains("panicked at")
+        || content.contains("=== RUN")
+        || (content.contains("passed") && content.contains("failed"))
+}
+
+/// The dereference instruction for a `<file>` stub. Models do not
+/// follow references through the sanctioned tools unprompted, so each
+/// stub names its own next step. The target is the on-disk copy at
+/// `path`: the raw bytes never reach the FTS tables (`intercept_large`
+/// replaces them before persistence), so `lcm_grep` cannot see them.
+pub fn next_step(kind: FileKind, test_run: bool, has_source_path: bool, path: &str) -> String {
+    if test_run {
+        return format!(
+            "Next: grep pattern='panicked at|FAILED|error' path={path} \
+             pulls the failures from the stored copy; do not re-run the \
+             command."
+        );
+    }
+    if has_source_path {
+        return format!("Next: file_read {path} with offset/limit windows the original file.");
+    }
+    match kind {
+        FileKind::Json | FileKind::Xml | FileKind::Yaml => format!(
+            "Next: the stored copy at {path} is line-oriented; grep it or \
+             file_read a range of it."
+        ),
+        _ => format!(
+            "Next: grep pattern=<regex> path={path} searches the stored \
+             text; file_read {path} windows it."
+        ),
+    }
 }
 
 /// Reformat a payload for on-disk storage so line-based tools work:
@@ -728,11 +769,58 @@ mod tests {
 
     #[test]
     fn file_reference_includes_attributes() {
-        let r = format_file_reference("file_0123456789abcdef", "data/out.json", 42, "sum");
+        let r = format_file_reference("file_0123456789abcdef", "data/out.json", 42, "sum", "");
         assert_eq!(
             r,
             "<file id=\"file_0123456789abcdef\" path=\"data/out.json\" tokens=\"42\">\nsum\n</file>"
         );
+    }
+
+    #[test]
+    fn file_reference_carries_the_next_step_line() {
+        let r = format_file_reference("file_0123456789abcdef", "src/a.rs", 42, "sum", "Next: x");
+        assert!(r.ends_with("\nsum\nNext: x\n</file>"), "{r}");
+    }
+
+    // ── next-step guidance ──────────────────────────────────────────
+
+    #[test]
+    fn test_run_payload_points_at_the_stored_copy_not_rerun() {
+        let step = next_step(FileKind::Text, true, false, "context/lcm/payloads/file_ab");
+        assert!(step.contains("grep pattern="), "{step}");
+        assert!(step.contains("path=context/lcm/payloads/file_ab"), "{step}");
+        assert!(step.contains("do not re-run"), "{step}");
+        assert!(!step.contains("lcm_grep"), "{step}");
+    }
+
+    #[test]
+    fn source_file_payload_points_at_windowed_file_read() {
+        let step = next_step(FileKind::Code, false, true, "src/tools/exec.rs");
+        assert!(step.contains("file_read src/tools/exec.rs"), "{step}");
+        assert!(step.contains("offset"), "{step}");
+    }
+
+    #[test]
+    fn structured_payload_names_the_stored_copy() {
+        let step = next_step(FileKind::Json, false, false, "context/lcm/payloads/file_ab");
+        assert!(step.contains("line-oriented"), "{step}");
+        assert!(step.contains("file_ab"), "{step}");
+    }
+
+    #[test]
+    fn test_run_detection_spans_ecosystems() {
+        assert!(looks_like_test_run(
+            "test result: FAILED. 1 passed; 1 failed"
+        ));
+        assert!(looks_like_test_run("thread 'x' panicked at src/a.rs"));
+        assert!(looks_like_test_run("=== RUN   TestFoo"));
+        assert!(looks_like_test_run("2 passed, 1 failed in 0.3s"));
+        assert!(!looks_like_test_run("plain build output, nothing here"));
+        // The word alone is not a test run: source files and logs say
+        // FAILED without being one.
+        assert!(!looks_like_test_run(
+            "const MSG: &str = \"FAILED to connect\";"
+        ));
     }
 
     // ── payload normalization ─────────────────────────────────────
