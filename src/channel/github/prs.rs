@@ -135,6 +135,18 @@ struct PollState {
     /// skipped.
     #[serde(default)]
     reviewed: BTreeMap<String, String>,
+    /// The reviewer turn running right now; survives a crash mid-turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    in_flight: Option<InFlight>,
+}
+
+/// A reviewer turn between its `reviewed` insert and its return.
+#[derive(Debug, Deserialize, serde::Serialize, PartialEq)]
+struct InFlight {
+    /// Tracking key, `owner/repo#42`.
+    key: String,
+    /// SHA the entry held before this dispatch; `None` for a first review.
+    prev_sha: Option<String>,
 }
 
 impl PollState {
@@ -143,6 +155,7 @@ impl PollState {
         Self {
             last_poll: now_iso8601(),
             reviewed: BTreeMap::new(),
+            in_flight: None,
         }
     }
 }
@@ -434,7 +447,11 @@ async fn review_request_pass(
             warn!(pr = %d.key, "Skipping review this tick, checkout prep failed: {e}");
             continue;
         }
-        state.reviewed.insert(d.key, d.head_sha);
+        let prev_sha = state.reviewed.insert(d.key.clone(), d.head_sha);
+        state.in_flight = Some(InFlight {
+            key: d.key,
+            prev_sha,
+        });
         save_state(state_db, state);
         send(
             handle,
@@ -444,6 +461,8 @@ async fn review_request_pass(
             d.message,
         )
         .await;
+        state.in_flight = None;
+        save_state(state_db, state);
         count += 1;
     }
     Ok(count)
@@ -530,7 +549,11 @@ async fn tracked_pass(
             warn!(pr = %d.key, "Skipping tracked turn this tick, checkout prep failed: {e}");
             continue;
         }
-        state.reviewed.insert(d.key, d.head_sha);
+        let prev_sha = state.reviewed.insert(d.key.clone(), d.head_sha);
+        state.in_flight = Some(InFlight {
+            key: d.key,
+            prev_sha,
+        });
         save_state(state_db, state);
         send(
             handle,
@@ -540,6 +563,8 @@ async fn tracked_pass(
             d.message,
         )
         .await;
+        state.in_flight = None;
+        save_state(state_db, state);
         count += 1;
     }
     count
@@ -1471,11 +1496,32 @@ mod tests {
         let state = PollState {
             last_poll: "2025-01-15T10:00:00Z".to_string(),
             reviewed: BTreeMap::from([("owner/repo#42".to_string(), "abc123".to_string())]),
+            in_flight: None,
         };
         save_state(&db, &state);
         let loaded = load_state(&db);
         assert_eq!(loaded.last_poll, "2025-01-15T10:00:00Z");
         assert_eq!(loaded.reviewed, state.reviewed);
+        assert_eq!(loaded.in_flight, None);
+    }
+
+    #[test]
+    fn save_and_load_in_flight_round_trip() {
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+
+        for prev_sha in [None, Some("abc123".to_string())] {
+            let state = PollState {
+                last_poll: "2025-01-15T10:00:00Z".to_string(),
+                reviewed: BTreeMap::from([("owner/repo#42".to_string(), "def456".to_string())]),
+                in_flight: Some(InFlight {
+                    key: "owner/repo#42".to_string(),
+                    prev_sha,
+                }),
+            };
+            save_state(&db, &state);
+            let loaded = load_state(&db);
+            assert_eq!(loaded.in_flight, state.in_flight);
+        }
     }
 
     #[test]
@@ -1487,6 +1533,25 @@ mod tests {
         let loaded = load_state(&db);
         assert_eq!(loaded.last_poll, "2025-01-15T10:00:00Z");
         assert!(loaded.reviewed.is_empty());
+    }
+
+    #[test]
+    fn load_state_without_in_flight() {
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        db.put_doc(
+            "github_poll",
+            r#"{"last_poll":"2025-01-15T10:00:00Z","reviewed":{"owner/repo#42":"abc123"}}"#,
+        )
+        .unwrap();
+
+        let loaded = load_state(&db);
+        assert_eq!(loaded.reviewed.len(), 1);
+        assert_eq!(loaded.in_flight, None);
+    }
+
+    #[test]
+    fn starting_now_has_no_in_flight() {
+        assert_eq!(PollState::starting_now().in_flight, None);
     }
 
     #[test]
