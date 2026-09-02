@@ -1,0 +1,7 @@
+# Tests build git fixtures and drive real git through the tools; the
+# machine's gitconfig must not leak in (the VM's /etc/gitconfig sets
+# commit.gpgsign, and the signing key is reachable only via the git
+# tool's GNUPGHOME).
+[env]
+GIT_CONFIG_GLOBAL = { value = "/dev/null", force = true }
+GIT_CONFIG_SYSTEM = { value = "/dev/null", force = true }

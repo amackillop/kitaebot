@@ -12,5 +12,6 @@ target/
 inspiration/
 secrets/*
 
+!.cargo/
 !.git*
 !.envrc

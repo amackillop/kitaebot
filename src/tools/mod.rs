@@ -94,6 +94,10 @@ const SAFE_ENV_VARS: &[&str] = &[
     "CARGO_TARGET_DIR",
     // GPG
     "GNUPGHOME",
+    // Git config isolation — unset in production; cargo's [env] sets
+    // them so tests ignore the machine gitconfig (commit.gpgsign).
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
     // Misc
     "TZ",
     "EDITOR",
