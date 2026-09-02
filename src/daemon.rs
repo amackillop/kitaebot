@@ -12,12 +12,15 @@
 //!
 //! The core loop ([`run_with_shutdown`]) is generic over its shutdown
 //! future so tests can substitute a simple `sleep` instead of real
-//! Unix signals.
+//! Unix signals. Shutdown drains rather than kills: the loops stop
+//! producing, the actor finishes the turn it is on, and only then does
+//! the daemon return.
 
 use std::future::Future;
 use std::path::Path;
 
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use crate::agent::AgentHandle;
@@ -32,12 +35,14 @@ use crate::state_db::StateDb;
 use crate::tools::git::GitCli;
 use crate::workspace::Workspace;
 
-/// Production entry point — runs until SIGINT or SIGTERM.
+/// Production entry point — runs until SIGINT or SIGTERM, then until
+/// the in-flight turn completes.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     workspace: &Workspace,
     state_db: &StateDb,
-    handle: &AgentHandle,
+    handle: AgentHandle,
+    actor: JoinHandle<()>,
     duties: Vec<Duty>,
     telegram: Option<&TelegramChannel>,
     github_client: Option<&GithubClient>,
@@ -52,6 +57,7 @@ pub async fn run(
         workspace,
         state_db,
         handle,
+        actor,
         duties,
         telegram,
         github_client,
@@ -67,9 +73,58 @@ pub async fn run(
 }
 
 /// Testable core: runs duties + github + linear + telegram + socket
-/// until `shutdown` resolves.
+/// until `shutdown` resolves, then drains the actor.
+///
+/// The loops are dropped before the drain, so nothing new is queued
+/// while the actor finishes; a dropped poll tick never saved its
+/// cursor, so its events re-dispatch on the next boot.
 #[allow(clippy::too_many_arguments)]
 async fn run_with_shutdown<S: Future<Output = ()>>(
+    workspace: &Workspace,
+    state_db: &StateDb,
+    handle: AgentHandle,
+    actor: JoinHandle<()>,
+    duties: Vec<Duty>,
+    telegram: Option<&TelegramChannel>,
+    github_client: Option<&GithubClient>,
+    git_cli: Option<&GitCli>,
+    github: &GithubConfig,
+    repos: &[String],
+    linear: Option<&LinearChannel>,
+    socket_cfg: &SocketConfig,
+    shutdown: S,
+    duty_triggers: mpsc::Receiver<duty::Trigger>,
+) {
+    Box::pin(serve_until(
+        workspace,
+        state_db,
+        &handle,
+        duties,
+        telegram,
+        github_client,
+        git_cli,
+        github,
+        repos,
+        linear,
+        socket_cfg,
+        shutdown,
+        duty_triggers,
+    ))
+    .await;
+
+    handle.begin_drain();
+    // The actor exits once the last sender is gone; this is it.
+    drop(handle);
+    info!("Draining: waiting for the in-flight turn to finish.");
+    if let Err(e) = actor.await {
+        error!("agent actor task failed during drain: {e}");
+    }
+    info!("Drain complete, exiting.");
+}
+
+/// The channel loops, racing `shutdown`.
+#[allow(clippy::too_many_arguments)]
+async fn serve_until<S: Future<Output = ()>>(
     workspace: &Workspace,
     state_db: &StateDb,
     handle: &AgentHandle,
@@ -144,7 +199,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         () = linear_loop => unreachable!("linear loop never exits"),
         () = socket_loop => unreachable!("socket loop never exits"),
         () = shutdown => {
-            info!("Shutdown signal received, exiting.");
+            info!("Shutdown signal received.");
             let _ = std::fs::remove_file(socket_path);
         }
     }
@@ -182,8 +237,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    fn spawn_agent(ws: &Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
-        TestAgent::new(ws.clone(), provider).spawn()
+    fn spawn_agent(
+        ws: &Arc<Workspace>,
+        provider: Arc<MockProvider>,
+    ) -> (AgentHandle, JoinHandle<()>) {
+        TestAgent::new(ws.clone(), provider).spawn_with_task()
     }
 
     /// One hourly distill duty. With no persisted state it is due
@@ -215,12 +273,13 @@ mod tests {
         let (_dir, ws) = workspace();
         let (_sock_dir, sock) = sock_config();
         // Closed distill gate → gate-closed reply, but the duty fired.
-        let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
+        let (handle, actor) = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
 
         Box::pin(run_with_shutdown(
             &ws,
             &StateDb::open_in_memory().unwrap(),
-            &handle,
+            handle,
+            actor,
             distill_duty(),
             None,
             None,
@@ -242,13 +301,14 @@ mod tests {
     async fn duty_run_persists_state() {
         let (_dir, ws) = workspace();
         let (_sock_dir, sock) = sock_config();
-        let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
+        let (handle, actor) = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
         let state_db = StateDb::open(&ws.state_db_path()).unwrap();
 
         Box::pin(run_with_shutdown(
             &ws,
             &state_db,
-            &handle,
+            handle,
+            actor,
             distill_duty(),
             None,
             None,
@@ -275,12 +335,13 @@ mod tests {
 
         // An unknown duty makes the turn fail — the loop must survive,
         // record the run, and move on.
-        let handle = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
+        let (handle, actor) = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
 
         Box::pin(run_with_shutdown(
             &ws,
             &StateDb::open_in_memory().unwrap(),
-            &handle,
+            handle,
+            actor,
             vec![Duty {
                 name: "nope".into(),
                 action: duty::Action::Dispatch {

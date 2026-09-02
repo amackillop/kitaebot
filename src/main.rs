@@ -137,7 +137,7 @@ async fn daemon_main() {
             let summarizer = config.provider.model_overrides.summarizer.as_ref();
             let summarize = context::make_summarize_fn(role_provider(&provider, summarizer));
 
-            let handle = build_handle(
+            let (handle, actor) = build_handle(
                 workspace.clone(),
                 &state_db,
                 provider,
@@ -152,7 +152,8 @@ async fn daemon_main() {
             Box::pin(daemon::run(
                 &workspace,
                 &state_db,
-                &handle,
+                handle,
+                actor,
                 duties,
                 rt.telegram.as_ref(),
                 rt.github.as_ref(),
@@ -224,7 +225,7 @@ fn build_handle(
     summarize: context::SummarizeFn,
     notifier: Option<Arc<notify::Notifier>>,
     duty_trigger: duty::TriggerHandle,
-) -> agent::AgentHandle {
+) -> (agent::AgentHandle, tokio::task::JoinHandle<()>) {
     let context = config.effective_context();
     match context.engine {
         EngineKind::Flat => {
@@ -377,7 +378,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     summarize: context::SummarizeFn,
     notifier: Option<Arc<notify::Notifier>>,
     duty_trigger: Option<duty::TriggerHandle>,
-) -> agent::AgentHandle {
+) -> (agent::AgentHandle, tokio::task::JoinHandle<()>) {
     // Namespacing makes collisions unlikely; if one happens anyway,
     // the built-in wins and the MCP tool is dropped everywhere.
     let mcp = mcp.without_collisions(&tools);

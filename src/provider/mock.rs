@@ -6,6 +6,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::Semaphore;
+
 use crate::error::ProviderError;
 use crate::provider::{CallUsage, ChatError, ChatOutcome, Provider};
 use crate::types::{Message, Response, ToolDefinition};
@@ -19,6 +21,9 @@ pub struct MockProvider {
     call_count: Arc<AtomicUsize>,
     /// Messages of the most recent `chat` call, for request assertions.
     last_messages: Arc<Mutex<Vec<Message>>>,
+    /// Each `chat` call takes one permit first, so a test can hold a
+    /// turn in flight.
+    gate: Option<Arc<Semaphore>>,
 }
 
 impl MockProvider {
@@ -29,7 +34,14 @@ impl MockProvider {
             failed: Vec::new(),
             call_count: Arc::new(AtomicUsize::new(0)),
             last_messages: Arc::new(Mutex::new(Vec::new())),
+            gate: None,
         }
+    }
+
+    /// Block every `chat` call until the test adds a permit to `gate`.
+    pub fn gated(mut self, gate: Arc<Semaphore>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// Attach a `prompt_tokens` value to every successful response.
@@ -68,6 +80,9 @@ impl Provider for MockProvider {
         _tools: &[ToolDefinition],
     ) -> Result<ChatOutcome, ChatError> {
         let index = self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.gate {
+            gate.acquire().await.expect("gate never closed").forget();
+        }
         *self
             .last_messages
             .lock()

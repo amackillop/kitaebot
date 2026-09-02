@@ -27,7 +27,7 @@ Channels (Telegram, Unix socket, GitHub PRs, GitHub issues, Linear, Duties)
            messages tagged by source)
 ```
 
-The agent is an actor (Ryhl pattern) — a spawned tokio task that processes one envelope at a time. Channels hold cloneable `AgentHandle`s and send messages via `send_message()`, awaiting a reply over a oneshot channel. This eliminates session locking: the actor owns the session and processes requests sequentially.
+The agent is an actor (Ryhl pattern) — a spawned tokio task that processes one envelope at a time. Channels hold cloneable `AgentHandle`s and send messages via `send_message()`, awaiting a reply over a oneshot channel. This eliminates session locking: the actor owns the session and processes requests sequentially. SIGTERM drains instead of killing: the channel loops stop, the in-flight turn runs to completion, queued envelopes are refused, then the daemon exits.
 
 The agent loop calls the LLM, dispatches tool calls in parallel, checks outputs for leaked secrets, and repeats until the model produces a final response or hits `max_iterations`.
 
