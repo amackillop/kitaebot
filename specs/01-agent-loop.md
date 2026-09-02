@@ -192,6 +192,33 @@ directive explicitly says to continue with tool calls: under
 turn summary logs `checkpointed` so effectiveness is measurable
 against `max_iterations` outcomes.
 
+### Corrective Hints
+
+The midpoint checkpoint's principle at finer grain: standing prompt
+guidance does not reach a model mid-habit (developer-workflow.md
+described the grep/sed pathology verbatim and failed to prevent it in
+the #136 turns), so the instruction arrives when its trigger fires.
+Three recognized failure shapes each yield one system-notice line per
+turn, appended after the round's tool results:
+
+| Trigger | Hint |
+|---------|------|
+| Failed assertion in tool output | Derive the expected value by hand; the expectation may be the bug. |
+| Identical test command with no `file_edit`/`file_write` since | The result will not change; edit first. |
+| Second `file_edit` no-match on one file | Your view of the file is stale; re-read the region. |
+
+Test commands are recognized by substring across ecosystems (cargo,
+just, pytest, pnpm/npm, go, vitest): the bot works non-Rust repos.
+The hints ride a separate system message rather than the result text:
+tool results are `<tool_output>`-framed and the LCM framing parsers
+require the closing tag last, so appending to the result body would
+break payload normalization. Hints are advisory only; they feed no
+strike counter. The `RepeatDetector` still owns literal-identical
+call sets (the third consecutive identical round onward is skipped,
+`REPEAT_LIMIT`); the rerun hint
+fires earlier and on a looser match — same test command, other calls
+allowed in between — where the detector correctly stays silent.
+
 ### Budget Exhaustion
 
 Hitting `agent.max_iterations` emits `Activity::MaxIterations`, then

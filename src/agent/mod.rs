@@ -7,6 +7,7 @@
 mod actor;
 pub(crate) mod envelope;
 mod handle;
+mod hints;
 pub(crate) mod task;
 
 pub use handle::AgentHandle;
@@ -511,6 +512,7 @@ async fn turn_loop(
     let tool_definitions: Arc<[ToolDefinition]> = tools.definitions().into();
 
     let mut repeats = RepeatDetector::new();
+    let mut hint_tracker = hints::HintTracker::new();
     let mut policy_strikes: BTreeMap<String, usize> = BTreeMap::new();
     let mut blocked_rounds: usize = 0;
     let mut repeat_strikes: usize = 0;
@@ -681,9 +683,23 @@ async fn turn_loop(
                     })
                     .collect();
 
-                let tool_halt =
-                    record_tool_results(engine, &calls, results, activity_tx, &mut tool_strikes)
-                        .await;
+                let (tool_halt, round_hints) = record_tool_results(
+                    engine,
+                    &calls,
+                    results,
+                    activity_tx,
+                    &mut tool_strikes,
+                    &mut hint_tracker,
+                )
+                .await;
+
+                if !round_hints.is_empty() {
+                    engine
+                        .push_message(Message::System {
+                            content: round_hints.join("\n"),
+                        })
+                        .await?;
+                }
 
                 if let Some(halt) = tool_halt {
                     warn!(
@@ -1080,9 +1096,22 @@ async fn record_tool_results<E: ContextEngine>(
     results: Vec<Result<String, ToolError>>,
     activity_tx: Option<&mpsc::Sender<Activity>>,
     tool_strikes: &mut ToolStrikeTracker,
-) -> Option<TurnOutput> {
+    hint_tracker: &mut hints::HintTracker,
+) -> (Option<TurnOutput>, Vec<&'static str>) {
     let mut halt: Option<TurnOutput> = None;
+    let mut round_hints: Vec<&'static str> = Vec::new();
     for (call, result) in calls.iter().zip(results) {
+        let observed = match &result {
+            Ok(output) => Ok(output.as_str()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Some(hint) = hint_tracker.observe(
+            call.function.name.as_str(),
+            &call.function.arguments,
+            observed.as_ref().map(|s| *s).map_err(String::as_str),
+        ) {
+            round_hints.push(hint);
+        }
         let (content, err) = match result {
             Ok(output) => {
                 let checked = safety::check_tool_output(call.function.name.as_str(), &output);
@@ -1143,7 +1172,7 @@ async fn record_tool_results<E: ContextEngine>(
             })
             .await;
     }
-    halt
+    (halt, round_hints)
 }
 
 #[cfg(test)]
@@ -1427,6 +1456,47 @@ mod tests {
             })
             .count();
         assert_eq!(directives, 1, "checkpoint must fire exactly once");
+    }
+
+    /// A failed-assertion shape in tool output must surface the
+    /// derive-by-hand hint as a system notice on that round.
+    #[tokio::test]
+    async fn assertion_output_injects_the_corrective_hint_once() {
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(mock_tool_calls(&["c1"])),
+            Ok(mock_tool_calls(&["c2"])),
+            Ok(text("done")),
+        ]));
+        let tools = mock_tools(
+            "thread 'exec::tests::t' panicked at src/a.rs:9:\n\
+             assertion `left == right` failed\n  left: 1\n right: 2",
+        );
+        let mut engine = test_engine();
+        let summarize = test_summarize(&provider);
+
+        let result = run_turn(
+            &mut engine,
+            &summarize,
+            SYSTEM,
+            "Fix the bug",
+            &*provider,
+            &tools,
+            MAX_ITER,
+            &ToolCtx::default(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap().into_text(), "done");
+        let notices = provider
+            .last_request()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                matches!(m, Message::System { content }
+                    if content == hints::ASSERT_HINT)
+            })
+            .count();
+        assert_eq!(notices, 1, "hint must fire exactly once per turn");
     }
 
     /// A cap of 1 has midpoint 0; injecting before the first call
@@ -2120,7 +2190,15 @@ mod tests {
 
         let mut engine = test_engine();
         let mut tracker = ToolStrikeTracker::default();
-        record_tool_results(&mut engine, &calls, results, None, &mut tracker).await;
+        record_tool_results(
+            &mut engine,
+            &calls,
+            results,
+            None,
+            &mut tracker,
+            &mut hints::HintTracker::new(),
+        )
+        .await;
 
         let ctx = engine.assemble("").await.unwrap();
         let stored: Vec<&String> = ctx
@@ -2656,9 +2734,16 @@ mod tests {
             };
             let result = exec_failing(&tool, &call, &ctx).await;
             let calls = vec![call];
-            if let Some(h) =
-                record_tool_results(&mut engine, &calls, vec![result], None, &mut tracker).await
-            {
+            let (halted, _) = record_tool_results(
+                &mut engine,
+                &calls,
+                vec![result],
+                None,
+                &mut tracker,
+                &mut hints::HintTracker::new(),
+            )
+            .await;
+            if let Some(h) = halted {
                 halt = Some(h);
                 break;
             }
@@ -2700,7 +2785,15 @@ mod tests {
             };
             let result = exec_failing(&tool, &call, &ctx).await;
             let calls = vec![call];
-            record_tool_results(&mut engine, &calls, vec![result], None, &mut tracker).await;
+            record_tool_results(
+                &mut engine,
+                &calls,
+                vec![result],
+                None,
+                &mut tracker,
+                &mut hints::HintTracker::new(),
+            )
+            .await;
         }
 
         let ctx = engine.assemble("").await.unwrap();
@@ -2744,7 +2837,15 @@ mod tests {
             };
             let result = exec_failing(&tool, &call, &ctx).await;
             let calls = vec![call];
-            record_tool_results(&mut engine, &calls, vec![result], None, &mut tracker).await;
+            record_tool_results(
+                &mut engine,
+                &calls,
+                vec![result],
+                None,
+                &mut tracker,
+                &mut hints::HintTracker::new(),
+            )
+            .await;
         }
 
         let ctx = engine.assemble("").await.unwrap();
@@ -2804,9 +2905,16 @@ mod tests {
             };
             let result = exec_failing(t, &call, &ctx).await;
             let calls = vec![call];
-            if let Some(h) =
-                record_tool_results(&mut engine, &calls, vec![result], None, &mut tracker).await
-            {
+            let (halted, _) = record_tool_results(
+                &mut engine,
+                &calls,
+                vec![result],
+                None,
+                &mut tracker,
+                &mut hints::HintTracker::new(),
+            )
+            .await;
+            if let Some(h) = halted {
                 halt = Some(h);
                 break;
             }
@@ -2842,9 +2950,16 @@ mod tests {
             };
             let result = exec_failing(&tool, &call, &ctx).await;
             let calls = vec![call];
-            if let Some(h) =
-                record_tool_results(&mut engine, &calls, vec![result], None, &mut tracker).await
-            {
+            let (halted, _) = record_tool_results(
+                &mut engine,
+                &calls,
+                vec![result],
+                None,
+                &mut tracker,
+                &mut hints::HintTracker::new(),
+            )
+            .await;
+            if let Some(h) = halted {
                 halt = Some(h);
                 break;
             }
