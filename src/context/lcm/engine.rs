@@ -354,11 +354,20 @@ impl LcmEngine {
         );
         // With no original path, point at the stored payload —
         // workspace-relative, so the confined file tools accept it.
+        let has_source_path = path_hint.is_some();
         let path = path_hint.unwrap_or_else(|| {
             use crate::workspace::{CONTEXT_DIR, LCM_DIR, LCM_PAYLOADS_DIR};
             format!("{CONTEXT_DIR}/{LCM_DIR}/{LCM_PAYLOADS_DIR}/{file_id}")
         });
-        let reference = explore::format_file_reference(&file_id, &path, token_count, &summary);
+        let next_step = explore::next_step(
+            kind,
+            explore::looks_like_test_run(&unframed),
+            has_source_path,
+            &file_id,
+            &path,
+        );
+        let reference =
+            explore::format_file_reference(&file_id, &path, token_count, &summary, &next_step);
         let row = LargeFileRow {
             file_id,
             path,
