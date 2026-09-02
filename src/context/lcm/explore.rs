@@ -109,26 +109,21 @@ pub fn format_file_reference(
 pub fn looks_like_test_run(content: &str) -> bool {
     content.contains("test result:")
         || content.contains("panicked at")
-        || content.contains("FAILED")
         || content.contains("=== RUN")
-        || content.contains("passed") && content.contains("failed")
+        || (content.contains("passed") && content.contains("failed"))
 }
 
 /// The dereference instruction for a `<file>` stub. Models do not
-/// follow references through the sanctioned tools unprompted (a 200
-/// iteration turn issued zero `lcm_grep` calls and re-ran commands
-/// instead), so each stub names its own next step.
-pub fn next_step(
-    kind: FileKind,
-    test_run: bool,
-    has_source_path: bool,
-    file_id: &str,
-    path: &str,
-) -> String {
+/// follow references through the sanctioned tools unprompted, so each
+/// stub names its own next step. The target is the on-disk copy at
+/// `path`: the raw bytes never reach the FTS tables (`intercept_large`
+/// replaces them before persistence), so `lcm_grep` cannot see them.
+pub fn next_step(kind: FileKind, test_run: bool, has_source_path: bool, path: &str) -> String {
     if test_run {
         return format!(
-            "Next: lcm_grep 'panicked|FAILED|error' {file_id} pulls the \
-             failures from the stored copy; do not re-run the command."
+            "Next: grep pattern='panicked at|FAILED|error' path={path} \
+             pulls the failures from the stored copy; do not re-run the \
+             command."
         );
     }
     if has_source_path {
@@ -136,12 +131,12 @@ pub fn next_step(
     }
     match kind {
         FileKind::Json | FileKind::Xml | FileKind::Yaml => format!(
-            "Next: the stored copy at {path} is line-oriented; lcm_grep a \
-             key ({file_id}) or file_read a range of it."
+            "Next: the stored copy at {path} is line-oriented; grep it or \
+             file_read a range of it."
         ),
         _ => format!(
-            "Next: lcm_grep <pattern> {file_id} searches the stored text; \
-             file_read {path} windows it."
+            "Next: grep pattern=<regex> path={path} searches the stored \
+             text; file_read {path} windows it."
         ),
     }
 }
@@ -787,34 +782,24 @@ mod tests {
     // ── next-step guidance ──────────────────────────────────────────
 
     #[test]
-    fn test_run_payload_points_at_lcm_grep_not_rerun() {
-        let step = next_step(
-            FileKind::Text,
-            true,
-            false,
-            "file_ab",
-            "context/lcm/payloads/file_ab",
-        );
-        assert!(step.contains("lcm_grep"), "{step}");
+    fn test_run_payload_points_at_the_stored_copy_not_rerun() {
+        let step = next_step(FileKind::Text, true, false, "context/lcm/payloads/file_ab");
+        assert!(step.contains("grep pattern="), "{step}");
+        assert!(step.contains("path=context/lcm/payloads/file_ab"), "{step}");
         assert!(step.contains("do not re-run"), "{step}");
+        assert!(!step.contains("lcm_grep"), "{step}");
     }
 
     #[test]
     fn source_file_payload_points_at_windowed_file_read() {
-        let step = next_step(FileKind::Code, false, true, "file_ab", "src/tools/exec.rs");
+        let step = next_step(FileKind::Code, false, true, "src/tools/exec.rs");
         assert!(step.contains("file_read src/tools/exec.rs"), "{step}");
         assert!(step.contains("offset"), "{step}");
     }
 
     #[test]
     fn structured_payload_names_the_stored_copy() {
-        let step = next_step(
-            FileKind::Json,
-            false,
-            false,
-            "file_ab",
-            "context/lcm/payloads/file_ab",
-        );
+        let step = next_step(FileKind::Json, false, false, "context/lcm/payloads/file_ab");
         assert!(step.contains("line-oriented"), "{step}");
         assert!(step.contains("file_ab"), "{step}");
     }
@@ -828,6 +813,11 @@ mod tests {
         assert!(looks_like_test_run("=== RUN   TestFoo"));
         assert!(looks_like_test_run("2 passed, 1 failed in 0.3s"));
         assert!(!looks_like_test_run("plain build output, nothing here"));
+        // The word alone is not a test run: source files and logs say
+        // FAILED without being one.
+        assert!(!looks_like_test_run(
+            "const MSG: &str = \"FAILED to connect\";"
+        ));
     }
 
     // ── payload normalization ─────────────────────────────────────

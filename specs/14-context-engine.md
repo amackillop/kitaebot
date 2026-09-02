@@ -494,14 +494,15 @@ Next: file_read data/output.json with offset/limit windows the original file.
 
 The trailing `Next:` line is content-aware dereference guidance
 (issue #147): models do not follow references through the sanctioned
-tools unprompted — a 200-iteration turn issued zero `lcm_grep` calls
-and re-ran commands instead — so each stub names its own next step.
-Test-runner output (recognized across cargo/pytest/go shapes) points
-at `lcm_grep` over the stored copy and says not to re-run the
-command; an original source path points at windowed `file_read`;
-structured payloads point at the line-oriented stored copy. The
-summarizer's preserve-`<file>`-tags rule carries the line through
-compaction unchanged.
+tools unprompted, so each stub names its own next step. Every target
+is the on-disk copy at `path` — the raw bytes never reach the FTS
+tables (`intercept_large` replaces them before persistence), so
+`lcm_grep` cannot see them. Test-runner output (recognized across
+cargo/pytest/go shapes) points at native `grep` over the stored copy
+and says not to re-run the command; an original source path points
+at windowed `file_read`; structured payloads point at the
+line-oriented stored copy. The summarizer's preserve-`<file>`-tags
+rule carries the line through compaction unchanged.
 
 The `path` attribute comes from an in-band lookup: for an oversized tool
 result, the engine queries the already-persisted `tool_call` part of the

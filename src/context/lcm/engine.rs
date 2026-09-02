@@ -363,7 +363,6 @@ impl LcmEngine {
             kind,
             explore::looks_like_test_run(&unframed),
             has_source_path,
-            &file_id,
             &path,
         );
         let reference =
