@@ -7,13 +7,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::ProviderError;
-use crate::provider::{CallUsage, ChatOutcome, Provider};
+use crate::provider::{CallUsage, ChatError, ChatOutcome, Provider};
 use crate::types::{Message, Response, ToolDefinition};
 
 /// Mock provider that returns pre-configured responses in sequence.
 pub struct MockProvider {
     responses: Vec<Result<Response, ProviderError>>,
     usage: CallUsage,
+    /// Failed-draw usage attached to every reply and error.
+    failed: Vec<CallUsage>,
     call_count: Arc<AtomicUsize>,
     /// Messages of the most recent `chat` call, for request assertions.
     last_messages: Arc<Mutex<Vec<Message>>>,
@@ -24,6 +26,7 @@ impl MockProvider {
         Self {
             responses,
             usage: CallUsage::default(),
+            failed: Vec::new(),
             call_count: Arc::new(AtomicUsize::new(0)),
             last_messages: Arc::new(Mutex::new(Vec::new())),
         }
@@ -32,6 +35,13 @@ impl MockProvider {
     /// Attach a `prompt_tokens` value to every successful response.
     pub fn with_prompt_tokens(mut self, tokens: u32) -> Self {
         self.usage.prompt_tokens = Some(tokens);
+        self
+    }
+
+    /// Attach failed-draw usage to every reply and error, as if each
+    /// chat had burned these draws before resolving.
+    pub fn with_failed_usage(mut self, failed: Vec<CallUsage>) -> Self {
+        self.failed = failed;
         self
     }
 
@@ -56,16 +66,23 @@ impl Provider for MockProvider {
         _session: &str,
         messages: &[Message],
         _tools: &[ToolDefinition],
-    ) -> Result<ChatOutcome, ProviderError> {
+    ) -> Result<ChatOutcome, ChatError> {
         let index = self.call_count.fetch_add(1, Ordering::SeqCst);
         *self
             .last_messages
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = messages.to_vec();
-        self.responses[index].clone().map(|response| ChatOutcome {
-            response,
-            usage: self.usage.clone(),
-        })
+        match self.responses[index].clone() {
+            Ok(response) => Ok(ChatOutcome {
+                response,
+                usage: self.usage.clone(),
+                failed: self.failed.clone(),
+            }),
+            Err(error) => Err(ChatError {
+                error,
+                failed: self.failed.clone(),
+            }),
+        }
     }
 
     #[allow(clippy::unnecessary_literal_bound)] // trait ties the return to &self

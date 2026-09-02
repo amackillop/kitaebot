@@ -13,9 +13,14 @@ OpenAI-compatible chat completions endpoint.
 The `Provider` trait exposes one method:
 
 ```
-chat(messages, tools) -> Result<Response, ProviderError>
+chat(session, messages, tools) -> Result<ChatOutcome, ChatError>
 ```
 
+Both arms carry billed usage: `ChatOutcome` is the reply plus its
+call's usage plus any failed draws' usage; `ChatError` is the final
+error plus the failed draws' usage (see Retry).
+
+`session` is the sticky cache-routing key (OpenRouter `session_id`).
 `messages` is the full context window (system + conversation history).
 `tools` is the set of tool definitions the LLM may invoke. When `tools` is
 empty, the `tools` field is omitted from the wire request entirely.
@@ -106,6 +111,17 @@ provider rather than the agent loop means every consumer (root turns,
 sub-agents, summarizer, heartbeat) gets it for free, and `MockProvider`
 call counts in agent tests stay deterministic. Cancellation needs no
 special handling — dropping the `chat` future drops the sleep with it.
+
+Failed attempts don't unbill their draws (#128). A parse-shaped
+failure (`EmptyResponse`, `Truncated`, `MalformedToolCall`,
+empty-choices `InvalidResponse`) carries the response's usage out of
+the attempt, and `chat` accumulates it across redraws — surfaced in
+`ChatOutcome.failed` on success, or in `ChatError { error, failed }`
+once retries are exhausted, so the ledger records what was billed
+rather than what happened to parse. Transport failures billed nothing
+and contribute nothing. The agent loop folds `failed` into the turn's
+`TurnUsage` on both arms; only the successful draw's `prompt_tokens`
+feeds context-size observation.
 
 No jitter: a single daemon cannot cause a thundering herd.
 
