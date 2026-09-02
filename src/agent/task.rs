@@ -90,6 +90,15 @@ const FINDINGS_RETRY_PROMPT: &str = "Your previous response had no parseable ```
 block (exactly one fenced block holding a single JSON object). Re-emit your review's \
 verdict and findings as exactly one such block, unchanged in substance, nothing else.";
 
+/// The corrective turn runs with no tool definitions and one
+/// iteration: it can only answer with text, at most one provider call
+/// plus one `FinalAnswer` squeeze. Session histories that hold tool
+/// rounds still carry their `tool_calls` and providers like GLM reject
+/// such a history when the tools are absent from the request; the
+/// failure is soft — a warning and the unparseable trailer, the
+/// parent's text survives.
+const FINDINGS_RETRY_MAX_ITERATIONS: usize = 1;
+
 /// A sub-agent type: system prompt plus prebuilt tool set.
 pub(crate) struct AgentType {
     system_prompt: String,
@@ -379,13 +388,10 @@ impl<P: Provider> Tool for TaskTool<P> {
                             meta: args.review.as_ref(),
                             provider,
                             system_prompt: &agent.system_prompt,
-                            tools: &agent.tools,
-                            max_iterations: self.max_iterations,
                             ctx: &child_ctx,
                         },
                         &text,
                     )
-                    .instrument(tracing::info_span!("subagent", agent = "reviewer-retry"))
                     .await;
                 append_recording_trailer(&mut text, &recorded);
                 // The retry's spend folds into this gate invocation's
@@ -412,24 +418,31 @@ impl<P: Provider> Tool for TaskTool<P> {
     }
 }
 
-/// How a reviewer's findings block landed in the ledger. `Disabled` is
-/// a ledger-off no-op, `Recorded` an empty vec on a clean review.
-enum ReviewRecording {
-    Disabled,
+/// How a reviewer response's findings block parsed. `Recorded` is an
+/// empty vec on a clean review.
+enum ParseOutcome {
     Recorded(Vec<i64>),
     Unparseable,
     WriteFailed,
 }
 
+/// How a reviewer's findings block landed in the ledger. `Disabled` is
+/// a ledger-off no-op and wraps only `ParseOutcome`s: parsing happens
+/// after the ledger check, so a parse outcome can never be `Disabled`.
+enum ReviewRecording {
+    Disabled,
+    Parsed(ParseOutcome),
+}
+
 /// Everything the corrective retry turn needs, borrowed from the
-/// reviewer invocation.
+/// reviewer invocation. The retry turn itself runs toolless and
+/// single-iteration (`Tools::default()`, `FINDINGS_RETRY_MAX_ITERATIONS`),
+/// so no tool set or budget is passed here.
 struct ReviewRetry<'a, P: Provider> {
     engine: &'a mut EphemeralSession,
     meta: Option<&'a ReviewMeta>,
     provider: &'a P,
     system_prompt: &'a str,
-    tools: &'a Tools,
-    max_iterations: usize,
     ctx: &'a ToolCtx,
 }
 
@@ -437,8 +450,12 @@ struct ReviewRetry<'a, P: Provider> {
 /// cite ids or call `review_disposition` for them. A clean review
 /// (empty `Recorded`) and `Disabled` get no trailer at all.
 fn append_recording_trailer(text: &mut String, recorded: &ReviewRecording) {
-    let trailer = match recorded {
-        ReviewRecording::Recorded(ids) if !ids.is_empty() => {
+    let outcome = match recorded {
+        ReviewRecording::Disabled => return,
+        ReviewRecording::Parsed(outcome) => outcome,
+    };
+    let trailer = match outcome {
+        ParseOutcome::Recorded(ids) if !ids.is_empty() => {
             let list = ids
                 .iter()
                 .map(ToString::to_string)
@@ -446,13 +463,11 @@ fn append_recording_trailer(text: &mut String, recorded: &ReviewRecording) {
                 .join(", ");
             format!("\n\n[ledger: finding ids {list}]")
         }
-        ReviewRecording::Unparseable => {
+        ParseOutcome::Unparseable => {
             "\n\n[ledger: findings block unparseable; nothing recorded]".to_string()
         }
-        ReviewRecording::WriteFailed => {
-            "\n\n[ledger: recording failed; nothing recorded]".to_string()
-        }
-        ReviewRecording::Recorded(_) | ReviewRecording::Disabled => return,
+        ParseOutcome::WriteFailed => "\n\n[ledger: recording failed; nothing recorded]".to_string(),
+        ParseOutcome::Recorded(_) => return,
     };
     let _ = write!(text, "{trailer}");
 }
@@ -473,17 +488,15 @@ impl<P: Provider> TaskTool<P> {
             return (ReviewRecording::Disabled, None);
         };
         match record_parse(ledger, retry.meta, text) {
-            recording @ (ReviewRecording::Recorded(_) | ReviewRecording::WriteFailed) => {
-                (recording, None)
+            recording @ (ParseOutcome::Recorded(_) | ParseOutcome::WriteFailed) => {
+                (ReviewRecording::Parsed(recording), None)
             }
-            ReviewRecording::Unparseable => {
+            ParseOutcome::Unparseable => {
                 warn!("reviewer response has no parseable findings block; retrying once");
                 let ReviewRetry {
                     engine,
                     provider,
                     system_prompt,
-                    tools,
-                    max_iterations,
                     ctx,
                     ..
                 } = retry;
@@ -493,33 +506,41 @@ impl<P: Provider> TaskTool<P> {
                     system_prompt,
                     FINDINGS_RETRY_PROMPT,
                     provider,
-                    tools,
-                    max_iterations,
+                    // No tool definitions: the corrective turn can only
+                    // answer with text (see FINDINGS_RETRY_MAX_ITERATIONS).
+                    &Tools::default(),
+                    FINDINGS_RETRY_MAX_ITERATIONS,
                     BudgetPolicy::FinalAnswer,
                     ReplyPolicy::Accept,
                     ctx,
                 )
+                .instrument(tracing::info_span!("subagent", agent = "findings-retry"))
                 .await;
                 match result {
                     Ok(output) => {
                         let retry_text = output.into_text();
-                        (record_parse(ledger, retry.meta, &retry_text), Some(meter))
+                        (
+                            ReviewRecording::Parsed(record_parse(ledger, retry.meta, &retry_text)),
+                            Some(meter),
+                        )
                     }
                     Err(e) => {
                         warn!("findings retry turn failed: {e}");
-                        (ReviewRecording::Unparseable, Some(meter))
+                        (
+                            ReviewRecording::Parsed(ParseOutcome::Unparseable),
+                            Some(meter),
+                        )
                     }
                 }
             }
-            ReviewRecording::Disabled => (ReviewRecording::Disabled, None),
         }
     }
 }
 
 /// Parse `text`'s findings block and write it to the ledger.
-fn record_parse(ledger: &ReviewLedger, meta: Option<&ReviewMeta>, text: &str) -> ReviewRecording {
+fn record_parse(ledger: &ReviewLedger, meta: Option<&ReviewMeta>, text: &str) -> ParseOutcome {
     let Some(output) = review::parse_findings_block(text) else {
-        return ReviewRecording::Unparseable;
+        return ParseOutcome::Unparseable;
     };
     // A missing meta mislabels the rows but must not drop them: the
     // category counts are the point.
@@ -535,10 +556,10 @@ fn record_parse(ledger: &ReviewLedger, meta: Option<&ReviewMeta>, text: &str) ->
         git_ref,
     };
     match ledger.record_review(&record, &output) {
-        Ok(ids) => ReviewRecording::Recorded(ids),
+        Ok(ids) => ParseOutcome::Recorded(ids),
         Err(e) => {
             warn!("failed to record review: {e}");
-            ReviewRecording::WriteFailed
+            ParseOutcome::WriteFailed
         }
     }
 }
@@ -630,6 +651,56 @@ mod tests {
 
     fn mock_tools() -> Tools {
         Tools::new(vec![Arc::new(MockTool::new("mock output"))], &[]).unwrap()
+    }
+
+    /// The corrective turn is structural: toolless (no definitions on
+    /// the wire) and single-iteration. A `ToolCalls` retry response gets
+    /// no execution round — only the `FinalAnswer` squeeze can follow —
+    /// so the run is exactly three calls: review, retry, squeeze.
+    #[tokio::test]
+    async fn findings_retry_is_toolless_and_single_iteration() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text(BAD_SHAPE_RESPONSE.to_string())),
+            Ok(mock_tool_calls()),
+            Ok(Response::Text(String::new())),
+        ]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(mock_tools()),
+            },
+            5,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        // Review + retry + FinalAnswer squeeze of the retry's tool
+        // calls: a second loop iteration would have meant a fourth.
+        assert_eq!(provider.call_count(), 3, "{result}");
+        assert!(!provider.request_tools(0).is_empty());
+        assert!(provider.request_tools(1).is_empty());
+        assert!(provider.request_tools(2).is_empty());
+        assert!(
+            result.contains("[ledger: findings block unparseable; nothing recorded]"),
+            "{result}"
+        );
     }
 
     /// Sub-agent rows inherit the parent's task key through the ctx,

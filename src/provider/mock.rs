@@ -21,6 +21,8 @@ pub struct MockProvider {
     call_count: Arc<AtomicUsize>,
     /// Messages of the most recent `chat` call, for request assertions.
     last_messages: Arc<Mutex<Vec<Message>>>,
+    /// Tool definitions of every `chat` call, in call order.
+    requests_tools: Arc<Mutex<Vec<Vec<ToolDefinition>>>>,
     /// Each `chat` call takes one permit first, so a test can hold a
     /// turn in flight.
     gate: Option<Arc<Semaphore>>,
@@ -34,6 +36,7 @@ impl MockProvider {
             failed: Vec::new(),
             call_count: Arc::new(AtomicUsize::new(0)),
             last_messages: Arc::new(Mutex::new(Vec::new())),
+            requests_tools: Arc::new(Mutex::new(Vec::new())),
             gate: None,
         }
     }
@@ -70,6 +73,16 @@ impl MockProvider {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (!held.is_empty()).then(|| held.clone())
     }
+
+    /// The tool definitions sent with the `index`th `chat` call.
+    pub fn request_tools(&self, index: usize) -> Vec<ToolDefinition> {
+        self.requests_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(index)
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 impl Provider for MockProvider {
@@ -77,7 +90,7 @@ impl Provider for MockProvider {
         &self,
         _session: &str,
         messages: &[Message],
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
     ) -> Result<ChatOutcome, ChatError> {
         let index = self.call_count.fetch_add(1, Ordering::SeqCst);
         if let Some(gate) = &self.gate {
@@ -87,6 +100,10 @@ impl Provider for MockProvider {
             .last_messages
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = messages.to_vec();
+        self.requests_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(tools.to_vec());
         match self.responses[index].clone() {
             Ok(response) => Ok(ChatOutcome {
                 response,
