@@ -314,6 +314,26 @@ impl TurnUsage {
         }
     }
 
+    /// Fold another turn's billed usage into this one (a multi-turn
+    /// pass reports one row): `None` stays `None` only while both
+    /// sides are `None`, mirroring `add_call`.
+    pub(crate) fn add_turn(&mut self, other: &Self) {
+        self.calls += other.calls;
+        self.prompt_tokens += other.prompt_tokens;
+        self.completion_tokens += other.completion_tokens;
+        self.cached_tokens = match (self.cached_tokens, other.cached_tokens) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+        };
+        self.cost = match (self.cost, other.cost) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+        };
+        if other.provider.is_some() {
+            self.provider.clone_from(&other.provider);
+        }
+    }
+
     /// Failed draws are billed draws; they count like any other call.
     fn add_failed(&mut self, failed: Vec<CallUsage>) {
         for call in failed {

@@ -59,9 +59,10 @@ that the index points at.
   writes it at runtime, so startup caching would serve stale memory.
 - Injection truncates at a byte cap. The cap is the token contract:
   memory can never crowd out the window regardless of what the model
-  wrote. Truncation logs a warning; the guidance (and the distiller,
-  once it exists) keeps the file under the cap so truncation stays
-  exceptional.
+  wrote. Truncation logs a warning and its marker names the `##`
+  sections that fell past the cut, so the invisible tail is visible
+  as invisible; the guidance (and the distiller) keeps the file under
+  the cap so truncation stays exceptional.
 - Like the rest of the system prompt, the index is never stored in the
   session.
 - Missing `MEMORY.md` is not an error: nothing is injected. Sub-agents
@@ -148,7 +149,12 @@ reading session history through the context engine abstraction:
   ([FUTURE](FUTURE.md)).
 - **Duties:** extract durable facts from the new events into topics and
   index; merge and dedupe entries the in-turn writes accumulated; prune
-  entries invalidated by newer events; enforce the index cap.
+  entries invalidated by newer events; enforce the index cap. The cap
+  is verified post-pass: a pass that ends over it triggers exactly one
+  compaction-only ephemeral turn (the index as the sole subject, no
+  transcript spans) before the pass completes. The retry runs after
+  the watermarks advance and is best-effort — its failure logs and is
+  flagged in the pass summary, never failing the pass.
 - The watermarks advance only after a successful pass, so a failed
   distillation retries over the same span.
 - **Priming:** an absent watermark *document* (fresh state database)
@@ -222,8 +228,9 @@ is speaking, not which channel they spoke through.
 |---------|----------|
 | `MEMORY.md` missing | Nothing injected, no warning — empty memory is a valid state |
 | `MEMORY.md` unreadable | Warn log, nothing injected, turn proceeds |
-| Index over the byte cap | Truncated at injection, warn log |
+| Index over the byte cap | Truncated at injection, warn log; the marker names the sections cut wholly or partly past the cap |
 | Distillation turn fails | Logged, watermark not advanced, retried at the next gate crossing |
+| Index over cap after a distillation pass | One compaction-only retry turn; if still over cap, warn and flag in the pass summary — the pass itself has already succeeded |
 | Slice exceeds what `sub_agents.max_iterations` plausibly folds | Warned at config load (rough tokens-per-iteration heuristic); the config still loads |
 | Model writes garbage to memory | Contained by the cap; corrected by guidance-driven edits or the distiller |
 
