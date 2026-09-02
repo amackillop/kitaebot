@@ -133,7 +133,9 @@ Executes commands via `bash -c` within the workspace.
    (workspace-root `context/` references except reads of
    `context/lcm/payloads/<file_id>`, which `<file>` references hand to the
    model and the sandbox grants; redirection into `state/`),
-   disk/filesystem (`mkfs`, `dd if=`, `fdisk`), system power (`init 0-6`,
+   disk/filesystem (`mkfs`, `dd if=`, `fdisk`, redirects into `/dev/`
+   other than the stream devices `/dev/null`, `/dev/std*`, `/dev/fd/N`,
+   `/dev/tty`, `/dev/zero`, `/dev/full`, `/dev/urandom`), system power (`init 0-6`,
    `systemctl`), privilege escalation (`sudo`, `chmod`, `chown`),
    network exfiltration (`curl -T`, `nc -l`, `socat`), pipe-to-shell
    (`curl|sh`, `wget|sh`), reverse shells (`/dev/tcp/`, python/ruby/perl

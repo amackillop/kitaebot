@@ -9,7 +9,7 @@
 //! - Recursive deletion (`rm -r`, `rm -rf`)
 //! - Filesystem creation (`mkfs`)
 //! - Raw disk writes (`dd if=`)
-//! - Device writes (`> /dev/`)
+//! - Device writes (`> /dev/`, except the stream devices such as `/dev/null`)
 //! - System power (`shutdown`, `reboot`)
 //! - Fork bombs
 //! - Authenticated git operations (`git clone`, `git push`) — must use the dedicated GitHub tools
@@ -439,6 +439,22 @@ fn sanitize_payload_refs(cmd: &str) -> std::borrow::Cow<'_, str> {
     })
 }
 
+/// The stream and pseudo-devices a redirect may target without touching
+/// storage. Blanked before the device-write rule looks, so `> /dev/null`
+/// stays a plain redirect while `> /dev/sda` stays a disk write.
+static STREAM_DEVICE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    crate::text::static_regex(r"/dev/(null|zero|full|stdin|stdout|stderr|tty|u?random|fd/[0-9]+)\b")
+});
+
+/// Blank out every reference the deny rules must not see: sanctioned
+/// payload-store reads and stream-device redirects.
+fn sanitize(cmd: &str) -> String {
+    let payloads = sanitize_payload_refs(cmd);
+    STREAM_DEVICE_RE
+        .replace_all(&payloads, "stream_device")
+        .into_owned()
+}
+
 /// Arguments for the exec tool.
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -757,9 +773,10 @@ fn nearest_envrc_dir<'a>(cwd: &'a Path, workspace_root: &Path) -> Option<&'a Pat
 /// then a parsed-command layer that tokenizes with shell quoting to
 /// catch bypasses like `VAR=x git commit`.
 fn blocked_reason(cmd: &str) -> Option<&'static str> {
-    // Payload-store reads are sanctioned (the sandbox grants them), so
-    // those paths are blanked out before the deny rules look.
-    let sanitized = sanitize_payload_refs(cmd);
+    // Payload-store reads are sanctioned (the sandbox grants them) and
+    // stream devices are not storage, so both are blanked out before
+    // the deny rules look.
+    let sanitized = sanitize(cmd);
     // Layer 1: regex on the sanitized string
     if let Some(i) = DENY_SET.matches(&sanitized).iter().next() {
         return Some(ALL_DENY_RULES[i].guidance);
@@ -1094,8 +1111,22 @@ mod tests {
         assert_blocked("parted /dev/sda print");
         assert_blocked("dd if=/dev/zero of=/dev/sda");
         assert_blocked("echo foo > /dev/sda");
+        assert_blocked("cat image.bin >/dev/nvme0n1");
         assert_blocked("mount /dev/sda1 /mnt");
         assert_blocked("umount /mnt");
+    }
+
+    #[test]
+    fn stream_device_redirects_are_not_device_writes() {
+        // The 2026-09-01 turn killers: stdout discards and fd redirects
+        // tripped the disk-write rule and halted turns on strikes.
+        assert_allowed("cat /tmp/commit-119-nits.diff >> /dev/null; echo probe-done");
+        assert_allowed("git diff origin/master...HEAD > /dev/null && echo ok");
+        assert_allowed("git stash pop >/dev/null 2>&1; echo POPPED");
+        assert_allowed("sed -n '1,5p' src/review.rs >/dev/null");
+        assert_allowed("echo progress > /dev/stderr");
+        assert_allowed("exec 3>/dev/tty; echo hi >/dev/fd/3");
+        assert_allowed("head -c 16 /dev/urandom > seed.bin");
     }
 
     #[test]
