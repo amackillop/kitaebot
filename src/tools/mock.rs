@@ -15,12 +15,20 @@ struct Args {}
 
 /// Mock tool that returns configurable output.
 pub struct MockTool {
+    name: &'static str,
     output: String,
 }
 
 impl MockTool {
     pub fn new(output: impl Into<String>) -> Self {
+        Self::named("mock", output)
+    }
+
+    /// A mock registered under another tool's name, for dispatch-path
+    /// behavior keyed on the name (the exec evidence trailer).
+    pub fn named(name: &'static str, output: impl Into<String>) -> Self {
         Self {
+            name,
             output: output.into(),
         }
     }
@@ -28,7 +36,7 @@ impl MockTool {
 
 impl Tool for MockTool {
     fn name(&self) -> &'static str {
-        "mock"
+        self.name
     }
 
     fn description(&self) -> &'static str {

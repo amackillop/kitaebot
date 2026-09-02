@@ -19,6 +19,7 @@ pub(crate) mod mcp;
 mod mock;
 #[cfg(not(feature = "mock-network"))]
 pub(crate) mod network;
+mod test_evidence;
 pub(crate) mod warm;
 
 pub mod path;
@@ -307,7 +308,16 @@ impl Tools {
     pub async fn execute(&self, call: &ToolCall, ctx: ToolCtx) -> Result<String, ToolError> {
         tracing::debug!(tool = %call.function.name, call_id = %call.id, "Tool started");
         let started = std::time::Instant::now();
-        let result = self.dispatch(call, ctx).await;
+        let mut result = self.dispatch(call, ctx).await;
+        // Exec output recognized as a failing test run gets the parsed
+        // verdict appended, surviving whatever the command's own
+        // pipeline filtered away (issue #145).
+        if call.function.name.as_str() == "exec"
+            && let Ok(output) = &result
+            && let Some(trailer) = test_evidence::trailer(output)
+        {
+            result = Ok(format!("{output}\n\n{trailer}"));
+        }
         let elapsed = started.elapsed();
         match &result {
             Ok(output) => tracing::debug!(
@@ -433,14 +443,18 @@ mod tests {
     use super::*;
     use crate::types::ToolFunction;
 
-    fn mock_call(id: &str) -> ToolCall {
+    fn call_named(name: &str, id: &str) -> ToolCall {
         ToolCall::new(
             id.to_string(),
             ToolFunction {
-                name: "mock".parse().unwrap(),
+                name: name.parse().unwrap(),
                 arguments: "{}".to_string(),
             },
         )
+    }
+
+    fn mock_call(id: &str) -> ToolCall {
+        call_named("mock", id)
     }
 
     #[derive(serde::Deserialize)]
@@ -578,6 +592,44 @@ mod tests {
             result.unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
+    }
+
+    const FAILING_RUN: &str = "test a ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
+
+    /// The dispatch hook (issue #145) fires only for exec results.
+    #[tokio::test]
+    async fn exec_failing_test_output_gets_the_evidence_trailer() {
+        let tools = Tools::new(vec![Arc::new(MockTool::named("exec", FAILING_RUN))], &[]).unwrap();
+        let out = tools
+            .execute(&call_named("exec", "c1"), ToolCtx::default())
+            .await
+            .unwrap();
+        assert!(out.contains("--- parsed test evidence ---"), "{out}");
+        assert!(out.contains("0 passed, 1 failed"), "{out}");
+        assert!(out.starts_with(FAILING_RUN), "original output must lead");
+    }
+
+    #[tokio::test]
+    async fn non_exec_tool_output_is_untouched() {
+        let tools = Tools::new(vec![Arc::new(MockTool::new(FAILING_RUN))], &[]).unwrap();
+        let out = tools
+            .execute(&call_named("mock", "c1"), ToolCtx::default())
+            .await
+            .unwrap();
+        assert_eq!(out, FAILING_RUN);
+    }
+
+    #[tokio::test]
+    async fn exec_errors_pass_through_the_evidence_hook() {
+        let tools = Tools::new(
+            vec![Arc::new(MockBlockedTool::named("exec", "denied"))],
+            &[],
+        )
+        .unwrap();
+        let result = tools
+            .execute(&call_named("exec", "c1"), ToolCtx::default())
+            .await;
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 
     #[test]
