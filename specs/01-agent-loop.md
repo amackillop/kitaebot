@@ -214,7 +214,8 @@ tool results are `<tool_output>`-framed and the LCM framing parsers
 require the closing tag last, so appending to the result body would
 break payload normalization. Hints are advisory only; they feed no
 strike counter. The `RepeatDetector` still owns literal-identical
-call sets (three identical rounds skip execution); the rerun hint
+call sets (the third consecutive identical round onward is skipped,
+`REPEAT_LIMIT`); the rerun hint
 fires earlier and on a looser match — same test command, other calls
 allowed in between — where the detector correctly stays silent.
 
