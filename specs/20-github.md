@@ -544,7 +544,8 @@ replying to stale code.
 The `github_poll` document in the state database (spec 05):
 
 ```json
-{"last_poll": "2026-07-05T12:00:00Z", "reviewed": {"owner/repo#42": "<head-sha>"}}
+{"last_poll": "2026-07-05T12:00:00Z", "reviewed": {"owner/repo#42": "<head-sha>"},
+ "in_flight": {"key": "owner/repo#42", "prev_sha": "<sha-before-dispatch>"}}
 ```
 
 - Missing or corrupt state defaults to `last_poll = now` (avoids
@@ -556,6 +557,18 @@ The `github_poll` document in the state database (spec 05):
   reappearing with the same SHA is skipped — this covers the failure
   loop where the model replies without submitting a formal review, which
   would otherwise re-trigger every tick.
+- `in_flight` names the reviewer turn currently running: its key and
+  the SHA the `reviewed` entry held before dispatch (`null` for a first
+  review). It is written in the same save as the SHA and cleared by a
+  second save when the turn returns, success or failure. A marker still
+  present at channel start means the daemon died mid-turn; the entry is
+  rolled back (removed, or restored to `prev_sha`) so the normal passes
+  re-dispatch — the review request is still pending, or the head still
+  differs from the restored SHA. Only a turn that never returned rolls
+  back; the SHA guard above stands for every turn that did. GitHub
+  cannot tell the two apart (the quiet path publishes nothing on
+  purpose, and so does the model that skips the formal review), which
+  is why this is local state and not a boot-time API reconciliation.
 - A new head SHA on a tracked PR dispatches an incremental re-review
   (see above).
 - Entries are pruned when the PR is closed or merged. Unlike Linear's
@@ -619,6 +632,7 @@ first place. Requires the `github-token` secret.
 | Individual message send fails | Log error, continue with remaining items |
 | Agent turn fails (review) | Logged and alerted via the notifier (spec 17). SHA already recorded, so no retry storm; the next push or a human re-request retries. |
 | Model never submits a formal review | Pending request stays, but the SHA guard prevents re-dispatch. Visible as a stale request on the PR. |
+| Daemon dies mid-review turn | `in_flight` rolls the `reviewed` entry back at next start and the turn re-dispatches. One duplicate review if the kill lands after submission. |
 | Review checkout prep fails (clone/fetch/detach) | Log warning, skip the PR this tick without recording state; retried next tick |
 | Head SHA / tracked-PR fetch fails | Skip the PR this tick |
 | Incremental compare fetch fails | The model falls back to the full diff |
