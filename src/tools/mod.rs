@@ -582,6 +582,52 @@ mod tests {
         ));
     }
 
+    const FAILING_RUN: &str = "test a ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
+
+    fn named_call(name: &str) -> ToolCall {
+        ToolCall::new(
+            "c1".to_string(),
+            ToolFunction {
+                name: name.parse().unwrap(),
+                arguments: "{}".to_string(),
+            },
+        )
+    }
+
+    /// The dispatch hook (issue #145) fires only for exec results.
+    #[tokio::test]
+    async fn exec_failing_test_output_gets_the_evidence_trailer() {
+        let tools = Tools::new(vec![Arc::new(MockTool::named("exec", FAILING_RUN))], &[]).unwrap();
+        let out = tools
+            .execute(&named_call("exec"), ToolCtx::default())
+            .await
+            .unwrap();
+        assert!(out.contains("--- parsed test evidence ---"), "{out}");
+        assert!(out.contains("0 passed, 1 failed"), "{out}");
+        assert!(out.starts_with(FAILING_RUN), "original output must lead");
+    }
+
+    #[tokio::test]
+    async fn non_exec_tool_output_is_untouched() {
+        let tools = Tools::new(vec![Arc::new(MockTool::new(FAILING_RUN))], &[]).unwrap();
+        let out = tools
+            .execute(&named_call("mock"), ToolCtx::default())
+            .await
+            .unwrap();
+        assert_eq!(out, FAILING_RUN);
+    }
+
+    #[tokio::test]
+    async fn exec_errors_pass_through_the_evidence_hook() {
+        let tools = Tools::new(
+            vec![Arc::new(MockBlockedTool::named("exec", "denied"))],
+            &[],
+        )
+        .unwrap();
+        let result = tools.execute(&named_call("exec"), ToolCtx::default()).await;
+        assert!(matches!(result, Err(ToolError::Blocked { .. })));
+    }
+
     #[test]
     fn filtered_projects_allowlist_sharing_instances() {
         let mock: Arc<dyn Tool> = Arc::new(MockTool::new("ok"));

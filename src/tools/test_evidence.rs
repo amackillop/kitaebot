@@ -24,8 +24,9 @@ static LIBTEST_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {
 static LIBTEST_FAILED_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::text::static_regex(r"(?m)^test (\S+) \.\.\. FAILED$"));
 
-static PYTEST_RESULT_RE: LazyLock<Regex> =
-    LazyLock::new(|| crate::text::static_regex(r"(?m)^=+ .*?(\d+) failed, (\d+) passed.*? =+$"));
+static PYTEST_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    crate::text::static_regex(r"(?m)^=+ .*?(\d+) failed(?:, (\d+) passed)?.*? =+$")
+});
 
 static PYTEST_FAILED_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::text::static_regex(r"(?m)^FAILED (\S+)"));
@@ -82,12 +83,22 @@ fn libtest(output: &str) -> Option<Evidence> {
     })
 }
 
-/// Pytest short summary: `=== 2 failed, 5 passed in 0.31s ===`.
+/// Pytest short summary, summed across runs. Zero-count categories
+/// are omitted from the line: an all-fail run prints
+/// `=== 3 failed in 0.12s ===` with no passed count at all.
 fn pytest(output: &str) -> Option<Evidence> {
-    let cap = PYTEST_RESULT_RE.captures(output)?;
-    Some(Evidence {
-        passed: cap[2].parse().unwrap_or(0),
-        failed: cap[1].parse().unwrap_or(0),
+    let mut seen = false;
+    let (mut passed, mut failed) = (0u64, 0u64);
+    for cap in PYTEST_RESULT_RE.captures_iter(output) {
+        seen = true;
+        failed += cap[1].parse::<u64>().unwrap_or(0);
+        passed += cap
+            .get(2)
+            .map_or(0, |m| m.as_str().parse::<u64>().unwrap_or(0));
+    }
+    seen.then(|| Evidence {
+        passed,
+        failed,
         failed_names: PYTEST_FAILED_RE
             .captures_iter(output)
             .map(|c| c[1].to_string())
@@ -161,6 +172,25 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
         let t = trailer(out).unwrap();
         assert!(t.contains("12 passed, 1 failed"), "{t}");
         assert!(t.contains("tests/test_api.py::test_checkout"), "{t}");
+    }
+
+    /// Pytest omits zero-count categories: the all-fail summary has
+    /// no passed count at all, and it is exactly the single-failing
+    /// debugging run the trailer exists for.
+    #[test]
+    fn pytest_all_fail_summary_is_recognized() {
+        let out = "FAILED tests/test_api.py::test_checkout - AssertionError\n\
+                   =========== 3 failed in 0.12s ===========\n";
+        let t = trailer(out).unwrap();
+        assert!(t.contains("0 passed, 3 failed"), "{t}");
+    }
+
+    #[test]
+    fn pytest_counts_sum_across_runs() {
+        let out = "=========== 1 failed, 2 passed in 0.10s ===========\n\
+                   =========== 3 failed in 0.12s ===========\n";
+        let t = trailer(out).unwrap();
+        assert!(t.contains("2 passed, 4 failed"), "{t}");
     }
 
     #[test]
