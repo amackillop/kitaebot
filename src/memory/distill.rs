@@ -257,7 +257,12 @@ pub async fn run<P: Provider, E: ContextEngine>(
         distiller.max_iterations,
         BudgetPolicy::Fail,
         ReplyPolicy::Accept,
-        &ToolCtx::default(),
+        // The ctx cap must match the engine that judges the output
+        // (issue #148), same as the task-spawned sub-agents.
+        &ToolCtx {
+            tool_output_tokens: Some(DISTILL_TOOL_OUTPUT_TOKENS),
+            ..ToolCtx::default()
+        },
     )
     .await;
     let output = result?;

@@ -248,9 +248,11 @@ slice — the model gets usable text on every call instead of an
 externalized reference to a file it can already read by path. A single
 line too large to fit falls through whole and externalizes as before
 (line windowing cannot help a minified blob; the payload store's
-pretty-printer is the recovery path there, issue #119). Sub-agent
-turns carry their own inline cap (`ToolCtx::tool_output_tokens`,
-spec 19's 20k), so explore agents keep absorbing whole files.
+pretty-printer is the recovery path there, issue #119). Ephemeral
+turns with a higher engine cap carry it in
+`ToolCtx::tool_output_tokens` — the task-spawned sub-agents and the
+distiller, both at 20k — so explore agents keep absorbing whole
+files.
 
 ---
 
