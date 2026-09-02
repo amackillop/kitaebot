@@ -435,14 +435,18 @@ mod tests {
     use super::*;
     use crate::types::ToolFunction;
 
-    fn mock_call(id: &str) -> ToolCall {
+    fn call_named(name: &str, id: &str) -> ToolCall {
         ToolCall::new(
             id.to_string(),
             ToolFunction {
-                name: "mock".parse().unwrap(),
+                name: name.parse().unwrap(),
                 arguments: "{}".to_string(),
             },
         )
+    }
+
+    fn mock_call(id: &str) -> ToolCall {
+        call_named("mock", id)
     }
 
     #[derive(serde::Deserialize)]
@@ -584,22 +588,12 @@ mod tests {
 
     const FAILING_RUN: &str = "test a ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
 
-    fn named_call(name: &str) -> ToolCall {
-        ToolCall::new(
-            "c1".to_string(),
-            ToolFunction {
-                name: name.parse().unwrap(),
-                arguments: "{}".to_string(),
-            },
-        )
-    }
-
     /// The dispatch hook (issue #145) fires only for exec results.
     #[tokio::test]
     async fn exec_failing_test_output_gets_the_evidence_trailer() {
         let tools = Tools::new(vec![Arc::new(MockTool::named("exec", FAILING_RUN))], &[]).unwrap();
         let out = tools
-            .execute(&named_call("exec"), ToolCtx::default())
+            .execute(&call_named("exec", "c1"), ToolCtx::default())
             .await
             .unwrap();
         assert!(out.contains("--- parsed test evidence ---"), "{out}");
@@ -611,7 +605,7 @@ mod tests {
     async fn non_exec_tool_output_is_untouched() {
         let tools = Tools::new(vec![Arc::new(MockTool::new(FAILING_RUN))], &[]).unwrap();
         let out = tools
-            .execute(&named_call("mock"), ToolCtx::default())
+            .execute(&call_named("mock", "c1"), ToolCtx::default())
             .await
             .unwrap();
         assert_eq!(out, FAILING_RUN);
@@ -624,7 +618,9 @@ mod tests {
             &[],
         )
         .unwrap();
-        let result = tools.execute(&named_call("exec"), ToolCtx::default()).await;
+        let result = tools
+            .execute(&call_named("exec", "c1"), ToolCtx::default())
+            .await;
         assert!(matches!(result, Err(ToolError::Blocked { .. })));
     }
 

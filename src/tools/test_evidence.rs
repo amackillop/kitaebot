@@ -24,9 +24,11 @@ static LIBTEST_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {
 static LIBTEST_FAILED_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::text::static_regex(r"(?m)^test (\S+) \.\.\. FAILED$"));
 
-static PYTEST_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    crate::text::static_regex(r"(?m)^=+ .*?(\d+) failed(?:, (\d+) passed)?.*? =+$")
-});
+static PYTEST_RESULT_RE: LazyLock<Regex> =
+    LazyLock::new(|| crate::text::static_regex(r"(?m)^=+ (.+?) =+$"));
+
+static PYTEST_PAIR_RE: LazyLock<Regex> =
+    LazyLock::new(|| crate::text::static_regex(r"(\d+) ([a-z]+)"));
 
 static PYTEST_FAILED_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::text::static_regex(r"(?m)^FAILED (\S+)"));
@@ -84,17 +86,31 @@ fn libtest(output: &str) -> Option<Evidence> {
 }
 
 /// Pytest short summary, summed across runs. Zero-count categories
-/// are omitted from the line: an all-fail run prints
-/// `=== 3 failed in 0.12s ===` with no passed count at all.
+/// are omitted from the line and their order varies, so every
+/// `N category` pair on a summary bar is scanned: `passed` counts as
+/// passed, `failed`/`error(s)` count as failures (a collection error
+/// is a failure for evidence purposes), and everything else
+/// (skipped, warnings, deselected) is ignored. Bars with no known
+/// category, like the `=== FAILURES ===` section header, do not mark
+/// the output as a pytest run.
 fn pytest(output: &str) -> Option<Evidence> {
     let mut seen = false;
     let (mut passed, mut failed) = (0u64, 0u64);
-    for cap in PYTEST_RESULT_RE.captures_iter(output) {
-        seen = true;
-        failed += cap[1].parse::<u64>().unwrap_or(0);
-        passed += cap
-            .get(2)
-            .map_or(0, |m| m.as_str().parse::<u64>().unwrap_or(0));
+    for line in PYTEST_RESULT_RE.captures_iter(output) {
+        for pair in PYTEST_PAIR_RE.captures_iter(&line[1]) {
+            let count = pair[1].parse::<u64>().unwrap_or(0);
+            match &pair[2] {
+                "passed" => {
+                    seen = true;
+                    passed += count;
+                }
+                "error" | "errors" | "failed" => {
+                    seen = true;
+                    failed += count;
+                }
+                _ => {}
+            }
+        }
     }
     seen.then(|| Evidence {
         passed,
@@ -183,6 +199,27 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
                    =========== 3 failed in 0.12s ===========\n";
         let t = trailer(out).unwrap();
         assert!(t.contains("0 passed, 3 failed"), "{t}");
+    }
+
+    /// Error-only and mixed-category summaries: a collection error is
+    /// a failure for evidence purposes, warnings and skips are not.
+    #[test]
+    fn pytest_error_categories_count_as_failures() {
+        let t = trailer("=========== 1 error in 0.12s ===========\n").unwrap();
+        assert!(t.contains("0 passed, 1 failed"), "{t}");
+
+        let t = trailer("=========== 1 failed, 1 error, 2 skipped in 0.2s ===========\n").unwrap();
+        assert!(t.contains("0 passed, 2 failed"), "{t}");
+    }
+
+    #[test]
+    fn pytest_warnings_and_headers_are_not_failures() {
+        assert_eq!(
+            trailer("=========== 2 passed, 1 warning in 0.1s ===========\n"),
+            None,
+            "green run with warnings must get no trailer"
+        );
+        assert_eq!(trailer("=========== FAILURES ===========\n"), None);
     }
 
     #[test]
