@@ -318,6 +318,7 @@ impl<P: Provider> Tool for TaskTool<P> {
                 activity: ctx.activity.as_ref().map(|parent| forward(parent, label)),
                 cancel: ctx.cancel.clone(),
                 task: ctx.task.clone(),
+                tool_output_tokens: Some(SUB_AGENT_TOOL_OUTPUT_TOKENS),
             };
             // FinalAnswer: a maxed-out sub-agent returns a degraded
             // answer instead of erroring, so a reviewer that runs out

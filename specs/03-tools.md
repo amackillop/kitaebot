@@ -241,6 +241,19 @@ Resolves via `PathGuard`. Rejects files >10MB. Formats with line numbers
 (`{line_number}\t{content}`). Appends summary (lines shown, total lines,
 bytes). UTF-8 only.
 
+A result that would cross the engine's inline threshold
+(`context.tool_output_tokens`) is clamped to the largest window that
+fits, and the trailer gains `; continue with offset=N` naming the next
+slice — the model gets usable text on every call instead of an
+externalized reference to a file it can already read by path. A single
+line too large to fit falls through whole and externalizes as before
+(line windowing cannot help a minified blob; the payload store's
+pretty-printer is the recovery path there, issue #119). Ephemeral
+turns with a higher engine cap carry it in
+`ToolCtx::tool_output_tokens` — the task-spawned sub-agents and the
+distiller, both at 20k — so explore agents keep absorbing whole
+files.
+
 ---
 
 ### `file_write` — Write File Contents

@@ -21,6 +21,10 @@ const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// Default number of lines returned when no limit is specified.
 const DEFAULT_LIMIT: u32 = 2000;
 
+/// Tokens reserved for the `<tool_output>` wrapper and the trailer so
+/// a clamped result stays under the engine's inline threshold whole.
+const CLAMP_RESERVE_TOKENS: usize = 64;
+
 #[derive(Deserialize, JsonSchema)]
 struct Args {
     /// File path relative to the workspace.
@@ -36,11 +40,18 @@ struct Args {
 /// Tool that reads file contents from the workspace.
 pub struct FileRead {
     guard: PathGuard,
+    /// The engine's inline threshold (`context.tool_output_tokens`):
+    /// output at or below it reaches the model whole instead of as an
+    /// externalized `<file>` reference.
+    inline_tokens: usize,
 }
 
 impl FileRead {
-    pub fn new(guard: PathGuard) -> Self {
-        Self { guard }
+    pub fn new(guard: PathGuard, inline_tokens: u32) -> Self {
+        Self {
+            guard,
+            inline_tokens: inline_tokens as usize,
+        }
     }
 }
 
@@ -60,9 +71,12 @@ impl Tool for FileRead {
     fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: ToolCtx,
+        ctx: ToolCtx,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         Box::pin(async move {
+            // Sub-agent engines run a higher inline cap (spec 19); the
+            // clamp must match the engine that will judge the result.
+            let inline_tokens = ctx.tool_output_tokens.unwrap_or(self.inline_tokens);
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
@@ -97,23 +111,55 @@ impl Tool for FileRead {
             let offset = args.offset.unwrap_or(1).max(1) as usize;
             let limit = args.limit.unwrap_or(DEFAULT_LIMIT) as usize;
 
-            let (output, shown) = content
+            let window: Vec<(usize, &str)> = content
                 .lines()
                 .enumerate()
                 .skip(offset.saturating_sub(1))
                 .take(limit)
-                .fold((String::new(), 0usize), |(mut acc, count), (i, line)| {
-                    let line_num = i + 1;
-                    let _ = writeln!(acc, "{line_num}\t{line}");
-                    (acc, count + 1)
-                });
+                .map(|(i, line)| (i + 1, line))
+                .collect();
 
-            let output = format!(
-                "{output}\n({shown} lines shown, {total_lines} total, {} bytes)",
-                meta.len()
-            );
+            let budget_bytes = inline_tokens
+                .saturating_sub(CLAMP_RESERVE_TOKENS)
+                .saturating_mul(4);
+            let mut used = 0usize;
+            let fitting = window
+                .iter()
+                .take_while(|(num, line)| {
+                    // Numbered-line cost: digits + tab + content + newline.
+                    used += num.ilog10() as usize + 1 + 1 + line.len() + 1;
+                    used <= budget_bytes
+                })
+                .count();
 
-            Ok(output)
+            // A first line alone over budget cannot be windowed; fall
+            // through whole and let the engine externalize it.
+            let clamped = fitting < window.len() && fitting > 0;
+            let shown = if clamped { fitting } else { window.len() };
+
+            let output =
+                window
+                    .iter()
+                    .take(shown)
+                    .fold(String::new(), |mut acc, (line_num, line)| {
+                        let _ = writeln!(acc, "{line_num}\t{line}");
+                        acc
+                    });
+
+            let trailer = if clamped {
+                let next = offset + shown;
+                format!(
+                    "({shown} lines shown, {total_lines} total, {} bytes; continue with offset={next})",
+                    meta.len()
+                )
+            } else {
+                format!(
+                    "({shown} lines shown, {total_lines} total, {} bytes)",
+                    meta.len()
+                )
+            };
+
+            Ok(format!("{output}\n{trailer}"))
         })
     }
 }
@@ -123,10 +169,14 @@ mod tests {
     use super::*;
 
     fn setup(content: &str) -> (tempfile::TempDir, FileRead) {
+        setup_with_threshold(content, 4096)
+    }
+
+    fn setup_with_threshold(content: &str, inline_tokens: u32) -> (tempfile::TempDir, FileRead) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("test.txt"), content).unwrap();
         let guard = PathGuard::new(dir.path());
-        (dir, FileRead::new(guard))
+        (dir, FileRead::new(guard, inline_tokens))
     }
 
     #[tokio::test]
@@ -212,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn file_not_found() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = FileRead::new(PathGuard::new(dir.path()));
+        let tool = FileRead::new(PathGuard::new(dir.path()), 4096);
         let result = tool
             .execute(
                 serde_json::json!({"path": "missing.txt"}),
@@ -249,6 +299,78 @@ mod tests {
         assert!(result.contains("0 lines shown"));
     }
 
+    /// Issue #148: an oversized read must return usable text plus the
+    /// next offset, not an externalized reference.
+    #[tokio::test]
+    async fn oversized_read_clamps_to_inline_window_with_continuation() {
+        let content = "0123456789\n".repeat(100);
+        let threshold = u32::try_from(CLAMP_RESERVE_TOKENS).unwrap() + 50;
+        let (_dir, tool) = setup_with_threshold(&content, threshold);
+        let result = tool
+            .execute(serde_json::json!({"path": "test.txt"}), ToolCtx::default())
+            .await
+            .unwrap();
+
+        assert!(
+            crate::types::estimate_tokens(&result) <= threshold as usize,
+            "clamped output must fit the inline threshold: {} tokens",
+            crate::types::estimate_tokens(&result)
+        );
+        assert!(result.contains("100 total"), "{result}");
+        let (_, tail) = result.rsplit_once("; continue with offset=").unwrap();
+        let next: usize = tail.trim_end_matches(')').trim().parse().unwrap();
+
+        let cont = tool
+            .execute(
+                serde_json::json!({"path": "test.txt", "offset": next}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            cont.lines()
+                .next()
+                .unwrap()
+                .starts_with(&format!("{next}\t")),
+            "continuation must resume at the advertised offset: {cont}"
+        );
+    }
+
+    /// Sub-agent contexts carry their own higher inline cap; the same
+    /// read that clamps for the root must pass whole for them.
+    #[tokio::test]
+    async fn ctx_threshold_override_lifts_the_clamp() {
+        let content = "0123456789\n".repeat(100);
+        let threshold = u32::try_from(CLAMP_RESERVE_TOKENS).unwrap() + 50;
+        let (_dir, tool) = setup_with_threshold(&content, threshold);
+        let ctx = ToolCtx {
+            tool_output_tokens: Some(20_000),
+            ..ToolCtx::default()
+        };
+        let result = tool
+            .execute(serde_json::json!({"path": "test.txt"}), ctx)
+            .await
+            .unwrap();
+        assert!(result.contains("100 lines shown, 100 total"), "{result}");
+        assert!(!result.contains("continue with offset"), "{result}");
+    }
+
+    /// A single line over budget cannot be windowed by lines; the read
+    /// falls through whole so the engine externalizes it as before.
+    #[tokio::test]
+    async fn unwindowable_line_falls_through_without_continuation() {
+        let content = "x".repeat(4000);
+        let threshold = u32::try_from(CLAMP_RESERVE_TOKENS).unwrap() + 50;
+        let (_dir, tool) = setup_with_threshold(&content, threshold);
+        let result = tool
+            .execute(serde_json::json!({"path": "test.txt"}), ToolCtx::default())
+            .await
+            .unwrap();
+        assert!(result.contains(&"x".repeat(4000)), "{result}");
+        assert!(!result.contains("continue with offset"), "{result}");
+        assert!(result.contains("1 lines shown, 1 total"), "{result}");
+    }
+
     #[tokio::test]
     async fn large_file_rejected() {
         let dir = tempfile::tempdir().unwrap();
@@ -257,7 +379,7 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_FILE_SIZE + 1).unwrap();
 
-        let tool = FileRead::new(PathGuard::new(dir.path()));
+        let tool = FileRead::new(PathGuard::new(dir.path()), 4096);
         let result = tool
             .execute(serde_json::json!({"path": "big.txt"}), ToolCtx::default())
             .await;
