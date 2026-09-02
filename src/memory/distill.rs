@@ -13,7 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::agent::{BudgetPolicy, ReplyPolicy, TurnMeter, TurnUsage, run_turn_metered};
+use crate::agent::{BudgetPolicy, ReplyPolicy, TurnMeter, run_turn_metered};
 use crate::context::ephemeral::EphemeralSession;
 use crate::context::{ContextEngine, SummarizeFn, format_messages_for_summary};
 use crate::error::Error;
@@ -272,8 +272,7 @@ pub async fn run<P: Provider, E: ContextEngine>(
     // ended over cap with compaction as a soft side quest (issue
     // #121). Watermarks have already advanced, so a failed retry
     // degrades to today's warn — it can never fail the pass.
-    let mut meter =
-        retry_compaction(workspace, distiller, provider, summarize, &mut ephemeral).await;
+    let retry_meter = retry_compaction(workspace, distiller, provider, summarize).await;
 
     // Reporting only: the pass already succeeded, so a failed probe
     // must not turn it into an error.
@@ -291,10 +290,11 @@ pub async fn run<P: Provider, E: ContextEngine>(
     // One ledger row for the whole pass: the fold and the compaction
     // retry bill together. The row's timing and outcome label are the
     // main turn's; the retry is auxiliary.
-    meter.usage.add_turn(&main_meter.usage);
-    meter.started_at = main_meter.started_at;
-    meter.outcome = main_meter.outcome;
-    meter.duration += main_meter.duration;
+    let mut meter = main_meter;
+    if let Some(retry) = retry_meter {
+        meter.usage.add_turn(&retry.usage);
+        meter.duration += retry.duration;
+    }
     let mut summary = output.into_text();
     // A bypass pass folds one slice like any other; without this the
     // reply reads as a full catch-up.
@@ -317,27 +317,23 @@ pub async fn run<P: Provider, E: ContextEngine>(
 /// One compaction-only ephemeral turn, run when the pass left the
 /// index over its injection cap. Compaction as a side quest inside a
 /// folding pass keeps failing; a turn whose only subject is the index
-/// is the task the model can actually finish. Best-effort by design:
-/// the caller advances watermarks first, so any failure here just
-/// logs and returns an empty meter to fold into the pass's billing.
+/// is the task the model can actually finish. The session is fresh:
+/// riding the fold's context would re-send the transcript spans whose
+/// attention dilution is the failure being repaired, and re-bill them
+/// as prompt tokens. Best-effort by design: the caller advances
+/// watermarks first, so any failure here just logs. `None` means the
+/// index was under cap and no retry ran.
 async fn retry_compaction<P: Provider>(
     workspace: &Workspace,
     distiller: &Distiller,
     provider: &P,
     summarize: &SummarizeFn,
-    ephemeral: &mut EphemeralSession,
-) -> TurnMeter {
-    let Some(directive) = index_over_cap(workspace, distiller.index_cap_bytes) else {
-        return TurnMeter {
-            usage: TurnUsage::default(),
-            started_at: crate::time::now_epoch(),
-            duration: std::time::Duration::ZERO,
-            outcome: "skipped",
-        };
-    };
+) -> Option<TurnMeter> {
+    let directive = index_over_cap(workspace, distiller.index_cap_bytes)?;
+    let mut ephemeral = EphemeralSession::new(DISTILL_TOOL_OUTPUT_TOKENS);
     let user_message = build_compaction_message(workspace, &directive);
     let (result, meter) = run_turn_metered(
-        ephemeral,
+        &mut ephemeral,
         summarize,
         &distiller.system_prompt,
         &user_message,
@@ -352,7 +348,7 @@ async fn retry_compaction<P: Provider>(
     if let Err(e) = result {
         warn!("compaction retry turn failed, index stays over cap: {e}");
     }
-    meter
+    Some(meter)
 }
 
 /// The compaction-only turn's user message: the index is the only
@@ -786,13 +782,22 @@ mod run_tests {
         .await
         .unwrap();
 
-        // Pre-pass: the user message carries the compaction directive.
+        // The captured request is the retry turn: a fresh session, so
+        // it carries the compaction task and nothing of the fold.
         let sent = provider.last_request().expect("one call");
         let directive_sent = sent.iter().any(|m| {
             matches!(m, Message::User { content }
-                if content.contains("REQUIRED FIRST: compact the index"))
+                if content.contains("REQUIRED: compact the index"))
         });
         assert!(directive_sent, "compaction directive missing from request");
+        let carries_fold = sent.iter().any(|m| {
+            matches!(m, Message::User { content }
+                if content.contains("REQUIRED FIRST") || content.contains("session history"))
+        });
+        assert!(
+            !carries_fold,
+            "retry must not ride the fold session: {sent:?}"
+        );
         let (summary, _usage) = out.expect("pass ran");
         assert!(summary.contains("did not compact"), "{summary}");
         // Post-pass verification: the second, compaction-only turn ran
@@ -844,10 +849,19 @@ mod run_tests {
         let retry_task = sent.iter().any(|m| {
             matches!(m, Message::User { content }
                 if content.contains("REQUIRED: compact the index")
-                    && content.contains("This turn has one job")
-                    && !content.contains("session history"))
+                    && content.contains("This turn has one job"))
         });
-        assert!(retry_task, "retry task must be index-only: {sent:?}");
+        assert!(retry_task, "retry task must be present: {sent:?}");
+        // The whole request, not just the new message: a retry riding
+        // the fold's session would carry the transcript spans whose
+        // dilution it exists to repair.
+        let carries_fold = sent
+            .iter()
+            .any(|m| matches!(m, Message::User { content } if content.contains("session history")));
+        assert!(
+            !carries_fold,
+            "retry request must not carry the fold: {sent:?}"
+        );
         let (summary, _usage) = out.expect("pass ran");
         assert!(summary.contains("folded"), "{summary}");
     }

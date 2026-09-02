@@ -61,28 +61,42 @@ fn truncate_on_boundary(s: &str, cap: usize) -> (&str, bool) {
     (kept, kept.len() < s.len())
 }
 
+/// Dropped section titles named in the marker before it truncates to
+/// "+K more"; the cap is the injection contract and an unbounded
+/// marker would breach it right where it is stated.
+const MARKER_SECTIONS_MAX: usize = 8;
+
 /// Why the tail is invisible and what it held: the marker names the
 /// `##` sections that fall entirely past the cut, so the agent (and
 /// the log) can see exactly what memory was hidden. A section
 /// straddling the cut keeps its header visible, so only its body tail
-/// is lost; the marker says the list covers whole sections.
+/// is lost; the marker says the list covers whole sections. Dropped
+/// sections are found by position, not title: a duplicate title
+/// surviving the cut must not hide its dropped twin, and a header the
+/// cut split mid-line is dropped — it is not shown whole.
 fn truncation_marker(full: &str, kept: &str, cap_bytes: usize) -> String {
-    let shown: std::collections::HashSet<&str> = trimmed_sections(kept).collect();
-    let dropped: Vec<&str> = trimmed_sections(full)
-        .filter(|title| !shown.contains(title))
-        .collect();
+    let mut offset = 0usize;
+    let mut dropped: Vec<&str> = Vec::new();
+    for line in full.split_inclusive('\n') {
+        if offset + line.trim_end().len() > kept.len()
+            && let Some(title) = line.trim_end().strip_prefix("## ")
+        {
+            dropped.push(title);
+        }
+        offset += line.len();
+    }
     let mut marker = format!("[memory index truncated at {cap_bytes} bytes");
     if !dropped.is_empty() {
+        use std::fmt::Write as _;
+        let shown = dropped.len().min(MARKER_SECTIONS_MAX);
         marker.push_str(" — sections not shown: ");
-        marker.push_str(&dropped.join("; "));
+        marker.push_str(&dropped[..shown].join("; "));
+        if dropped.len() > shown {
+            let _ = write!(marker, " (+{} more)", dropped.len() - shown);
+        }
     }
     marker.push(']');
     marker
-}
-
-/// `##` section titles of a markdown body.
-fn trimmed_sections(body: &str) -> impl Iterator<Item = &str> {
-    body.lines().filter_map(|l| l.strip_prefix("## "))
 }
 
 #[cfg(test)]
@@ -160,6 +174,39 @@ mod tests {
             !marker.contains("sections not shown"),
             "a straddling section keeps its header and must not be listed: {marker}"
         );
+    }
+
+    /// Positional detection: a surviving "## Repos" must not hide a
+    /// second "## Repos" that fell past the cut.
+    #[test]
+    fn truncation_marker_lists_a_dropped_duplicate_title() {
+        let kept = "## Repos\n- a\n";
+        let full = format!("{kept}## Repos\n- b\n");
+        let marker = truncation_marker(&full, kept, kept.len());
+        assert!(marker.contains("sections not shown: Repos"), "{marker}");
+    }
+
+    /// The marker itself honors the cap contract it sits next to: a
+    /// pathological index cannot inflate it without bound.
+    #[test]
+    fn truncation_marker_caps_the_dropped_list() {
+        let kept = "# Memory\n";
+        let dropped = (0..MARKER_SECTIONS_MAX + 3).fold(String::new(), |mut s, i| {
+            use std::fmt::Write as _;
+            let _ = writeln!(s, "## Section{i}\n- x");
+            s
+        });
+        let marker = truncation_marker(&format!("{kept}{dropped}"), kept, kept.len());
+        assert!(marker.contains("Section0"), "{marker}");
+        assert!(
+            marker.contains(&format!("Section{}", MARKER_SECTIONS_MAX - 1)),
+            "{marker}"
+        );
+        assert!(
+            !marker.contains(&format!("Section{MARKER_SECTIONS_MAX}")),
+            "{marker}"
+        );
+        assert!(marker.contains("(+3 more)"), "{marker}");
     }
 
     #[test]
