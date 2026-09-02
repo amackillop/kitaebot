@@ -1757,6 +1757,33 @@ mod tests {
     }
 
     #[test]
+    fn split_unquoted_separators_escape_semantics() {
+        // An escaped quote does not close the string: | stays quoted.
+        assert_eq!(
+            split_unquoted_separators(r#"echo "a\"b|c""#),
+            vec![r#"echo "a\"b|c""#]
+        );
+        // A double backslash is a complete escape: the separator splits.
+        assert_eq!(
+            split_unquoted_separators(r"echo a\\;reboot"),
+            vec![r"echo a\\", "reboot"]
+        );
+        // Backslash inside single quotes is literal, not an escape.
+        assert_eq!(
+            split_unquoted_separators(r"echo 'a\';reboot"),
+            vec![r"echo 'a\'", "reboot"]
+        );
+    }
+
+    #[test]
+    fn test_command_blocked_background_ampersand() {
+        // A single & separates commands just like &&: the deny rule
+        // fires, not the unparseable-syntax fallback.
+        assert_eq!(command_blocked("true& truncate -s 0 f"), Some(BLOCKED));
+        assert_eq!(command_blocked("sleep 5 & reboot"), Some(BLOCKED));
+    }
+
+    #[test]
     fn test_command_blocked_unspaced_operators() {
         // Separators split even without surrounding whitespace; shlex
         // alone would fold `x|git` into one token and miss these.
