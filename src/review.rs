@@ -149,6 +149,15 @@ impl ReviewLedger {
         }
     }
 
+    /// Tests sabotage the schema directly; production code goes
+    /// through `record_review` and sees only its `Err`.
+    #[cfg(test)]
+    pub(crate) fn connection_for_test(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Record one gate invocation: the review row plus one finding row
     /// per entry, all `source = 'self'`. One transaction; a gate either
     /// lands whole or not at all. Returns the inserted finding ids so

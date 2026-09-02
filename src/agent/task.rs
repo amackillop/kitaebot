@@ -1230,6 +1230,60 @@ mod tests {
         assert!(!result.contains("[ledger:"), "{result}");
     }
 
+    /// Exercise the ledger-write failure path: the reviews table is
+    /// dropped behind the ledger's back, so `record_review` fails at
+    /// the statement — the same `Err` any schema/IO failure surfaces.
+    #[tokio::test]
+    async fn failed_ledger_write_carries_its_trailer() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let review = "Bad.\n```findings\n\
+             {\"verdict\": \"incorrect\", \"confidence\": 0.9, \
+             \"explanation\": \"x\", \
+             \"findings\": [{\"category\": \"c\", \"note\": \"n\"}]}\n```";
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            review.to_string(),
+        ))]));
+        {
+            let conn = ledger.connection_for_test();
+            conn.execute("DROP TABLE reviews", []).unwrap();
+        }
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.call_count(), 1, "no retry on a write failure");
+        assert!(
+            result.contains("[ledger: recording failed; nothing recorded]"),
+            "{result}"
+        );
+        assert!(
+            !result.contains("[ledger: finding ids"),
+            "a failed write must not cite ids: {result}"
+        );
+    }
+
     #[tokio::test]
     async fn clean_review_gets_no_id_trailer() {
         let dir = tempfile::tempdir().unwrap();

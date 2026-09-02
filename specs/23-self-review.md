@@ -450,7 +450,7 @@ that references an unavailable mechanism is worse than none.
 |---------|----------|
 | Reviewer sub-agent errors (overflow, max_iterations, provider) | Tool error text to parent; parent proceeds on its own judgment. A failed review is a skipped review, not a blocked turn. |
 | Findings block missing or malformed | One corrective turn on the reviewer's own session ("re-emit the block"); if the retry also fails to parse, warning log plus an explicit `[ledger: findings block unparseable; nothing recorded]` trailer on the task result. The ledger is telemetry; it never blocks work. |
-| Ledger write fails | Warning log, review continues. The ledger is telemetry; it never blocks work. |
+| Ledger write fails | Warning log plus an explicit `[ledger: recording failed; nothing recorded]` trailer on the task result. The ledger is telemetry; it never blocks work. |
 | Reviewer hallucinates a finding | Parent disputes with a reason, as with human feedback. Cost is bounded by the advisory design — no gate blocks on a false positive. |
 | Branch diff too large to pack (series gate) | Parent degrades to commit list + stats; reviewer pulls files itself. |
 | `review_log` called with bad arguments | `ToolError::InvalidArguments`, parent retries or skips. |
