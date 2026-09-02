@@ -160,7 +160,14 @@ Executes commands via `bash -c` within the workspace.
    double as English prose and grep-pattern text, so command position
    must be decided with real quoting rules — a regex over the raw
    string blocked `grep "a\|truncate"` (#135). Also blocks `gh auth`
-   and `nix profile`.
+   and `nix profile`, and any `sleep` whose literal arguments sum past
+   `tools.exec.timeout_secs` minus a 30-second headroom for whatever
+   follows it: such a call can never return inside the budget, so the
+   timeout was certain when the command was written (three 600-second
+   `sleep 600; echo waited` timeouts on 2026-09-01). GNU suffixes,
+   fractions, and `infinity` are read; a variable argument is left to
+   the shell. The block names the budget, the longest poll interval
+   that fits, and `github_ci_status` for CI waits.
 
 These are defense-in-depth heuristics with friendly error messages. The real
 filesystem boundary is the Landlock sandbox (see [spec 15](15-sandbox.md)).
