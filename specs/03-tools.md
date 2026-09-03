@@ -135,7 +135,8 @@ Executes commands via `bash -c` within the workspace.
    model and the sandbox grants; redirection into `state/`),
    disk/filesystem (`mkfs`, `dd if=`, `fdisk`, redirects into `/dev/`
    other than the stream devices `/dev/null`, `/dev/std*`, `/dev/fd/N`,
-   `/dev/tty`, `/dev/zero`, `/dev/full`, `/dev/urandom`), system power (`init 0-6`,
+   `/dev/tty`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`),
+   system power (`init 0-6`,
    `systemctl`), privilege escalation (`sudo`, `chmod`, `chown`),
    network exfiltration (`curl -T`, `nc -l`, `socat`), pipe-to-shell
    (`curl|sh`, `wget|sh`), reverse shells (`/dev/tcp/`, python/ruby/perl
@@ -179,7 +180,8 @@ raw git verbs to the git tools, nix mutations to "the operator deploys",
 signal sweeps to the automatic child cleanup). Only classes where any
 hint would be a how-to keep the bare `command blocked by policy`:
 exfiltration, pipe-to-shell, reverse shells, recon, secret and keyring
-harvesting, library injection, namespace escape, firewall tampering.
+harvesting, library injection, namespace escape, firewall tampering,
+fork bombs.
 
 **Environment scrubbing:**
 
