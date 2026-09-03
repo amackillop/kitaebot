@@ -133,7 +133,10 @@ Executes commands via `bash -c` within the workspace.
    (workspace-root `context/` references except reads of
    `context/lcm/payloads/<file_id>`, which `<file>` references hand to the
    model and the sandbox grants; redirection into `state/`),
-   disk/filesystem (`mkfs`, `dd if=`, `fdisk`), system power (`init 0-6`,
+   disk/filesystem (`mkfs`, `dd if=`, `fdisk`, redirects into `/dev/`
+   other than the stream devices `/dev/null`, `/dev/std*`, `/dev/fd/N`,
+   `/dev/tty`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`),
+   system power (`init 0-6`,
    `systemctl`), privilege escalation (`sudo`, `chmod`, `chown`),
    network exfiltration (`curl -T`, `nc -l`, `socat`), pipe-to-shell
    (`curl|sh`, `wget|sh`), reverse shells (`/dev/tcp/`, python/ruby/perl
@@ -158,10 +161,27 @@ Executes commands via `bash -c` within the workspace.
    double as English prose and grep-pattern text, so command position
    must be decided with real quoting rules — a regex over the raw
    string blocked `grep "a\|truncate"` (#135). Also blocks `gh auth`
-   and `nix profile`.
+   and `nix profile`, and any `sleep` whose literal arguments sum past
+   `tools.exec.timeout_secs` minus a 30-second headroom for whatever
+   follows it: such a call can never return inside the budget, so the
+   timeout was certain when the command was written (three 600-second
+   `sleep 600; echo waited` timeouts on 2026-09-01). GNU suffixes,
+   fractions, and `infinity` are read; a variable argument is left to
+   the shell. The block names the budget, the longest poll interval
+   that fits, and `github_ci_status` for CI waits.
 
 These are defense-in-depth heuristics with friendly error messages. The real
 filesystem boundary is the Landlock sandbox (see [spec 15](15-sandbox.md)).
+
+**Guidance policy** (issue #136): the block message is what the model
+reads after a strike, so every rule class with a remediation states it
+(recursive rm to single-file rm, chmod +x to running the interpreter,
+raw git verbs to the git tools, nix mutations to "the operator deploys",
+signal sweeps to the automatic child cleanup). Only classes where any
+hint would be a how-to keep the bare `command blocked by policy`:
+exfiltration, pipe-to-shell, reverse shells, recon, secret and keyring
+harvesting, library injection, namespace escape, firewall tampering,
+fork bombs.
 
 **Environment scrubbing:**
 
