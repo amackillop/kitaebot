@@ -27,7 +27,7 @@ use crate::tools::mcp::McpTools;
 use crate::tools::{Tool, ToolCtx, Tools, string_or_value};
 use crate::usage::{self, TurnRecord, UsageLedger};
 
-use super::{BudgetPolicy, ReplyPolicy, run_turn_metered};
+use super::{BudgetPolicy, ReplyPolicy, TurnMeter, run_turn_metered};
 
 /// Allowlist for the `explore` type: read-only research.
 ///
@@ -82,6 +82,17 @@ const EXPLORE_PROMPT: &str = include_str!("../prompts/explore.md");
 const WORKER_PROMPT: &str = include_str!("../prompts/worker.md");
 
 const REVIEWER_PROMPT: &str = include_str!("../prompts/reviewer.md");
+
+/// The corrective turn after an unparseable findings block: the
+/// reviewer sees its own prior text in the session and re-emits the
+/// block; one attempt, no new analysis.
+const FINDINGS_RETRY_PROMPT: &str = "Your previous response had no parseable ```findings \
+block (exactly one fenced block holding a single JSON object). Re-emit your review's \
+verdict and findings as exactly one such block, unchanged in substance, nothing else.";
+
+/// Toolless and single-iteration: the corrective turn can only
+/// answer with text (see the commit for the GLM tool-history caveat).
+const FINDINGS_RETRY_MAX_ITERATIONS: usize = 1;
 
 /// A sub-agent type: system prompt plus prebuilt tool set.
 pub(crate) struct AgentType {
@@ -339,8 +350,52 @@ impl<P: Provider> Tool for TaskTool<P> {
             .instrument(tracing::info_span!("subagent", agent = label))
             .await;
             // Bill before propagating: a sub-agent that errored still
-            // spent its calls. No conversation of its own, so the row is
-            // tagged by agent type.
+            // spent its calls. The reviewer branch's retry spend is
+            // already folded into the meter, so one row bills it all.
+            let output = match result {
+                Ok(output) => output,
+                Err(e) => {
+                    usage::record_turn(
+                        self.usage_ledger.as_deref(),
+                        &TurnRecord {
+                            // Inherited from the parent: sub-agent spend
+                            // folds into the task that delegated it
+                            // (spec 27).
+                            task: ctx.task.as_ref(),
+                            session: "subagent",
+                            source: label,
+                            model: provider.model(),
+                            meter,
+                        },
+                    );
+                    return Err(ToolError::SubAgent {
+                        source: Box::new(e),
+                    });
+                }
+            };
+            let mut text = output.into_text();
+            let mut meter = meter;
+            if args.agent_type == AgentKind::Reviewer {
+                let (recorded, retry_meter) = self
+                    .record_review_with_retry(
+                        ReviewRetry {
+                            engine: &mut engine,
+                            meta: args.review.as_ref(),
+                            provider,
+                            system_prompt: &agent.system_prompt,
+                            ctx: &child_ctx,
+                        },
+                        &text,
+                    )
+                    .await;
+                append_recording_trailer(&mut text, &recorded);
+                // The retry's spend folds into this gate invocation's
+                // single usage row (spec 27).
+                if let Some(retry) = retry_meter {
+                    meter.usage.add_turn(&retry.usage);
+                    meter.duration += retry.duration;
+                }
+            }
             usage::record_turn(
                 self.usage_ledger.as_deref(),
                 &TurnRecord {
@@ -353,37 +408,134 @@ impl<P: Provider> Tool for TaskTool<P> {
                     meter,
                 },
             );
-            let output = result.map_err(|e| ToolError::SubAgent {
-                source: Box::new(e),
-            })?;
-            let mut text = output.into_text();
-            if args.agent_type == AgentKind::Reviewer {
-                let ids = record_review(self.review_ledger.as_deref(), args.review.as_ref(), &text);
-                if !ids.is_empty() {
-                    let list = ids
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let _ = write!(text, "\n\n[ledger: finding ids {list}]");
-                }
-            }
             Ok(text)
         })
     }
 }
 
-/// Parse a reviewer response's findings block and record it —
-/// mechanically, no model cooperation required. Telemetry only: every
-/// failure is a warning, never a review failure. Returns the recorded
-/// finding ids so the parent can disposition them.
-fn record_review(ledger: Option<&ReviewLedger>, meta: Option<&ReviewMeta>, text: &str) -> Vec<i64> {
-    let Some(ledger) = ledger else {
-        return Vec::new();
+/// How a reviewer response's findings block parsed. `Recorded` is an
+/// empty vec on a clean review.
+enum ParseOutcome {
+    Recorded(Vec<i64>),
+    Unparseable,
+    WriteFailed,
+}
+
+/// How a reviewer's findings block landed in the ledger. `Disabled` is
+/// a ledger-off no-op and wraps only `ParseOutcome`s: parsing happens
+/// after the ledger check, so a parse outcome can never be `Disabled`.
+enum ReviewRecording {
+    Disabled,
+    Parsed(ParseOutcome),
+}
+
+/// Everything the corrective retry turn needs, borrowed from the
+/// reviewer invocation. The retry turn itself runs toolless and
+/// single-iteration (`Tools::default()`, `FINDINGS_RETRY_MAX_ITERATIONS`),
+/// so no tool set or budget is passed here.
+struct ReviewRetry<'a, P: Provider> {
+    engine: &'a mut EphemeralSession,
+    meta: Option<&'a ReviewMeta>,
+    provider: &'a P,
+    system_prompt: &'a str,
+    ctx: &'a ToolCtx,
+}
+
+/// A failure trailer means nothing was recorded: the parent must not
+/// cite ids or call `review_disposition` for them. A clean review
+/// (empty `Recorded`) and `Disabled` get no trailer at all.
+fn append_recording_trailer(text: &mut String, recorded: &ReviewRecording) {
+    let outcome = match recorded {
+        ReviewRecording::Disabled => return,
+        ReviewRecording::Parsed(outcome) => outcome,
     };
+    let trailer = match outcome {
+        ParseOutcome::Recorded(ids) if !ids.is_empty() => {
+            let list = ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("\n\n[ledger: finding ids {list}]")
+        }
+        ParseOutcome::Unparseable => {
+            "\n\n[ledger: findings block unparseable; nothing recorded]".to_string()
+        }
+        ParseOutcome::WriteFailed => "\n\n[ledger: recording failed; nothing recorded]".to_string(),
+        ParseOutcome::Recorded(_) => return,
+    };
+    let _ = write!(text, "{trailer}");
+}
+
+impl<P: Provider> TaskTool<P> {
+    /// Parse a reviewer response's findings block and record it —
+    /// mechanically, no model cooperation required. Telemetry only:
+    /// every failure is a warning, never a review failure. An
+    /// unparseable block gets one corrective turn on the same session
+    /// (the reviewer sees its own text) before giving up; that turn's
+    /// meter comes back for folding into the invocation's usage row.
+    async fn record_review_with_retry(
+        &self,
+        retry: ReviewRetry<'_, P>,
+        text: &str,
+    ) -> (ReviewRecording, Option<TurnMeter>) {
+        let Some(ledger) = self.review_ledger.as_deref() else {
+            return (ReviewRecording::Disabled, None);
+        };
+        match record_parse(ledger, retry.meta, text) {
+            recording @ (ParseOutcome::Recorded(_) | ParseOutcome::WriteFailed) => {
+                (ReviewRecording::Parsed(recording), None)
+            }
+            ParseOutcome::Unparseable => {
+                warn!("reviewer response has no parseable findings block; retrying once");
+                let ReviewRetry {
+                    engine,
+                    provider,
+                    system_prompt,
+                    ctx,
+                    ..
+                } = retry;
+                let (result, meter) = run_turn_metered(
+                    engine,
+                    &self.summarize,
+                    system_prompt,
+                    FINDINGS_RETRY_PROMPT,
+                    provider,
+                    // No tool definitions: the corrective turn can only
+                    // answer with text (see FINDINGS_RETRY_MAX_ITERATIONS).
+                    &Tools::default(),
+                    FINDINGS_RETRY_MAX_ITERATIONS,
+                    BudgetPolicy::FinalAnswer,
+                    ReplyPolicy::Accept,
+                    ctx,
+                )
+                .instrument(tracing::info_span!("subagent", agent = "findings-retry"))
+                .await;
+                match result {
+                    Ok(output) => {
+                        let retry_text = output.into_text();
+                        (
+                            ReviewRecording::Parsed(record_parse(ledger, retry.meta, &retry_text)),
+                            Some(meter),
+                        )
+                    }
+                    Err(e) => {
+                        warn!("findings retry turn failed: {e}");
+                        (
+                            ReviewRecording::Parsed(ParseOutcome::Unparseable),
+                            Some(meter),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse `text`'s findings block and write it to the ledger.
+fn record_parse(ledger: &ReviewLedger, meta: Option<&ReviewMeta>, text: &str) -> ParseOutcome {
     let Some(output) = review::parse_findings_block(text) else {
-        warn!("reviewer response has no parseable findings block");
-        return Vec::new();
+        return ParseOutcome::Unparseable;
     };
     // A missing meta mislabels the rows but must not drop them: the
     // category counts are the point.
@@ -399,10 +551,10 @@ fn record_review(ledger: Option<&ReviewLedger>, meta: Option<&ReviewMeta>, text:
         git_ref,
     };
     match ledger.record_review(&record, &output) {
-        Ok(ids) => ids,
+        Ok(ids) => ParseOutcome::Recorded(ids),
         Err(e) => {
             warn!("failed to record review: {e}");
-            Vec::new()
+            ParseOutcome::WriteFailed
         }
     }
 }
@@ -494,6 +646,56 @@ mod tests {
 
     fn mock_tools() -> Tools {
         Tools::new(vec![Arc::new(MockTool::new("mock output"))], &[]).unwrap()
+    }
+
+    /// The corrective turn is structural: toolless (no definitions on
+    /// the wire) and single-iteration. A `ToolCalls` retry response gets
+    /// no execution round — only the `FinalAnswer` squeeze can follow —
+    /// so the run is exactly three calls: review, retry, squeeze.
+    #[tokio::test]
+    async fn findings_retry_is_toolless_and_single_iteration() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text(BAD_SHAPE_RESPONSE.to_string())),
+            Ok(mock_tool_calls()),
+            Ok(Response::Text(String::new())),
+        ]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(mock_tools()),
+            },
+            5,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        // Review + retry + FinalAnswer squeeze of the retry's tool
+        // calls: a second loop iteration would have meant a fourth.
+        assert_eq!(provider.call_count(), 3, "{result}");
+        assert!(!provider.request_tools(0).is_empty());
+        assert!(provider.request_tools(1).is_empty());
+        assert!(provider.request_tools(2).is_empty());
+        assert!(
+            result.contains("[ledger: findings block unparseable; nothing recorded]"),
+            "{result}"
+        );
     }
 
     /// Sub-agent rows inherit the parent's task key through the ctx,
@@ -930,6 +1132,224 @@ mod tests {
         assert!(report.contains("swallowed-error"), "{report}");
     }
 
+    /// The incident's real bad shape (issue #113): a dispatch prompt
+    /// respec'd the block into plain verdict/findings prose.
+    const BAD_SHAPE_RESPONSE: &str =
+        "Looks broken.\nverdict: incorrect\nfindings:\n- id: 1\n  note: drops err\n";
+
+    fn malformed_response_provider() -> Arc<MockProvider> {
+        Arc::new(MockProvider::new(vec![
+            Ok(Response::Text(BAD_SHAPE_RESPONSE.to_string())),
+            Ok(Response::Text(REVIEW_RESPONSE.to_string())),
+        ]))
+    }
+
+    #[tokio::test]
+    async fn unparseable_block_retried_once_and_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let provider = malformed_response_provider();
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        // Two calls: the review, then the corrective re-emit. The
+        // parent sees the original prose plus the recorded ids.
+        assert_eq!(provider.call_count(), 2, "{result}");
+        assert!(
+            result.contains("verdict: incorrect"),
+            "original prose must reach the parent: {result}"
+        );
+        assert!(result.contains("[ledger: finding ids 1]"), "{result}");
+        let report = ledger.report().unwrap();
+        assert!(report.contains("swallowed-error"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn unparseable_after_retry_carries_the_trailer() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text(BAD_SHAPE_RESPONSE.to_string())),
+            Ok(Response::Text(BAD_SHAPE_RESPONSE.to_string())),
+        ]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.call_count(), 2);
+        assert!(
+            result.contains("[ledger: findings block unparseable; nothing recorded]"),
+            "{result}"
+        );
+        assert_eq!(ledger.report().unwrap(), "No reviews recorded.");
+    }
+
+    #[tokio::test]
+    async fn failed_retry_turn_still_delivers_the_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text(BAD_SHAPE_RESPONSE.to_string())),
+            Err(ProviderError::RateLimited),
+        ]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.contains("[ledger: findings block unparseable; nothing recorded]"),
+            "a failed retry must not fail the task: {result}"
+        );
+        assert!(result.contains("verdict: incorrect"), "{result}");
+        assert_eq!(ledger.report().unwrap(), "No reviews recorded.");
+    }
+
+    #[tokio::test]
+    async fn disabled_ledger_makes_no_retry() {
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            BAD_SHAPE_RESPONSE.to_string(),
+        ))]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            None,
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({"prompt": "review this", "agent_type": "reviewer"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.call_count(), 1, "no retry without a ledger");
+        assert!(!result.contains("[ledger:"), "{result}");
+    }
+
+    /// Exercise the ledger-write failure path: the reviews table is
+    /// dropped behind the ledger's back, so `record_review` fails at
+    /// the statement — the same `Err` any schema/IO failure surfaces.
+    #[tokio::test]
+    async fn failed_ledger_write_carries_its_trailer() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let review = "Bad.\n```findings\n\
+             {\"verdict\": \"incorrect\", \"confidence\": 0.9, \
+             \"explanation\": \"x\", \
+             \"findings\": [{\"category\": \"c\", \"note\": \"n\"}]}\n```";
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            review.to_string(),
+        ))]));
+        {
+            let conn = ledger.connection_for_test();
+            conn.execute("DROP TABLE reviews", []).unwrap();
+        }
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger.clone()),
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {"repo": "o/r", "gate": "commit", "git_ref": "abc"}
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.call_count(), 1, "no retry on a write failure");
+        assert!(
+            result.contains("[ledger: recording failed; nothing recorded]"),
+            "{result}"
+        );
+        assert!(
+            !result.contains("[ledger: finding ids"),
+            "a failed write must not cite ids: {result}"
+        );
+    }
+
     #[tokio::test]
     async fn clean_review_gets_no_id_trailer() {
         let dir = tempfile::tempdir().unwrap();
@@ -1209,6 +1629,12 @@ mod tests {
         assert!(REVIEWER_PROMPT.contains("```findings"));
         assert!(REVIEWER_PROMPT.contains("verdict"));
         assert!(REVIEWER_PROMPT.contains("must-fix"));
+    }
+
+    #[test]
+    fn findings_retry_prompt_reemits_without_new_analysis() {
+        assert!(FINDINGS_RETRY_PROMPT.contains("```findings"));
+        assert!(FINDINGS_RETRY_PROMPT.contains("unchanged in substance"));
     }
 
     /// A convention file inside the artifact is the author's claim, so
