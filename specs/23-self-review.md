@@ -173,6 +173,13 @@ already demonstrated; the ledger measures skipped gates instead, and
 enforcement gets reconsidered only if the data shows prompting is not
 enough.
 
+A moved-base rebase (`git_rebase`, spec 03) runs no gate. The gates
+review authored change; the replay authors none, and a conflict
+resolution is bounded instead by the checks: the workflow requires the
+Validate step to pass on the paused tree before `continue`, since
+`continue` force-pushes on success. The PR review reads the resolved
+diff.
+
 ### Convergence
 
 Review loops are the dual failure mode: an agent reviewer will always
