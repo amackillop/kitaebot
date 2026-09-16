@@ -105,59 +105,19 @@ in
             check = "just check; just warm";
             proposals = "github";
           };
-          "CumuloGlobal/lightning-node" = {
-            check = "just check";
-          };
-          "CumuloGlobal/open-money" = {
-            check = "just check";
-          };
-          "CumuloGlobal/unhuman" = {
-            check = "just check";
-          };
-          "moneydevkit/ldk-node" = {
-            check = "just check";
-          };
-          "moneydevkit/lightning-js" = {
-            check = "just check";
-          };
-          "moneydevkit/mdk-recovery" = {
-            check = "just check";
-          };
-          "moneydevkit/mdkd" = {
-            check = "just check";
-          };
-          "moneydevkit/rust-lightning" = {
-            check = "just check";
-          };
         };
       };
       github = {
         enabled = true;
         owner = "amackillop";
-        # Humans only: agent accounts (cursoragent) and bots stay out —
-        # another AI driving this one's turns is a decision, not a default.
-        trusted_users = [
-          "ezefrd-mdk"
-          "martinsaposnic"
-          "NatElkins"
-          "npslaney"
-        ];
+        # Owner is always trusted. Agent accounts (cursoragent) stay
+        # out — another AI driving this one's turns is a decision, not
+        # a default.
         trusted_bots = [ "chatgpt-codex-connector" ];
         issues = {
           enabled = true;
           plan_label = "needs-plan";
         };
-      };
-      linear = {
-        enabled = true;
-        trusted_users = [
-          "austin@moneydevkit.com"
-          "eze@moneydevkit.com"
-          "martin@moneydevkit.com"
-          "nat@moneydevkit.com"
-          "nick@moneydevkit.com"
-        ];
-        plan_label = "needs-plan";
       };
       duties = {
         # Weekly: the shared cargo target dir persists and devshell
@@ -184,53 +144,6 @@ in
         # to code only if it earns that (spec 24: with data, not in
         # advance).
         prompt = [
-          # Two-lane dependency duty: security fixes authored natively
-          # from the alert queue, freshness via weekly cooled-down
-          # Dependabot PRs repaired with fix-deps. Both procedures
-          # live in lightning-node's AGENTS.md (its PR #891).
-          {
-            name = "lightning-node-dep-queues";
-            every = "1d";
-            repo = "CumuloGlobal/lightning-node";
-            prompt = ''
-              Work the dependency queues of CumuloGlobal/lightning-node.
-              Read the "Vulnerability & Dependency Remediation"
-              section of that checkout's AGENTS.md; both procedures
-              below live there — follow them exactly.
-
-              Freshness first: if an open Dependabot version-update PR
-              has failing checks, apply the freshness-lane procedure
-              to the oldest one (fix-deps rung, rebase-comment only if
-              stale and carrying no fix commits, superseding PR for
-              real breakage), then stop.
-
-              Otherwise security: fetch this repository's open
-              Dependabot alerts via the GitHub API. If none are open,
-              reply with one line and stop. Group alerts by manifest
-              directory, pick the directory containing the highest
-              severity alert, and apply the security-lane procedure:
-              fix every alert in that directory with native pnpm or
-              cargo bumps, run just fix-deps and just check, and open
-              ONE pull request for the directory listing the alert
-              numbers it fixes. Write every alert reference as a
-              markdown link to
-              https://github.com/CumuloGlobal/lightning-node/security/dependabot/<n>
-              — a bare #n in a PR body autolinks to an unrelated issue
-              or PR. Push nothing that fails just check locally. End
-              your reply with the number of alerts still open
-              repo-wide.
-
-              Hard rules: one PR or one directory per run. Never touch
-              anything under .github/workflows. Never force-push.
-              Before pushing a fix commit to a Dependabot PR, check the
-              PR's net diff against its base; if your fix would leave
-              that diff empty (the fix reverts the bump itself), do not
-              push — comment explaining why the bump is not applicable
-              and recommend closing the PR instead. Never dismiss
-              alerts. Never regenerate a lockfile whose manifest you
-              did not just author.
-            '';
-          }
           {
             name = "workaround-audit";
             every = "7d";
