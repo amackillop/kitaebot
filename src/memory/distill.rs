@@ -29,6 +29,8 @@ use crate::workspace::Workspace;
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct DistillState {
     #[serde(default)]
+    pub last_session: Option<String>,
+    #[serde(default)]
     pub watermarks: BTreeMap<String, u64>,
 }
 
@@ -68,6 +70,15 @@ impl DistillState {
 /// already subtracts each watermark, so this is a plain sum.
 pub fn total_pending(pending: &BTreeMap<String, u64>) -> u64 {
     pending.values().copied().sum()
+}
+
+fn session_order(pending: &BTreeMap<String, u64>, last_session: Option<&str>) -> Vec<String> {
+    let mut names = pending.keys().cloned().collect::<Vec<_>>();
+    if let Some(last) = last_session {
+        let start = names.partition_point(|name| name.as_str() <= last);
+        names.rotate_left(start);
+    }
+    names
 }
 
 /// The gate opens once the pending total reaches the threshold. A zero
@@ -172,6 +183,7 @@ impl Distiller {
             return Ok(state);
         }
         let state = DistillState {
+            last_session: None,
             watermarks: engine.latest_positions().await?,
         };
         state.save(&self.state_db);
@@ -218,15 +230,15 @@ pub async fn run<P: Provider, E: ContextEngine>(
     // cannot outgrow the distiller's window; each fetch is clamped and
     // always makes progress.
     let mut gathered = Gathered::new(distiller.slice_tokens);
-    for name in pending.keys() {
+    for name in session_order(&pending, state.last_session.as_deref()) {
         if gathered.budget == 0 {
             break;
         }
-        let after = state.watermarks.get(name).copied().unwrap_or(0);
+        let after = state.watermarks.get(&name).copied().unwrap_or(0);
         let messages = engine
-            .transcript_since(name, after, gathered.budget)
+            .transcript_since(&name, after, gathered.budget)
             .await?;
-        gathered.accept(name, after, messages);
+        gathered.accept(&name, after, messages);
     }
 
     if gathered.spans.is_empty() {
@@ -267,9 +279,11 @@ pub async fn run<P: Provider, E: ContextEngine>(
     .await;
     let output = result?;
 
+    let last_session = gathered.last_session.clone();
     for (name, watermark) in gathered.advances {
         state.watermarks.insert(name, watermark);
     }
+    state.last_session = last_session;
     state.save(&distiller.state_db);
 
     // Verify the pass's compaction duty before declaring done: the
@@ -413,6 +427,7 @@ fn index_and_topics_section(workspace: &Workspace) -> String {
 /// advance arithmetic pure and apart from the engine reads.
 struct Gathered {
     budget: u64,
+    last_session: Option<String>,
     spans: Vec<(String, Vec<Message>)>,
     advances: BTreeMap<String, u64>,
 }
@@ -421,6 +436,7 @@ impl Gathered {
     fn new(budget: u64) -> Self {
         Self {
             budget,
+            last_session: None,
             spans: Vec::new(),
             advances: BTreeMap::new(),
         }
@@ -440,6 +456,7 @@ impl Gathered {
             .saturating_sub(u64::try_from(used).unwrap_or(u64::MAX));
         let count = u64::try_from(messages.len()).unwrap_or(u64::MAX);
         self.advances.insert(name.to_string(), after + count);
+        self.last_session = Some(name.to_string());
         self.spans.push((name.to_string(), messages));
     }
 }
@@ -1234,6 +1251,49 @@ mod run_tests {
         .unwrap();
         assert!(out.is_none());
         assert_eq!(provider.call_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn hot_session_does_not_starve_the_next_session() {
+        let (_dir, ws) = workspace();
+        let engine = seeded_engine(&[
+            ("a", session_messages(8, 100)),
+            ("b", session_messages(4, 100)),
+        ])
+        .await;
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text("first".into())),
+            Ok(Response::Text("second".into())),
+        ]));
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let distiller = Distiller::new(&Tools::default(), ws.path(), db, 400, 400, 5, 8192);
+        let mut state = DistillState::default();
+
+        run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.watermarks.get("a"), Some(&4));
+
+        run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Enforce,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.watermarks.get("b"), Some(&4));
     }
 
     #[tokio::test]
