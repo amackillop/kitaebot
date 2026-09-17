@@ -96,7 +96,8 @@ When an excerpt is not enough, ask a narrower question instead:
 - Delegate to the `task` tool (explore). A sub-agent reads the volume in
   its own context and returns the conclusion; this is what sub-agents
   are for.
-- `lcm_grep` to search the stored text for the part you need.
+- `lcm_grep` to search stored messages and summaries, or `scope: "files"`
+  with `mode: "regex"` to search an externalized payload.
 - `grep` for a pattern against the reference's `path`.
 - A slice: `file_read` with `offset` and `limit`, or shell slicers
   (`sed -n`, `awk`, `jq`) against the reference's `path`. Payload files

@@ -559,7 +559,11 @@ impl ContextEngine for LcmEngine {
                 .ok()
         };
         if let Some(conn) = open("lcm_grep") {
-            tools.push(Arc::new(LcmGrep::new(conn, Arc::clone(&self.active_id))));
+            tools.push(Arc::new(LcmGrep::new(
+                conn,
+                Arc::clone(&self.active_id),
+                self.payloads_dir(),
+            )));
         }
         if let Some(conn) = open("lcm_describe") {
             tools.push(Arc::new(LcmDescribe::new(

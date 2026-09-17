@@ -496,8 +496,10 @@ The trailing `Next:` line is content-aware dereference guidance
 (issue #147): models do not follow references through the sanctioned
 tools unprompted, so each stub names its own next step. Every target
 is the on-disk copy at `path` — the raw bytes never reach the FTS
-tables (`intercept_large` replaces them before persistence), so
-`lcm_grep` cannot see them. Test-runner output (recognized across
+tables (`intercept_large` replaces them before persistence). `lcm_grep`
+searches them only through its explicit `scope: "files"`, which reads
+the immutable copy under `context/lcm/payloads/<file_id>` rather than
+the mutable source path. Test-runner output (recognized across
 cargo/pytest/go shapes) points at native `grep` over the stored copy
 and says not to re-run the command; an original source path points
 at windowed `file_read`; structured payloads point at the
@@ -871,7 +873,7 @@ The LCM engine contributes three tools via `tools()`:
 |-------|------|----------|-------------|
 | `pattern` | String | yes | Search pattern (FTS5 query syntax or regex) |
 | `mode` | String | no | `regex` or `fts` (default: `fts`) |
-| `scope` | String | no | `messages`, `summaries`, or `both` (default: `both`) |
+| `scope` | String | no | `messages`, `summaries`, `both` (default: `both`), or `files` |
 | `limit` | u32 | no | Max results (default: 50) |
 
 `fts` mode uses SQLite FTS5 — token-based matching with boolean operators
@@ -887,6 +889,12 @@ silently drop the operators; when such a pattern fails to parse (or the
 phrase retry itself fails), the tool returns `ToolError::FtsQuery`, which
 names the pattern verbatim, keeps the sqlite error as source, and tells
 the model to quote punctuated terms or switch to regex mode.
+
+`scope: "files"` searches the active session's externalized payloads. It
+requires `mode: "regex"`: payload bytes remain out of FTS, and scanning the
+immutable `context/lcm/payloads/<file_id>` copy preserves search results even
+when the original workspace path has changed. Matches identify the file ID and
+line number for follow-up with `lcm_describe` or `file_read`.
 
 `regex` mode uses a `REGEXP` user function registered on the SQLite connection.
 It scans the `content` column directly (no index), so it is slower than FTS but
