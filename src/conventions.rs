@@ -143,7 +143,14 @@ mod tests {
     /// the fixture works without global git config.
     fn git_in(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
-            .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+            ])
             .args(args)
             .current_dir(dir)
             .output()
