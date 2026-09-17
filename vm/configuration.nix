@@ -556,6 +556,11 @@ in
       dates = "weekly";
       options = "--delete-older-than 7d";
     };
+    systemd.services.nix-gc.serviceConfig.ExecStartPre = [
+      # Interrupted builds leave these root-owned directories behind;
+      # nix-collect-garbage skips their contents without failing.
+      "${pkgs.findutils}/bin/find /nix/store -mindepth 1 -maxdepth 1 -type d -name *.drv.chroot -exec ${pkgs.coreutils}/bin/rm -rf -- {} +"
+    ];
     nix.settings = {
       # Stock nix disables these; every devshell and gate needs flakes.
       experimental-features = [
