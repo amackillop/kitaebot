@@ -9,6 +9,7 @@ mod session;
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -151,36 +152,47 @@ impl FlatSession {
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 impl ContextEngine for FlatSession {
-    async fn push_message(&mut self, msg: Message) -> Result<(), EngineError> {
-        // The flat engine cannot externalize to disk, so oversized
-        // tool output is truncated tail-biased instead (LCM keeps it
-        // lossless; see spec 14).
-        let msg = match msg {
-            Message::Tool { call_id, content } => {
-                let content = match super::truncate_tool_output(
-                    &content,
-                    self.ctx.tool_output_tokens as usize,
-                ) {
-                    std::borrow::Cow::Owned(truncated) => truncated,
-                    std::borrow::Cow::Borrowed(_) => content,
-                };
-                Message::Tool { call_id, content }
-            }
-            other => other,
-        };
-        self.session.add_message(msg);
-        Ok(())
+    fn push_message(
+        &mut self,
+        msg: Message,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move {
+            // The flat engine cannot externalize to disk, so oversized
+            // tool output is truncated tail-biased instead (LCM keeps it
+            // lossless; see spec 14).
+            let msg = match msg {
+                Message::Tool { call_id, content } => {
+                    let content = match super::truncate_tool_output(
+                        &content,
+                        self.ctx.tool_output_tokens as usize,
+                    ) {
+                        std::borrow::Cow::Owned(truncated) => truncated,
+                        std::borrow::Cow::Borrowed(_) => content,
+                    };
+                    Message::Tool { call_id, content }
+                }
+                other => other,
+            };
+            self.session.add_message(msg);
+            Ok(())
+        }
     }
 
-    async fn assemble(&self, system_prompt: &str) -> Result<AssembledContext, EngineError> {
-        let mut messages = Vec::with_capacity(self.session.len() + 1);
-        messages.push(Message::System {
-            content: system_prompt.to_string(),
-        });
-        messages.extend(self.session.messages().iter().cloned());
+    fn assemble(
+        &self,
+        system_prompt: &str,
+    ) -> impl Future<Output = Result<AssembledContext, EngineError>> + Send {
+        async move {
+            let mut messages = Vec::with_capacity(self.session.len() + 1);
+            messages.push(Message::System {
+                content: system_prompt.to_string(),
+            });
+            messages.extend(self.session.messages().iter().cloned());
 
-        Ok(AssembledContext { messages })
+            Ok(AssembledContext { messages })
+        }
     }
 
     fn observe_tokens(&mut self, prompt_tokens: usize) {
@@ -220,15 +232,19 @@ impl ContextEngine for FlatSession {
         }
     }
 
-    async fn clear(&mut self) -> Result<(), EngineError> {
-        self.session.clear();
-        self.observed_tokens = None;
-        Ok(())
+    fn clear(&mut self) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move {
+            self.session.clear();
+            self.observed_tokens = None;
+            Ok(())
+        }
     }
 
-    async fn save(&mut self) -> Result<(), EngineError> {
-        self.session.save(&self.path_for(&self.active_name))?;
-        Ok(())
+    fn save(&mut self) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move {
+            self.session.save(&self.path_for(&self.active_name))?;
+            Ok(())
+        }
     }
 
     fn stats(&self) -> ContextStats {
@@ -243,48 +259,50 @@ impl ContextEngine for FlatSession {
         Vec::new()
     }
 
-    async fn report(&self) -> Result<String, EngineError> {
-        let mut sessions = Vec::new();
-        let mut saw_active = false;
+    fn report(&self) -> impl Future<Output = Result<String, EngineError>> + Send {
+        async move {
+            let mut sessions = Vec::new();
+            let mut saw_active = false;
 
-        let entries = fs::read_dir(&self.sessions_dir).map_err(|e| EngineError::Io {
-            operation: "read",
-            path: self.sessions_dir.clone(),
-            source: e,
-        })?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| EngineError::Io {
-                operation: "read an entry of",
+            let entries = fs::read_dir(&self.sessions_dir).map_err(|e| EngineError::Io {
+                operation: "read",
                 path: self.sessions_dir.clone(),
                 source: e,
             })?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
 
-            // For the active session, use the in-memory state (avoids
-            // re-reading and sees unsaved messages). Both sides are the
-            // sanitized form; desanitizing here never matched a name
-            // containing a slash, so repo sessions counted twice.
-            if stem == self.active_name {
+            for entry in entries {
+                let entry = entry.map_err(|e| EngineError::Io {
+                    operation: "read an entry of",
+                    path: self.sessions_dir.clone(),
+                    source: e,
+                })?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+
+                // For the active session, use the in-memory state (avoids
+                // re-reading and sees unsaved messages). Both sides are the
+                // sanitized form; desanitizing here never matched a name
+                // containing a slash, so repo sessions counted twice.
+                if stem == self.active_name {
+                    sessions.push(self.session.messages().to_vec());
+                    saw_active = true;
+                } else if let Ok(s) = Session::load(&path) {
+                    sessions.push(s.messages().to_vec());
+                }
+            }
+
+            // Active session with no file yet (new, never saved).
+            if !saw_active {
                 sessions.push(self.session.messages().to_vec());
-                saw_active = true;
-            } else if let Ok(s) = Session::load(&path) {
-                sessions.push(s.messages().to_vec());
             }
-        }
 
-        // Active session with no file yet (new, never saved).
-        if !saw_active {
-            sessions.push(self.session.messages().to_vec());
+            Ok(super::stats::render(&sessions))
         }
-
-        Ok(super::stats::render(&sessions))
     }
 
     fn active_session(&self) -> &str {
@@ -309,59 +327,61 @@ impl ContextEngine for FlatSession {
         Ok(())
     }
 
-    async fn list_sessions(&self) -> Result<Vec<SessionInfo>, EngineError> {
-        let mut sessions = Vec::new();
+    fn list_sessions(&self) -> impl Future<Output = Result<Vec<SessionInfo>, EngineError>> + Send {
+        async move {
+            let mut sessions = Vec::new();
 
-        let entries = fs::read_dir(&self.sessions_dir).map_err(|e| EngineError::Io {
-            operation: "read",
-            path: self.sessions_dir.clone(),
-            source: e,
-        })?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| EngineError::Io {
-                operation: "read an entry of",
+            let entries = fs::read_dir(&self.sessions_dir).map_err(|e| EngineError::Io {
+                operation: "read",
                 path: self.sessions_dir.clone(),
                 source: e,
             })?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let name = desanitize_name(stem);
 
-            // For the active session, use the in-memory state (avoids re-reading).
-            if name == self.active_name {
+            for entry in entries {
+                let entry = entry.map_err(|e| EngineError::Io {
+                    operation: "read an entry of",
+                    path: self.sessions_dir.clone(),
+                    source: e,
+                })?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let name = desanitize_name(stem);
+
+                // For the active session, use the in-memory state (avoids re-reading).
+                if name == self.active_name {
+                    sessions.push(SessionInfo {
+                        name,
+                        message_count: self.session.len(),
+                        estimated_tokens: self.token_estimate(0),
+                    });
+                } else if let Ok(s) = Session::load(&path) {
+                    let chars: usize = s.messages().iter().map(Message::char_count).sum();
+                    sessions.push(SessionInfo {
+                        name,
+                        message_count: s.len(),
+                        estimated_tokens: estimate_tokens_from_chars(chars),
+                    });
+                }
+            }
+
+            // If no file exists for the active session yet (new, never saved),
+            // make sure it still shows up.
+            if !sessions.iter().any(|s| s.name == self.active_name) {
                 sessions.push(SessionInfo {
-                    name,
+                    name: self.active_name.clone(),
                     message_count: self.session.len(),
                     estimated_tokens: self.token_estimate(0),
                 });
-            } else if let Ok(s) = Session::load(&path) {
-                let chars: usize = s.messages().iter().map(Message::char_count).sum();
-                sessions.push(SessionInfo {
-                    name,
-                    message_count: s.len(),
-                    estimated_tokens: estimate_tokens_from_chars(chars),
-                });
             }
-        }
 
-        // If no file exists for the active session yet (new, never saved),
-        // make sure it still shows up.
-        if !sessions.iter().any(|s| s.name == self.active_name) {
-            sessions.push(SessionInfo {
-                name: self.active_name.clone(),
-                message_count: self.session.len(),
-                estimated_tokens: self.token_estimate(0),
-            });
+            sessions.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(sessions)
         }
-
-        sessions.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(sessions)
     }
 
     async fn latest_positions(&self) -> Result<BTreeMap<String, u64>, EngineError> {
@@ -411,26 +431,28 @@ impl ContextEngine for FlatSession {
         })
     }
 
-    async fn transcript_since(
+    fn transcript_since(
         &self,
         session: &str,
         after: u64,
         max_tokens: u64,
-    ) -> Result<Vec<Message>, EngineError> {
-        let msgs = self.session_messages(session);
-        let after = usize::try_from(after).unwrap_or(usize::MAX);
-        let mut out = Vec::new();
-        let mut total: u64 = 0;
-        for msg in msgs.get(after..).unwrap_or(&[]) {
-            let tokens =
-                u64::try_from(estimate_tokens_from_chars(msg.char_count())).unwrap_or(u64::MAX);
-            if !out.is_empty() && total + tokens > max_tokens {
-                break;
+    ) -> impl Future<Output = Result<Vec<Message>, EngineError>> + Send {
+        async move {
+            let msgs = self.session_messages(session);
+            let after = usize::try_from(after).unwrap_or(usize::MAX);
+            let mut out = Vec::new();
+            let mut total: u64 = 0;
+            for msg in msgs.get(after..).unwrap_or(&[]) {
+                let tokens =
+                    u64::try_from(estimate_tokens_from_chars(msg.char_count())).unwrap_or(u64::MAX);
+                if !out.is_empty() && total + tokens > max_tokens {
+                    break;
+                }
+                out.push(msg.clone());
+                total += tokens;
             }
-            out.push(msg.clone());
-            total += tokens;
+            Ok(out)
         }
-        Ok(out)
     }
 }
 

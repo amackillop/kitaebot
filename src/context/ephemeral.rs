@@ -3,6 +3,7 @@
 //! See `specs/19-sub-agents.md` for the design.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -40,62 +41,78 @@ impl EphemeralSession {
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 impl ContextEngine for EphemeralSession {
-    async fn push_message(&mut self, msg: Message) -> Result<(), EngineError> {
-        let msg = match msg {
-            Message::Tool { call_id, content } => {
-                let content = match super::truncate_tool_output(&content, self.tool_output_tokens) {
-                    std::borrow::Cow::Owned(truncated) => truncated,
-                    std::borrow::Cow::Borrowed(_) => content,
-                };
-                Message::Tool { call_id, content }
-            }
-            other => other,
-        };
-        self.messages.push(msg);
-        Ok(())
+    fn push_message(
+        &mut self,
+        msg: Message,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move {
+            let msg = match msg {
+                Message::Tool { call_id, content } => {
+                    let content =
+                        match super::truncate_tool_output(&content, self.tool_output_tokens) {
+                            std::borrow::Cow::Owned(truncated) => truncated,
+                            std::borrow::Cow::Borrowed(_) => content,
+                        };
+                    Message::Tool { call_id, content }
+                }
+                other => other,
+            };
+            self.messages.push(msg);
+            Ok(())
+        }
     }
 
-    async fn assemble(&self, system_prompt: &str) -> Result<AssembledContext, EngineError> {
-        let mut messages = Vec::with_capacity(self.messages.len() + 1);
-        messages.push(Message::System {
-            content: system_prompt.to_string(),
-        });
-        messages.extend(self.messages.iter().cloned());
-        Ok(AssembledContext { messages })
+    fn assemble(
+        &self,
+        system_prompt: &str,
+    ) -> impl Future<Output = Result<AssembledContext, EngineError>> + Send {
+        async move {
+            let mut messages = Vec::with_capacity(self.messages.len() + 1);
+            messages.push(Message::System {
+                content: system_prompt.to_string(),
+            });
+            messages.extend(self.messages.iter().cloned());
+            Ok(AssembledContext { messages })
+        }
     }
 
     fn observe_tokens(&mut self, _prompt_tokens: usize) {
         // Never compacts, so there is no trigger to inform.
     }
 
-    async fn compact_if_urgent(
+    fn compact_if_urgent(
         &mut self,
         _summarize: &SummarizeFn,
-    ) -> Result<Option<CompactionEvent>, EngineError> {
-        Ok(None)
+    ) -> impl Future<Output = Result<Option<CompactionEvent>, EngineError>> + Send {
+        std::future::ready(Ok(None))
     }
 
-    async fn force_compact(
+    fn force_compact(
         &mut self,
         _summarize: &SummarizeFn,
-    ) -> Result<CompactionEvent, EngineError> {
-        // Unreachable in practice: slash commands never target a child
-        // context. Reported as a zero-delta cycle.
-        let tokens = estimate_messages_tokens(&self.messages);
-        Ok(CompactionEvent {
-            before: tokens,
-            after: tokens,
-        })
+    ) -> impl Future<Output = Result<CompactionEvent, EngineError>> + Send {
+        async move {
+            // Unreachable in practice: slash commands never target a child
+            // context. Reported as a zero-delta cycle.
+            let tokens = estimate_messages_tokens(&self.messages);
+            Ok(CompactionEvent {
+                before: tokens,
+                after: tokens,
+            })
+        }
     }
 
-    async fn clear(&mut self) -> Result<(), EngineError> {
-        self.messages.clear();
-        Ok(())
+    fn clear(&mut self) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move {
+            self.messages.clear();
+            Ok(())
+        }
     }
 
-    async fn save(&mut self) -> Result<(), EngineError> {
-        Ok(())
+    fn save(&mut self) -> impl Future<Output = Result<(), EngineError>> + Send {
+        std::future::ready(Ok(()))
     }
 
     fn stats(&self) -> ContextStats {
@@ -111,9 +128,11 @@ impl ContextEngine for EphemeralSession {
         Vec::new()
     }
 
-    async fn report(&self) -> Result<String, EngineError> {
-        // Unreachable in practice: children get no slash commands.
-        Ok(super::stats::render(std::slice::from_ref(&self.messages)))
+    fn report(&self) -> impl Future<Output = Result<String, EngineError>> + Send {
+        async move {
+            // Unreachable in practice: children get no slash commands.
+            Ok(super::stats::render(std::slice::from_ref(&self.messages)))
+        }
     }
 
     // The trait ties the lifetime to &self; the literal is incidental.
@@ -122,21 +141,24 @@ impl ContextEngine for EphemeralSession {
         "ephemeral"
     }
 
-    async fn switch_session(&mut self, _name: &str) -> Result<(), EngineError> {
+    fn switch_session(
+        &mut self,
+        _name: &str,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
         // Meaningless for a single-turn context; ignored.
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
-    async fn list_sessions(&self) -> Result<Vec<SessionInfo>, EngineError> {
-        Ok(Vec::new())
+    fn list_sessions(&self) -> impl Future<Output = Result<Vec<SessionInfo>, EngineError>> + Send {
+        std::future::ready(Ok(Vec::new()))
     }
 
-    async fn pending_distill_tokens(
+    fn pending_distill_tokens(
         &self,
         _since: &BTreeMap<String, u64>,
-    ) -> Result<BTreeMap<String, u64>, EngineError> {
+    ) -> impl Future<Output = Result<BTreeMap<String, u64>, EngineError>> + Send {
         // Single-turn context, never distilled.
-        Ok(BTreeMap::new())
+        std::future::ready(Ok(BTreeMap::new()))
     }
 
     fn backup(_context_dir: &Path, _dest: &Path) -> Result<(), EngineError> {
@@ -144,13 +166,13 @@ impl ContextEngine for EphemeralSession {
         Ok(())
     }
 
-    async fn transcript_since(
+    fn transcript_since(
         &self,
         _session: &str,
         _after: u64,
         _max_tokens: u64,
-    ) -> Result<Vec<Message>, EngineError> {
-        Ok(Vec::new())
+    ) -> impl Future<Output = Result<Vec<Message>, EngineError>> + Send {
+        std::future::ready(Ok(Vec::new()))
     }
 }
 

@@ -28,6 +28,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -518,10 +519,10 @@ impl ContextEngine for LcmEngine {
         Ok(())
     }
 
-    async fn save(&mut self) -> Result<(), EngineError> {
+    fn save(&mut self) -> impl Future<Output = Result<(), EngineError>> + Send {
         // No-op. Every push commits in its own transaction; WAL gives
         // us crash safety without an explicit save.
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
     fn stats(&self) -> ContextStats {
