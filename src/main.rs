@@ -149,7 +149,7 @@ async fn daemon_main() {
                 duty_trigger,
             );
 
-            Box::pin(daemon::run(
+            if let Err(e) = Box::pin(daemon::run(
                 &workspace,
                 &state_db,
                 handle,
@@ -164,7 +164,11 @@ async fn daemon_main() {
                 &config.socket,
                 trigger_rx,
             ))
-            .await;
+            .await
+            {
+                error!("Daemon stopped unexpectedly: {e}");
+                std::process::exit(1);
+            }
         }
         Some(cmd) => {
             error!("Unknown command: {cmd}");
