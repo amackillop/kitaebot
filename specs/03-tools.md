@@ -161,7 +161,11 @@ Executes commands via `bash -c` within the workspace.
    double as English prose and grep-pattern text, so command position
    must be decided with real quoting rules — a regex over the raw
    string blocked `grep "a\|truncate"` (#135). Also blocks `gh auth`
-   and `nix profile`, and any `sleep` whose literal arguments sum past
+   and `nix profile`. It also rejects an unquoted pipeline whose left
+   side is `cargo test` or `just test*`: filters can discard the failure
+   evidence before exec can externalize and parse it, so the guidance
+   tells the model to rerun the test unpiped. Any `sleep` whose literal
+   arguments sum past
    `tools.exec.timeout_secs` minus a 30-second headroom for whatever
    follows it: such a call can never return inside the budget, so the
    timeout was certain when the command was written (three 600-second
@@ -256,8 +260,9 @@ refuted); the trailer preserves the verdict regardless. Recognition is
 a per-format registry — libtest and pytest today — that degrades to no
 trailer on unrecognized output, never to an error, and passing runs get
 none: it exists to preserve failure evidence, not restate green
-summaries. The remaining half of #145, guidance against piping test
-commands at all, waits on the #136 deny-guidance work it builds on.
+summaries. The structural guard also rejects piped `cargo test` and
+`just test*` runs before execution, so the full result is available for
+this trailer to parse.
 
 ---
 
