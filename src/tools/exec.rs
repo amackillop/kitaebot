@@ -80,6 +80,7 @@ const TRUNCATE: &str = "truncate is blocked; rewrite the file with file_write";
 const MOUNT: &str = "mounts are blocked; the daemon runs unprivileged";
 const NIX_MUTATION: &str = "the daemon never runs nix mutations; the operator deploys and \
                             collects garbage on the host";
+const PIPED_TEST: &str = "test output must reach exec intact; rerun the test command without a pipe so its full output can be parsed";
 
 /// Deny list with per-rule guidance.
 ///
@@ -975,6 +976,71 @@ fn split_unquoted_separators(cmd: &str) -> Vec<String> {
     segments
 }
 
+/// Whether a test command's stdout is sent to an unquoted pipeline.
+/// `||` is control flow, not an output pipeline.
+fn piped_test_command(cmd: &str) -> bool {
+    let mut start = 0;
+    let mut state = QuoteState::None;
+    let mut escaped = false;
+    let mut chars = cmd.char_indices().peekable();
+
+    while let Some((index, c)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match (&state, c) {
+            (QuoteState::Double, '"') | (QuoteState::Single, '\'') => {
+                state = QuoteState::None;
+            }
+            (QuoteState::Double | QuoteState::None, '\\') => escaped = true,
+            (QuoteState::None, '"') => state = QuoteState::Double,
+            (QuoteState::None, '\'') => state = QuoteState::Single,
+            (QuoteState::None, '|') if chars.peek().is_some_and(|(_, next)| *next == '|') => {
+                let Some((next_index, _)) = chars.next() else {
+                    return false;
+                };
+                start = next_index + '|'.len_utf8();
+            }
+            (QuoteState::None, '|') => {
+                if cmd.get(start..index).is_some_and(is_test_command) {
+                    return true;
+                }
+                start = index + c.len_utf8();
+            }
+            (QuoteState::None, ';' | '&' | '\n') => start = index + c.len_utf8(),
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// Whether `segment` invokes a supported test runner in command position.
+fn is_test_command(segment: &str) -> bool {
+    let Some(tokens) = shlex::split(segment) else {
+        return false;
+    };
+    let rest: Vec<&str> = tokens
+        .iter()
+        .map(String::as_str)
+        .skip_while(|token| is_env_assignment(token))
+        .collect();
+    let Some(binary) = rest.first().and_then(|binary| binary.rsplit('/').next()) else {
+        return false;
+    };
+    let subcommand = rest
+        .iter()
+        .skip(1)
+        .find(|token| !token.starts_with('-') && !token.contains('='));
+
+    match (binary, subcommand) {
+        ("cargo", Some(&"test")) => true,
+        ("just", Some(subcommand)) => subcommand.starts_with("test"),
+        _ => false,
+    }
+}
+
 /// Time left for whatever follows a sleep before the exec budget runs out.
 const SLEEP_HEADROOM: Duration = Duration::from_secs(30);
 
@@ -1012,6 +1078,9 @@ fn sleep_over_budget(secs: f64, budget: Duration) -> String {
 ///
 /// Returns guidance for the first matching rule, or `None`.
 fn command_blocked(cmd: &str, budget: Duration) -> Option<Cow<'static, str>> {
+    if piped_test_command(cmd) {
+        return Some(Cow::Borrowed(PIPED_TEST));
+    }
     let sleep_limit = budget.saturating_sub(SLEEP_HEADROOM).as_secs_f64();
     for segment in split_unquoted_separators(cmd) {
         let Some(tokens) = shlex::split(&segment) else {
@@ -1917,6 +1986,35 @@ mod tests {
         // directly: shlex treats the quoted string as a single token,
         // so `command_blocked` alone should not flag it.
         assert!(command_blocked("echo 'git commit'", BUDGET).is_none());
+    }
+
+    #[test]
+    fn piped_test_commands_are_blocked() {
+        for command in [
+            "cargo test | grep failed",
+            "CARGO_TERM_COLOR=always cargo test | tee test.log",
+            "/usr/bin/cargo test | head -5",
+            "just test | grep failed",
+            "just test-one tools::exec | grep failed",
+            "just test-nixos-one egress | tail -20",
+        ] {
+            assert_eq!(reason(command).as_deref(), Some(PIPED_TEST), "{command}");
+        }
+    }
+
+    #[test]
+    fn test_command_pipes_respect_shell_quoting_and_control_flow() {
+        for command in [
+            "cargo test",
+            "just test-one tools::exec",
+            "just build | grep finished",
+            "echo 'cargo test | grep failed'",
+            r"cargo test \| grep failed",
+            "cargo test || echo failed",
+            "grep -rn 'names::' src/ | grep -v context | head -5",
+        ] {
+            assert_allowed(command);
+        }
     }
 
     #[test]
