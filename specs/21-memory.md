@@ -128,7 +128,10 @@ reading session history through the context engine abstraction:
   the default iteration budget — #47 was a threshold-sized slice
   exceeding it); each fetch is clamped to the remaining budget
   and still returns at least one event, so an oversized head cannot
-  stall progress.
+  stall progress. Passes start after the last session advanced by the
+  previous successful pass, wrapping in session-name order. The cursor
+  is persisted with the watermarks, so a hot early session cannot starve
+  later sessions across restarts.
 - **Backlog carry:** exactly one pass runs per heartbeat tick, and it
   reads at most one slice's worth. Each session's watermark advances by
   the events actually read (positions are dense, so `after + count`),
