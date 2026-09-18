@@ -19,6 +19,9 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use grep::regex::RegexMatcher;
+use grep::searcher::Searcher;
+use grep::searcher::sinks::UTF8;
 use rusqlite::{Connection, params};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -103,7 +106,7 @@ struct GrepArgs {
     /// `fts` (default) or `regex`.
     #[serde(default)]
     mode: Option<String>,
-    /// `messages`, `summaries`, or `both` (default).
+    /// `messages`, `summaries`, `both` (default), or `files`.
     #[serde(default)]
     scope: Option<String>,
     /// Max results returned. Defaults to 50; capped at 200.
@@ -115,13 +118,15 @@ struct GrepArgs {
 pub struct LcmGrep {
     conn: Arc<Mutex<Connection>>,
     active_id: Arc<AtomicI64>,
+    payloads_dir: PathBuf,
 }
 
 impl LcmGrep {
-    pub fn new(conn: Connection, active_id: Arc<AtomicI64>) -> Self {
+    pub fn new(conn: Connection, active_id: Arc<AtomicI64>, payloads_dir: PathBuf) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
             active_id,
+            payloads_dir,
         }
     }
 }
@@ -134,7 +139,8 @@ impl Tool for LcmGrep {
     fn description(&self) -> &'static str {
         "Search the active session's compacted history for keywords or patterns. \
          Use mode=fts (default, token-based search with boolean operators) for keywords; \
-         mode=regex for arbitrary patterns. Scope filters to messages, summaries, or both. \
+         mode=regex for arbitrary patterns. Scope filters to messages, summaries, both, or externalized files. \
+         File scope supports regex only and reads LCM's immutable payload copies. \
          Returns IDs you can pass to lcm_describe or lcm_expand."
     }
 
@@ -149,6 +155,7 @@ impl Tool for LcmGrep {
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + '_>> {
         let conn = Arc::clone(&self.conn);
         let conversation_id = self.active_id.load(Ordering::Acquire);
+        let payloads_dir = self.payloads_dir.clone();
         Box::pin(async move {
             let args: GrepArgs = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
@@ -165,17 +172,30 @@ impl Tool for LcmGrep {
                 }
             }
             match scope.as_str() {
-                "messages" | "summaries" | "both" => {}
+                "files" | "messages" | "summaries" | "both" => {}
                 other => {
                     return Err(ToolError::InvalidArguments(format!(
-                        "scope must be \"messages\", \"summaries\", or \"both\", got {other:?}"
+                        "scope must be \"messages\", \"summaries\", \"both\", or \"files\", got {other:?}"
                     )));
                 }
+            }
+            if scope == "files" && mode != "regex" {
+                return Err(ToolError::InvalidArguments(
+                    "scope=\"files\" requires mode=\"regex\"".to_string(),
+                ));
             }
 
             debug!(pattern = %args.pattern, mode, scope, limit, "lcm_grep");
             run_blocking(conn, move |c| {
-                run_grep(c, conversation_id, &args.pattern, &mode, &scope, limit)
+                run_grep(
+                    c,
+                    conversation_id,
+                    &args.pattern,
+                    &mode,
+                    &scope,
+                    limit,
+                    &payloads_dir,
+                )
             })
             .await
         })
@@ -228,8 +248,18 @@ fn run_grep(
     mode: &str,
     scope: &str,
     limit: u32,
+    payloads_dir: &std::path::Path,
 ) -> Result<String, ToolError> {
     let lim = i64::from(limit);
+
+    if scope == "files" {
+        let hits = grep_files(conn, conversation_id, pattern, limit, payloads_dir)?;
+        return if hits.is_empty() {
+            Ok(format!("No matches for {pattern:?} in files ({mode})."))
+        } else {
+            Ok(format!("{} match(es):\n{}", hits.len(), hits.join("\n")))
+        };
+    }
 
     let run = |pattern: &str| -> Result<Vec<String>, ToolError> {
         let mut hits: Vec<String> = Vec::new();
@@ -266,6 +296,60 @@ fn run_grep(
     } else {
         Ok(format!("{} match(es):\n{}", hits.len(), hits.join("\n")))
     }
+}
+
+fn grep_files(
+    conn: &Connection,
+    conversation_id: i64,
+    pattern: &str,
+    limit: u32,
+    payloads_dir: &std::path::Path,
+) -> Result<Vec<String>, ToolError> {
+    let matcher = RegexMatcher::new(pattern)
+        .map_err(|e| ToolError::InvalidArguments(format!("invalid regex: {e}")))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT file_id FROM large_files \
+             WHERE conversation_id = ?1 ORDER BY created_at, file_id",
+        )
+        .map_err(exec_err)?;
+    let file_ids = stmt
+        .query_map([conversation_id], |r| r.get::<_, String>(0))
+        .map_err(exec_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(exec_err)?;
+    let mut hits = Vec::new();
+
+    for file_id in file_ids {
+        if hits.len() >= limit as usize {
+            break;
+        }
+        let valid_id = extract_file_ids(&file_id)
+            .into_iter()
+            .next()
+            .is_some_and(|id| id == file_id);
+        if !valid_id {
+            return Err(ToolError::Precondition(format!(
+                "lcm large_files row has unsafe file id {file_id:?}"
+            )));
+        }
+        let path = payloads_dir.join(&file_id);
+        Searcher::new()
+            .search_path(
+                &matcher,
+                &path,
+                UTF8(|line, text| {
+                    hits.push(format!("[file_id={file_id} line={line}] {}", snippet(text)));
+                    Ok(hits.len() < limit as usize)
+                }),
+            )
+            .map_err(|source| ToolError::Io {
+                operation: "search",
+                path,
+                source,
+            })?;
+    }
+    Ok(hits)
 }
 
 fn grep_messages(
@@ -915,6 +999,16 @@ mod tests {
         conn.last_insert_rowid()
     }
 
+    fn insert_file(conn: &Connection, conversation_id: i64, file_id: &str, path: &str) {
+        conn.execute(
+            "INSERT INTO large_files(file_id, conversation_id, path, mime_type, \
+             byte_size, token_count, exploration_summary, created_at) \
+             VALUES (?1, ?2, ?3, 'text/plain', 1, 1, 'summary', '2025-01-01')",
+            params![file_id, conversation_id, path],
+        )
+        .unwrap();
+    }
+
     fn shared_active(id: i64) -> Arc<AtomicI64> {
         Arc::new(AtomicI64::new(id))
     }
@@ -926,7 +1020,11 @@ mod tests {
         insert_message(&writer, 1, "user", "the quick brown fox");
         insert_message(&writer, 1, "assistant", "lazy dog response");
 
-        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            PathBuf::new(),
+        );
         let out = tool
             .execute(serde_json::json!({"pattern": "fox"}), ToolCtx::default())
             .await
@@ -948,7 +1046,11 @@ mod tests {
         );
         insert_message(&writer, 1, "user", "unrelated");
 
-        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            PathBuf::new(),
+        );
         // Raw `isl-0.20` is an FTS5 syntax error; the phrase retry
         // must find the row anyway.
         let out = tool
@@ -968,7 +1070,11 @@ mod tests {
         let writer = schema::open(&db).unwrap();
         insert_message(&writer, 1, "user", "he said \"hello.world\" twice");
 
-        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            PathBuf::new(),
+        );
         let out = tool
             .execute(
                 serde_json::json!({"pattern": "said \"hello.world\""}),
@@ -985,7 +1091,11 @@ mod tests {
         let writer = schema::open(&db).unwrap();
         insert_message(&writer, 1, "user", "the security-lane alert fired");
 
-        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            PathBuf::new(),
+        );
         // Raw `security-lane` fails as "no such column: lane"; the
         // phrase retry must find the row anyway.
         let out = tool
@@ -1002,7 +1112,11 @@ mod tests {
     async fn lcm_grep_fts_operator_pattern_with_bad_term_names_the_pattern() {
         let (_dir, db) = fresh_db();
         let pattern = "security lane OR security-lane OR \"fix every alert\"";
-        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            PathBuf::new(),
+        );
         let err = tool
             .execute(serde_json::json!({"pattern": pattern}), ToolCtx::default())
             .await
@@ -1045,7 +1159,11 @@ mod tests {
         insert_message(&writer, 1, "user", "phone: 555-1234");
         insert_message(&writer, 1, "user", "alpha bravo charlie");
 
-        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            PathBuf::new(),
+        );
         let out = tool
             .execute(
                 serde_json::json!({
@@ -1062,9 +1180,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lcm_grep_regex_mode_files_reads_authoritative_payload() {
+        let (dir, db) = fresh_db();
+        let writer = schema::open(&db).unwrap();
+        let file_id = "file_00000000000000aa";
+        let source = dir.path().join("mutable-source.txt");
+        std::fs::write(&source, "source-only-match\n").unwrap();
+        insert_file(&writer, 1, file_id, &source.display().to_string());
+        let payloads = payloads_dir(&dir);
+        std::fs::write(payloads.join(file_id), "payload-match\n").unwrap();
+
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            payloads,
+        );
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "pattern": "payload-match",
+                    "mode": "regex",
+                    "scope": "files",
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains(file_id));
+        assert!(out.contains("payload-match"));
+        assert!(!out.contains("source-only-match"));
+    }
+
+    #[tokio::test]
+    async fn lcm_grep_file_scope_rejects_fts() {
+        let (_dir, db) = fresh_db();
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            PathBuf::new(),
+        );
+        let err = tool
+            .execute(
+                serde_json::json!({"pattern": "x", "scope": "files"}),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Invalid arguments: scope=\"files\" requires mode=\"regex\""
+        );
+    }
+
+    #[tokio::test]
     async fn lcm_grep_no_matches_message_is_friendly() {
         let (_dir, db) = fresh_db();
-        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            PathBuf::new(),
+        );
         let out = tool
             .execute(
                 serde_json::json!({"pattern": "nothingmatches"}),
@@ -1102,7 +1277,11 @@ mod tests {
     #[tokio::test]
     async fn lcm_grep_rejects_unknown_mode() {
         let (_dir, db) = fresh_db();
-        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(1));
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(1),
+            PathBuf::new(),
+        );
         let err = tool
             .execute(
                 serde_json::json!({"pattern": "x", "mode": "fuzzy"}),
@@ -1128,7 +1307,11 @@ mod tests {
         insert_message(&writer, 2, "user", "other realm");
 
         // Active id points at conversation 2 → only "other realm" hits.
-        let tool = LcmGrep::new(schema::open_readonly(&db).unwrap(), shared_active(2));
+        let tool = LcmGrep::new(
+            schema::open_readonly(&db).unwrap(),
+            shared_active(2),
+            PathBuf::new(),
+        );
         let out = tool
             .execute(serde_json::json!({"pattern": "realm"}), ToolCtx::default())
             .await
