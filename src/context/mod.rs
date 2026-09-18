@@ -19,10 +19,10 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::{EngineError, ProviderError};
-use crate::provider::Provider;
+use crate::provider::{ChatError, ChatOutcome, Provider};
 use crate::tools::Tool;
 use crate::types::{Message, Response, ToolDefinition};
 use crate::usage::{self, ProviderCallRecord, TaskKey, UsageLedger};
@@ -256,6 +256,40 @@ const SUMMARIZER_ROLE_PROMPT: &str = "You are a context-compaction \
 summarization engine. Follow user instructions exactly and return \
 plain text summary content only.";
 
+/// Capture the billed calls from either result of a provider request.
+fn provider_call_record<'a>(
+    result: &Result<ChatOutcome, ChatError>,
+    duration: Duration,
+    model: &'a str,
+    session: &'a str,
+    source: &'a str,
+    started_at: u64,
+    task: &'a TaskKey,
+) -> ProviderCallRecord<'a> {
+    let (calls, outcome) = match result {
+        Ok(outcome) => (
+            outcome
+                .failed
+                .iter()
+                .cloned()
+                .chain(std::iter::once(outcome.usage.clone()))
+                .collect(),
+            "text",
+        ),
+        Err(error) => (error.failed.clone(), "error"),
+    };
+    ProviderCallRecord {
+        calls,
+        duration,
+        model,
+        outcome,
+        session,
+        source,
+        started_at,
+        task,
+    }
+}
+
 /// Build a `SummarizeFn` that uses the given provider for LLM calls.
 ///
 /// The provider is captured by `Arc`: one heap allocation, paid once.
@@ -291,39 +325,18 @@ pub fn make_summarize_fn<P: Provider + 'static>(
                 .as_secs();
             let task = TaskKey::background("summarizer");
             let outcome = provider.chat("summarizer", &prompt_messages, &[]).await;
-            match &outcome {
-                Ok(outcome) => usage::record_provider_call(
-                    ledger.as_deref(),
-                    &ProviderCallRecord {
-                        calls: outcome
-                            .failed
-                            .iter()
-                            .cloned()
-                            .chain(std::iter::once(outcome.usage.clone()))
-                            .collect(),
-                        duration: started.elapsed(),
-                        model: provider.model(),
-                        outcome: "text",
-                        session: "summarizer",
-                        source: "Summarizer",
-                        started_at,
-                        task: &task,
-                    },
+            usage::record_provider_call(
+                ledger.as_deref(),
+                &provider_call_record(
+                    &outcome,
+                    started.elapsed(),
+                    provider.model(),
+                    "summarizer",
+                    "Summarizer",
+                    started_at,
+                    &task,
                 ),
-                Err(error) => usage::record_provider_call(
-                    ledger.as_deref(),
-                    &ProviderCallRecord {
-                        calls: error.failed.clone(),
-                        duration: started.elapsed(),
-                        model: provider.model(),
-                        outcome: "error",
-                        session: "summarizer",
-                        source: "Summarizer",
-                        started_at,
-                        task: &task,
-                    },
-                ),
-            }
+            );
             let outcome = outcome.map_err(|e| e.error)?;
             match outcome.response {
                 Response::Text(text) => Ok(text),
@@ -368,39 +381,18 @@ pub fn make_raw_chat_fn<P: Provider + 'static>(
                     .as_secs();
                 let task = TaskKey::background("cache-prefix");
                 let outcome = provider.chat(&session, &messages, &tools).await;
-                match &outcome {
-                    Ok(outcome) => usage::record_provider_call(
-                        ledger.as_deref(),
-                        &ProviderCallRecord {
-                            calls: outcome
-                                .failed
-                                .iter()
-                                .cloned()
-                                .chain(std::iter::once(outcome.usage.clone()))
-                                .collect(),
-                            duration: started.elapsed(),
-                            model: provider.model(),
-                            outcome: "text",
-                            session: &session,
-                            source: "CachePrefix",
-                            started_at,
-                            task: &task,
-                        },
+                usage::record_provider_call(
+                    ledger.as_deref(),
+                    &provider_call_record(
+                        &outcome,
+                        started.elapsed(),
+                        provider.model(),
+                        &session,
+                        "CachePrefix",
+                        started_at,
+                        &task,
                     ),
-                    Err(error) => usage::record_provider_call(
-                        ledger.as_deref(),
-                        &ProviderCallRecord {
-                            calls: error.failed.clone(),
-                            duration: started.elapsed(),
-                            model: provider.model(),
-                            outcome: "error",
-                            session: &session,
-                            source: "CachePrefix",
-                            started_at,
-                            task: &task,
-                        },
-                    ),
-                }
+                );
                 let outcome = outcome.map_err(|e| e.error)?;
                 match outcome.response {
                     Response::Text(text) => Ok(text),
