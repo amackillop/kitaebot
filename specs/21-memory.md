@@ -155,9 +155,14 @@ reading session history through the context engine abstraction:
   entries invalidated by newer events; enforce the index cap. The cap
   is verified post-pass: a pass that ends over it triggers exactly one
   compaction-only ephemeral turn (the index as the sole subject, no
-  transcript spans) before the pass completes. The retry runs after
-  the watermarks advance and is best-effort — its failure logs and is
-  flagged in the pass summary, never failing the pass.
+  transcript spans) before the pass completes. The retry is
+  structurally minimal: a 2-iteration bound (not the sub-agent
+  budget — a research-sized budget let the model spend the whole turn
+  verifying pointers and die one write short) and only the memory-write
+  tools (reads are how the budget gets spent instead of writing). It
+  runs after the watermarks advance and is best-effort —
+  its failure logs and is flagged in the pass summary, never failing
+  the pass.
 - The watermarks advance only after a successful pass, so a failed
   distillation retries over the same span.
 - **Priming:** an absent watermark *document* (fresh state database)

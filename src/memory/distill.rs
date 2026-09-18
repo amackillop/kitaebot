@@ -333,6 +333,11 @@ pub async fn run<P: Provider, E: ContextEngine>(
     Ok(Some((summary, meter)))
 }
 
+/// Compaction is a single write: bound the turn and strip it to the
+/// write tools.
+const COMPACTION_MAX_ITERATIONS: usize = 2;
+const COMPACTION_TOOLS: &[&str] = &["file_write", "file_edit"];
+
 /// One compaction-only ephemeral turn, run when the pass left the
 /// index over its injection cap. Compaction as a side quest inside a
 /// folding pass keeps failing; a turn whose only subject is the index
@@ -351,14 +356,15 @@ async fn retry_compaction<P: Provider>(
     let directive = index_over_cap(workspace, distiller.index_cap_bytes)?;
     let mut ephemeral = EphemeralSession::new(DISTILL_TOOL_OUTPUT_TOKENS);
     let user_message = build_compaction_message(workspace, &directive);
+    let tools = distiller.tools.filtered(COMPACTION_TOOLS);
     let (result, meter) = run_turn_metered(
         &mut ephemeral,
         summarize,
         &distiller.system_prompt,
         &user_message,
         provider,
-        &distiller.tools,
-        distiller.max_iterations,
+        &tools,
+        COMPACTION_MAX_ITERATIONS,
         BudgetPolicy::Fail,
         ReplyPolicy::Accept,
         &ToolCtx::default(),
@@ -384,9 +390,14 @@ fn build_compaction_message(workspace: &Workspace, directive: &str) -> String {
         msg,
         "({directive}) — everything past the cap is invisible \
          at injection time. This turn has one job: bring memory/MEMORY.md \
-         under the cap. Move detailed sections into memory/topics/*.md and \
-         leave one-line pointers, oldest finished-ticket sections first. \
-         Do not fold any new facts.\n\n"
+         under the cap. You have only the write tools (file_write, \
+         file_edit) this turn; move detailed sections into \
+         memory/topics/*.md and leave one-line pointers, oldest \
+         finished-ticket sections first. Do not fold any new facts. \
+         Index entries are pointers: their detail is already required \
+         to live in the topic files, so do not re-verify pointers \
+         before shrinking — write the compacted index first; \
+         verification is the fold pass's job.\n\n"
     );
     msg.push_str(&index_and_topics_section(workspace));
     msg
@@ -615,7 +626,7 @@ mod run_tests {
     use crate::error::ProviderError;
     use crate::provider::MockProvider;
     use crate::test_support::workspace;
-    use crate::types::Response;
+    use crate::types::{Response, ToolCall, ToolFunction};
 
     /// Seed a `FlatSession` (the production engine) with per-session
     /// transcripts. The engine gets its own context dir: the distiller
@@ -883,6 +894,96 @@ mod run_tests {
         assert!(
             !carries_fold,
             "retry request must not carry the fold: {sent:?}"
+        );
+        let (summary, _usage) = out.expect("pass ran");
+        assert!(summary.contains("folded"), "{summary}");
+    }
+
+    #[tokio::test]
+    async fn compaction_retry_is_write_only_and_iteration_bounded() {
+        let (_dir, ws) = workspace();
+        std::fs::create_dir_all(ws.path().join("memory")).unwrap();
+        std::fs::write(ws.path().join("memory/MEMORY.md"), "x".repeat(9000)).unwrap();
+        let engine = seeded_engine(&[(
+            "general",
+            vec![Message::User {
+                content: "small backlog".into(),
+            }],
+        )])
+        .await;
+        // Fold succeeds; the retry turn's mock emits a read-tool call
+        // every round. With the write-only toolset the provider must
+        // never see file_read, and the bounded retry must end after
+        // its constant, not the distiller's budget. A final Text draw
+        // covers the state-report squeeze fired when the bounded
+        // rounds exhaust.
+        let read_calls = || Response::ToolCalls {
+            content: String::new(),
+            calls: vec![ToolCall::new(
+                "c1".to_string(),
+                ToolFunction {
+                    name: "file_read".parse().unwrap(),
+                    arguments: r#"{"path":"memory/MEMORY.md"}"#.to_string(),
+                },
+            )],
+        };
+        let provider = Arc::new(MockProvider::new(vec![
+            Ok(Response::Text("folded".into())),
+            Ok(read_calls()),
+            Ok(read_calls()),
+            Ok(Response::Text("state report".into())),
+        ]));
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        // A base registry that really contains the memory tools, so the
+        // filtered toolset's shape is observable (Tools::default() is
+        // empty and filters to nothing).
+        let base = Tools::new(
+            vec![
+                Arc::new(crate::tools::MockTool::named(
+                    "file_read",
+                    "pretend index contents",
+                )),
+                Arc::new(crate::tools::MockTool::named("file_write", "wrote")),
+                Arc::new(crate::tools::MockTool::named("file_edit", "edited")),
+            ],
+            &[],
+        )
+        .unwrap();
+        let distiller = Distiller::new(&base, ws.path(), db, 1000, 1000, 5, 8192);
+        let mut state = DistillState::default();
+
+        let out = run(
+            &engine,
+            &distiller,
+            &*provider,
+            &noop_summarize(),
+            &ws,
+            &mut state,
+            Gate::Bypass,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            provider.call_count(),
+            4,
+            "fold + 2 bounded retry rounds + state-report squeeze"
+        );
+        let retry_tools = provider.request_tools(1);
+        assert!(
+            retry_tools
+                .iter()
+                .all(|t| t.function.name.as_str() != "file_read"),
+            "retry must not offer read tools: {retry_tools:?}"
+        );
+        let offered: Vec<&str> = retry_tools
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        assert_eq!(
+            offered,
+            vec!["file_write", "file_edit"],
+            "retry must offer exactly the memory-write tools"
         );
         let (summary, _usage) = out.expect("pass ran");
         assert!(summary.contains("folded"), "{summary}");
