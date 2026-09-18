@@ -11,6 +11,7 @@
 use std::cmp::Ordering;
 use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use std::collections::HashMap;
 
@@ -19,10 +20,11 @@ use rusqlite::{Connection, params};
 use crate::agent::envelope::ChannelSource;
 use crate::clients::openrouter_pricing::PricingClient;
 use crate::config::ModelRates;
+use crate::provider::CallUsage;
 use crate::state_db::StateDb;
 use tracing::warn;
 
-use crate::agent::TurnMeter;
+use crate::agent::{TurnMeter, TurnUsage};
 
 /// The ledger's SQL, as consts so the schema-drift test in
 /// `state_db` can prepare every query against the migrated schema.
@@ -50,6 +52,11 @@ const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
 pub struct TaskKey(String);
 
 impl TaskKey {
+    /// Identity for a provider call that has no owning dispatched turn.
+    pub fn background(name: &str) -> Self {
+        Self(format!("background:{name}"))
+    }
+
     /// Derive the key from a dispatch's source. PR roles fold: the
     /// feedback, contributor, and reviewer turns on one PR are one
     /// task. Interactive channels aggregate under one key each.
@@ -88,6 +95,17 @@ pub struct TurnRecord<'a> {
     /// dispatch identity (tests, the distiller's ephemeral engine).
     pub task: Option<&'a TaskKey>,
     pub meter: TurnMeter,
+}
+
+pub struct ProviderCallRecord<'a> {
+    pub calls: Vec<CallUsage>,
+    pub duration: Duration,
+    pub model: &'a str,
+    pub outcome: &'static str,
+    pub session: &'a str,
+    pub source: &'a str,
+    pub started_at: u64,
+    pub task: &'a TaskKey,
 }
 
 /// Append-only ledger of per-turn usage, on the shared operational
@@ -217,6 +235,49 @@ impl UsageLedger {
             ],
         )?;
         Ok(())
+    }
+
+    fn record_provider_call(&self, record: &ProviderCallRecord<'_>) -> rusqlite::Result<()> {
+        let usage = record
+            .calls
+            .iter()
+            .cloned()
+            .fold(TurnUsage::default(), |mut usage, call| {
+                usage.add_call(call);
+                usage
+            });
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        conn.execute(
+            INSERT_TURN,
+            params![
+                GIT_SHA,
+                record.session,
+                record.source,
+                record.model,
+                record.task.as_str(),
+                usage.calls,
+                usage.prompt_tokens.cast_signed(),
+                usage.cached_tokens.map(u64::cast_signed),
+                usage.completion_tokens.cast_signed(),
+                usage.cost,
+                record.started_at.cast_signed(),
+                i64::try_from(record.duration.as_millis()).unwrap_or(i64::MAX),
+                record.outcome,
+                usage.provider,
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+pub fn record_provider_call(ledger: Option<&UsageLedger>, record: &ProviderCallRecord<'_>) {
+    if let Some(ledger) = ledger
+        && let Err(e) = ledger.record_provider_call(record)
+    {
+        warn!("Failed to record provider call usage: {e}");
     }
 }
 

@@ -129,13 +129,17 @@ async fn daemon_main() {
             info!(telegram = config.telegram.enabled, "Daemon starting");
 
             let state_db = open_state_db(&workspace);
+            let usage_ledger = usage_ledger(&state_db, &config);
             let duties = build_duties(&config);
             let (duty_trigger, trigger_rx) = duty_trigger_channel(&duties);
             let workspace = Arc::new(workspace);
             let provider = Arc::new(rt.provider);
             let tools = rt.tools;
             let summarizer = config.provider.model_overrides.summarizer.as_ref();
-            let summarize = context::make_summarize_fn(role_provider(&provider, summarizer));
+            let summarize = context::make_summarize_fn(
+                role_provider(&provider, summarizer),
+                Some(usage_ledger.clone()),
+            );
 
             let (handle, actor) = build_handle(
                 workspace.clone(),
@@ -145,6 +149,7 @@ async fn daemon_main() {
                 mcp,
                 &config,
                 summarize,
+                usage_ledger,
                 rt.notifier.clone(),
                 duty_trigger,
             );
@@ -223,6 +228,7 @@ fn build_handle(
     mcp: tools::mcp::McpTools,
     config: &Config,
     summarize: context::SummarizeFn,
+    usage_ledger: Arc<usage::UsageLedger>,
     notifier: Option<Arc<notify::Notifier>>,
     duty_trigger: duty::TriggerHandle,
 ) -> (agent::AgentHandle, tokio::task::JoinHandle<()>) {
@@ -243,6 +249,7 @@ fn build_handle(
                 config,
                 engine,
                 summarize,
+                usage_ledger,
                 notifier,
                 Some(duty_trigger),
             )
@@ -251,7 +258,7 @@ fn build_handle(
             // Raw chat over the main provider, never the summarizer
             // override: compaction rides the main session's cache,
             // which lives under the main model.
-            let raw_chat = context::make_raw_chat_fn(provider.clone());
+            let raw_chat = context::make_raw_chat_fn(provider.clone(), Some(usage_ledger.clone()));
             let engine = context::lcm::LcmEngine::new(
                 &workspace.context_dir(),
                 context,
@@ -271,6 +278,7 @@ fn build_handle(
                 config,
                 engine,
                 summarize,
+                usage_ledger,
                 notifier,
                 Some(duty_trigger),
             )
@@ -292,6 +300,17 @@ fn duty_trigger_channel(
         tx,
     };
     (handle, rx)
+}
+
+fn usage_ledger(state_db: &state_db::StateDb, config: &Config) -> Arc<usage::UsageLedger> {
+    let ledger = usage::UsageLedger::new(state_db, config.usage.rates.clone());
+    let ledger = match config.provider.api.pricing_endpoint() {
+        Some(base) => ledger.with_pricing(clients::openrouter_pricing::PricingClient::new(
+            base.to_string(),
+        )),
+        None => ledger,
+    };
+    Arc::new(ledger)
 }
 
 /// Built-in and operator-defined duties, scheduled from config
@@ -376,6 +395,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     config: &Config,
     engine: E,
     summarize: context::SummarizeFn,
+    usage_ledger: Arc<usage::UsageLedger>,
     notifier: Option<Arc<notify::Notifier>>,
     duty_trigger: Option<duty::TriggerHandle>,
 ) -> (agent::AgentHandle, tokio::task::JoinHandle<()>) {
@@ -404,14 +424,7 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     // Telemetry: an open failure is logged and the daemon runs
     // unmetered and unrecorded. Opened before the task tool so
     // sub-agent turns share the ledgers.
-    let usage_ledger = usage::UsageLedger::new(state_db, config.usage.rates.clone());
-    let usage_ledger = match config.provider.api.pricing_endpoint() {
-        Some(base) => usage_ledger.with_pricing(clients::openrouter_pricing::PricingClient::new(
-            base.to_string(),
-        )),
-        None => usage_ledger,
-    };
-    let usage_ledger = Some(Arc::new(usage_ledger));
+    let usage_ledger = Some(usage_ledger);
     let review_ledger = config
         .review
         .enabled

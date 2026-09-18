@@ -91,6 +91,12 @@ Distillation turns are attributed through the command path: a
 scheduled `/duty distill` arrives as `duty:distill`; an operator
 `/distill` from the socket is `chat:socket`.
 
+Compaction provider calls have no stable owning envelope: soft compaction can
+run after a reply, and cache-prefix riding may retry independently. They write
+their own rows under `background:summarizer` and `background:cache-prefix`.
+This keeps their billed usage visible without charging it to an unrelated later
+turn. Failed attempts are included in the same row.
+
 ### Timing
 
 `run_turn_metered` returns a `TurnMeter { usage, started_at,

@@ -297,7 +297,7 @@ pub(crate) struct TurnUsage {
 }
 
 impl TurnUsage {
-    fn add_call(&mut self, call: CallUsage) {
+    pub(crate) fn add_call(&mut self, call: CallUsage) {
         self.calls += 1;
         if let Some(prompt) = call.prompt_tokens {
             self.prompt_tokens += u64::from(prompt);
@@ -1344,7 +1344,7 @@ mod tests {
     }
 
     fn test_summarize(provider: &Arc<MockProvider>) -> SummarizeFn {
-        make_summarize_fn(provider.clone())
+        make_summarize_fn(provider.clone(), None)
     }
 
     #[tokio::test]

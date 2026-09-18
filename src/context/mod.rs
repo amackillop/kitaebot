@@ -19,11 +19,13 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::{EngineError, ProviderError};
 use crate::provider::Provider;
 use crate::tools::Tool;
 use crate::types::{Message, Response, ToolDefinition};
+use crate::usage::{self, ProviderCallRecord, TaskKey, UsageLedger};
 
 /// Callback for LLM summarization during compaction.
 ///
@@ -261,9 +263,13 @@ plain text summary content only.";
 /// messages, wraps them in `<conversation_segment>` tags, and combines
 /// them with the instructions into a single user turn. The system
 /// turn is fixed.
-pub fn make_summarize_fn<P: Provider + 'static>(provider: Arc<P>) -> SummarizeFn {
+pub fn make_summarize_fn<P: Provider + 'static>(
+    provider: Arc<P>,
+    ledger: Option<Arc<UsageLedger>>,
+) -> SummarizeFn {
     Arc::new(move |instructions: &str, messages: &[Message]| {
         let provider = provider.clone();
+        let ledger = ledger.clone();
         let user_content = format!(
             "{instructions}\n\n<conversation_segment>\n{}\n</conversation_segment>",
             format_messages_for_summary(messages),
@@ -278,13 +284,47 @@ pub fn make_summarize_fn<P: Provider + 'static>(provider: Arc<P>) -> SummarizeFn
         ];
 
         Box::pin(async move {
-            // Failed-attempt usage is dropped here, as success usage
-            // already is — ledger attribution for summarizer calls is
-            // #139.
-            let outcome = provider
-                .chat("summarizer", &prompt_messages, &[])
-                .await
-                .map_err(|e| e.error)?;
+            let started = Instant::now();
+            let started_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let task = TaskKey::background("summarizer");
+            let outcome = provider.chat("summarizer", &prompt_messages, &[]).await;
+            match &outcome {
+                Ok(outcome) => usage::record_provider_call(
+                    ledger.as_deref(),
+                    &ProviderCallRecord {
+                        calls: outcome
+                            .failed
+                            .iter()
+                            .cloned()
+                            .chain(std::iter::once(outcome.usage.clone()))
+                            .collect(),
+                        duration: started.elapsed(),
+                        model: provider.model(),
+                        outcome: "text",
+                        session: "summarizer",
+                        source: "Summarizer",
+                        started_at,
+                        task: &task,
+                    },
+                ),
+                Err(error) => usage::record_provider_call(
+                    ledger.as_deref(),
+                    &ProviderCallRecord {
+                        calls: error.failed.clone(),
+                        duration: started.elapsed(),
+                        model: provider.model(),
+                        outcome: "error",
+                        session: "summarizer",
+                        source: "Summarizer",
+                        started_at,
+                        task: &task,
+                    },
+                ),
+            }
+            let outcome = outcome.map_err(|e| e.error)?;
             match outcome.response {
                 Response::Text(text) => Ok(text),
                 Response::ToolCalls { content, .. } => Ok(content),
@@ -312,15 +352,56 @@ pub type RawChatFn = Arc<
 >;
 
 /// Build a `RawChatFn` over the given provider.
-pub fn make_raw_chat_fn<P: Provider + 'static>(provider: Arc<P>) -> RawChatFn {
+pub fn make_raw_chat_fn<P: Provider + 'static>(
+    provider: Arc<P>,
+    ledger: Option<Arc<UsageLedger>>,
+) -> RawChatFn {
     Arc::new(
         move |session: String, messages: Vec<Message>, tools: Arc<[ToolDefinition]>| {
             let provider = provider.clone();
+            let ledger = ledger.clone();
             Box::pin(async move {
-                let outcome = provider
-                    .chat(&session, &messages, &tools)
-                    .await
-                    .map_err(|e| e.error)?;
+                let started = Instant::now();
+                let started_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let task = TaskKey::background("cache-prefix");
+                let outcome = provider.chat(&session, &messages, &tools).await;
+                match &outcome {
+                    Ok(outcome) => usage::record_provider_call(
+                        ledger.as_deref(),
+                        &ProviderCallRecord {
+                            calls: outcome
+                                .failed
+                                .iter()
+                                .cloned()
+                                .chain(std::iter::once(outcome.usage.clone()))
+                                .collect(),
+                            duration: started.elapsed(),
+                            model: provider.model(),
+                            outcome: "text",
+                            session: &session,
+                            source: "CachePrefix",
+                            started_at,
+                            task: &task,
+                        },
+                    ),
+                    Err(error) => usage::record_provider_call(
+                        ledger.as_deref(),
+                        &ProviderCallRecord {
+                            calls: error.failed.clone(),
+                            duration: started.elapsed(),
+                            model: provider.model(),
+                            outcome: "error",
+                            session: &session,
+                            source: "CachePrefix",
+                            started_at,
+                            task: &task,
+                        },
+                    ),
+                }
+                let outcome = outcome.map_err(|e| e.error)?;
                 match outcome.response {
                     Response::Text(text) => Ok(text),
                     Response::ToolCalls { content, .. } => Ok(content),
@@ -400,6 +481,7 @@ mod tests {
     use super::*;
     use crate::provider::MockProvider;
     use crate::types::Response;
+    use crate::usage::UsageLedger;
 
     #[test]
     fn truncate_tool_output_passes_small_content_through() {
@@ -433,7 +515,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
             "summary".to_string(),
         ))]));
-        let summarize = make_summarize_fn(provider.clone());
+        let summarize = make_summarize_fn(provider.clone(), None);
 
         let messages = vec![
             Message::User {
@@ -450,12 +532,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summarize_fn_records_successful_usage() {
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let ledger = Arc::new(UsageLedger::new(&db, std::collections::HashMap::default()));
+        let provider = Arc::new(
+            MockProvider::new(vec![Ok(Response::Text("summary".into()))]).with_prompt_tokens(42),
+        );
+        let summarize = make_summarize_fn(provider, Some(ledger.clone()));
+
+        summarize("p", &[]).await.unwrap();
+
+        let rows = ledger.rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task.as_deref(), Some("background:summarizer"));
+        assert_eq!(rows[0].prompt_tokens, 42);
+    }
+
+    #[tokio::test]
     async fn summarize_fn_handles_tool_calls_response() {
         let provider = Arc::new(MockProvider::new(vec![Ok(Response::ToolCalls {
             content: "fallback text".to_string(),
             calls: vec![],
         })]));
-        let summarize = make_summarize_fn(provider);
+        let summarize = make_summarize_fn(provider, None);
 
         let result = summarize("p", &[]).await.unwrap();
         assert_eq!(result, "fallback text");
@@ -464,10 +563,48 @@ mod tests {
     #[tokio::test]
     async fn summarize_fn_propagates_error() {
         let provider = Arc::new(MockProvider::new(vec![Err(ProviderError::RateLimited)]));
-        let summarize = make_summarize_fn(provider);
+        let summarize = make_summarize_fn(provider, None);
 
         let result = summarize("p", &[]).await;
         assert!(matches!(result, Err(ProviderError::RateLimited)));
+    }
+
+    #[tokio::test]
+    async fn summarize_fn_records_failed_attempt_usage() {
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let ledger = Arc::new(UsageLedger::new(&db, std::collections::HashMap::default()));
+        let provider = Arc::new(
+            MockProvider::new(vec![Err(ProviderError::RateLimited)]).with_failed_usage(vec![
+                crate::provider::CallUsage {
+                    prompt_tokens: Some(11),
+                    ..crate::provider::CallUsage::default()
+                },
+            ]),
+        );
+        let summarize = make_summarize_fn(provider, Some(ledger.clone()));
+
+        summarize("p", &[]).await.unwrap_err();
+
+        let rows = ledger.rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].prompt_tokens, 11);
+    }
+
+    #[tokio::test]
+    async fn raw_chat_records_usage() {
+        let db = crate::state_db::StateDb::open_in_memory().unwrap();
+        let ledger = Arc::new(UsageLedger::new(&db, std::collections::HashMap::default()));
+        let provider = Arc::new(
+            MockProvider::new(vec![Ok(Response::Text("summary".into()))]).with_prompt_tokens(24),
+        );
+        let chat = make_raw_chat_fn(provider, Some(ledger.clone()));
+
+        chat("general".into(), vec![], Arc::from([])).await.unwrap();
+
+        let rows = ledger.rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task.as_deref(), Some("background:cache-prefix"));
+        assert_eq!(rows[0].prompt_tokens, 24);
     }
 
     #[test]
