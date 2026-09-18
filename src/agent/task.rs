@@ -324,12 +324,13 @@ impl<P: Provider> Tool for TaskTool<P> {
                     args.review.as_ref(),
                     args.review.as_ref().and_then(|m| m.tree_hash.as_deref()),
                 )
-                && ledger
-                    .has_reviewed_tree(&meta.repo, &meta.gate, tree_hash)
-                    .map_err(|source| ToolError::Sqlite {
-                        context: "check reviewed tree",
-                        source,
-                    })?
+                && match ledger.has_reviewed_tree(&meta.repo, &meta.gate, tree_hash) {
+                    Ok(reviewed) => reviewed,
+                    Err(error) => {
+                        warn!("failed to look up reviewed tree: {error}");
+                        false
+                    }
+                }
             {
                 return Ok(format!(
                     "Review already recorded for {} gate on tree {tree_hash}; \
@@ -1196,6 +1197,53 @@ mod tests {
 
         assert_eq!(provider.call_count(), 1);
         assert!(cached.contains("proceed without re-dispatching"));
+    }
+
+    #[tokio::test]
+    async fn reviewer_runs_when_tree_cache_lookup_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        ledger
+            .connection_for_test()
+            .execute_batch("DROP TABLE reviews")
+            .unwrap();
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            REVIEW_RESPONSE.to_string(),
+        ))]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger),
+        );
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {
+                        "repo": "o/r",
+                        "gate": "series",
+                        "git_ref": "abc",
+                        "tree_hash": "tree"
+                    }
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(provider.call_count(), 1);
+        assert!(result.contains("[ledger: recording failed; nothing recorded]"));
     }
 
     /// The incident's real bad shape (issue #113): a dispatch prompt

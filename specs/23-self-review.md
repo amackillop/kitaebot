@@ -280,7 +280,7 @@ in its versioned baseline migration. One row per finding:
 | `disposed_at` | Timestamp of the disposition, nullable |
 
 A second table, `reviews`, records one row per gate invocation: `ts`,
-`repo`, `gate`, `git_ref`, `verdict`, `confidence`. It answers what
+`repo`, `gate`, `git_ref`, `tree_hash`, `verdict`, `confidence`. It answers what
 finding rows cannot: whether a gate ran at all — a pushed series with no
 series-review row is a skipped gate, which is how "the ledger measures
 skipped gates" is actually mechanized — and how verdicts correlate with
