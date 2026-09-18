@@ -78,6 +78,18 @@ The refusal is injected even on the round that ends the turn: every
 `tool_call` needs a matching result before the next completion, so
 skipping that would leave the stored context malformed.
 
+### Crash Recovery
+
+LCM persists each message as it is produced. On engine open and session
+switch, it repairs a recoverable tail: an assistant tool-call message followed
+only by tool results, with one or more missing call ids. It appends an error
+result for each missing call stating that the previous turn ended before the
+call completed. The repair is idempotent. It does not rewrite a malformed
+middle of a conversation, where appending results could break message order.
+
+Flat sessions save atomically after a turn, so a hard death retains the prior
+complete session rather than a partial tool-call round.
+
 ### Policy Violation Gate
 
 A blocked tool call is just an error string to the model: nothing stops

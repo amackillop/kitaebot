@@ -127,6 +127,9 @@ pub(super) struct SentRequest {
 /// qualifies.
 const SNAPSHOT_MAX_AGE: std::time::Duration = std::time::Duration::from_mins(2);
 
+const INTERRUPTED_TOOL_CALL: &str =
+    "Error: the previous turn ended before this tool call completed.";
+
 impl LcmEngine {
     /// Open or create the LCM database at `db_path`.
     ///
@@ -153,9 +156,10 @@ impl LcmEngine {
             source: e,
         })?;
         let db_path = context_dir.join("lcm.db");
-        let conn = schema::open(&db_path)?;
+        let mut conn = schema::open(&db_path)?;
         let active_name = read_active_session(&context_dir).unwrap_or_else(|| "general".into());
         let conversation_id = ensure_conversation(&conn, &active_name)?;
+        repair_dangling_tool_calls(&mut conn, conversation_id)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             db_path,
@@ -602,7 +606,12 @@ impl ContextEngine for LcmEngine {
         }
         let conn = Arc::clone(&self.conn);
         let name_for_db = sanitized.clone();
-        let id = run_blocking(conn, move |c| ensure_conversation(c, &name_for_db)).await?;
+        let id = run_blocking(conn, move |c| {
+            let id = ensure_conversation(c, &name_for_db)?;
+            repair_dangling_tool_calls(c, id)?;
+            Ok(id)
+        })
+        .await?;
         self.observed_tokens = None;
         self.active_name = sanitized;
         self.conversation_id = id;
@@ -753,6 +762,55 @@ fn push_message_sync(
     )?;
 
     tx.commit()?;
+    Ok(())
+}
+
+/// Append results for tool calls left at the recoverable conversation tail.
+fn repair_dangling_tool_calls(
+    conn: &mut Connection,
+    conversation_id: i64,
+) -> Result<(), EngineError> {
+    let call_ids = {
+        let mut stmt = conn.prepare(
+            "WITH latest_tool_calls AS (\
+             SELECT m.message_id, m.seq FROM messages m \
+              WHERE m.conversation_id = ?1 \
+                AND EXISTS (SELECT 1 FROM message_parts p \
+                             WHERE p.message_id = m.message_id \
+                               AND p.part_type = 'tool_call') \
+              ORDER BY m.seq DESC LIMIT 1\
+         ) \
+         SELECT calls.tool_call_id FROM latest_tool_calls latest \
+          JOIN message_parts calls ON calls.message_id = latest.message_id \
+          WHERE calls.part_type = 'tool_call' \
+            AND NOT EXISTS (SELECT 1 FROM messages later \
+                            WHERE later.conversation_id = ?1 \
+                              AND later.seq > latest.seq \
+                              AND later.role != 'tool') \
+            AND NOT EXISTS (SELECT 1 FROM messages result_message \
+                            JOIN message_parts result \
+                              ON result.message_id = result_message.message_id \
+                            WHERE result_message.conversation_id = ?1 \
+                              AND result_message.seq > latest.seq \
+                              AND result.part_type = 'tool_output' \
+                              AND result.tool_call_id = calls.tool_call_id) \
+          ORDER BY calls.ordinal",
+        )?;
+        stmt.query_map([conversation_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    for call_id in call_ids {
+        push_message_sync(
+            conn,
+            conversation_id,
+            &Message::Tool {
+                call_id,
+                content: INTERRUPTED_TOOL_CALL.to_string(),
+            },
+            None,
+        )?;
+    }
     Ok(())
 }
 
@@ -2358,6 +2416,91 @@ mod tests {
             Message::User { content } => assert_eq!(content, "u2"),
             other => panic!("expected user, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn reopen_repairs_dangling_tool_calls() {
+        let (mut engine, dir) = temp_engine();
+        engine
+            .push_message(Message::ToolCalls {
+                content: "running tools".into(),
+                calls: vec![
+                    ToolCall::new(
+                        "c1".into(),
+                        ToolFunction {
+                            name: "exec".parse().unwrap(),
+                            arguments: r#"{"cmd":"one"}"#.into(),
+                        },
+                    ),
+                    ToolCall::new(
+                        "c2".into(),
+                        ToolFunction {
+                            name: "exec".parse().unwrap(),
+                            arguments: r#"{"cmd":"two"}"#.into(),
+                        },
+                    ),
+                ],
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::Tool {
+                call_id: "c1".into(),
+                content: "first result".into(),
+            })
+            .await
+            .unwrap();
+        drop(engine);
+
+        let engine = LcmEngine::new(
+            &dir.path().join("context"),
+            ContextConfig::default(),
+            canned_summarize("summary"),
+            unused_raw_chat(),
+        )
+        .unwrap();
+        let ctx = engine.assemble("SYS").await.unwrap();
+
+        assert!(matches!(ctx.messages[1], Message::ToolCalls { .. }));
+        assert!(matches!(
+            &ctx.messages[2],
+            Message::Tool { call_id, content }
+                if call_id == "c1" && content == "first result"
+        ));
+        assert!(matches!(
+            &ctx.messages[3],
+            Message::Tool { call_id, content }
+                if call_id == "c2" && content == INTERRUPTED_TOOL_CALL
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_switch_repairs_dangling_tool_calls() {
+        let (mut engine, _dir) = temp_engine();
+        engine.switch_session("recover").await.unwrap();
+        engine
+            .push_message(Message::ToolCalls {
+                content: String::new(),
+                calls: vec![ToolCall::new(
+                    "c1".into(),
+                    ToolFunction {
+                        name: "exec".parse().unwrap(),
+                        arguments: r#"{"cmd":"true"}"#.into(),
+                    },
+                )],
+            })
+            .await
+            .unwrap();
+
+        engine.switch_session("general").await.unwrap();
+        engine.switch_session("recover").await.unwrap();
+        let ctx = engine.assemble("SYS").await.unwrap();
+
+        assert!(matches!(
+            &ctx.messages[2],
+            Message::Tool { call_id, content }
+                if call_id == "c1" && content == INTERRUPTED_TOOL_CALL
+        ));
     }
 
     #[tokio::test]
