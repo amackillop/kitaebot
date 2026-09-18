@@ -88,6 +88,7 @@ pub struct GateRecord<'a> {
     pub repo: &'a str,
     pub gate: &'a str,
     pub git_ref: &'a str,
+    pub tree_hash: Option<&'a str>,
 }
 
 /// Append-only `SQLite` ledger of review verdicts and findings.
@@ -98,8 +99,11 @@ pub struct GateRecord<'a> {
 /// The ledger's SQL, as consts so the schema-drift test in
 /// `state_db` can prepare every query against the migrated schema.
 pub(crate) const INSERT_REVIEW: &str =
-    "INSERT INTO reviews (repo, gate, git_ref, verdict, confidence)
-     VALUES (?1, ?2, ?3, ?4, ?5)";
+    "INSERT INTO reviews (repo, gate, git_ref, tree_hash, verdict, confidence)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+
+pub(crate) const SELECT_REVIEW_BY_TREE: &str = "SELECT 1 FROM reviews
+     WHERE repo = ?1 AND gate = ?2 AND tree_hash = ?3 LIMIT 1";
 
 pub(crate) const INSERT_SELF_FINDING: &str = "INSERT INTO findings
          (repo, gate, git_ref, source, category, severity,
@@ -178,6 +182,7 @@ impl ReviewLedger {
                 gate.repo,
                 gate.gate,
                 gate.git_ref,
+                gate.tree_hash,
                 output.verdict.as_str(),
                 output.confidence,
             ],
@@ -202,6 +207,28 @@ impl ReviewLedger {
         }
         tx.commit()?;
         Ok(ids)
+    }
+
+    /// A completed review applies only to its exact artifact tree.
+    pub fn has_reviewed_tree(
+        &self,
+        repo: &str,
+        gate: &str,
+        tree_hash: &str,
+    ) -> rusqlite::Result<bool> {
+        use rusqlite::OptionalExtension;
+
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        conn.query_row(
+            SELECT_REVIEW_BY_TREE,
+            params![repo, gate, tree_hash],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map(|row| row.is_some())
     }
 
     /// Record one externally-sourced finding (a human or review-bot
@@ -628,6 +655,7 @@ mod tests {
             repo: "owner/repo",
             gate: "commit",
             git_ref: "abc123",
+            tree_hash: None,
         }
     }
 
@@ -787,6 +815,7 @@ mod tests {
                     repo: "owner/repo",
                     gate: "pr",
                     git_ref: "abc123",
+                    tree_hash: None,
                 },
                 &output,
             )
@@ -813,6 +842,39 @@ mod tests {
                 .is_empty()
         );
         assert!(ledger.pr_findings("o/other", "abc123").unwrap().is_empty());
+    }
+
+    #[test]
+    fn reviewed_tree_is_scoped_to_its_gate_and_repo() {
+        let ledger = ledger();
+        let output = parse_findings_block(BLOCK).unwrap();
+        ledger
+            .record_review(
+                &GateRecord {
+                    repo: "owner/repo",
+                    gate: "series",
+                    git_ref: "abc123",
+                    tree_hash: Some("tree"),
+                },
+                &output,
+            )
+            .unwrap();
+
+        assert!(
+            ledger
+                .has_reviewed_tree("owner/repo", "series", "tree")
+                .unwrap()
+        );
+        assert!(
+            !ledger
+                .has_reviewed_tree("owner/repo", "commit", "tree")
+                .unwrap()
+        );
+        assert!(
+            !ledger
+                .has_reviewed_tree("other/repo", "series", "tree")
+                .unwrap()
+        );
     }
 
     #[test]

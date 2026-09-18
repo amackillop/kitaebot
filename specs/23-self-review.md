@@ -202,6 +202,13 @@ Two rules bound every gate:
   manufactured to justify the invocation. Severity discipline is part of
   the same instruction — must-fix is reserved for defects, not taste.
 
+For Git-backed gates, the review record also carries the immutable tree
+hash. The task tool reuses a prior review result when a resumed turn
+submits the same repository, gate, and tree hash, rather than calling a
+reviewer again. The hash deliberately keys the artifact rather than the
+commit SHA: an amended commit with the same tree is the same review
+input. A changed tree is a new artifact and remains eligible for review.
+
 The ledger polices both directions: findings-per-commit rate, nit share,
 and dispute rate expose an over-flagging reviewer just as the escapes
 stream exposes an under-catching one. Prompt tuning works from that
@@ -261,6 +268,7 @@ in its versioned baseline migration. One row per finding:
 | `repo` | `owner/repo` |
 | `gate` | `plan` \| `commit` \| `series` \| `external` \| `pr` (bot reviews of others' PRs, spec 20) |
 | `git_ref` | SHA for commit/series/pr, branch for plan, PR number for external |
+| `tree_hash` | Git tree object for a Git-backed self-review; null otherwise |
 | `source` | `self` \| `human` \| `bot` |
 | `category` | Free-text category |
 | `severity` | `must-fix` \| `should-fix` \| `nit` (self only) |
@@ -517,4 +525,3 @@ that references an unavailable mechanism is worse than none.
 - **Per-gate model strength**: plan review arguably deserves the
   strongest model while commit review could run cheaper. Single override
   in v1; split only if the ledger shows plan-review misses.
-
