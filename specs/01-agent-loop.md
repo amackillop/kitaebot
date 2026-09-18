@@ -260,6 +260,23 @@ itself fails must not mask the cap: the error carries a
 "state report unavailable" note instead. Cancellation during the
 squeeze stays `Error::Cancelled`.
 
+### Execution Model Retry
+
+When `provider.model_overrides.execution_retry` is configured, the
+first root turn for a task that ends in `MaxIterationsReached` arms one
+retry. The next root turn with the same task key (spec 27) runs on that
+static override. Any non-cap outcome clears the armed retry. A second
+cap on the retry tier clears it and adds a human-intervention notice to
+the state report; later turns return to the default provider. State is
+durable in the operational database, so a daemon restart cannot erase
+the cap and buy another retry. Unset, this mechanism does nothing.
+
+The retry provider is selected by configuration and the trigger is a
+typed turn outcome. The model cannot select a more expensive model or
+extend the retry chain. The midpoint checkpoint and this retry land
+together: the checkpoint is the free first defense against fixation;
+the retry is the bounded fallback when it fails.
+
 The turn accepts a cancellation token. Cancellation is checked:
 
 - Before compaction
@@ -387,6 +404,7 @@ All values configurable via `config.toml`:
 | Constraint | Default | Config key |
 |------------|---------|------------|
 | Max iterations per turn | 100 | `agent.max_iterations` |
+| Execution retry model | unset | `provider.model_overrides.execution_retry` |
 | Exec tool timeout | 60s | `tools.exec.timeout_secs` |
 | Provider response max tokens | 32768 | `provider.max_tokens` |
 | Context window budget | 200,000 tokens at 80% | `context.max_tokens`, `context.budget_percent` |

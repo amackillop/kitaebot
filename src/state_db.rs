@@ -37,6 +37,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("state_db/migrations/0004_cached_tokens.sql"),
     include_str!("state_db/migrations/0005_provider.sql"),
     include_str!("state_db/migrations/0006_review_tree.sql"),
+    include_str!("state_db/migrations/0007_execution_escalations.sql"),
 ];
 
 /// Shared handle to the operational state database.
@@ -204,7 +205,13 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, i64::try_from(MIGRATIONS.len()).unwrap());
-        for table in ["turns", "reviews", "findings", "docs"] {
+        for table in [
+            "turns",
+            "reviews",
+            "findings",
+            "docs",
+            "execution_escalations",
+        ] {
             let count: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",

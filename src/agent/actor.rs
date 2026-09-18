@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::PromptConfig;
 use super::envelope::{ChannelSource, Envelope, InputEnvelope, TurnRole};
+use super::escalation::{ExecutionEscalations, ProviderTier, Transition};
 
 /// The actor that processes envelopes sequentially.
 ///
@@ -37,6 +38,8 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     drain: CancellationToken,
     workspace: Arc<Workspace>,
     provider: Arc<P>,
+    /// Serves one retry after a root turn reaches `max_iterations`.
+    execution_retry_provider: Option<Arc<P>>,
     /// Serves [`TurnRole::Planner`] turns; the default provider when
     /// no `model_overrides.planner` is configured.
     planner_provider: Arc<P>,
@@ -51,6 +54,7 @@ pub(super) struct Agent<P: Provider, E: ContextEngine> {
     usage_ledger: Option<Arc<UsageLedger>>,
     review_ledger: Option<Arc<ReviewLedger>>,
     duty_trigger: Option<TriggerHandle>,
+    escalations: ExecutionEscalations,
     /// Monotonic turn counter, the `id` field of the per-turn log span.
     turn_seq: u64,
 }
@@ -62,6 +66,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         drain: CancellationToken,
         workspace: Arc<Workspace>,
         provider: Arc<P>,
+        execution_retry_provider: Option<Arc<P>>,
         planner_provider: Arc<P>,
         memory_provider: Arc<P>,
         tools: Arc<Tools>,
@@ -74,12 +79,14 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         usage_ledger: Option<Arc<UsageLedger>>,
         review_ledger: Option<Arc<ReviewLedger>>,
         duty_trigger: Option<TriggerHandle>,
+        escalations: ExecutionEscalations,
     ) -> Self {
         Self {
             rx,
             drain,
             workspace,
             provider,
+            execution_retry_provider,
             planner_provider,
             memory_provider,
             tools,
@@ -92,6 +99,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             usage_ledger,
             review_ledger,
             duty_trigger,
+            escalations,
             turn_seq: 0,
         }
     }
@@ -202,6 +210,79 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         )
     }
 
+    fn escalation_tier(
+        &self,
+        role: TurnRole,
+        task: &TaskKey,
+    ) -> Result<Option<ProviderTier>, String> {
+        match role {
+            TurnRole::Planner => Ok(None),
+            TurnRole::Default => {
+                match &self.execution_retry_provider {
+                    Some(_) => self.escalations.tier(task).map(Some).map_err(|e| {
+                        format!("Failed to load execution retry state for {task}: {e}")
+                    }),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
+    fn provider_for<'a>(
+        role: TurnRole,
+        tier: Option<ProviderTier>,
+        provider: &'a P,
+        planner: &'a P,
+        retry: Option<&'a P>,
+    ) -> Result<&'a P, String> {
+        match (role, tier) {
+            (TurnRole::Planner, _) => Ok(planner),
+            (TurnRole::Default, None | Some(ProviderTier::Default)) => Ok(provider),
+            (TurnRole::Default, Some(ProviderTier::Retry)) => {
+                retry.ok_or_else(|| "Execution retry provider became unavailable".to_string())
+            }
+        }
+    }
+
+    fn record_escalation(
+        &self,
+        task: &TaskKey,
+        tier: Option<ProviderTier>,
+        capped: bool,
+        result: &mut Result<super::TurnOutput, crate::error::Error>,
+    ) -> Result<(), String> {
+        let Some(tier) = tier else {
+            return Ok(());
+        };
+        match self.escalations.record(task, tier, capped) {
+            Ok(Transition::Exhausted) => {
+                if let Err(crate::error::Error::MaxIterationsReached { report }) = result {
+                    report.push_str(
+                        "\n\nThe configured execution retry tier also exhausted its budget. Human intervention is required before retrying.",
+                    );
+                }
+                Ok(())
+            }
+            Ok(Transition::Armed | Transition::Cleared) => Ok(()),
+            Err(e) => Err(format!(
+                "Failed to update execution retry state for {task}: {e}"
+            )),
+        }
+    }
+
+    async fn finish_message(&mut self, original: &str, switched: bool) {
+        if let Some(notifier) = &self.notifier {
+            notifier.flush().await;
+        }
+        if switched {
+            if let Err(e) = self.engine.switch_session(original).await {
+                error!("Failed to restore active session '{original}': {e}");
+            }
+        } else if let Err(e) = self.engine.save().await {
+            error!("Failed to save session: {e}");
+        }
+    }
+
     async fn handle(&mut self, envelope: &InputEnvelope) -> Result<Reply, String> {
         let result = match Input::parse(&envelope.input) {
             Ok(Input::Command(cmd)) => {
@@ -274,6 +355,17 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         envelope: &InputEnvelope,
         text: &str,
     ) -> Result<Reply, String> {
+        // Derived once for both the ToolCtx and the ledger row, so the
+        // sub-agent inheritance and the root attribution cannot diverge.
+        let task = TaskKey::for_source(&envelope.source);
+        let escalation_tier = self.escalation_tier(envelope.role, &task)?;
+        let provider = Self::provider_for(
+            envelope.role,
+            escalation_tier,
+            &self.provider,
+            &self.planner_provider,
+            self.execution_retry_provider.as_deref(),
+        )?;
         let original = self.engine.active_session().to_string();
         let target = envelope.session_hint.as_deref().unwrap_or(&original);
         let switched = target != original;
@@ -294,15 +386,6 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         }
 
         let tagged = format!("[{}]: {text}", envelope.source);
-        // Derived once for both the ToolCtx and the ledger row, so the
-        // sub-agent inheritance and the root attribution cannot diverge.
-        let task = TaskKey::for_source(&envelope.source);
-        // Selected once for both the turn and the ledger row, so the
-        // billed model can never disagree with the one that ran.
-        let provider: &P = match envelope.role {
-            TurnRole::Default => &self.provider,
-            TurnRole::Planner => &self.planner_provider,
-        };
         let metered = super::process_message_metered(
             &mut self.engine,
             &self.summarize,
@@ -324,7 +407,11 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
         .await;
 
         // Bill the turn whatever its outcome: the calls were made.
-        let (result, meter) = metered;
+        let (mut result, meter) = metered;
+        let capped = matches!(
+            result,
+            Err(crate::error::Error::MaxIterationsReached { .. })
+        );
         let source = envelope.source.to_string();
         usage::record_turn(
             self.usage_ledger.as_deref(),
@@ -337,6 +424,7 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             },
         );
 
+        let escalation_result = self.record_escalation(&task, escalation_tier, capped, &mut result);
         // A policy halt or tool halt is an Ok reply, so the Err hook
         // in `handle` never sees it. Alert here where the outcome is
         // still typed.
@@ -372,21 +460,9 @@ impl<P: Provider + 'static, E: ContextEngine + 'static> Agent<P, E> {
             }
         }
 
-        // Deliver batched low-urgency notifications after every turn —
-        // success, error, and cancellation alike.
-        if let Some(notifier) = &self.notifier {
-            notifier.flush().await;
-        }
+        self.finish_message(&original, switched).await;
 
-        if switched {
-            // Restore. switch_session saves the target before loading original.
-            if let Err(e) = self.engine.switch_session(&original).await {
-                error!("Failed to restore active session '{original}': {e}");
-            }
-        } else if let Err(e) = self.engine.save().await {
-            error!("Failed to save session: {e}");
-        }
-
+        escalation_result?;
         result
             .map(|out| Reply::text(out.into_text()))
             .map_err(|e| e.to_string())
@@ -400,7 +476,7 @@ mod tests {
     use crate::agent::envelope::{ChannelSource, GitHubRole};
     use crate::provider::MockProvider;
     use crate::test_support::{TestAgent, workspace};
-    use crate::types::Response;
+    use crate::types::{Response, ToolCall, ToolFunction};
 
     fn spawn_agent(ws: Arc<Workspace>, provider: Arc<MockProvider>) -> AgentHandle {
         spawn_agent_with(ws, provider, Tools::default(), None, 1)
@@ -1082,6 +1158,62 @@ mod tests {
         assert_eq!(reply.content, "root");
         assert_eq!(root.call_count(), 1);
         assert_eq!(planner.call_count(), 1);
+    }
+
+    fn capped_turn_responses(report: &str) -> Vec<Result<Response, crate::error::ProviderError>> {
+        vec![
+            Ok(Response::ToolCalls {
+                content: String::new(),
+                calls: vec![ToolCall::new(
+                    "call".into(),
+                    ToolFunction {
+                        name: "missing".parse().unwrap(),
+                        arguments: "{}".into(),
+                    },
+                )],
+            }),
+            Ok(Response::Text(report.into())),
+        ]
+    }
+
+    #[tokio::test]
+    async fn capped_turn_retries_once_on_configured_provider() {
+        let (_dir, ws) = workspace();
+        let root = Arc::new(MockProvider::new(capped_turn_responses("first report")));
+        let retry = Arc::new(MockProvider::new(capped_turn_responses("second report")));
+        let handle = TestAgent::new(ws, root.clone())
+            .execution_retry(retry.clone())
+            .spawn();
+
+        assert!(
+            handle
+                .send_message(
+                    ChannelSource::GitHubIssue {
+                        issue: "owner/repo#146".into(),
+                    },
+                    "work".into(),
+                    Some("owner/repo".into()),
+                    None,
+                    CancellationToken::new(),
+                )
+                .await
+                .is_err()
+        );
+        let error = handle
+            .send_message(
+                ChannelSource::GitHubIssue {
+                    issue: "owner/repo#146".into(),
+                },
+                "work".into(),
+                Some("owner/repo".into()),
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(root.call_count(), 2);
+        assert_eq!(retry.call_count(), 2);
+        assert!(error.contains("retry tier also exhausted"), "{error}");
     }
 
     #[tokio::test]

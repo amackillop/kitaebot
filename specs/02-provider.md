@@ -194,6 +194,7 @@ Configuration via `config.toml` under `[provider]`:
 | `max_tokens` | 32768 | Max tokens in LLM response. Reasoning tokens count against it (OpenRouter), so it must cover reasoning plus output |
 | `temperature` | unset | Sampling temperature (0.0–2.0). Unset omits the parameter so the endpoint's default applies; some models fix sampling server-side and reject it |
 | `reasoning` | unset | Reasoning budget for the root model: `{ effort = "low\|medium\|high" }` or `{ max_tokens = n }` (n > 0, below `max_tokens` to leave content room). OpenRouter only; unset leaves the model's default |
+| `model_overrides.execution_retry` | unset | Override for one root execution retry after `max_iterations` (spec 01) |
 | `model_overrides.explore` | unset | Override for `explore` sub-agents |
 | `model_overrides.worker` | unset | Override for `worker` sub-agents |
 | `model_overrides.reviewer` | unset | Override for `reviewer` sub-agents (spec 23) |
@@ -210,6 +211,12 @@ replaces the root's. `max_tokens` and `temperature` are shared across
 all roles. Role providers are built once at startup via
 `CompletionsProvider::with_spec`; the choice per role is static — the
 agent cannot select models at runtime.
+
+`execution_retry` is selected only after a root turn ends in
+`max_iterations` (spec 01). It runs one successor for that task; a
+second cap alerts a human and resets the task to the default provider.
+It is distinct from `planner`: planning is known at dispatch time,
+while this route is a bounded response to a typed execution failure.
 
 On OpenRouter, requests opt into usage accounting (`usage: {include:
 true}`) and the response's token usage — including prompt-cache hits

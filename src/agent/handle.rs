@@ -25,6 +25,7 @@ use crate::workspace::Workspace;
 use super::PromptConfig;
 use super::actor::Agent;
 use super::envelope::{ChannelSource, Envelope, InputEnvelope, TurnRole};
+use super::escalation::ExecutionEscalations;
 
 /// Cloneable handle to the agent actor.
 ///
@@ -47,6 +48,7 @@ impl AgentHandle {
     pub fn spawn<P: Provider + 'static, E: ContextEngine + 'static>(
         workspace: Arc<Workspace>,
         provider: Arc<P>,
+        execution_retry_provider: Option<Arc<P>>,
         planner_provider: Arc<P>,
         memory_provider: Arc<P>,
         tools: Arc<Tools>,
@@ -59,6 +61,7 @@ impl AgentHandle {
         usage_ledger: Option<Arc<UsageLedger>>,
         review_ledger: Option<Arc<ReviewLedger>>,
         duty_trigger: Option<TriggerHandle>,
+        escalations: ExecutionEscalations,
     ) -> (Self, JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(32);
         let drain = CancellationToken::new();
@@ -67,6 +70,7 @@ impl AgentHandle {
             drain.clone(),
             workspace,
             provider,
+            execution_retry_provider,
             planner_provider,
             memory_provider,
             tools,
@@ -79,6 +83,7 @@ impl AgentHandle {
             usage_ledger,
             review_ledger,
             duty_trigger,
+            escalations,
         );
         let task = tokio::spawn(actor.run());
         (Self { tx, drain }, task)

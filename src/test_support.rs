@@ -36,6 +36,7 @@ pub(crate) struct TestAgent {
     /// `None` mirrors an unset `model_overrides.planner`: the root
     /// provider serves planner turns too.
     planner_provider: Option<Arc<MockProvider>>,
+    execution_retry_provider: Option<Arc<MockProvider>>,
     memory_provider: Arc<MockProvider>,
     tools: Tools,
     notifier: Option<Arc<Notifier>>,
@@ -52,6 +53,7 @@ impl TestAgent {
             ws,
             provider,
             planner_provider: None,
+            execution_retry_provider: None,
             tools: Tools::default(),
             notifier: None,
             max_iterations: 1,
@@ -61,6 +63,11 @@ impl TestAgent {
 
     pub(crate) fn planner(mut self, provider: Arc<MockProvider>) -> Self {
         self.planner_provider = Some(provider);
+        self
+    }
+
+    pub(crate) fn execution_retry(mut self, provider: Arc<MockProvider>) -> Self {
+        self.execution_retry_provider = Some(provider);
         self
     }
 
@@ -106,9 +113,11 @@ impl TestAgent {
         let planner = self
             .planner_provider
             .unwrap_or_else(|| self.provider.clone());
+        let state_db = crate::state_db::StateDb::open_in_memory().unwrap();
         AgentHandle::spawn(
             self.ws,
             self.provider,
+            self.execution_retry_provider,
             planner,
             self.memory_provider,
             Arc::new(self.tools),
@@ -124,6 +133,7 @@ impl TestAgent {
             None,
             None,
             self.duty_trigger,
+            crate::agent::escalation::ExecutionEscalations::new(&state_db),
         )
     }
 }

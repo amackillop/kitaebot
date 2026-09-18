@@ -306,6 +306,7 @@ kitaebot = {
       temperature = 0.7;                         # 0.0–2.0; optional, unset omits the parameter (endpoint default applies)
       reasoning.effort = "high";                 # Optional bound for the root model: effort or max_tokens (OpenRouter only)
       model_overrides = {                        # Per-role: model, reasoning bound, or both; unset parts fall back to provider
+        execution_retry.model = "strong/model";   # One root retry after max_iterations; a second cap alerts a human
         explore.model = "cheap/model";
         worker.model = "mid/model";
         summarizer.model = "cheap/model";          # Fresh-path summaries only; live compaction rides the main model's cache (spec 14)
