@@ -34,6 +34,9 @@ before reading the fence's rationale is a guess. Pure additions are exempt.
 - Use `just fmt` to format code. Use `just fix` to fix simple lints automatically.
 - Prepare a commit message for review as well using the `/commit` skill
 - Pass that output through the `/humanizer` skill
+- PR descriptions that complete a GitHub issue must include `Closes #123`.
+  For commits made directly to `master`, every non-final commit must include a
+  `Part of #123` trailer and the final commit must include `Closes #123`.
 
 ## Guidelines
 - **Pure core, thin effectful shell.** Separate logic from I/O. Build pure data structures that describe intent, then interpret them in a thin layer that performs effects. Test the pure core; the effectful shell should be too simple to fail.
