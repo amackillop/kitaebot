@@ -2472,6 +2472,53 @@ mod tests {
             Message::Tool { call_id, content }
                 if call_id == "c2" && content == INTERRUPTED_TOOL_CALL
         ));
+
+        drop(engine);
+        let engine = LcmEngine::new(
+            &dir.path().join("context"),
+            ContextConfig::default(),
+            canned_summarize("summary"),
+            unused_raw_chat(),
+        )
+        .unwrap();
+        assert_eq!(engine.assemble("SYS").await.unwrap().messages.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn reopen_leaves_dangling_tool_calls_in_the_middle() {
+        let (mut engine, dir) = temp_engine();
+        engine
+            .push_message(Message::ToolCalls {
+                content: String::new(),
+                calls: vec![ToolCall::new(
+                    "c1".into(),
+                    ToolFunction {
+                        name: "exec".parse().unwrap(),
+                        arguments: r#"{"cmd":"true"}"#.into(),
+                    },
+                )],
+            })
+            .await
+            .unwrap();
+        engine
+            .push_message(Message::User {
+                content: "later input".into(),
+            })
+            .await
+            .unwrap();
+        drop(engine);
+
+        let engine = LcmEngine::new(
+            &dir.path().join("context"),
+            ContextConfig::default(),
+            canned_summarize("summary"),
+            unused_raw_chat(),
+        )
+        .unwrap();
+        let ctx = engine.assemble("SYS").await.unwrap();
+
+        assert_eq!(ctx.messages.len(), 3);
+        assert!(matches!(ctx.messages[2], Message::User { .. }));
     }
 
     #[tokio::test]
