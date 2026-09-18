@@ -198,6 +198,9 @@ pub enum ReasoningEffort {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelOverrides {
+    /// Override for one retry after a root execution turn exhausts its
+    /// iteration budget (spec 01). Unset disables escalation.
+    pub execution_retry: Option<ModelSpec>,
     /// Override for `explore` sub-agents (read-only research).
     pub explore: Option<ModelSpec>,
     /// Override for `worker` sub-agents (delegated implementation).
@@ -219,6 +222,7 @@ impl ModelOverrides {
     /// Set overrides with their role names, for validation.
     fn iter(&self) -> impl Iterator<Item = (&'static str, &ModelSpec)> {
         [
+            ("execution_retry", &self.execution_retry),
             ("explore", &self.explore),
             ("memory", &self.memory),
             ("planner", &self.planner),
@@ -1315,12 +1319,17 @@ mod tests {
     fn model_overrides_parse_model_reasoning_or_both() {
         let cfg = load_toml(
             "[provider.model_overrides]\n\
+             execution_retry = { model = \"strong/model\" }\n\
              worker = { model = \"cheap/model\" }\n\
              memory = { reasoning = { effort = \"low\" } }\n\
              reviewer = { model = \"smart/model\", reasoning = { max_tokens = 4096 } }\n",
         )
         .unwrap();
         let o = &cfg.provider.model_overrides;
+        assert_eq!(
+            o.execution_retry.as_ref().unwrap().model.as_deref(),
+            Some("strong/model")
+        );
         assert_eq!(
             o.worker.as_ref().unwrap().model.as_deref(),
             Some("cheap/model")
@@ -1472,6 +1481,7 @@ BKB_API_KEY = \"bkb-api-key\"
     #[test]
     fn model_overrides_default_unset() {
         let cfg = load_toml("").unwrap();
+        assert!(cfg.provider.model_overrides.execution_retry.is_none());
         assert!(cfg.provider.model_overrides.explore.is_none());
         assert!(cfg.provider.model_overrides.worker.is_none());
         assert!(cfg.provider.model_overrides.reviewer.is_none());
@@ -1485,6 +1495,7 @@ BKB_API_KEY = \"bkb-api-key\"
         let cfg = load_toml(
             "\
 [provider.model_overrides]
+execution_retry = { model = \"strong/execution\" }
 explore = { model = \"cheap/explore\" }
 worker = { model = \"mid/worker\" }
 reviewer = { model = \"strong/reviewer\" }
@@ -1495,6 +1506,10 @@ memory = { model = \"cheap/memory\" }
         .unwrap();
         let overrides = &cfg.provider.model_overrides;
         let model = |spec: &Option<ModelSpec>| spec.as_ref().and_then(|s| s.model.clone());
+        assert_eq!(
+            model(&overrides.execution_retry).as_deref(),
+            Some("strong/execution")
+        );
         assert_eq!(model(&overrides.explore).as_deref(), Some("cheap/explore"));
         assert_eq!(model(&overrides.worker).as_deref(), Some("mid/worker"));
         assert_eq!(

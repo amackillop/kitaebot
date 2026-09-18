@@ -6,6 +6,7 @@
 
 mod actor;
 pub(crate) mod envelope;
+pub(crate) mod escalation;
 mod handle;
 mod hints;
 pub(crate) mod task;

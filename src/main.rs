@@ -459,9 +459,14 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
     }
     let memory_provider = role_provider(&provider, overrides.memory.as_ref());
     let planner_provider = role_provider(&provider, overrides.planner.as_ref());
+    let execution_retry_provider = overrides
+        .execution_retry
+        .as_ref()
+        .map(|spec| role_provider(&provider, Some(spec)));
     agent::AgentHandle::spawn(
         workspace,
         provider,
+        execution_retry_provider,
         planner_provider,
         memory_provider,
         Arc::new(tools),
@@ -477,5 +482,6 @@ fn spawn_with_engine<E: ContextEngine + 'static>(
         usage_ledger,
         review_ledger,
         duty_trigger,
+        agent::escalation::ExecutionEscalations::new(state_db),
     )
 }
