@@ -35,6 +35,20 @@ use crate::state_db::StateDb;
 use crate::tools::git::GitCli;
 use crate::workspace::Workspace;
 
+/// A failure that must terminate the daemon for systemd to restart it.
+#[derive(Debug, thiserror::Error)]
+pub enum DaemonError {
+    /// The actor can exit only after every handle is dropped, which cannot
+    /// happen while the channel loops are still running.
+    #[error("agent actor exited unexpectedly")]
+    AgentExited,
+    #[error("agent actor task failed unexpectedly: {source}")]
+    AgentTaskFailed {
+        #[source]
+        source: tokio::task::JoinError,
+    },
+}
+
 /// Production entry point — runs until SIGINT or SIGTERM, then until
 /// the in-flight turn completes.
 #[allow(clippy::too_many_arguments)]
@@ -52,7 +66,7 @@ pub async fn run(
     linear: Option<&LinearChannel>,
     socket_cfg: &SocketConfig,
     duty_triggers: mpsc::Receiver<duty::Trigger>,
-) {
+) -> Result<(), DaemonError> {
     Box::pin(run_with_shutdown(
         workspace,
         state_db,
@@ -69,7 +83,7 @@ pub async fn run(
         shutdown_signal(),
         duty_triggers,
     ))
-    .await;
+    .await
 }
 
 /// Testable core: runs duties + github + linear + telegram + socket
@@ -83,7 +97,7 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     workspace: &Workspace,
     state_db: &StateDb,
     handle: AgentHandle,
-    actor: JoinHandle<()>,
+    mut actor: JoinHandle<()>,
     duties: Vec<Duty>,
     telegram: Option<&TelegramChannel>,
     github_client: Option<&GithubClient>,
@@ -94,11 +108,12 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
     socket_cfg: &SocketConfig,
     shutdown: S,
     duty_triggers: mpsc::Receiver<duty::Trigger>,
-) {
+) -> Result<(), DaemonError> {
     Box::pin(serve_until(
         workspace,
         state_db,
         &handle,
+        &mut actor,
         duties,
         telegram,
         github_client,
@@ -110,16 +125,17 @@ async fn run_with_shutdown<S: Future<Output = ()>>(
         shutdown,
         duty_triggers,
     ))
-    .await;
+    .await?;
 
     handle.begin_drain();
     // The actor exits once the last sender is gone; this is it.
     drop(handle);
     info!("Draining: waiting for the in-flight turn to finish.");
-    if let Err(e) = actor.await {
-        error!("agent actor task failed during drain: {e}");
-    }
+    actor
+        .await
+        .map_err(|source| DaemonError::AgentTaskFailed { source })?;
     info!("Drain complete, exiting.");
+    Ok(())
 }
 
 /// The channel loops, racing `shutdown`.
@@ -128,6 +144,7 @@ async fn serve_until<S: Future<Output = ()>>(
     workspace: &Workspace,
     state_db: &StateDb,
     handle: &AgentHandle,
+    actor: &mut JoinHandle<()>,
     duties: Vec<Duty>,
     telegram: Option<&TelegramChannel>,
     github_client: Option<&GithubClient>,
@@ -138,7 +155,7 @@ async fn serve_until<S: Future<Output = ()>>(
     socket_cfg: &SocketConfig,
     shutdown: S,
     duty_triggers: mpsc::Receiver<duty::Trigger>,
-) {
+) -> Result<(), DaemonError> {
     let duty_loop = duty::run_loop(
         duties,
         state_db.clone(),
@@ -198,9 +215,14 @@ async fn serve_until<S: Future<Output = ()>>(
         () = github_issues_loop => unreachable!("github issues loop never exits"),
         () = linear_loop => unreachable!("linear loop never exits"),
         () = socket_loop => unreachable!("socket loop never exits"),
+        result = actor => match result {
+            Ok(()) => Err(DaemonError::AgentExited),
+            Err(source) => Err(DaemonError::AgentTaskFailed { source }),
+        },
         () = shutdown => {
             info!("Shutdown signal received.");
             let _ = std::fs::remove_file(socket_path);
+            Ok(())
         }
     }
 }
@@ -291,7 +313,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)),
             tokio::sync::mpsc::channel(1).1,
         ))
-        .await;
+        .await
+        .unwrap();
 
         // If we get here without hanging, the catch-up fired and the
         // shutdown future terminated the loop.
@@ -320,7 +343,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)),
             tokio::sync::mpsc::channel(1).1,
         ))
-        .await;
+        .await
+        .unwrap();
 
         // The run must be recorded: a restarted scheduler reads this
         // and does not re-fire — the restart-cadence contract.
@@ -361,8 +385,38 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)),
             tokio::sync::mpsc::channel(1).1,
         ))
-        .await;
+        .await
+        .unwrap();
 
         // Reaching here means the error didn't panic/crash.
+    }
+
+    #[tokio::test]
+    async fn panicked_actor_stops_daemon() {
+        let (_dir, ws) = workspace();
+        let (_sock_dir, sock) = sock_config();
+        let (handle, real_actor) = spawn_agent(&ws, Arc::new(MockProvider::new(vec![])));
+        let actor = tokio::spawn(async { panic!("actor test panic") });
+
+        let result = Box::pin(run_with_shutdown(
+            &ws,
+            &StateDb::open_in_memory().unwrap(),
+            handle,
+            actor,
+            vec![],
+            None,
+            None,
+            None,
+            &GithubConfig::default(),
+            &[],
+            None,
+            &sock,
+            std::future::pending(),
+            tokio::sync::mpsc::channel(1).1,
+        ))
+        .await;
+
+        assert!(matches!(result, Err(DaemonError::AgentTaskFailed { .. })));
+        real_actor.await.unwrap();
     }
 }

@@ -328,6 +328,9 @@ oneshot channel. `Reply` carries a `content: String` and a `preformatted: bool`
 hint for display formatting.
 
 If the actor has shut down, `send_message` returns a synthetic error string.
+An unexpected actor exit instead terminates the daemon, so systemd restarts it
+from the durable workspace rather than leaving live channel loops pointed at a
+dead mailbox.
 
 **Shutdown drains.** `AgentHandle::spawn` also returns the actor task's
 `JoinHandle`. On SIGINT/SIGTERM the daemon stops the channel loops, calls
