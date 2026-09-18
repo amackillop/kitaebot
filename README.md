@@ -50,7 +50,7 @@ Durable cross-session knowledge lives in `memory/` (spec 21). The index file `me
 
 The `task` tool delegates to sub-agents: `explore` (read-only research), `worker` (can write files and execute commands), and `reviewer` (read-only judge). Each can run on its own model override.
 
-The review pipeline (spec 23) prompts the agent to have a reviewer sub-agent judge its work at four gates: `plan`, `commit`, `series`, and `pr`. The reviewer ends its response with a fenced `findings` block; the task tool parses it and records verdicts and findings in a review ledger (`/findings` reads it back). Gates are prompted, not enforced — `review.enabled` only controls the recording.
+The review pipeline (spec 23) prompts the agent to have a reviewer sub-agent judge its work at four gates: `plan`, `commit`, `series`, and `pr`. The reviewer ends its response with a fenced `findings` block; the task tool parses it and records verdicts and findings in a review ledger (`/findings` reads it back). A Git-backed gate memoizes the reviewed tree, so a resumed turn does not pay for the same review twice. Gates are prompted, not enforced — `review.enabled` only controls the recording.
 
 ### Duties
 

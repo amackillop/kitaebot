@@ -234,6 +234,10 @@ struct ReviewMeta {
     gate: String,
     /// The ref under review: SHA for commit/series/pr, branch for plan.
     git_ref: String,
+    /// The immutable Git tree object under review. A repeated tree
+    /// reuses the prior reviewer result instead of spending another call.
+    #[serde(default)]
+    tree_hash: Option<String>,
 }
 
 /// Tool that runs a sub-agent turn in an isolated in-memory context.
@@ -313,6 +317,27 @@ impl<P: Provider> Tool for TaskTool<P> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+
+            if args.agent_type == AgentKind::Reviewer
+                && let (Some(ledger), Some(meta), Some(tree_hash)) = (
+                    self.review_ledger.as_deref(),
+                    args.review.as_ref(),
+                    args.review.as_ref().and_then(|m| m.tree_hash.as_deref()),
+                )
+                && match ledger.has_reviewed_tree(&meta.repo, &meta.gate, tree_hash) {
+                    Ok(reviewed) => reviewed,
+                    Err(error) => {
+                        warn!("failed to look up reviewed tree: {error}");
+                        false
+                    }
+                }
+            {
+                return Ok(format!(
+                    "Review already recorded for {} gate on tree {tree_hash}; \
+                     proceed without re-dispatching the reviewer.",
+                    meta.gate
+                ));
+            }
 
             let (agent, provider, label) = match args.agent_type {
                 AgentKind::Explore => (&self.types.explore, &self.providers.explore, "explore"),
@@ -549,6 +574,7 @@ fn record_parse(ledger: &ReviewLedger, meta: Option<&ReviewMeta>, text: &str) ->
         repo,
         gate,
         git_ref,
+        tree_hash: meta.and_then(|m| m.tree_hash.as_deref()),
     };
     match ledger.record_review(&record, &output) {
         Ok(ids) => ParseOutcome::Recorded(ids),
@@ -1130,6 +1156,94 @@ mod tests {
         let report = ledger.report().unwrap();
         assert!(report.contains("commit"), "{report}");
         assert!(report.contains("swallowed-error"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn repeated_reviewer_tree_reuses_recorded_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            REVIEW_RESPONSE.to_string(),
+        ))]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger),
+        );
+        let args = serde_json::json!({
+            "prompt": "review this",
+            "agent_type": "reviewer",
+            "review": {
+                "repo": "o/r",
+                "gate": "series",
+                "git_ref": "abc",
+                "tree_hash": "tree"
+            }
+        });
+
+        tool.execute(args.clone(), ToolCtx::default())
+            .await
+            .unwrap();
+        let cached = tool.execute(args, ToolCtx::default()).await.unwrap();
+
+        assert_eq!(provider.call_count(), 1);
+        assert!(cached.contains("proceed without re-dispatching"));
+    }
+
+    #[tokio::test]
+    async fn reviewer_runs_when_tree_cache_lookup_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(crate::review::ReviewLedger::new(
+            &crate::state_db::StateDb::open(&dir.path().join("kitaebot.db")).unwrap(),
+        ));
+        ledger
+            .connection_for_test()
+            .execute_batch("DROP TABLE reviews")
+            .unwrap();
+        let provider = Arc::new(MockProvider::new(vec![Ok(Response::Text(
+            REVIEW_RESPONSE.to_string(),
+        ))]));
+        let tool = TaskTool::new(
+            same_provider(&provider),
+            noop_summarize(),
+            AgentTypes {
+                explore: agent_type(Tools::default()),
+                worker: agent_type(Tools::default()),
+                reviewer: agent_type(Tools::default()),
+            },
+            5,
+            None,
+            Some(ledger),
+        );
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "review this",
+                    "agent_type": "reviewer",
+                    "review": {
+                        "repo": "o/r",
+                        "gate": "series",
+                        "git_ref": "abc",
+                        "tree_hash": "tree"
+                    }
+                }),
+                ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(provider.call_count(), 1);
+        assert!(result.contains("[ledger: recording failed; nothing recorded]"));
     }
 
     /// The incident's real bad shape (issue #113): a dispatch prompt

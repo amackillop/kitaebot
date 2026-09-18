@@ -32,13 +32,15 @@ shrink.
   channel posts it to the thread; never post it through a tool. Pack
   the task statement, the plan, and the repo conventions you were
   given. A plan has no diff; it is packed by value as before.
-- **Commit gate** (gate "commit", git_ref: current HEAD SHA) — after
+- **Commit gate** (gate "commit", git_ref: current HEAD SHA, tree_hash:
+  `git -C projects/<owner>/<repo> write-tree`) — after
   staging, before every git_commit. Write the staged diff out:
   `git -C projects/<owner>/<repo> diff --cached >
   diffs/commit-<HEAD SHA>.diff`. Pack the path and the proposed
   commit message. Fix must-fix findings in the staged diff, then
   commit: history never contains the mistake.
-- **Series gate** (gate "series", git_ref: branch head SHA) — before
+- **Series gate** (gate "series", git_ref: branch head SHA, tree_hash:
+  `git -C projects/<owner>/<repo> rev-parse HEAD^{tree}`) — before
   pushing a branch that will become a pull request. Write the branch
   diff out: `git -C projects/<owner>/<repo> diff origin/<base>...HEAD >
   diffs/series-<head SHA>.diff`. Pack the path and the commit list
@@ -56,8 +58,11 @@ contest it, "no-action" for an ignored nit. A trailer reading
 recorded: do not cite ids or call `review_disposition` — the findings
 exist only in the reviewer prose you just read.
 
-Convergence: one review per artifact. Never re-dispatch a review of
-your fixes. One exception: a wrong-approach verdict on a plan yields a
+Convergence: one review per artifact. Always include `tree_hash` in
+review metadata when the artifact is a Git tree. The task tool reuses a
+recorded result for the same repo, gate, and tree, so do not omit it to
+force another review. Never re-dispatch a review of your fixes. One
+exception: a wrong-approach verdict on a plan yields a
 redesigned plan, which gets one review; after that, proceed and let
 human sign-off arbitrate. A clean verdict needs no action. A failed
 reviewer call is a skipped review — proceed on your own judgment, and

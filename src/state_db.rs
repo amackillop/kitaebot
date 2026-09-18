@@ -36,6 +36,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("state_db/migrations/0003_turn_timing.sql"),
     include_str!("state_db/migrations/0004_cached_tokens.sql"),
     include_str!("state_db/migrations/0005_provider.sql"),
+    include_str!("state_db/migrations/0006_review_tree.sql"),
 ];
 
 /// Shared handle to the operational state database.
@@ -158,6 +159,7 @@ mod tests {
             crate::usage::INSERT_TURN,
             crate::usage::SELECT_TURN_ROWS,
             crate::review::INSERT_REVIEW,
+            crate::review::SELECT_REVIEW_BY_TREE,
             crate::review::INSERT_SELF_FINDING,
             crate::review::INSERT_EXTERNAL_FINDING,
             crate::review::UPDATE_DISPOSITION,
