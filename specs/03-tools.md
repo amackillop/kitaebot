@@ -148,6 +148,10 @@ Executes commands via `bash -c` within the workspace.
    operations that must use dedicated tools, and the Nix fences
    (`nixos-rebuild`, `nix-env`, `nix store delete/gc/optimise`,
    `nix-channel`, `nix copy --to`, remote flake refs).
+   A single static, unredirected `grep` or `rg` invocation skips this
+   layer: its operands are search data, so the model can inspect deny-rule
+   text without taking a policy strike. Shell expansions, redirections, and
+   compound commands retain the regex check.
 
 2. **Shell-aware structural layer** — splits the raw string into
    simple-command segments on unquoted `|`, `;`, `&`, and newline

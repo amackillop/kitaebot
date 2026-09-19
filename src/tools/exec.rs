@@ -806,13 +806,15 @@ fn nearest_envrc_dir<'a>(cwd: &'a Path, workspace_root: &Path) -> Option<&'a Pat
 /// catch bypasses like `VAR=x git commit` and sleeps that cannot
 /// finish inside `budget`.
 fn blocked_reason(cmd: &str, budget: Duration) -> Option<Cow<'static, str>> {
-    // Payload-store reads are sanctioned (the sandbox grants them) and
-    // stream devices are not storage, so both are blanked out before
-    // the deny rules look.
-    let sanitized = sanitize(cmd);
-    // Layer 1: regex on the sanitized string
-    if let Some(i) = DENY_SET.matches(&sanitized).iter().next() {
-        return Some(Cow::Borrowed(ALL_DENY_RULES[i].guidance));
+    if !inert_search(cmd) {
+        // Payload-store reads are sanctioned (the sandbox grants them) and
+        // stream devices are not storage, so both are blanked out before
+        // the deny rules look.
+        let sanitized = sanitize(cmd);
+        // Layer 1: regex on the sanitized string
+        if let Some(i) = DENY_SET.matches(&sanitized).iter().next() {
+            return Some(Cow::Borrowed(ALL_DENY_RULES[i].guidance));
+        }
     }
     // Layer 2: shell-aware structural match
     command_blocked(cmd, budget)
@@ -974,6 +976,54 @@ fn split_unquoted_separators(cmd: &str) -> Vec<String> {
     }
     segments.push(current);
     segments
+}
+
+/// Whether `cmd` is a static search whose operands cannot execute.
+fn inert_search(cmd: &str) -> bool {
+    split_unquoted_separators(cmd).as_slice() == [cmd]
+        && !has_unquoted_redirection(cmd)
+        && !cmd.contains(['$', '`'])
+        && shlex::split(cmd).is_some_and(|tokens| {
+            tokens
+                .iter()
+                .map(String::as_str)
+                .find(|token| !is_env_assignment(token))
+                .and_then(|binary| binary.rsplit('/').next())
+                .is_some_and(|binary| matches!(binary, "grep" | "rg"))
+        })
+}
+
+/// Whether `cmd` has a shell redirect outside quotes.
+fn has_unquoted_redirection(cmd: &str) -> bool {
+    let mut state = QuoteState::None;
+    let mut escaped = false;
+    cmd.chars().any(|c| {
+        if escaped {
+            escaped = false;
+            false
+        } else {
+            match (&state, c) {
+                (QuoteState::Double, '"') | (QuoteState::Single, '\'') => {
+                    state = QuoteState::None;
+                    false
+                }
+                (QuoteState::Double | QuoteState::None, '\\') => {
+                    escaped = true;
+                    false
+                }
+                (QuoteState::None, '"') => {
+                    state = QuoteState::Double;
+                    false
+                }
+                (QuoteState::None, '\'') => {
+                    state = QuoteState::Single;
+                    false
+                }
+                (QuoteState::None, '<' | '>') => true,
+                _ => false,
+            }
+        }
+    })
 }
 
 /// Whether a test command's stdout is sent to an unquoted pipeline.
@@ -2093,6 +2143,20 @@ mod tests {
         assert_allowed(
             r#"grep -E "shred|wipe|truncate|mount|umount|shutdown|reboot|poweroff|halt|su|at|dd" f"#,
         );
+    }
+
+    #[test]
+    fn static_searches_can_name_deny_rules() {
+        assert_allowed(r#"grep -n "commit.gpgsign=false" src/tools/git/rebase.rs"#);
+        assert_allowed(r#"grep -n "rm -rf" src/tools/exec.rs"#);
+        assert_allowed(r#"rg "rm -rf|commit.gpgsign=false" src"#);
+    }
+
+    #[test]
+    fn search_exemption_rejects_shell_effects() {
+        assert_blocked(r#"grep "rm -rf" src > /dev/sda"#);
+        assert_blocked(r#"grep "$(rm -rf /)" src"#);
+        assert_blocked(r#"grep "rm -rf" src; rm -rf /"#);
     }
 
     #[test]
