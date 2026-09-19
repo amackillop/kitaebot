@@ -78,6 +78,8 @@ const SCHEDULING: &str = "scheduling is blocked; recurring work belongs to dutie
 const FILE_WIPE: &str = "shred and wipe are blocked; remove the file with rm";
 const TRUNCATE: &str = "truncate is blocked; rewrite the file with file_write";
 const MOUNT: &str = "mounts are blocked; the daemon runs unprivileged";
+const RIPGREP_PREPROCESSOR: &str =
+    "ripgrep preprocessors are blocked; search converted text instead";
 const NIX_MUTATION: &str = "the daemon never runs nix mutations; the operator deploys and \
                             collects garbage on the host";
 const PIPED_TEST: &str = "test output must reach exec intact; rerun the test command without a pipe so its full output can be parsed";
@@ -806,6 +808,9 @@ fn nearest_envrc_dir<'a>(cwd: &'a Path, workspace_root: &Path) -> Option<&'a Pat
 /// catch bypasses like `VAR=x git commit` and sleeps that cannot
 /// finish inside `budget`.
 fn blocked_reason(cmd: &str, budget: Duration) -> Option<Cow<'static, str>> {
+    if ripgrep_preprocessor(cmd) {
+        return Some(Cow::Borrowed(RIPGREP_PREPROCESSOR));
+    }
     if !inert_search(cmd) {
         // Payload-store reads are sanctioned (the sandbox grants them) and
         // stream devices are not storage, so both are blanked out before
@@ -1023,6 +1028,21 @@ fn has_unquoted_redirection(cmd: &str) -> bool {
                 _ => false,
             }
         }
+    })
+}
+
+/// Whether any command segment invokes ripgrep with a preprocessor.
+fn ripgrep_preprocessor(cmd: &str) -> bool {
+    split_unquoted_separators(cmd).into_iter().any(|segment| {
+        shlex::split(&segment).is_some_and(|tokens| {
+            let mut tokens = tokens
+                .iter()
+                .map(String::as_str)
+                .skip_while(|token| is_env_assignment(token));
+            let binary = tokens.next().and_then(|binary| binary.rsplit('/').next());
+            binary == Some("rg")
+                && tokens.any(|token| token == "--pre" || token.starts_with("--pre="))
+        })
     })
 }
 
@@ -2157,6 +2177,12 @@ mod tests {
         assert_blocked(r#"grep "rm -rf" src > /dev/sda"#);
         assert_blocked(r#"grep "$(rm -rf /)" src"#);
         assert_blocked(r#"grep "rm -rf" src; rm -rf /"#);
+    }
+
+    #[test]
+    fn ripgrep_preprocessors_are_blocked() {
+        assert_blocked("rg --pre rm pattern src");
+        assert_blocked("rg --pre=sh pattern src");
     }
 
     #[test]
