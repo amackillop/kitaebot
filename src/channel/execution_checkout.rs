@@ -145,9 +145,10 @@ async fn park_leftovers(git: &GitCli, dir: &Path) -> Result<Option<String>, Tool
     let name = format!("{RECOVERED_PREFIX}{}", crate::time::now_epoch());
     checkout::run(git, &["checkout", "-b", &name], dir, false).await?;
     if dirty {
-        let mut add = vec!["add", "-A", "--"];
-        add.extend(&pathspec);
-        checkout::run(git, &add, dir, false).await?;
+        checkout::run(git, &["add", "-A", "--", "."], dir, false).await?;
+        let mut reset = vec!["reset", "--quiet", "--"];
+        reset.extend(KEPT_CACHES.iter().copied());
+        checkout::run(git, &reset, dir, false).await?;
         // Hermetic identity, unsigned, hook-free: this is a checkpoint
         // of a possibly-broken tree, and a pre-commit hook that gates
         // on that tree would abort the very rescue it needs.
@@ -244,7 +245,9 @@ mod tests {
     fn fixture_origin(dir: &Path) -> String {
         git_in(dir, &["init", "-b", "main"]);
         std::fs::write(dir.join("a.txt"), "base\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), ".*\n").unwrap();
         git_in(dir, &["add", "a.txt"]);
+        git_in(dir, &["add", "-f", ".gitignore"]);
         git_in(dir, &["commit", "-m", "base"]);
         git_in(dir, &["rev-parse", "HEAD"]).trim().to_string()
     }
@@ -443,9 +446,12 @@ mod tests {
         std::fs::write(checkout.join(".direnv/env"), "cached\n").unwrap();
         std::fs::create_dir(checkout.join(".gcroots")).unwrap();
         std::fs::write(checkout.join(".gcroots/deps"), "root\n").unwrap();
+        std::fs::create_dir(checkout.join(".venv")).unwrap();
+        std::fs::write(checkout.join(".venv/python"), "cached\n").unwrap();
         std::fs::create_dir(checkout.join("target")).unwrap();
         std::fs::write(checkout.join("target/lib.rlib"), "cached\n").unwrap();
         std::fs::write(checkout.join("stale.log"), "junk\n").unwrap();
+        std::fs::write(checkout.join("a.txt"), "unfinished work\n").unwrap();
 
         let parked = prepare_at(&git, &url, "projects/o/r")
             .await
@@ -456,7 +462,13 @@ mod tests {
         // tree-switch back to base.
         let files = git_in(&checkout, &["show", "--stat", "--format=", &parked]);
         assert!(!files.contains("node_modules"), "{files}");
+        assert!(!files.contains(".direnv"), "{files}");
         assert!(!files.contains(".gcroots"), "{files}");
+        assert!(!files.contains(".venv"), "{files}");
+        assert_eq!(
+            git_in(&checkout, &["show", &format!("{parked}:a.txt")]),
+            "unfinished work\n"
+        );
 
         assert!(
             checkout.join("node_modules/dep.js").exists(),
@@ -469,6 +481,10 @@ mod tests {
         assert!(
             checkout.join(".gcroots/deps").exists(),
             ".gcroots must survive the clean — it holds the nix store roots"
+        );
+        assert!(
+            checkout.join(".venv/python").exists(),
+            ".venv must survive the clean"
         );
         assert!(
             !checkout.join("target/lib.rlib").exists(),
